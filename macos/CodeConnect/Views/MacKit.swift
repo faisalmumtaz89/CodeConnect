@@ -304,6 +304,8 @@ enum PanelSymbol {
     static let compact = "arrow.down.right.and.arrow.up.left"
     /// iPhone: `eraser`.
     static let clear = "eraser"
+    /// iPhone: `copy`.
+    static let copy = "doc.on.doc"
 }
 
 /// One act in a "…" panel, on the Model and Mode panels' row: a quiet icon, the 12.5 pt label 8 pt in, 4 pt above and
@@ -409,8 +411,9 @@ extension View {
 
 private struct RowMenuHost: ViewModifier {
     let menu: RowMenu
-    static let width: CGFloat = 180
-    @State private var height: CGFloat = 0
+    /// At least this wide, and as wide as its longest item, so no item's words are cut.
+    static let minWidth: CGFloat = 180
+    @State private var size: CGSize = CGSize(width: minWidth, height: 0)
 
     func body(content: Content) -> some View {
         content
@@ -429,11 +432,12 @@ private struct RowMenuHost: ViewModifier {
                             }
                         }
                         .padding(.vertical, 5)
-                        .frame(width: Self.width)
+                        .frame(minWidth: Self.minWidth)
+                        .fixedSize()
                         .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
                         .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+                        .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
                         .modifier(ControlRect(rect: shown.rect, window: bounds))
                         .openPanel()
                         .offset(x: corner.x - bounds.minX, y: corner.y - bounds.minY)
@@ -448,12 +452,12 @@ private struct RowMenuHost: ViewModifier {
     /// the window's bottom, inside the window's sides. A right-click's point: its top leading corner there.
     private func place(_ rect: CGRect, in bounds: CGRect) -> CGPoint {
         let point = rect.size == .zero
-        let x = point ? rect.minX : rect.maxX - Self.width
+        let x = point ? rect.minX : rect.maxX - size.width
         let gap = point ? 0 : Theme.panelGap
         let below = rect.maxY + gap
-        let above = rect.minY - gap - height
-        let y = below + height <= bounds.maxY || above < bounds.minY ? below : above
-        return CGPoint(x: min(max(x, bounds.minX), bounds.maxX - Self.width), y: y)
+        let above = rect.minY - gap - size.height
+        let y = below + size.height <= bounds.maxY || above < bounds.minY ? below : above
+        return CGPoint(x: min(max(x, bounds.minX), bounds.maxX - size.width), y: y)
     }
 }
 
@@ -531,7 +535,7 @@ struct CopyButton: View {
 
     var body: some View {
         Button(action: copy) {
-            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+            Image(systemName: copied ? "checkmark" : PanelSymbol.copy)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(copied ? Theme.green : Theme.text3)
                 .frame(width: Self.size, height: Self.size)
