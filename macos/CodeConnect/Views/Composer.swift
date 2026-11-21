@@ -108,6 +108,12 @@ private struct Composer: View {
     /// The draft that opened the list, the dialog or the confirmation: a command that lands consumes it, if it is
     /// still the draft.
     @State private var opener: String?
+    /// The slash palette's lit row, the first whenever it shows.
+    @State private var slashLit = 0
+    /// The draft the slash palette was closed on (Esc, a click outside, a row run): it stays closed until the draft
+    /// changes, so the next Return sends the words as typed.
+    @State private var slashClosed: String?
+    @State private var slashHeight: CGFloat = 0
 
     private struct Running: Equatable {
         let command: NativeCommand
@@ -121,6 +127,20 @@ private struct Composer: View {
     private var blocked: String? { model.sendBlockedReason(for: key, draft: kept.reply) }
     private var computer: String { HostDevice.current.computer("the computer", named: model.machineName) }
     private var busy: Bool { sending || running?.phase.busy == true }
+
+    /// The slash palette, on a Claude run while the box has the keyboard and no settings panel is open (Kit's
+    /// `SlashPalette`: the commands this app answers itself, as the iPhone offers them). A Codex run has no slash
+    /// vocabulary.
+    private var slash: SlashPalette.Content? {
+        guard summary?.agent == .claude, fieldFocused, panel == nil, slashClosed != kept.reply else { return nil }
+        return SlashPalette.content(for: kept.reply)
+    }
+
+    /// A palette row, as the typed command would go: the same `route`, then the palette stays closed.
+    private func runSlash(_ row: SlashRow) {
+        slashClosed = kept.reply
+        route(row.action, draft: kept.reply)
+    }
 
     private var canSend: Bool {
         blocked == nil && !sending && !kept.reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -177,6 +197,16 @@ private struct Composer: View {
         #if DEBUG
             .task {
                 if let typed = RenderWindow.reply, kept.reply.isEmpty { kept.reply = typed }
+                // A render of the slash palette: the box holds the keyboard, as a person typing "/" there has it, once
+                // the render has sized its window (a resize closes an open panel), and `-CC_SLASH_LIT <row>` lights a
+                // row, as ↓ would.
+                if RenderWindow.reply?.hasPrefix("/") == true {
+                    try? await Task.sleep(for: .seconds(1))
+                    slashClosed = nil
+                    fieldFocused = true
+                    try? await Task.sleep(for: .milliseconds(300))
+                    slashLit = RenderWindow.slashLit
+                }
                 if let shown = RenderWindow.panel { panel = shown }
             }
         #endif
@@ -226,11 +256,31 @@ private struct Composer: View {
                 .font(Theme.ui(13))
                 .foregroundStyle(Theme.text)
                 .lineLimit(1...5)
+                .accessibilityLabel(SessionWords.replyPrompt(agent))
+                .accessibilityIdentifier("session.composer.field")
+                // Inside `sendsOnReturn`: over the palette, ↑ ↓ move its light and Return runs the lit row; anything
+                // the palette leaves (⇧/⌥Return, no palette) goes on to the box. ⌘ and ⌃ Return are never the palette's.
+                .onKeyPress(keys: [.upArrow, .downArrow, .return], phases: .down) { press in
+                    guard let slash, !press.modifiers.contains(.command), !press.modifiers.contains(.control) else {
+                        return .ignored
+                    }
+                    let key: SlashPalette.Key =
+                        switch press.key {
+                        case .upArrow: .up
+                        case .downArrow: .down
+                        default: .return(addsLine: press.modifiers.contains(.shift) || press.modifiers.contains(.option))
+                        }
+                    switch SlashPalette.outcome(of: key, rows: slash.rows.count, highlighted: slashLit) {
+                    case .highlight(let row): slashLit = row
+                    case .run(let row): runSlash(slash.rows[row])
+                    case .close: slashClosed = kept.reply
+                    case .addLine, .toBox: return .ignored
+                    }
+                    return .handled
+                }
                 .sendsOnReturn(submit)
                 .focused($fieldFocused)
                 .onExitCommand { if panel != nil { panel = nil } else { fieldFocused = false } }
-                .accessibilityLabel(SessionWords.replyPrompt(agent))
-                .accessibilityIdentifier("session.composer.field")
             HStack(spacing: Self.rowSpacing) {
                 if isCodex, let counter = ComposeDraft(text: kept.reply).counterText {
                     Text(counter)
@@ -277,6 +327,19 @@ private struct Composer: View {
             RoundedRectangle(cornerRadius: 10).fill(Theme.raised)
             RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.09))
         }
+        // The slash palette above the box, clear of it by the panels' one gap, as wide as the reply row.
+        .overlay(alignment: .topLeading) {
+            if let slash {
+                SlashPanel(content: slash, lit: min(slashLit, slash.rows.count - 1), run: runSlash)
+                    .frame(width: rowWidth + 24)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { slashHeight = $0 }
+                    .openPanel()
+                    .offset(y: -(slashHeight + Theme.panelGap))
+            }
+        }
+        // Around the box and its palette: a click outside or Esc closes the palette and keeps the words.
+        .closesPanel(Binding(get: { slash != nil }, set: { if !$0 { slashClosed = kept.reply } }))
+        .onChange(of: kept.reply) { slashLit = 0 }
     }
 
     private var sendButton: some View {
