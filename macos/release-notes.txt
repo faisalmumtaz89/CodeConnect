@@ -1,1 +1,1 @@
-With two computers, the start’s Computer picker opens over the Folder section again, so the second computer can be chosen. Every menu takes the arrow keys, Return and Esc. After Clear or a mode’s question, the reply box has the keyboard again with your words kept. An ended Claude Code run shows its model’s id, such as claude-sonnet-5-5.
+The conversation shows a focus ring while it has the keyboard, so you can see where the arrow and Page keys will scroll.
