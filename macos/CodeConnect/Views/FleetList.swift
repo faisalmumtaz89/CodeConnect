@@ -150,9 +150,8 @@ struct FleetList: View {
                                     // once it has ended.
                                     let removable =
                                         row.summary.isRemovable && model?.daemonProfile.removesSessions == true
-                                    let more = (endable || removable)
-                                        && (hovered == row.id || menu.shown?.owner == "fleet.row.\(row.id).more"
-                                            || HoverButtonStyle.forced("fleet.row.\(row.id)"))
+                                    let more = hovered == row.id || menu.shown?.owner == "fleet.row.\(row.id).more"
+                                        || HoverButtonStyle.forced("fleet.row.\(row.id)")
                                     let choosable = selectable.contains(row.id)
                                     Button {
                                         if selecting || (choosable && NSEvent.modifierFlags.contains(.command)) {
@@ -176,9 +175,10 @@ struct FleetList: View {
                                     .accessibilityAction { opened = selected ? nil : row.id }
                                     .accessibilityIdentifier("fleet.row.\(row.id)")
                                     .accessibilityAddTraits(selected ? .isSelected : [])
-                                    // The run's "…" (decisions 185 and 217): on hover, its panel holding End Run…
-                                    // while the run is live, or Remove… once it has ended (an adopted run's at any
-                                    // time); for VoiceOver, which does not hover, that is the row's own action.
+                                    // The run's "…" (decisions 185 and 217): on hover, its panel holding Copy
+                                    // Working Directory, then End Run… while the run is live, or Remove… once it has
+                                    // ended (an adopted run's at any time); for VoiceOver, which does not hover, those
+                                    // are the row's own actions.
                                     .accessibilityActions {
                                         Button("Copy Working Directory") { copyToPasteboard(row.summary.cwd) }
                                             .accessibilityIdentifier("fleet.row.\(row.id).copyWorkingDirectoryAction")
@@ -192,14 +192,14 @@ struct FleetList: View {
                                         }
                                     }
                                     .overlay(alignment: .trailing) {
-                                        moreButton(row, endable: endable, shown: more && !selecting)
+                                        moreButton(row, endable: endable, removable: removable, shown: more && !selecting)
                                     }
                                     // The same menu, at the pointer; none while choosing.
                                     .onRightClick { point in
-                                        guard endable || removable, !selecting else { return }
+                                        guard !selecting else { return }
                                         RunMore.show(
                                             menu, at: CGRect(origin: point, size: .zero), id: "fleet.row.\(row.id).more",
-                                            action: endable ? .endRun : .remove, copies: row.summary.cwd
+                                            action: endable ? .endRun : removable ? .remove : nil, copies: row.summary.cwd
                                         ) { if endable { ending = row } else { removing = row } }
                                     }
                                     .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
@@ -336,9 +336,12 @@ struct FleetList: View {
     }
 
     /// The row's "…" while it is shown: on hover, or while its panel is open.
-    @ViewBuilder private func moreButton(_ row: FleetRow, endable: Bool, shown: Bool) -> some View {
+    @ViewBuilder private func moreButton(_ row: FleetRow, endable: Bool, removable: Bool, shown: Bool) -> some View {
         if shown {
-            RunMore(id: "fleet.row.\(row.id).more", action: endable ? .endRun : .remove, copies: row.summary.cwd) {
+            RunMore(
+                id: "fleet.row.\(row.id).more", action: endable ? .endRun : removable ? .remove : nil,
+                copies: row.summary.cwd
+            ) {
                 if endable { ending = row } else { removing = row }
             }
             .padding(.trailing, 16)
@@ -644,8 +647,9 @@ private struct FleetLine: View {
 
 /// A row's "…" (a run's, or a computer's in the sidebar): it opens the window's row menu (`RowMenu`) below itself,
 /// holding End Run… or Remove… (`PanelItem`, destructive), each of which asks before anything is sent; a run's menu
-/// first offers Copy Working Directory, its folder as the computer names it, as the iPhone's run offers it. A
-/// right-click on the row opens the same menu at the pointer (`RunMore.show`).
+/// first offers Copy Working Directory, its folder as the computer names it, as the iPhone's run offers it, and is
+/// there for every run, so a run that can be neither ended nor removed from here has that item alone. A right-click
+/// on the row opens the same menu at the pointer (`RunMore.show`).
 struct RunMore: View {
     enum Action {
         case endRun, remove
@@ -657,7 +661,9 @@ struct RunMore: View {
 
     static let width: CGFloat = 26
     let id: String
-    let action: Action
+    /// What the menu does to the row's subject after any copy: none for a run that can be neither ended nor removed
+    /// from here (its computer's link is down, or its ccd cannot stop it), whose menu only copies its folder.
+    let action: Action?
     /// A run's folder, which the menu's first item copies; none for a computer.
     var copies: String? = nil
     let perform: () -> Void
@@ -704,17 +710,18 @@ struct RunMore: View {
     /// The row's menu by `rect` (its "…", or a right-click's point as a zero-size rect): Copy Working Directory when
     /// it `copies` a folder, then the act on the row's own subject through `perform`.
     @MainActor static func show(
-        _ menu: RowMenu, at rect: CGRect, id: String, action: Action, copies: String? = nil,
+        _ menu: RowMenu, at rect: CGRect, id: String, action: Action?, copies: String? = nil,
         perform: @escaping () -> Void
     ) {
         let copy = copies.map { folder in
             RowMenu.Item(id: "\(id).copyWorkingDirectory", title: "Copy Working Directory", symbol: PanelSymbol.copy,
                          destructive: false) { copyToPasteboard(folder) }
         }
-        menu.toggle(rect, owner: id, items: [copy].compactMap { $0 } + [
+        let act = action.map { action in
             RowMenu.Item(id: "\(id).\(action.id)", title: action.title, symbol: action.symbol, destructive: true,
                          perform: perform)
-        ])
+        }
+        menu.toggle(rect, owner: id, items: [copy, act].compactMap { $0 })
     }
 
 }
