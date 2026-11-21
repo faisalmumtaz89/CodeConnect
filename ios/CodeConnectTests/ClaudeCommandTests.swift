@@ -94,11 +94,11 @@ final class ClaudeCommandPolicyTests: XCTestCase {
 final class PaletteContentTests: XCTestCase {
 
     private func rows(_ typed: String) -> [String]? {
-        CommandPalette.content(for: typed)?.rows.map(\.command)
+        SlashPalette.content(for: typed)?.rows.map(\.command)
     }
 
     func testBareSlashIsDiscoveryWithEveryRowAndTheCaption() {
-        let content = CommandPalette.content(for: "/")
+        let content = SlashPalette.content(for: "/")
         XCTAssertEqual(content?.rows.map(\.command), ["model", "effort", "compact", "clear", "diff"])
         XCTAssertEqual(content?.showsCaption, true)
         XCTAssertEqual(
@@ -116,7 +116,7 @@ final class PaletteContentTests: XCTestCase {
         XCTAssertNil(rows("/s"), "no row, no palette")
         for typed in ["/c", "/e"] {
             XCTAssertEqual(
-                CommandPalette.content(for: typed)?.showsCaption,
+                SlashPalette.content(for: typed)?.showsCaption,
                 false, "the caption belongs to discovery, not filtering")
         }
     }
@@ -127,10 +127,50 @@ final class PaletteContentTests: XCTestCase {
         }
     }
 
+    /// The palette closes when a row runs, on Esc and on a click outside, and comes back on the next edit: after
+    /// /model ran from "/", clearing the box and typing "/" again shows it again. Must-fail: a close that outlasts the
+    /// edit (the latch kept the draft it closed on, and "/" typed again matched it), so Return sent a bare "/".
+    func testThePaletteComesBackOnTheNextEdit() {
+        var latch = SlashPalette.Latch()
+        XCTAssertNotNil(latch.content(for: "/", claudeRun: true, focused: true))
+        latch.close()  // /model ran from the palette
+        XCTAssertNil(latch.content(for: "/", claudeRun: true, focused: true), "closed on the draft it ran from")
+        latch.edited()  // ⌘A Delete
+        latch.edited()  // "/"
+        XCTAssertNotNil(latch.content(for: "/", claudeRun: true, focused: true), "the same words typed again show it")
+        latch.close()  // Esc on "/c"
+        XCTAssertNil(latch.content(for: "/c", claudeRun: true, focused: true), "Esc keeps it closed on the words")
+        latch.edited()  // "/cl"
+        XCTAssertEqual(latch.content(for: "/cl", claudeRun: true, focused: true)?.rows.map(\.command), ["clear"])
+        XCTAssertNil(latch.content(for: "/", claudeRun: false, focused: true), "a Codex run has no palette")
+        XCTAssertNil(latch.content(for: "/", claudeRun: true, focused: false), "nor a box without the keyboard")
+    }
+
+    /// The palette's keys: the first row lit, ↑ and ↓ move the light and stop at the ends, Return runs the lit row,
+    /// ⇧/⌥Return add a line, Esc closes it; with no palette every key is the box's but ⇧/⌥Return. Must-fail: Return
+    /// with a row lit falls through to the box and sends the fragment as typed.
+    func testThePalettesKeys() {
+        func outcome(_ key: SlashPalette.Key, rows: Int = 3, lit: Int = 0) -> SlashPalette.KeyOutcome {
+            SlashPalette.outcome(of: key, rows: rows, highlighted: lit)
+        }
+        XCTAssertEqual(outcome(.return(addsLine: false)), .run(0), "Return runs the first row, lit when it shows")
+        XCTAssertEqual(outcome(.return(addsLine: false), lit: 2), .run(2))
+        XCTAssertEqual(outcome(.down), .highlight(1))
+        XCTAssertEqual(outcome(.down, lit: 2), .highlight(2), "↓ stops at the last row")
+        XCTAssertEqual(outcome(.up, lit: 1), .highlight(0))
+        XCTAssertEqual(outcome(.up), .highlight(0), "↑ stops at the first row")
+        XCTAssertEqual(outcome(.escape), .close)
+        XCTAssertEqual(outcome(.return(addsLine: true)), .addLine, "⇧/⌥Return adds a line over the palette")
+        for key: SlashPalette.Key in [.up, .down, .escape, .return(addsLine: false)] {
+            XCTAssertEqual(outcome(key, rows: 0), .toBox, "no palette: \(key)")
+        }
+        XCTAssertEqual(outcome(.return(addsLine: true), rows: 0), .addLine)
+    }
+
     /// A tapped row and the typed command resolve to the same action — the
     /// palette can never do something typing would not.
     func testRowActionsMatchTheTypedPolicy() {
-        for row in CommandPalette.allRows {
+        for row in SlashPalette.allRows {
             XCTAssertEqual(
                 row.action,
                 ClaudeCommandPolicy.action(for: "/\(row.command)"),

@@ -218,6 +218,8 @@
         static var sessionTab: SessionTab? {
             UserDefaults.standard.string(forKey: "CC_SESSION_TAB") == "changes" ? .changes : nil
         }
+        /// `-CC_SLASH_LIT <row>`: with a `/` reply, the slash palette lights this row, as ↓ would.
+        static var slashLit: Int { UserDefaults.standard.integer(forKey: "CC_SLASH_LIT") }
         /// `-CC_REPLY <text>`: the opened run's reply box holds these words, as typed (`\n` for a new line).
         static var reply: String? {
             UserDefaults.standard.string(forKey: "CC_REPLY")?.replacingOccurrences(of: "\\n", with: "\n")
