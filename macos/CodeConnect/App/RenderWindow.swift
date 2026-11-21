@@ -403,12 +403,21 @@
         /// could not be. `still`: the photograph waits for a frame that stops changing; a step with a moving bar never
         /// stops, so it is taken once the window has had a moment to draw. A window `over` has its frame printed beside
         /// the main window's.
+        /// What this launch drew wrongly in a way no picture shows: said at once, and a render with any fails.
+        @MainActor private(set) static var faults: [String] = []
+
+        @MainActor static func fault(_ what: String) {
+            faults.append(what)
+            FileHandle.standardError.write(Data("fault: \(what)\n".utf8))
+        }
+
         @MainActor static func renderAndQuit(_ window: NSWindow, over: NSWindow? = nil, still: Bool = true) {
             guard let path = UserDefaults.standard.string(forKey: "CC_RENDER_WINDOW") else { return }
             Task { @MainActor in
                 // `-CC_RENDER_DELAY <seconds>`: what a screen shows a while after it is ready.
                 try? await Task.sleep(for: .seconds(UserDefaults.standard.double(forKey: "CC_RENDER_DELAY")))
                 do {
+                    guard faults.isEmpty else { throw RenderFailure(faults.joined(separator: "; ")) }
                     let rep = try await RenderWindow.photograph(window, over: over, still: still)
                     guard let png = rep.representation(using: .png, properties: [:]) else {
                         throw RenderFailure("could not encode the PNG")
