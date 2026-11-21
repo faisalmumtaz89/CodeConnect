@@ -8,7 +8,6 @@ struct AgentNotice: View {
     let context: StartContext
     /// The form's computer is not this Mac.
     let elsewhere: Bool
-    @State private var copied = false
 
     var body: some View {
         switch context.models(.claude) {
@@ -31,19 +30,17 @@ struct AgentNotice: View {
                         .accessibilityIdentifier("agent.notice.there")
                         // "CodeConnect sees it when you're done": see `StartContext.watchSignIn`.
                         .task(id: context.id) { await context.watchSignIn() }
-                    HStack(spacing: 8) {
-                        Text(StartContext.claudeSignIn).font(Theme.mono(12)).foregroundStyle(Theme.text)
-                            .textSelection(.enabled)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
-                            .accessibilityIdentifier("agent.notice.command")
-                        ActionButton(title: copied ? "Copied" : "Copy", key: nil, prominent: false, id: "agent.notice.copy") {
-                            copyToPasteboard(StartContext.claudeSignIn)
-                            copied = true
+                    Text(StartContext.claudeSignIn).font(Theme.mono(12)).foregroundStyle(Theme.text)
+                        .textSelection(.enabled)
+                        .padding(.leading, 10)
+                        .padding(.trailing, CopyButton.slot)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
+                        .accessibilityIdentifier("agent.notice.command")
+                        .overlay(alignment: .trailing) {
+                            CopyButton(text: StartContext.claudeSignIn, id: "agent.notice.copy")
                         }
-                    }
                 }
             }
             Spacer(minLength: 0)

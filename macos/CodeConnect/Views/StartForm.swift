@@ -596,7 +596,9 @@ private struct StartProgress: View {
             .textSelection(.enabled)
             .accessibilityIdentifier("start.failed.text")
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10)
+            .padding(.leading, 10)
+            .padding(.trailing, CopyButton.slot)
+            .padding(.vertical, 10)
     }
 
     /// Kit's words: its title, and its sentence where it has one. A launch that failed has none;
@@ -636,6 +638,7 @@ private struct StartProgress: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
                         .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+                        .overlay(alignment: .trailing) { CopyButton(text: detail, id: "start.failed.copy") }
                     }
                 }
             }
@@ -668,11 +671,13 @@ private struct FolderStep: View {
                 Text(FolderWords.title).font(Theme.ui(17, .semibold)).foregroundStyle(Theme.text)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(path).font(Theme.mono(11.5)).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.head)
-                    .padding(.horizontal, 10)
+                    .padding(.leading, 10)
+                    .padding(.trailing, CopyButton.slot)
                     .padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
                     .accessibilityIdentifier("folder.path")
+                    .overlay(alignment: .trailing) { CopyButton(text: path, id: "folder.path.copy") }
                 Text(FolderWords.body(computer)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
                     .fixedSize(horizontal: false, vertical: true)
                 VStack(spacing: 6) {

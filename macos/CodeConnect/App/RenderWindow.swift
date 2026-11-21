@@ -269,6 +269,12 @@
             Set((UserDefaults.standard.string(forKey: "CC_HOVER") ?? "").split(separator: ",").map(String.init))
         }
 
+        /// `-CC_COPIED <id>,<id>`: the Copy buttons with these identifiers draw their check, as just after a press,
+        /// without a press: nothing reaches the pasteboard.
+        static var copied: Set<String> {
+            Set((UserDefaults.standard.string(forKey: "CC_COPIED") ?? "").split(separator: ",").map(String.init))
+        }
+
         /// `-CC_FORCE <id>=pressed,<id>=disabled`: the buttons with these identifiers draw pressed, or disabled, since a
         /// test launch can neither hold a click nor reach every state that disables a control.
         static var forced: [String: String] {

@@ -590,6 +590,9 @@ struct CopyButton: View {
         .accessibilityLabel("Copy")
         .accessibilityValue(copied ? "Copied" : "")
         .accessibilityIdentifier(id)
+        #if DEBUG
+            .onAppear { if RenderWindow.copied.contains(id) { copied = true } }
+        #endif
     }
 
     private func copy() {
