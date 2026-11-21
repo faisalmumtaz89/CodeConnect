@@ -109,6 +109,8 @@ User-facing changes, newest first. Mac releases are cut per
 - On the iPhone, New agent stays and says why when no computer can start one, a signed-out agent says so at
   start with how to sign in, short sheets are as tall as their content, a fact too long for its line moves under
   its label whole, and Link health's State reads one word.
+- On the iPhone, while you look around with sample data, Settings › Computers says "No computers yet", where it
+  used to list the sample fleet as a computer that was not paired and offline.
 
 ## CodeConnect 0.19.3, with the iPhone app 1.1.20
 
