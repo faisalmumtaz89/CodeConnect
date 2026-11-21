@@ -68,7 +68,7 @@ private struct LatestPill: View {
                 .overlay(Capsule().strokeBorder(Color.white.opacity(0.09)))
                 .contentShape(Capsule())
             }
-            .buttonStyle(.hover(radius: 13, id: "session.latest"))
+            .buttonStyle(.hover(radius: 13, over: true, id: "session.latest"))
             .padding(.bottom, 12)
             .accessibilityLabel(SessionWords.jumpToLatest)
             .accessibilityValue(SessionWords.latest(new: latest.count))
