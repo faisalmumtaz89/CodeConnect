@@ -86,7 +86,11 @@ struct HunkHeader: View {
                     try? await Task.sleep(for: .seconds(1))
                     let hunkID = HunkActions.id(file: file, hunk: hunk)
                     switch act {
-                    case "menu": show(at: frame)
+                    case "menu":
+                        // As a click on the dots: drawn as the pointer draws them, measured, then opened from them.
+                        hovered = true
+                        try? await Task.sleep(for: .milliseconds(300))
+                        show(at: frame)
                     case "sent": actions.sent = hunkID
                     default: actions.commenting = hunkID
                     }
