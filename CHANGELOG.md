@@ -61,6 +61,13 @@ User-facing changes, newest first. Mac releases are cut per
   a second computer of its own.
 - When ending or removing a run doesn't happen, the notice says so, "Couldn’t end the run" or "Couldn’t remove
   the run", and why, in a sentence, never quoting the computer's status word.
+- On the Mac, as on the iPhone, several ended runs are removed together. Select in the Ended header, or a ⌘-click
+  on a run, starts choosing, Select All (⌘A) chooses every one the list shows, and Done or Esc stops. "Remove N…"
+  asks once and removes each in turn; a run a computer didn't remove stays chosen with its reason on its row, and
+  a note under the header says how many and why.
+- On the Mac and on the iPhone, a Codex run that can only be observed says "Observe only." and why: the computer
+  has lost its link to the run, or can't promise an answer will reach the agent. It used to say only that answers
+  are given at the computer.
 - On the iPhone, a Claude Code run's ⋯ offers Compact… and Clear…, each with its icon, and the app's red is the
   Mac's.
 - On the Mac, the window behind a question dims further, so nothing under the card reads as an answer.
