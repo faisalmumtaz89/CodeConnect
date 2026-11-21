@@ -390,9 +390,13 @@ public final class SessionStarter {
     /// as given (fixtures/claude/minor-33-wire.json), models and sign-in included.
     public func listFixtureProjects(linux: Bool, computer: String) {
         projects = linux ? Self.fixtureLinuxProjects(now: Date()) : Self.fixtureProjects(now: Date())
-        var codex = true
+        var codex = StartAgentStatus(agent: .codex, available: true, detail: nil, models: [], signedIn: nil)
         #if DEBUG
-            codex = UserDefaults.standard.string(forKey: "CC_START_AGENTS") != "claude"
+            if UserDefaults.standard.string(forKey: "CC_START_AGENTS") == "claude" {
+                codex = StartAgentStatus(
+                    agent: .codex, available: false, detail: "Codex isn’t installed on \(computer).", models: [],
+                    signedIn: nil)
+            }
             let arguments = ProcessInfo.processInfo.arguments
             if let flag = arguments.firstIndex(of: "-CC_START_AGENTS_WIRE"), flag + 1 < arguments.count,
                 let wire = try? JSONDecoder().decode([StartAgentStatus.Wire].self, from: Data(arguments[flag + 1].utf8))
@@ -401,12 +405,7 @@ public final class SessionStarter {
                 return
             }
         #endif
-        agents = [
-            StartAgentStatus(agent: .claude, available: true, detail: nil, models: [], signedIn: nil),
-            StartAgentStatus(
-                agent: .codex, available: codex, detail: codex ? nil : "Codex isn’t installed on \(computer).",
-                models: [], signedIn: nil),
-        ]
+        agents = [StartAgentStatus(agent: .claude, available: true, detail: nil, models: [], signedIn: nil), codex]
     }
 
     /// What `projects` said.
