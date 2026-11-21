@@ -63,6 +63,11 @@ struct CodeConnectApp: App {
         .commands {
             AddCommands(pending: $pendingAdd)
             PaneCommands()
+            // View › Refresh: every computer asked for its runs again, as the iPhone's pull to refresh asks.
+            CommandGroup(after: .sidebar) {
+                Button("Refresh") { machines.refreshFleet() }
+                    .keyboardShortcut("r")
+            }
             CommandGroup(after: .appInfo) {
                 if let updates {
                     Button("Check for Updates\u{2026}") { updates.checkForUpdates() }
