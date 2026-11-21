@@ -97,7 +97,8 @@ User-facing changes, newest first. Mac releases are cut per
   Mac's.
 - On the Mac, the window behind a question dims further, so nothing under the card reads as an answer.
 - On the iPhone, a computer that refused the link says "Different version" or "Pair again" on its card, in
-  place of "Not paired". Typing /model, /effort, /diff or /compact where it can't be typed says what to do
+  place of "Not paired", and one on a different version offers Try again, as the Mac does, where it used to send
+  you to Settings. Typing /model, /effort, /diff or /compact where it can't be typed says what to do
   instead, and every sentence either app shows uses the typographic apostrophe and no long dash.
 - A card answered just after its agent's host re-attaches, after the daemon restarts, is no longer refused.
 - On the Mac, a run row shows its status and its command whole or not at all, a long command keeps its start
