@@ -21,7 +21,7 @@ struct Conversation: View {
         let shown = model.shown(for: key)
         ConversationTable(
             model: model, key: key, items: TimelineBuilder.drawn(shown?.timeline ?? []),
-            drawnThrough: shown?.drawnThrough ?? 0, tail: tail, latest: latest)
+            drawnThrough: shown?.drawnThrough ?? 0, gap: shown?.gap, tail: tail, latest: latest)
             .overlay {
                 if shown?.timeline.isEmpty ?? true { NothingRecorded(model: model, key: key) }
             }
@@ -380,23 +380,49 @@ private struct ToolLine: View {
     }
 }
 
-/// Something the run reported about itself, quiet unless it went wrong.
-private struct NoticeLine: View {
-    let notice: NoticeItem
+/// Something the run reported about itself, quiet unless it went wrong; and the run's missed-events notice, where the
+/// Kit places it (`GapNotice.index(in:)`), as a warning whose Dismiss at the trailing edge lets it go
+/// (`AppModel.dismissGap`), as the iPhone's marker does.
+struct NoticeLine: View {
+    let severity: NoticeSeverity
+    let title: String
+    let detail: String?
+    var dismiss: (() -> Void)? = nil
+
+    init(notice: NoticeItem) {
+        severity = notice.severity
+        title = notice.title
+        detail = notice.detail
+    }
+
+    init(gap: GapNotice, dismiss: @escaping () -> Void) {
+        severity = .warning
+        title = gap.message
+        detail = nil
+        self.dismiss = dismiss
+    }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
-            Image(systemName: notice.severity == .failure || notice.severity == .warning ? "exclamationmark.circle" : "info.circle")
+            Image(systemName: severity == .failure || severity == .warning ? "exclamationmark.circle" : "info.circle")
                 .font(.system(size: 11))
-                .foregroundStyle(notice.severity == .failure ? Theme.red : notice.severity == .warning ? Theme.amber : Theme.text3)
+                .foregroundStyle(severity == .failure ? Theme.red : severity == .warning ? Theme.amber : Theme.text3)
                 // The tool line's mark width: a notice's words and a tool's name start on one edge.
                 .frame(width: 14)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
-                Text(notice.title).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
-                if let detail = notice.detail, !detail.isEmpty {
+                Text(title).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let detail, !detail.isEmpty {
                     Text(detail).font(Theme.ui(12)).foregroundStyle(Theme.text3).textSelection(.enabled)
                 }
+            }
+            if let dismiss {
+                Spacer(minLength: 12)
+                ActionButton(title: "Dismiss", key: nil, prominent: false, id: "conversation.gap.dismiss", action: dismiss)
+                    // Its word whole: the sentence wraps first.
+                    .fixedSize()
+                    .accessibilityLabel("Dismiss this notice")
             }
         }
     }
