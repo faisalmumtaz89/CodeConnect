@@ -97,6 +97,9 @@ User-facing changes, newest first. Mac releases are cut per
   are given at the computer.
 - On the iPhone, a Claude Code run's ⋯ offers Compact… and Clear…, each with its icon, and the app's red is the
   Mac's.
+- On the iPhone, as on the Mac, the run list narrows to one computer or one project: the Projects title becomes a
+  menu once there are two or more of either. A narrowed list says what it shows, such as "2 runs on build-server",
+  and its chip's × shows every run again; what waits for you, and what failed, stay counted on every computer.
 - On the Mac, the window behind a question dims further, so nothing under the card reads as an answer.
 - On the iPhone, a computer that refused the link says "Different version" or "Pair again" on its card, in
   place of "Not paired", and one on a different version offers Try again, as the Mac does, where it used to send
