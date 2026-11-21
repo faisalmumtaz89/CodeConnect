@@ -216,6 +216,10 @@ extension View {
 
     /// The panel a `closesPanel` control opens: a click on it keeps it open.
     func openPanel() -> some View { modifier(OpenPanel()) }
+
+    /// A field that appears because of a choice just made takes the keyboard as it appears, so what is typed next
+    /// goes into it and not into the field that had the keyboard before.
+    func takesKeyboardWhenShown() -> some View { modifier(TakesKeyboardWhenShown()) }
 }
 
 /// Where a control and its open panel are, in the window's coordinates (top-left origin).
@@ -282,6 +286,14 @@ private struct ClosesPanel: ViewModifier {
         monitor = nil
         resizing.map(NotificationCenter.default.removeObserver)
         resizing = nil
+    }
+}
+
+private struct TakesKeyboardWhenShown: ViewModifier {
+    @FocusState private var focused: Bool
+
+    func body(content: Content) -> some View {
+        content.focused($focused).onAppear { focused = true }
     }
 }
 
