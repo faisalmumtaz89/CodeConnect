@@ -11,6 +11,11 @@ User-facing changes, newest first. Mac releases are cut per
   3 new", as on the Mac.
 - On the iPhone, a card that asks for a name, such as New folder, is answered from the keyboard as on the Mac: its
   acting answer is drawn as the card's main button, and the keyboard's done key gives it once a name is typed.
+- Every menu panel on the Mac, such as a run's Model, Mode and ⋯ panels, the Branch menu, the start's Computer
+  picker and the slash palette, takes ↓, ↑, Return and Esc with no modifier held, and the pointer and the keys move
+  one highlight. Return picks the highlighted row, and a row that cannot be chosen is skipped.
+- On the Mac, the start's Computer picker opens over the Folder section again: with two computers, 0.19.4 drew the
+  Folder section over it, and the second computer could not be chosen.
 
 ## CodeConnect 0.19.4, with the iPhone app 1.1.21
 
