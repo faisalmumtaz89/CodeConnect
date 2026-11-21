@@ -465,7 +465,7 @@ struct PairingView: View {
 
             CCCard(padding: 0) {
                 VStack(spacing: 0) {
-                    // With no computer listed, the row says so.
+                    // No computer listed (the sample fleet is none: `AppModel.listsAsComputer`), and the row says so.
                     if listedMachines.isEmpty {
                         CCRow(FleetWords.noComputersYet) {
                             CCStatusDot(
@@ -551,7 +551,7 @@ struct PairingView: View {
     /// The machines Settings lists: every paired one and, in a fixture run, the
     /// fixture standing in for one.
     private var listedMachines: [AppModel] {
-        machines.models.filter { $0.machineID != nil || $0.fixturesActive }
+        machines.models.filter(\.listsAsComputer)
     }
 
     /// One machine: its link in the app's own words for that level, dimmed while

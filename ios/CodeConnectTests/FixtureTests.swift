@@ -229,6 +229,21 @@ final class SampleFleetTests: XCTestCase {
             settings: AppSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!))
     }
 
+    /// Settings lists a computer only where there is one: the sample fleet is none. Must-fail: the sample model
+    /// listed because its fixture flag is set, which showed "Not paired, Offline" in Settings.
+    func testTheSampleFleetIsNoComputerInSettings() {
+        XCTAssertFalse(makeModel().listsAsComputer, "nothing paired, nothing listed")
+        let sample = makeModel()
+        sample.startSampleFleet()
+        XCTAssertTrue(sample.fixturesActive)
+        XCTAssertFalse(sample.listsAsComputer, "the sample fleet is no computer")
+        let paired = AppModel(
+            machineID: "m1", pairing: PairingStore(ephemeral: true),
+            cache: EventCache(root: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)),
+            settings: AppSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!))
+        XCTAssertTrue(paired.listsAsComputer, "a paired computer is listed")
+    }
+
     /// A fleet with agents on it, and a link that is still reported as absent —
     /// the whole claim the banner makes, in the state the app is actually in.
     func testTheSampleFleetLoadsWithoutClaimingALink() async {
