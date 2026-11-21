@@ -304,7 +304,7 @@ private struct Composer: View {
 
     /// The command typed last, while it stands and sending can work; else, on a run started from the app, the answer
     /// to its last model, effort or mode change; else what became of the last send (a Codex run's own outcome first, as
-    /// Kit ranks it); else why sending cannot work, or that answers are given at the computer.
+    /// Kit ranks it); else why sending cannot work, or that the run can only be observed, and why.
     /// A command's line never hides why Send is disabled: the watch for its receipt stays armed underneath.
     private var line: Line? {
         if blocked == nil, let running, let status = model.commandStatus(running.command, running.phase) {

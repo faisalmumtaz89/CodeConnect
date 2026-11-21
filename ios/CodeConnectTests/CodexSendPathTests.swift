@@ -730,8 +730,30 @@ final class CodexSendPathTests: XCTestCase {
         XCTAssertEqual(
             model.standingNote(for: key(), draft: "hello"),
             ComposeProse.Note(
-                text: "Observe only - answers are given at the computer.", tone: .neutral, icon: nil,
-                offersWhy: true))
+                text: "Observe only. The computer has lost its link to this run. It can be answered again once the link is back.",
+                tone: .neutral, icon: nil, offersWhy: true))
+    }
+
+    /// "Observe only" says the run's own reason it cannot be answered from here, the capability rule's sentence, for
+    /// each reason a Codex run with a reply box can have: its link to the run lost, and a computer that can't promise an
+    /// answer reaches the agent. (An ended run takes no reply, so it shows no box and no note: `takesNoReply`.)
+    func testObserveOnlySaysTheRunsOwnReason() throws {
+        let (model, _) = model(link: "subscribed")
+        func note(_ summary: SessionSummary) -> String? {
+            model.adoptSummariesForTesting([summary])
+            return model.standingNote(for: key(), draft: "hello")?.text
+        }
+        XCTAssertEqual(
+            note(Self.summary(uid: key(), agent: "codex", link: "subscribed", runLink: "detached")),
+            "Observe only. The computer has lost its link to this run. It can be answered again once the link is back.")
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(
+                canApproveReliably: false, sendText: true,
+                extra: ["codex_interrupt": .bool(true), "codex_compose": .bool(true)]),
+            minor: 19)
+        XCTAssertEqual(
+            note(Self.summary(uid: key(), agent: "codex", link: "subscribed")),
+            "Observe only. The computer can’t promise an answer will reach the agent.")
     }
 
     /// Why a Claude run cannot be typed into: the link first, then a computer
