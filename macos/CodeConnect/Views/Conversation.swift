@@ -191,9 +191,9 @@ private struct Prose: View {
     /// Kit's inline Markdown, with `code` in the code face on a raised ground.
     static func inline(_ words: String) -> AttributedString {
         var string = AgentProse.inline(words)
-        for run in string.runs where run.inlinePresentationIntent?.contains(.code) == true {
-            string[run.range].font = Theme.mono(12)
-            string[run.range].backgroundColor = Theme.raised
+        for run in string.runs where run[AttributeScopes.FoundationAttributes.InlinePresentationIntentAttribute.self]?.contains(.code) == true {
+            string[run.range][AttributeScopes.SwiftUIAttributes.FontAttribute.self] = Theme.mono(12)
+            string[run.range][AttributeScopes.SwiftUIAttributes.BackgroundColorAttribute.self] = Theme.raised
         }
         return string
     }
