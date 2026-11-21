@@ -163,7 +163,12 @@ struct StartForm: View {
                 computerMenuOpen = true
             }
             .task {
-                menuOpen = RenderWindow.opensModelMenu
+                // Opened once the render has sized its window: a resize closes an open panel.
+                guard RenderWindow.opensModelMenu else { return }
+                try? await Task.sleep(for: .seconds(1))
+                menuOpen = true
+            }
+            .task {
                 browsing = RenderWindow.browsed != nil
                 guard let path = RenderWindow.chosenFolder else { return }
                 for _ in 0..<150 {
