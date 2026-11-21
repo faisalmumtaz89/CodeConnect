@@ -84,6 +84,8 @@ private struct Composer: View {
     @State private var askingAgain = false
     /// The field has the keyboard: Esc leaves it before it closes the run.
     @FocusState private var fieldFocused: Bool
+    /// The field's caret, which the box sets when the app gives it the keyboard back (`takeKeyboardBack`).
+    @State private var selection: TextSelection?
     @Environment(\.replyFocusRequest) private var replyFocusRequest
     /// The Compact command typed last, and where it stands.
     @State private var running: Running?
@@ -180,7 +182,7 @@ private struct Composer: View {
             if awaitsFirstMessage { fieldFocused = true }
         }
         // Return in the run list asks for the reply box.
-        .onChange(of: replyFocusRequest) { fieldFocused = true }
+        .onChange(of: replyFocusRequest) { takeKeyboardBack() }
         // Esc closes the open settings panel, then leaves the field, before the window's Esc closes the run. Published
         // to the whole window, not only along the focus: a panel opened by a click leaves nothing in the box focused.
         .focusedSceneValue(\.composerHoldsEscape, panel != nil || fieldFocused)
@@ -219,7 +221,9 @@ private struct Composer: View {
                 compacting = false
             }
         }
-        .confirmation(Binding(get: { clearing ? true : nil }, set: { clearing = $0 ?? false })) { _ in
+        .confirmation(
+            Binding(get: { clearing ? true : nil }, set: { clearing = $0 ?? false }), returnsKeyboard: takeKeyboardBack
+        ) { _ in
             Confirmation(title: ClearConfirmation.title, message: ClearConfirmation.message, answers: [
                 .init(title: ClearConfirmation.keep, kind: .cancel, id: "session.composer.clear.cancel"),
                 .init(title: ClearConfirmation.clear, kind: .destructive, id: "session.composer.clear.confirm") {
@@ -228,7 +232,7 @@ private struct Composer: View {
             ])
         }
         // Kit's words for the run's agent; Keep Asking and Esc send nothing, and the mode stays as it was.
-        .confirmation($confirmingMode) { mode in
+        .confirmation($confirmingMode, returnsKeyboard: takeKeyboardBack) { mode in
             Confirmation(title: modeWords.title, message: modeWords.message, answers: [
                 .init(title: modeWords.cancel, kind: .cancel, id: "session.composer.mode.cancel"),
                 .init(title: modeWords.confirm, kind: .destructive, id: "session.composer.mode.confirm") {
@@ -247,7 +251,8 @@ private struct Composer: View {
         let agent = summary?.agent.displayName ?? "the agent"
         return VStack(alignment: .leading, spacing: 10) {
             TextField(
-                "", text: $kept.reply, prompt: Text(SessionWords.replyPrompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
+                "", text: $kept.reply, selection: $selection,
+                prompt: Text(SessionWords.replyPrompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
             )
                 .textFieldStyle(.plain)
                 .font(Theme.ui(13))
@@ -490,6 +495,16 @@ private struct Composer: View {
         case .passThrough:
             break
         }
+    }
+
+    /// The keyboard back to the box from where the app sent it (an ask, the run list's Return), with the caret at the end
+    /// of the words: never the select-all AppKit gives a field handed the keyboard by code, which the next key would
+    /// replace. Not where the caret was: this field's selection binding does not report the caret, so where it was
+    /// cannot be known. The caret goes in a turn after the keyboard, once that select-all is done.
+    private func takeKeyboardBack() {
+        fieldFocused = true
+        let end = kept.reply.endIndex
+        DispatchQueue.main.async { selection = TextSelection(insertionPoint: end) }
     }
 
     /// A choice in a hosted run's list answers the `/model` or `/effort` that opened it: those words leave the box, as a
