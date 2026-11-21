@@ -79,6 +79,9 @@ struct FleetView: View {
     /// Expanding `Ended` is deliberately not persisted: a fresh launch is a
     /// fresh glance.
     @State private var showEnded = false
+    /// What the list is narrowed to: one computer's runs or one project's (`FleetFilter`), or every run. Not kept
+    /// across a launch, as on the Mac; only its computer's removal clears it.
+    @State private var filter: FleetFilter?
     /// The band's own observe-only reason, set when its header note is tapped.
     @State private var capabilityReason: CapabilityReason?
     /// A removal waiting on its confirmation. One question for the screen,
@@ -188,7 +191,8 @@ struct FleetView: View {
             VStack(alignment: .leading, spacing: 0) {
                 // An empty fleet is one instruction, not a list with no rows:
                 // a header above it would name the same emptiness again.
-                if !screen.isEmpty || !screen.projects.isEmpty { scrollHeader(screen) }
+                // A narrowed list keeps its header, chip and all, however few runs it has left.
+                if filter != nil || !screen.isEmpty || !screen.projects.isEmpty { scrollHeader(screen) }
                 content(screen)
             }
             // Whether the fleet is in the window, which is whether any of it
@@ -462,6 +466,23 @@ struct FleetView: View {
 
     private func lifecycle(_ list: some View) -> some View {
         list
+            // Only a computer's removal clears the list's filter, as on the Mac: a project with no runs left keeps
+            // its chip over its empty line.
+            .onChange(of: machines.models.map(\.machineID)) { _, ids in
+                if case .computer(let id) = filter, !ids.contains(where: { ($0 ?? "") == id }) { narrow(to: nil) }
+            }
+            #if DEBUG
+                // `-CC_FILTER <name>`: the list narrowed to the computer, or failing that the project, of that name,
+                // once the fleet has it.
+                .onChange(of: FleetFilterChoices(machines: machines).computers.count
+                    + FleetFilterChoices(machines: machines).projects.count, initial: true) { _, _ in
+                    guard filter == nil, let wanted = UserDefaults.standard.string(forKey: "CC_FILTER") else { return }
+                    let choices = FleetFilterChoices(machines: machines)
+                    if let choice = (choices.computers + choices.projects).first(where: { $0.name == wanted }) {
+                        narrow(to: choice.filter)
+                    }
+                }
+            #endif
             .onChange(of: machines.pendingDeepLink) { _, _ in consumeDeepLink() }
             // A name that waited out a catch-up is resolved at its release.
             .onChange(of: machines.isCatchingUp) { _, _ in consumeDeepLink() }
@@ -509,6 +530,8 @@ struct FleetView: View {
         let selectable: [String]
         /// The count under the title, which the Deck bar prints too.
         let decisions: Int
+        /// The runs that failed, on every computer.
+        let failed: Int
         /// How many waiting cards sit at each risk, for the Deck bar; empty until
         /// a card has arrived, and then the bar rises.
         let risks: [RiskClass: Int]
@@ -540,7 +563,8 @@ struct FleetView: View {
     /// Let in what the list has held back: the arrivals take their places and
     /// what left goes.
     private func applyHeld() {
-        let rows = machines.fleet
+        let every = machines.fleet
+        let rows = filter.map { $0.narrow(every) } ?? every
         let membership = Self.membership(of: rows)
         let keys = Set(membership.values.flatMap { $0 })
         held = membership
@@ -595,7 +619,8 @@ struct FleetView: View {
         // on this screen ticks it any more — see `FleetRowView.now` — so a body
         // pass now means the fleet itself changed, or a Stop cooldown is
         // counting down (`stopBlockedReason`).
-        let rows = machines.fleet
+        let every = machines.fleet
+        let rows = filter.map { $0.narrow(every) } ?? every
         // Read once for the same reason, and for a sharper one: `machines.deck`
         // flat-maps `pendingApprovals` across every session, which walks every
         // event log the app holds. Read inside the `safeAreaInset` builder it was
@@ -618,7 +643,9 @@ struct FleetView: View {
             ended: bands(of: rows.filter { $0.status == .ended && !inCards.contains($0.summary.sessionKey) })
                 .first,
             selectable: selectableKeys(rows),
-            decisions: FleetCount.decisions(in: rows),
+            // Every computer's, narrowed or not: a decision waiting elsewhere is never hidden by a filter.
+            decisions: FleetCount.decisions(in: every),
+            failed: every.filter { $0.status == .failed }.count,
             // Each card at the risk its own card shows.
             risks: deck.reduce(into: [:]) {
                 $0[$1.assessment(profile: machines.profile(forSession: $1.sessionKey)).effective, default: 0] += 1
@@ -647,10 +674,7 @@ struct FleetView: View {
     private func scrollHeader(_ screen: FleetScreen) -> some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
             CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
-                Text(FleetWords.projects)
-                    .ccType(CC.type.display)
-                    .foregroundStyle(CC.text.primary)
-                    .accessibilityAddTraits(.isHeader)
+                title
                 CCAdaptiveSpacer(minLength: CC.space.sm)
                 // The pill is always in its place, unseen and inert while the list
                 // holds nothing back, and always one line: the whole change where
@@ -677,11 +701,42 @@ struct FleetView: View {
                 .foregroundStyle(CC.text.secondary)
                 .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
                 .fixedSize(horizontal: false, vertical: true)
+            filterControl
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, CC.space.md)
         .padding(.top, CC.space.xs)
         .padding(.bottom, CC.space.xl)
+    }
+
+    /// The large title: a menu of what the list can be narrowed to, when there is a choice.
+    @ViewBuilder
+    private var title: some View {
+        let choices = FleetFilterChoices(machines: machines)
+        if choices.offered {
+            FleetFilterMenu(choices: choices, chosen: Binding(get: { filter }, set: { narrow(to: $0) }))
+        } else {
+            Text(FleetWords.projects)
+                .ccType(CC.type.display)
+                .foregroundStyle(CC.text.primary)
+                .accessibilityAddTraits(.isHeader)
+        }
+    }
+
+    /// Under the summary, while the list is narrowed: what to, and the way back to every run.
+    @ViewBuilder
+    private var filterControl: some View {
+        if let filter {
+            FleetFilterChip(name: filter.name(in: machines)) { narrow(to: nil) }
+                .padding(.top, CC.space.xs)
+        }
+    }
+
+    /// Narrow the list, or show every run again, and let the cards it now holds in.
+    private func narrow(to next: FleetFilter?) {
+        guard next != filter else { return }
+        filter = next
+        applyHeld()
     }
 
     private func heldPill(_ title: String, change: HeldChange?) -> some View {
@@ -704,8 +759,7 @@ struct FleetView: View {
         if screen.decisions > 0 {
             return (FleetCount.waitingForYou(screen.decisions), CC.color.warning)
         }
-        let failed = screen.rows.filter { $0.status == .failed }.count
-        return failed > 0 ? ("\(failed) failed", CC.color.danger) : nil
+        return screen.failed > 0 ? ("\(screen.failed) failed", CC.color.danger) : nil
     }
 
     /// `4 runs on 2 computers · 1 done`: every live run, the computers they
@@ -713,13 +767,18 @@ struct FleetView: View {
     /// the alert above said. A status with nothing in it is omitted rather than
     /// printed as `0`.
     private func summaryLine(_ screen: FleetScreen) -> String {
+        let narrowedTo = filter.map { filter -> String in
+            if case .computer = filter { return " on \(filter.name(in: machines))" }
+            return " in \(filter.name(in: machines))"
+        }
         guard !screen.projects.isEmpty else {
+            if let narrowedTo { return "Nothing running" + narrowedTo }
             return screen.rows.isEmpty ? "Nothing has arrived yet" : "Nothing running"
         }
         let live = screen.rows.filter { $0.status != .ended }
         let computers = Set(live.map(\.machineID)).count
         let overview = "\(live.count) \(live.count == 1 ? "run" : "runs")"
-            + (computers > 1 ? " on \(computers) computers" : "")
+            + (narrowedTo ?? (computers > 1 ? " on \(computers) computers" : ""))
         let taken: FleetStatus? =
             screen.decisions > 0 ? .blocked : (live.contains { $0.status == .failed } ? .failed : nil)
         // A seen finished turn is counted with the unseen ones, under their one word.
@@ -740,9 +799,9 @@ struct FleetView: View {
         // foot of the screen (the bottom inset).
         if typeSize.isAccessibilitySize { FleetBanner { showSettings = true } }
 
-        if screen.isEmpty && screen.projects.isEmpty {
+        if filter == nil, screen.isEmpty && screen.projects.isEmpty {
             emptyState
-        } else if screen.rows.isEmpty && screen.projects.isEmpty {
+        } else if filter == nil, screen.rows.isEmpty && screen.projects.isEmpty {
             loadingState
         } else {
             // One list in the owner's order: a card that starts waiting turns
