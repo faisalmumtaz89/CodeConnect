@@ -51,6 +51,18 @@ final class RelaunchableRunTests: XCTestCase {
         XCTAssertEqual(badge.reason, "This run has ended.")
     }
 
+    /// **An empty conversation says "yet" only while the run can still record something.** A run ended by End run
+    /// takes no reply and will record nothing more, so it says nothing was recorded; a relaunchable run and a live one
+    /// can still record, so they say "yet". Must-fail: the words say "yet" whatever the run.
+    func testAnEndedRunsEmptyConversationSaysNothingWasRecorded() throws {
+        func title(_ name: String) throws -> String {
+            SessionWords.nothingRecorded(endedRun: try summary(name).takesNoReply)
+        }
+        XCTAssertEqual(try title("session_summary_ended_by_end_run"), "Nothing recorded")
+        XCTAssertEqual(try title("session_summary_relaunchable"), "Nothing recorded yet")
+        XCTAssertEqual(try title("session_summary"), "Nothing recorded yet")
+    }
+
     /// **A Claude run its own stop left relaunchable opens its composer too** (minor 42). The daemon's
     /// `relaunchable` field answers for both agents, so a hosted Claude run whose claude exited on its
     /// own — with no `codexLink` to lean on — reads relaunchable just as a Codex run does. From the

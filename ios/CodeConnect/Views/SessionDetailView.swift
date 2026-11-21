@@ -1915,10 +1915,11 @@ private struct SessionTimeline: View {
         // you can always talk to an agent.
         // A run that has ended will record nothing more, so it says only that
         // nothing was recorded.
-        CCEmptyState(
+        let ended = model.shownSummary(for: key)?.takesNoReply == true
+        return CCEmptyState(
             glyph: "clock",
-            title: SessionWords.nothingRecorded,
-            message: model.shownSummary(for: key)?.takesNoReply == true ? nil : SessionWords.eventsAppearHere)
+            title: SessionWords.nothingRecorded(endedRun: ended),
+            message: ended ? nil : SessionWords.eventsAppearHere)
             // 96pt from the top of the list, counting the empty state's own
             // 32pt of vertical padding.
             .padding(.top, CC.space.xxxl + CC.space.md)
