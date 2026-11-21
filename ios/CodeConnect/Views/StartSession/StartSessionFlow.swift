@@ -276,7 +276,7 @@ struct StartStepsSheet: View {
             // A computer below minor 30 starts only in the folders it lists.
             if context.browses {
                 CCActionBar {
-                    CCButton("Browse folders", variant: .secondary, fullWidth: true) {
+                    CCButton(StartWords.browseFolders, variant: .secondary, fullWidth: true) {
                         go(.browse(nil))
                     }
                     .accessibilityIdentifier("start-browse")
@@ -306,7 +306,7 @@ struct StartStepsSheet: View {
                 .padding(.horizontal, CC.space.md)
                 .padding(.top, CC.space.sm)
             Toggle(isOn: $showsHidden) {
-                Text("Show hidden folders")
+                Text(StartWords.showHiddenFolders)
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -324,14 +324,14 @@ struct StartStepsSheet: View {
                                 folderName = ""
                                 namingFolder = true
                             } label: {
-                                StartStepRow(title: "New folder…")
+                                StartStepRow(title: StartWords.newFolderAction)
                             }
                             .buttonStyle(StartRowStyle())
                             .accessibilityIdentifier("start-new-folder")
                             CCHairline().padding(.leading, CC.space.md)
                         }
                         if listing.path != "/" {
-                            let parent = parentFolder(listing.path)
+                            let parent = StartContext.parentFolder(listing.path)
                             Button {
                                 go(.browse(parent))
                             } label: {
@@ -344,7 +344,7 @@ struct StartStepsSheet: View {
                         ForEach(listing.folders.sorted { $0.localizedStandardCompare($1) == .orderedAscending }, id: \.self) {
                             name in
                             Button {
-                                go(.browse(childFolder(listing.path, name)))
+                                go(.browse(StartContext.childFolder(listing.path, name)))
                             } label: {
                                 StartStepRow(title: name, mono: true)
                             }
@@ -359,6 +359,18 @@ struct StartStepsSheet: View {
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(CC.space.md)
                         }
+                    } else {
+                        // Until the computer has answered, a ring says which folder it is reading.
+                        HStack(spacing: CC.space.sm) {
+                            CCProgressRing()
+                            Text(StartWords.readingFolder(asked, on: context.machineName))
+                                .ccType(CC.type.body)
+                                .foregroundStyle(CC.text.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(CC.space.md)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("start-reading-folder")
                     }
                 }
             }
@@ -367,7 +379,7 @@ struct StartStepsSheet: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let listing, listing.error == nil {
                 CCActionBar {
-                    CCButton("Use this folder", fullWidth: true) { useFolder(listing.path) }
+                    CCButton(StartWords.useThisFolder, fullWidth: true) { useFolder(listing.path) }
                         .accessibilityIdentifier("start-use-folder")
                 }
             }
@@ -380,13 +392,13 @@ struct StartStepsSheet: View {
             if let refusal = outcome {
                 folderRefusal = refusal
             } else {
-                go(.browse(childFolder(creatingIn, folderName)))
+                go(.browse(StartContext.childFolder(creatingIn, folderName)))
             }
         }
         .onChange(of: showsHidden) { _, _ in context.listFolder(StartFolderRequest(path: asked, showHidden: showsHidden)) }
         .ccConfirmation(isPresented: $namingFolder) {
             CCConfirmation(
-                title: "New folder", message: "In \(listing?.path ?? "")",
+                title: StartWords.newFolder, message: StartWords.newFolderIn(listing?.path ?? ""),
                 answers: [
                     .init(title: "Cancel", kind: .cancel, id: "folder.new.cancel"),
                     .init(title: "Create", kind: .plain, id: "folder.new.create") {
@@ -395,11 +407,11 @@ struct StartStepsSheet: View {
                         creating = context.createFolder(named: folderName, in: parent)
                     },
                 ],
-                field: .init(placeholder: "Name", text: $folderName))
+                field: .init(placeholder: StartWords.folderName, text: $folderName))
         }
         .ccConfirmation($folderRefusal) { refusal in
             CCConfirmation(
-                title: "Couldn’t make “\(folderName)”", message: refusal,
+                title: StartWords.couldNotMake(folderName), message: refusal,
                 answers: [.init(title: "OK", kind: .ok, id: "folder.new.ok")])
         }
     }
@@ -408,18 +420,9 @@ struct StartStepsSheet: View {
     /// folder, or more folders than it sends.
     private func listingNote(_ listing: StartFolderListing) -> String? {
         if let error = listing.error { return error }
-        if listing.truncated { return "The first 2,000 folders, in name order." }
-        if listing.folders.isEmpty { return showsHidden ? "No folders in here." : "No folders in here, hidden ones aside." }
+        if listing.truncated { return StartWords.firstFolders }
+        if listing.folders.isEmpty { return StartWords.noFolders(showingHidden: showsHidden) }
         return nil
-    }
-
-    private func parentFolder(_ path: String) -> String {
-        let parts = path.split(separator: "/").dropLast()
-        return "/" + parts.joined(separator: "/")
-    }
-
-    private func childFolder(_ path: String, _ name: String) -> String {
-        (path == "/" ? "" : path) + "/" + name
     }
 
     /// The browsed folder as a project: a recent one when it is one.

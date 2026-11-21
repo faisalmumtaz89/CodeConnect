@@ -86,6 +86,8 @@ struct AddSheet: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .environment(\.sheetHeight, height)
         .background(Theme.sheet)
+        // A question asked in the sheet, such as New Folder's, is drawn over the sheet, not in the window behind it.
+        .confirmationHost()
     }
 
     @Environment(\.sheetRoom) private var room
@@ -115,8 +117,11 @@ struct SheetBar<Leading: View>: View {
     /// "Cancel", or "Close" where closing leaves the work going.
     var cancelTitle = "Cancel"
     @ViewBuilder let leading: Leading
+    /// The sheet's questions, where it has them: while one is up, Esc and ⌘↩ are its, not the bar's.
+    @Environment(ConfirmationQueue.self) private var asks: ConfirmationQueue?
 
     var body: some View {
+        let asking = asks?.isAsking == true
         VStack(spacing: 0) {
             Rectangle().fill(Theme.hairline).frame(height: 1)
             HStack(spacing: 8) {
@@ -126,11 +131,11 @@ struct SheetBar<Leading: View>: View {
                 // button beside the filled one, the same height and corners.
                 if let cancel {
                     ActionButton(title: cancelTitle, key: nil, prominent: false, id: cancelID, action: cancel)
-                        .keyboardShortcut(.cancelAction)
+                        .keyboardShortcut(asking ? nil : .cancelAction)
                 }
                 if let action {
                     ActionButton(title: action, key: "⌘↩", prominent: true, id: actionID, action: perform)
-                        .keyboardShortcut(.return, modifiers: .command)
+                        .keyboardShortcut(asking ? nil : KeyboardShortcut(.return, modifiers: .command))
                         .disabled(blocked)
                 }
             }
