@@ -17,33 +17,6 @@ extension FleetGroup.Kind {
     var title: String { self == .computer ? "Computer" : "Project" }
 }
 
-/// What the sidebar narrows the list to: one computer's runs, or one project's, a project being one folder on one
-/// computer. Each names a group by its `FleetGroup` id.
-enum FleetFilter: Hashable {
-    case computer(String)
-    case project(String)
-
-    /// The rows of the group this names, as the list groups them; none once that group has no rows.
-    func narrow(_ rows: [FleetRow]) -> [FleetRow] {
-        let (kind, id): (FleetGroup.Kind, String) =
-            switch self {
-            case .computer(let id): (.computer, id)
-            case .project(let id): (.project, id)
-            }
-        return FleetGroup.groups(rows, by: kind).first { $0.id == id }?.rows ?? []
-    }
-
-    /// What the list's chip calls it: a computer as the sidebar names it, whether or not anything runs there.
-    @MainActor func name(in machines: Machines) -> String {
-        switch self {
-        case .computer(let id):
-            machines.models.first { ($0.machineID ?? "") == id }?.machineName ?? "Unknown computer"
-        case .project(let key):
-            FleetGroup.groups(machines.fleet, by: .project).first { $0.id == key }?.name ?? "Project"
-        }
-    }
-}
-
 /// Every run on every paired computer, one line each, grouped by computer or by project in the
 /// fleet's own order, or only one computer's or project's when the sidebar narrows it. A run waiting on you is a
 /// state of its row, and its group says how many decisions wait there.
