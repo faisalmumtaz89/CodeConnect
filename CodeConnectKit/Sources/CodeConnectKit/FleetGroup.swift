@@ -74,3 +74,22 @@ public struct FleetGroup: Sendable, Hashable, Identifiable {
         }
     }
 }
+
+extension FleetGroup {
+    /// The runs a choice of runs to remove can hold, in the list's order: those the list shows, grouped by `kind` less
+    /// the groups `folded` names, that `removable` allows. A run a filter left out of `rows`, or a folded group hides,
+    /// is not among them.
+    public static func choosable(
+        _ rows: [FleetRow], by kind: Kind, folded: Set<String>, removable: (FleetRow) -> Bool
+    ) -> [String] {
+        groups(rows, by: kind).filter { !folded.contains($0.id) }.flatMap(\.rows).filter(removable).map(\.id)
+    }
+
+    /// The chosen runs a removal takes, and the number it says: the choosable ones among `chosen`, so what is counted
+    /// and removed is what the list shows as chosen. A hidden run stays chosen, and is picked again once shown.
+    public static func picked(
+        _ rows: [FleetRow], by kind: Kind, folded: Set<String>, chosen: Set<String>, removable: (FleetRow) -> Bool
+    ) -> [String] {
+        choosable(rows, by: kind, folded: folded, removable: removable).filter(chosen.contains)
+    }
+}
