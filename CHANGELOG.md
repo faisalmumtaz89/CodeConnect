@@ -23,8 +23,9 @@ User-facing changes, newest first. Mac releases are cut per
   box was, on the Mac and on the iPhone. A run the next message would relaunch keeps its box.
 - On the Mac, as on the iPhone, an ended Claude Code run shows the command that picks its conversation up at the
   computer, with a Copy button, a diff numbers each line with its old and new line numbers and a folded stretch
-  of unchanged lines opens on a click, a code block and an approval's command each have a Copy button at their
-  trailing edge, and a conversation with nothing in it says "Nothing recorded yet", or "Nothing recorded" once
+  of unchanged lines opens on a click, a code block, an approval's command and its full input, the sign-in
+  command, a failed start's details and the folder question's path each have a Copy button at their trailing
+  edge, and a conversation with nothing in it says "Nothing recorded yet", or "Nothing recorded" once
   the run has ended, on both apps.
 - On the Mac, the start form chooses where in the repository a run starts, as the iPhone does: the folder as it
   is, one of its worktrees, a new worktree for a branch, or a new one by name, from a Branch menu under the
@@ -33,7 +34,8 @@ User-facing changes, newest first. Mac releases are cut per
 - On the Mac, a run can start in any folder of a computer that is not this Mac, as on the iPhone: Browse… shows
   the folder's path, ".." and its folders in the Folder box, a double-click or Return goes in, and Use This Folder
   starts there, with Show hidden folders and New Folder… beside it. On both apps the browser says which folder
-  the computer is reading while it lists it, and New Folder's Create waits for a name.
+  the computer is reading while it lists it, and New Folder's Create waits for a name. On the Mac the box keeps
+  one height while you browse.
 - On the Mac, every panel closes on a click outside it, on Esc or when the window is resized, each act in a "…"
   panel has an icon, End Run…, Remove… and Clear… in red, and a row's "…" menu opens over every row, at its dots
   or wherever a right-click on the row lands.
