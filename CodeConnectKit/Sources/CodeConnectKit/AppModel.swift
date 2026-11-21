@@ -2104,10 +2104,12 @@ public final class AppModel {
         return shown?.permissionMode
     }
 
-    /// The run's model, likewise.
+    /// The run's model, likewise. A tie is one event read twice, and the Mac's reading of it stands: the Mac
+    /// resolved it against the run's start's models (claude's `sonnet (claude-sonnet-5-5)` is the model id
+    /// `claude-sonnet-5-5`), which an ended run no longer sends.
     public func confirmedModel(for key: String) -> ConfirmedModel? {
         let shown = shown(for: key)
-        if let fact = shownSummary(for: key)?.model, fact.seq > shown?.confirmedModelSeq ?? 0 {
+        if let fact = shownSummary(for: key)?.model, fact.seq >= shown?.confirmedModelSeq ?? 0 {
             return ConfirmedModel(name: ModelConfirmation.unwrapped(fact.value))
         }
         return shown?.confirmedModel

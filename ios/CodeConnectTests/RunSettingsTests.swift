@@ -205,6 +205,18 @@ final class RunSettingsTests: XCTestCase {
             RunModelName(text: "claude-sonnet-5-5", reported: true))
     }
 
+    /// Just after a change on a live run, the Mac's model fact and claude's receipt of it are one event: either
+    /// reading names the chosen entry's id.
+    func testALiveRunsChangedModelReadsAsTheIdFromEitherReading() throws {
+        let run = try summary("session_hosted_live")
+        XCTAssertEqual(run.menus?.selectedModel, "sonnet")
+        for confirmed in ["claude-sonnet-5-5", "sonnet (claude-sonnet-5-5)"] {
+            XCTAssertEqual(
+                RunSettings.modelName(confirmed: confirmed, menus: run.menus),
+                RunModelName(text: "claude-sonnet-5-5", reported: true), confirmed)
+        }
+    }
+
     /// A model this build has never heard of, on a run whose menus name no entry for it, reads as the agent
     /// reported it: nothing here names models.
     func testAnUnlistedModelReadsAsReported() throws {

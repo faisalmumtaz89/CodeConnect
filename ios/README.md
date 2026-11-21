@@ -427,7 +427,9 @@ is enforced.
   before any page. A pinned question's hold is the newest held for it, else the
   Mac's. The permission mode and the model shown are the newer, by seq, of what
   the window says and the Mac's own account (`AppModel.permissionMode(for:)`,
-  `confirmedModel(for:)`); an older Mac sends neither and nothing changes.
+  `confirmedModel(for:)`), a model's tie being the Mac's: it is one receipt read
+  twice, and the Mac's reading names the model id; an older Mac sends neither
+  and nothing changes.
 * **One live request per correlation key** (`DaemonConnection.request`).
   `send_text_result` and `diff` carry only a `session_id`, so
   replies can only be matched by position; two concurrent requests for one key
