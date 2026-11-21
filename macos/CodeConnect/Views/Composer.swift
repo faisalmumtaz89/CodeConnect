@@ -200,7 +200,11 @@ private struct Composer: View {
                     try? await Task.sleep(for: .milliseconds(300))
                     slashLit = RenderWindow.slashLit
                 }
-                if let shown = RenderWindow.panel { panel = shown }
+                // Opened once the render has sized its window: a resize closes an open panel.
+                if let shown = RenderWindow.panel {
+                    try? await Task.sleep(for: .seconds(1))
+                    panel = shown
+                }
             }
         #endif
         .onDisappear {
