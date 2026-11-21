@@ -32,6 +32,8 @@ User-facing changes, newest first. Mac releases are cut per
 - On the Mac, the sidebar, the run list and the open run each hide and show by themselves, from the toggles at
   the window's top edge or the View menu, ⌃⌘S for the sidebar. A hidden pane's room goes to the panes beside it,
   and the window keeps the panes as they were left.
+- On the Mac, View › Refresh (⌘R) asks every connected computer for its runs again, as pulling to refresh does on
+  the iPhone; the list already updates on its own, so Refresh is there for when you want to be sure.
 - A long project name reaches both apps whole, where it used to be cut at 40 characters, and where it has to
   give way it is cut in the middle, so the end that tells two folders apart stays. Only a notification's title is
   still cut.
