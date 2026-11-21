@@ -88,8 +88,9 @@ final class DiffTruncationUITests: XCTestCase {
         attach(app, "truncated-diff")
     }
 
-    /// The grid draws a bounded number of rows, and the hunk that is holding
-    /// lines back says how many, where it stopped.
+    /// The grid draws a bounded number of rows; the banner says how many of
+    /// the lines it draws, and the hunk that is holding lines back offers the
+    /// next step where it stopped.
     func testAHeldBackHunkStatesTheCountAndDrawsMoreWhenAsked() throws {
         let app = launch(rows: 12)
         try openDiff(app)
@@ -102,7 +103,7 @@ final class DiffTruncationUITests: XCTestCase {
             "the grid stopped, so it says so at the point it stopped")
         let before = marker.label
 
-        // The banner counts the same thing the marker does.
+        // The banner carries the totals.
         let coverage = app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS '12 of 126 lines drawn'")
         ).firstMatch
@@ -116,11 +117,11 @@ final class DiffTruncationUITests: XCTestCase {
         XCTAssertTrue(
             grown.waitForExistence(timeout: 10),
             "asking for more draws more, and the banner keeps up")
-        XCTAssertNotEqual(
-            app.buttons.matching(NSPredicate(format: "label CONTAINS 'more lines'"))
-                .firstMatch.label,
-            before,
-            "the count of what is still held back comes down")
+        // The marker is the way on, not the tally: it names the next step and
+        // stays while lines are held back.
+        let still = app.buttons.matching(NSPredicate(format: "label CONTAINS 'more lines'")).firstMatch
+        XCTAssertTrue(still.exists, "lines are still held back, so the way to them is still there")
+        XCTAssertEqual(still.label, before, "each tap draws the same step until the last")
 
         attach(app, "held-back-marker")
     }
