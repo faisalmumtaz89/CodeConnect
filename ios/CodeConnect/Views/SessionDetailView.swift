@@ -1971,6 +1971,7 @@ private struct TailPill: View {
         .allowsHitTesting(!watch.following)
         .accessibilityHidden(watch.following)
         .accessibilityLabel(SessionWords.jumpToLatest)
+        .accessibilityValue(SessionWords.latest(new: watch.newSinceLeaving))
     }
 }
 

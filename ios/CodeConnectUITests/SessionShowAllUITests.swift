@@ -67,6 +67,7 @@ final class SessionShowAllUITests: XCTestCase {
             waitUntil(timeout: 5) { pill.exists && pill.isHittable },
             "opening every line is reading: the way back is offered")
         XCTAssertTrue(app.staticTexts["Latest"].exists, "nothing has arrived yet")
+        XCTAssertEqual(pill.value as? String, "Latest", "VoiceOver hears what the pill shows")
         XCTAssertTrue(lineOne.exists, "line 1 is still laid out")
         XCTAssertEqual(
             lineOne.frame.minY, before, accuracy: 1,
@@ -77,6 +78,7 @@ final class SessionShowAllUITests: XCTestCase {
                 app.staticTexts["1 new"].exists
             },
             "an event arriving while reading is counted, not followed")
+        XCTAssertEqual(pill.value as? String, "1 new", "VoiceOver hears the count the pill shows")
         XCTAssertEqual(
             lineOne.frame.minY, before, accuracy: 1, "and the reader was not moved by it")
     }
