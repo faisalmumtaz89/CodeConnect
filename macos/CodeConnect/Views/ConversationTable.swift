@@ -14,13 +14,21 @@ struct ConversationTable: NSViewRepresentable {
     let model: AppModel
     let key: String
     let items: [TimelineItem]
+    /// The last event `items` were drawn from, from which "N new" counts (`TimelineEnd`).
+    let drawnThrough: UInt64
     let tail: Tail
+    let latest: Latest
 
-    func makeCoordinator() -> ConversationColumn { ConversationColumn(model: model, key: key, tail: tail) }
+    func makeCoordinator() -> ConversationColumn {
+        ConversationColumn(model: model, key: key, tail: tail, latest: latest)
+    }
 
     func makeNSView(context: Context) -> NSScrollView { context.coordinator.scroll }
 
-    func updateNSView(_ view: NSScrollView, context: Context) { context.coordinator.show(items, model: model) }
+    func updateNSView(_ view: NSScrollView, context: Context) {
+        noteFollow("UPDATE")
+        context.coordinator.show(items, drawnThrough: drawnThrough, model: model)
+    }
 
     static func dismantleNSView(_ view: NSScrollView, coordinator: ConversationColumn) { coordinator.detach() }
 }
@@ -41,6 +49,16 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     private var model: AppModel
     private let key: String
     private let tail: Tail
+    /// The way back to the end: assigned from `away` and `arrived` when they change, never read here, so nothing this
+    /// column does during a view update depends on what it writes.
+    private let latest: Latest
+    private var away = false
+    /// Rows that arrived while the reader was away from the end.
+    private var arrived = 0
+    /// What `latest.count` was last given.
+    private var shownArrived = 0
+    /// Where the timeline ended at the last `show`.
+    private var end: TimelineEnd?
     private var entries: [Entry] = []
     private var layout = MacColumnLayout(rows: [], origin: 0, pane: 0)
     /// Rows whose height was measured at the present width; the rest hold an estimate until they come near the screen.
@@ -55,10 +73,11 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     private var observers: [NSObjectProtocol] = []
     private let sizer = NSHostingController(rootView: AnyView(EmptyView()))
 
-    init(model: AppModel, key: String, tail: Tail) {
+    init(model: AppModel, key: String, tail: Tail, latest: Latest) {
         self.model = model
         self.key = key
         self.tail = tail
+        self.latest = latest
         super.init()
         // First: the scroll view's background setting lives on its clip view, so a clip swapped in later drew its own.
         scroll.contentView = PageClip()
@@ -82,6 +101,7 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
         tail.attach(scroll)
         tail.readerLeaves = { [weak self] in self?.left() }
         tail.isFollowing = { [weak self] in self?.layout.following ?? true }
+        latest.jump = { [weak self] in self?.jumpToEnd() }
         let clip = scroll.contentView
         clip.postsBoundsChangedNotifications = true
         clip.postsFrameChangedNotifications = true
@@ -107,8 +127,11 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     /// The published timeline. New rows and rows whose item changed are measured (once the column has a width), the
     /// rest keep their heights; then one `apply`: a page above, rows below, rows changed in place, or the rows set
     /// afresh.
-    func show(_ items: [TimelineItem], model: AppModel) {
+    func show(_ items: [TimelineItem], drawnThrough: UInt64, model: AppModel) {
         self.model = model
+        // Rows that arrived while the reader was away from the end, as the iPhone counts them.
+        if let end, !layout.following { arrived += TimelineEnd.rowsAfter(end, in: items) }
+        end = TimelineEnd(items, drawnThrough: drawnThrough)
         let places = TimelineItem.places(items)
         let next = [Entry(place: Self.earlier, item: nil)] + zip(places, items).map { Entry(place: $0, item: $1) }
             + [Entry(place: Self.end, item: nil)]
@@ -132,6 +155,19 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
         let old = entries.map(\.place), new = next.map(\.place)
         if old.isEmpty {
             apply("open", .init(rows: rows), entries: next) { $0.reloadData() }
+            #if DEBUG
+                // A render's `-CC_CONVERSATION_UP <points>`: a moment after opening, the reader scrolls up that far.
+                if let up = RenderWindow.conversationUp {
+                    Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(1))
+                        guard let self else { return }
+                        let clip = self.scroll.contentView
+                        clip.scroll(to: NSPoint(
+                            x: clip.bounds.origin.x, y: max(0, self.table.frame.height - clip.bounds.height - up)))
+                        self.scroll.reflectScrolledClipView(clip)
+                    }
+                }
+            #endif
         } else if new.count > old.count, Array(new.suffix(old.count - 1)) == Array(old.dropFirst()) {
             let count = new.count - old.count
             apply("page \(count)", .init(rows: rows), entries: next) {
@@ -257,6 +293,7 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
             scroll.reflectScrolledClipView(clip)
         }
         tail.applied(moved)
+        noteLatest()
         noteFollow(String(format: "APPLY %@ y %.3f -> %.3f h %.3f -> %.3f frame %.3f", why, before.origin,
             layout.origin, before.height, layout.height, table.frame.height))
     }
@@ -269,6 +306,7 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
         if layout.following != was {
             noteFollow(String(format: "FOLLOW %d scroll y %.3f", layout.following ? 1 : 0, layout.origin))
         }
+        noteLatest()
         measureNearScreen()
     }
 
@@ -276,6 +314,29 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     private func left() {
         if layout.following { noteFollow("FOLLOW 0 opened a row") }
         layout.left()
+        noteLatest()
+    }
+
+    /// The way back to the end shows while the reader is away from it and not already there; back at the end, nothing
+    /// is new.
+    private func noteLatest() {
+        let nowAway = !layout.following && !layout.isAtEnd
+        if layout.following { arrived = 0 }
+        if nowAway != away {
+            away = nowAway
+            latest.away = nowAway
+        }
+        if arrived != shownArrived {
+            shownArrived = arrived
+            latest.count = arrived
+        }
+    }
+
+    /// To the end, as End takes the reader there: the column follows again from there.
+    private func jumpToEnd() {
+        let clip = scroll.contentView
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: max(0, table.frame.height - clip.bounds.height)))
+        scroll.reflectScrolledClipView(clip)
     }
 
     /// The pane changed size. A new width measures the rows near the screen at it (the rest are measured as they

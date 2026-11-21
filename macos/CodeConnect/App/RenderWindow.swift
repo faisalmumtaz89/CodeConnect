@@ -189,6 +189,12 @@
 
         /// `-CC_FOLDS_OPEN YES`: every diff opens with its folded stretches of unchanged lines opened, as clicks open them.
         static var foldsOpen: Bool { UserDefaults.standard.bool(forKey: "CC_FOLDS_OPEN") }
+        /// `-CC_CONVERSATION_UP <points>`: a moment after the open run's conversation opens, the reader scrolls up that
+        /// far from its end, as a reader's scroll does.
+        static var conversationUp: CGFloat? {
+            UserDefaults.standard.object(forKey: "CC_CONVERSATION_UP") == nil
+                ? nil : CGFloat(UserDefaults.standard.double(forKey: "CC_CONVERSATION_UP"))
+        }
 
         /// `-CC_OPEN <key>`: the run with this key opens beside the list.
         static var opened: String? { UserDefaults.standard.string(forKey: "CC_OPEN") }

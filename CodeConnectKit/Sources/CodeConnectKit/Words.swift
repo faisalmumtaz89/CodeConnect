@@ -97,6 +97,10 @@ public enum SessionWords {
     public static let interrupted = "Interrupted"
     public static let interruptedSpoken = "Interrupted: this reply was cut short"
     public static let loadingEarlier = "Loading earlier history…"
+    /// The way back to the conversation's end for a reader who left it: how many rows arrived since
+    /// (`TimelineEnd.rowsAfter`), or, with none, "Latest".
+    public static func latest(new count: Int) -> String { count > 0 ? "\(count) new" : "Latest" }
+    public static let jumpToLatest = "Jump to the latest event"
     public static let stopThisTurn = "Stop this turn"
     public static let stopping = "Stopping…"
     public static let stopHelp = "Stop the turn this run is running"

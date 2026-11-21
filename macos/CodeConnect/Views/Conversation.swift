@@ -9,17 +9,23 @@ import SwiftUI
 /// same step, and builds only the rows near the screen. It opens at the newest row and follows new rows until the
 /// reader scrolls up away from the end or opens a row to read it (`MacColumnLayout.following`); a reader who went up
 /// stays where they are as rows land below or a page of earlier history lands above, and is followed again once they
-/// come back to the end. Reaching the top pages back on its own, as the iPhone does (`Tail`).
+/// come back to the end. Reaching the top pages back on its own, as the iPhone does (`Tail`). A reader away from the
+/// end has the way back at the column's foot, saying how many rows arrived since they left (`LatestPill`).
 struct Conversation: View {
     let model: AppModel
     let key: String
     @State private var tail = Tail()
+    @State private var latest = Latest()
 
     var body: some View {
-        ConversationTable(model: model, key: key, items: TimelineBuilder.drawn(model.shown(for: key)?.timeline ?? []), tail: tail)
+        let shown = model.shown(for: key)
+        ConversationTable(
+            model: model, key: key, items: TimelineBuilder.drawn(shown?.timeline ?? []),
+            drawnThrough: shown?.drawnThrough ?? 0, tail: tail, latest: latest)
             .overlay {
-                if model.shown(for: key)?.timeline.isEmpty ?? true { NothingRecorded(model: model, key: key) }
+                if shown?.timeline.isEmpty ?? true { NothingRecorded(model: model, key: key) }
             }
+            .overlay(alignment: .bottom) { LatestPill(latest: latest) }
             .onChange(of: model.isReadyToPage(key)) { _, ready in
                 if ready { tail.wake() }
             }
@@ -30,6 +36,44 @@ struct Conversation: View {
         #if DEBUG
             .modifier(ShownOut(model: model, key: key))
         #endif
+    }
+}
+
+/// Whether the reader is away from the conversation's end, and how many rows arrived since they left: written by the
+/// column (`ConversationColumn`), read by `LatestPill` alone, so a change repaints the pill and nothing else.
+@Observable @MainActor final class Latest {
+    var away = false
+    var count = 0
+    /// To the end, as End takes the reader there.
+    @ObservationIgnored var jump: () -> Void = {}
+}
+
+/// The way back to the conversation's end, as the iPhone's: at the column's foot while the reader is away from the
+/// end, "3 new" or "Latest" (Kit's words). Never drawn at the end, so it covers no last line; only its capsule takes a
+/// click. Shown and gone by a cut.
+private struct LatestPill: View {
+    let latest: Latest
+
+    var body: some View {
+        if latest.away {
+            Button { latest.jump() } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.down").font(.system(size: 10, weight: .semibold)).accessibilityHidden(true)
+                    Text(SessionWords.latest(new: latest.count)).font(Theme.ui(12))
+                }
+                .foregroundStyle(Theme.text)
+                .padding(.horizontal, 12)
+                .frame(height: 26)
+                .background(Theme.raised, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.09)))
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.hover(radius: 13, over: true, id: "session.latest"))
+            .padding(.bottom, 12)
+            .accessibilityLabel(SessionWords.jumpToLatest)
+            .accessibilityValue(SessionWords.latest(new: latest.count))
+            .accessibilityIdentifier("session.latest")
+        }
     }
 }
 
