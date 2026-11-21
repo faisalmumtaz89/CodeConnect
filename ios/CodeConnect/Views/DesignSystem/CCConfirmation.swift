@@ -12,7 +12,9 @@ struct CCConfirmation {
     /// The answers in order: the safe one first, the one that acts last.
     let answers: [Answer]
     /// A name to type, for an ask that makes something: while it is blank,
-    /// only the safe answer can be given.
+    /// only the safe answer can be given. With a field, the plain answer is
+    /// drawn as the card's one primary and its keyboard's return key gives it,
+    /// as Return does on the Mac's card.
     var field: Field?
 
     struct Answer {
@@ -146,8 +148,11 @@ private struct CCConfirmationScreen: View {
                 .fixedSize(horizontal: false, vertical: true)
             if let field = confirmation.field {
                 CCField(
-                    label: nil, text: field.text, placeholder: field.placeholder,
-                    autocapitalization: .never, disableAutocorrection: true, focusOnAppear: true
+                    label: nil, text: field.text, placeholder: field.placeholder, submitLabel: .done,
+                    autocapitalization: .never, disableAutocorrection: true, focusOnAppear: true,
+                    onSubmit: {
+                        if let returned, !blank { answer(returned) }
+                    }
                 )
                 .padding(.top, CC.space.xxs)
             }
@@ -185,14 +190,24 @@ private struct CCConfirmationScreen: View {
     private func button(_ each: CCConfirmation.Answer, fullWidth: Bool) -> some View {
         let variant: CCButtonVariant
         switch each.kind {
-        case .cancel, .plain: variant = .secondary
+        case .cancel: variant = .secondary
+        case .plain: variant = each.id == returned?.id ? .primary : .secondary
         case .destructive: variant = .destructive
         case .ok: variant = .primary
         }
-        let blank = confirmation.field != nil && typed.trimmingCharacters(in: .whitespaces).isEmpty
         return CCButton(each.title, variant: variant, size: .md, fullWidth: fullWidth, haptic: nil) { answer(each) }
             .disabled(blank && each.kind != .cancel)
             .accessibilityIdentifier(each.id)
+    }
+
+    /// The answer the field's return key gives: a card's plain answer, when it has a field.
+    private var returned: CCConfirmation.Answer? {
+        confirmation.field == nil ? nil : confirmation.answers.first { $0.kind == .plain }
+    }
+
+    /// A field with nothing in it but spaces: only the safe answer can be given.
+    private var blank: Bool {
+        confirmation.field != nil && typed.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     /// The sentence with its last two words held together, so its last line
