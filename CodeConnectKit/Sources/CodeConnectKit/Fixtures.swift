@@ -668,21 +668,18 @@ enum Fixtures {
     /// daemon’s own summary.
     private static func hostedSettingsSessionsJSON(stamp: String) -> String {
         var json = hostedSettingsBodyJSON.replacingOccurrences(of: "@STAMP@", with: stamp)
-        // cx-1, observed: its link to the computer lost, or ended with its Codex link still up.
+        // cx-1, observed: its link to the computer lost.
         let cx1 = #""last_seq":0,"lifecycle":"live","link":"attached""#
-        if let range = json.range(of: cx1) {
-            switch observed {
-            case "detached": json.replaceSubrange(range, with: #""last_seq":0,"lifecycle":"live","link":"detached""#)
-            case "ended": json.replaceSubrange(range, with: #""last_seq":0,"lifecycle":"exited","link":"attached""#)
-            default: break
-            }
+        if observed == "detached", let range = json.range(of: cx1) {
+            json.replaceSubrange(range, with: #""last_seq":0,"lifecycle":"live","link":"detached""#)
         }
         return json
     }
 
-    /// Test seam: **`-CC_OBSERVE detached|ended|unpromised`** with `-CC_FIXTURE hostedSettings` leaves its first Codex
-    /// run (cx-1) one that can only be observed, for each reason a run still written to has: its link to the computer
-    /// lost, ended, or a computer that can't promise an answer will reach the agent.
+    /// Test seam: **`-CC_OBSERVE detached|unpromised`** with `-CC_FIXTURE hostedSettings` leaves its first Codex run
+    /// (cx-1) one that can only be observed, for each reason a run with a reply box can have: its link to the computer
+    /// lost, or a computer that can't promise an answer will reach the agent. An ended run has no reply box on either
+    /// app (`SessionSummary.takesNoReply`), so it never shows this note.
     private static var observed: String? {
         #if DEBUG
             UserDefaults.standard.string(forKey: "CC_OBSERVE")

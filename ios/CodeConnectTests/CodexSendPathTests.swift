@@ -100,7 +100,7 @@ final class CodexSendPathTests: XCTestCase {
     }
 
     private static func summary(
-        uid: String, agent: String, link: String, runLink: String = "attached", lifecycle: String = "live"
+        uid: String, agent: String, link: String, runLink: String = "attached"
     ) -> SessionSummary {
         let uidClause = uid.isEmpty ? "" : #""session_uid":"\#(uid)","#
         return try! JSONDecoder().decode(
@@ -108,7 +108,7 @@ final class CodexSendPathTests: XCTestCase {
             from: Data(
                 """
                 {\(uidClause)"session_id":"cc-1",
-                 "cwd":"/work","project_label":"work","lifecycle":"\(lifecycle)","link":"\(runLink)",
+                 "cwd":"/work","project_label":"work","lifecycle":"live","link":"\(runLink)",
                  "last_seq":1,"created_at":"2026-09-04T21:31:59.000Z",
                  "updated_at":"2026-09-04T21:31:59.000Z","blocked_on":[],
                  "agent":"\(agent)","codex_link":"\(link)"}
@@ -735,8 +735,8 @@ final class CodexSendPathTests: XCTestCase {
     }
 
     /// "Observe only" says the run's own reason it cannot be answered from here, the capability rule's sentence, for
-    /// each reason a Codex run that can still be written to has: its link to the run lost, a run that has ended, and a
-    /// computer that can't promise an answer reaches the agent.
+    /// each reason a Codex run with a reply box can have: its link to the run lost, and a computer that can't promise an
+    /// answer reaches the agent. (An ended run takes no reply, so it shows no box and no note: `takesNoReply`.)
     func testObserveOnlySaysTheRunsOwnReason() throws {
         let (model, _) = model(link: "subscribed")
         func note(_ summary: SessionSummary) -> String? {
@@ -746,9 +746,6 @@ final class CodexSendPathTests: XCTestCase {
         XCTAssertEqual(
             note(Self.summary(uid: key(), agent: "codex", link: "subscribed", runLink: "detached")),
             "Observe only. The computer has lost its link to this run. It can be answered again once the link is back.")
-        XCTAssertEqual(
-            note(Self.summary(uid: key(), agent: "codex", link: "subscribed", lifecycle: "exited")),
-            "Observe only. This run has ended.")
         model.connection.simulateCapabilitiesForTesting(
             Capabilities(
                 canApproveReliably: false, sendText: true,
