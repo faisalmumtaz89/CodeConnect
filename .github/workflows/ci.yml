@@ -179,7 +179,7 @@ jobs:
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=
 
   # **The iPhone UI suite, every test that needs no computer.** RELEASING.md's
-  # UI command, on the iPhone 17 Pro the tests are written for, with Xcode 27.1
+  # UI suite, on the iPhone 17 Pro the tests are written for, with Xcode 27.1
   # on the image the Mac job uses, as the app is built with. The live classes
   # drive the app against a running `ccd`; a runner has none, so they are left
   # out by name. A class is live when its file reads the test runner's
@@ -213,16 +213,43 @@ jobs:
             exit 1
           fi
 
+      # The image carries no iPhone 17 Pro, so the job makes one, fresh each
+      # run, on the newest installed iOS that supports it.
+      - name: A fresh iPhone 17 Pro simulator
+        id: sim
+        run: |
+          type=$(xcrun simctl list -j devicetypes \
+            | jq -r '.devicetypes[] | select(.name == "iPhone 17 Pro") | .identifier')
+          [ -n "$type" ] || { echo "::error::Xcode has no iPhone 17 Pro device type"; exit 1; }
+          runtime=$(xcrun simctl list -j runtimes | jq -r --arg t "$type" '
+            [.runtimes[] | select(.platform == "iOS" and .isAvailable
+              and any(.supportedDeviceTypes[]; .identifier == $t))]
+            | sort_by(.version | split(".") | map(tonumber)) | last | .identifier // empty')
+          [ -n "$runtime" ] || { echo "::error::no installed iOS runtime supports the iPhone 17 Pro"; exit 1; }
+          udid=$(xcrun simctl create "iPhone 17 Pro" "$type" "$runtime")
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+          echo "iPhone 17 Pro on $runtime: $udid"
+
+      # Signed to run locally, as the Swift job signs, and as Xcode signs the
+      # suite by default on a Mac: an unsigned build gets no Keychain.
       - name: UI tests
         working-directory: ios
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
         run: |
           xcodebuild -version
           skip=()
           for class in $LIVE_CLASSES; do skip+=("-skip-testing:CodeConnectUITests/$class"); done
           xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
-            -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+            -destination "id=$UDID" \
             -only-testing:CodeConnectUITests "${skip[@]}" \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=
+
+      - name: Delete the simulator
+        if: always() && steps.sim.outputs.udid != ''
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+        run: xcrun simctl delete "$UDID"
 
   # **The Mac app, compiled on every change.** Without this job only the
   # release's draft job builds macos/, so a change could break the app with
