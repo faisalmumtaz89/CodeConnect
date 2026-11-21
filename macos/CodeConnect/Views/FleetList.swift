@@ -416,12 +416,17 @@ struct FleetList: View {
         return (model, notice)
     }
 
-    /// The notice's one action on the Mac, as the computer's sidebar row offers it: Try Again where the link can be
-    /// asked again, Pair Again where the pairing or its address has to change.
+    /// The notice's one action on the Mac, as the computer's sidebar row offers it (`LinkNotice.macAction`): Try
+    /// Again where the link can be asked again, Open Tailscale where Tailscale is off and its app is here, Pair Again
+    /// where the pairing or its address has to change.
     private func noticeAction(_ computer: AppModel, _ notice: LinkNotice) -> (title: String, run: () -> Void)? {
-        switch notice.action {
-        case .retry, .tailscale: return (PeerWords.tryAgain, { computer.connection.retryNow() })
-        case .settings:
+        let app = TailscaleApp.url
+        switch LinkNotice.macAction(notice.action, tailscaleFound: app != nil) {
+        case .tryAgain: return (PeerWords.tryAgain, { computer.connection.retryNow() })
+        case .openTailscale:
+            guard let app else { return nil }
+            return (LinkNotice.openTailscale, { NSWorkspace.shared.open(app) })
+        case .pairAgain:
             guard let address = computer.endpoint?.typedAddress else { return nil }
             return (LinkHealth.pairAgain, { pairAgain(address) })
         case nil: return nil

@@ -290,7 +290,7 @@ extension LinkHealth {
             case .retry: ("Try again", onRetry)
             case .settings: ("Settings", onSettings)
             case .tailscale:
-                (TailscaleAssist.isInstallHintNeeded ? "Set up Tailscale" : "Open Tailscale", onTailscale ?? onRetry)
+                (TailscaleAssist.isInstallHintNeeded ? "Set up Tailscale" : LinkNotice.openTailscale, onTailscale ?? onRetry)
             case nil: nil
             }
         let (slot, tone, icon): (CCBannerPriority, CCTone, String) =

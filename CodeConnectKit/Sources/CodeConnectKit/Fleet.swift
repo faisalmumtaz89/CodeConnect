@@ -585,7 +585,7 @@ public struct LinkHealth: Sendable, Equatable {
                 // that is almost always Tailscale being off on this device, which is why the title is an
                 // instruction rather than a diagnosis.
                 return LinkNotice(
-                    title: "Connect Tailscale",
+                    title: LinkNotice.connectTailscale,
                     sentence:
                         "Can’t find your computer at `\(host)`. Turn on Tailscale on this \(device), signed in to the same account as your computer. CodeConnect reconnects on its own.",
                     action: .tailscale)
@@ -715,11 +715,18 @@ public struct LinkHealth: Sendable, Equatable {
 /// and the one thing to do, if any.
 public struct LinkNotice: Sendable, Equatable {
     /// What a not-connected computer's row says beside its one action: its words, or none when they say what the
-    /// action says ("Pair again" beside Pair Again), so the same words are never shown twice.
+    /// action says ("Pair again" beside Pair Again, "Connect Tailscale" beside Open Tailscale), so the same instruction
+    /// is never shown twice.
     public static func words(_ words: String, beside action: String?) -> String? {
-        guard let action, action.caseInsensitiveCompare(words) == .orderedSame else { return words }
-        return nil
+        guard let action else { return words }
+        let same =
+            action.caseInsensitiveCompare(words) == .orderedSame
+            || (words == connectTailscale && action == openTailscale)
+        return same ? nil : words
     }
+
+    /// The title of a link that is out of reach for want of Tailscale on this device.
+    public static let connectTailscale = "Connect Tailscale"
 
     public enum Action: Sendable, Equatable {
         /// Ask now; the link is retried on its own as well.
@@ -733,6 +740,25 @@ public struct LinkNotice: Sendable, Equatable {
     public let title: String
     public let sentence: String
     public let action: Action?
+
+    /// The word of the action that opens the Tailscale app, in both apps.
+    public static let openTailscale = "Open Tailscale"
+
+    /// What the Mac does about a notice's action.
+    public enum MacAction: Sendable, Equatable {
+        case tryAgain, openTailscale, pairAgain
+    }
+
+    /// The Mac's one action for a notice: Tailscale is opened where this Mac has its app; without it, asking again is
+    /// what is left.
+    public static func macAction(_ action: Action?, tailscaleFound: Bool) -> MacAction? {
+        switch action {
+        case .retry: .tryAgain
+        case .tailscale: tailscaleFound ? .openTailscale : .tryAgain
+        case .settings: .pairAgain
+        case nil: nil
+        }
+    }
 }
 
 // MARK: - Formatting

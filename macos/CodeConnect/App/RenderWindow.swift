@@ -168,6 +168,12 @@
         /// the Tailscale note reads it so, and Add an iPhone has no code an iPhone could reach.
         static var onLoopback: Bool { UserDefaults.standard.bool(forKey: "CC_LOOPBACK") }
 
+        /// `-CC_TAILSCALE_APP YES`: this Mac is taken to have the Tailscale app (at a path never opened); without
+        /// it, a render has none.
+        static var tailscaleApp: URL? {
+            UserDefaults.standard.bool(forKey: "CC_TAILSCALE_APP") ? URL(fileURLWithPath: "/Applications/Tailscale.app") : nil
+        }
+
         /// `-CC_MACHINE_STATS <frame>`: the `machine_stats` frame every computer is taken to have answered last (one
         /// serialised by ccd), in place of its own; a row still shows it only while its link is live. Read from the
         /// arguments as given.
