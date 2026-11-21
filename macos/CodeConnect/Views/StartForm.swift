@@ -157,6 +157,12 @@ struct StartForm: View {
         .task { thisMac = setup.installer.flatMap { LocalDaemon.machineID(root: $0.root) } }
         #if DEBUG
             .task {
+                // Opened once the render has sized its window: a resize closes an open panel.
+                guard RenderWindow.opensComputerPicker else { return }
+                try? await Task.sleep(for: .seconds(1))
+                computerMenuOpen = true
+            }
+            .task {
                 menuOpen = RenderWindow.opensModelMenu
                 browsing = RenderWindow.browsed != nil
                 guard let path = RenderWindow.chosenFolder else { return }

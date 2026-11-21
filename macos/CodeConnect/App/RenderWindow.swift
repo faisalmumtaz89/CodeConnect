@@ -60,6 +60,8 @@
         static var pickedFolder: String? { UserDefaults.standard.string(forKey: "CC_PICK_FOLDER") }
         /// `-CC_MODEL_MENU YES`: Start an agent opens with its model menu open.
         static var opensModelMenu: Bool { UserDefaults.standard.bool(forKey: "CC_MODEL_MENU") }
+        /// `-CC_COMPUTER_PICKER YES`: Start an agent opens with its Computer picker open (two computers: `-CC_FIXTURE_SECOND_MACHINE`).
+        static var opensComputerPicker: Bool { UserDefaults.standard.bool(forKey: "CC_COMPUTER_PICKER") }
         /// `-CC_BRANCH_MENU YES`: the start form's Branch menu open.
         static var opensBranchMenu: Bool { UserDefaults.standard.bool(forKey: "CC_BRANCH_MENU") }
         /// `-CC_BROWSE <path>`: the start form opens browsing that folder of a computer that is not this Mac; `~` is
