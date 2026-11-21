@@ -50,6 +50,7 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
 
     let scroll = NSScrollView()
     private let table = ColumnTableView()
+    private let ring = ColumnRing()
     private var model: AppModel
     private let key: String
     private let tail: Tail
@@ -105,6 +106,10 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
         // One stop for the keyboard: the column itself, which scrolls by its keys (`ColumnTableView`); its scroll bar
         // is never a stop.
         scroll.verticalScroller?.refusesFirstResponder = true
+        ring.isHidden = true
+        // Under the scroll bar, so its knob stays whole over the ring, as it does over a system ring.
+        scroll.addSubview(ring, positioned: .below, relativeTo: scroll.verticalScroller)
+        table.ring = ring
         tail.attach(scroll)
         tail.readerLeaves = { [weak self] in self?.left() }
         tail.isFollowing = { [weak self] in self?.layout.following ?? true }
@@ -118,7 +123,13 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
                 MainActor.assumeIsolated { self?.scrolled() }
             },
             center.addObserver(forName: NSView.frameDidChangeNotification, object: clip, queue: nil) { [weak self] _ in
-                MainActor.assumeIsolated { self?.resized() }
+                // The ring takes the pane's size here: a scroll view's tiling sizes its clip view and scrollers only,
+                // and leaves another subview at the size it joined with, whether by autoresizing or by constraints.
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.ring.frame = self.scroll.bounds
+                    self.resized()
+                }
             },
         ]
     }
@@ -466,8 +477,22 @@ private final class RowCell: NSView {
 }
 
 /// The column's table: Page Up and Page Down, the arrows and Home and End scroll it, as they do the pane; there is no
-/// selection to move.
+/// selection to move. It tells its ring when it takes or gives up the keyboard.
 private final class ColumnTableView: NSTableView {
+    weak var ring: ColumnRing?
+
+    override func becomeFirstResponder() -> Bool {
+        let took = super.becomeFirstResponder()
+        if took { ring?.show(holding: true) }
+        return took
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let gave = super.resignFirstResponder()
+        if gave { ring?.show(holding: false) }
+        return gave
+    }
+
     override func keyDown(with event: NSEvent) {
         guard let scroll = enclosingScrollView else { return super.keyDown(with: event) }
         let clip = scroll.contentView, page = max(clip.bounds.height - scroll.verticalPageScroll, scroll.verticalLineScroll)
@@ -484,6 +509,53 @@ private final class ColumnTableView: NSTableView {
         }
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: min(max(y, 0), highest)))
         scroll.reflectScrolledClipView(clip)
+    }
+}
+
+/// The column's focus ring, drawn by the app: AppKit draws none for this table, as first responder of the key window it
+/// is never asked for its ring's mask, whatever its `focusRingType`, and AppKit's documentation leaves a view's ring to
+/// the view. A view over the whole pane, sized with the scroll view, so scrolling and resizing move nothing; shown while
+/// the table holds the keyboard and its window is key, in the system's focus colour, which follows the accent colour.
+/// It takes no clicks and is no accessibility element.
+private final class ColumnRing: NSView {
+    // The system ring's measure, read from a button's ring on macOS 26: a solid 4 pt band whose outer corners round by
+    // 10 pt. This one stands 2 pt inside the pane, as the pane has no room outside.
+    private static let inset: CGFloat = 2
+    private static let width: CGFloat = 4
+    private static let outerRadius: CGFloat = 10
+    private var holding = false
+    private var observers: [NSObjectProtocol] = []
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        guard let window else { return }
+        let center = NotificationCenter.default
+        observers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map { name in
+            center.addObserver(forName: name, object: window, queue: nil) { [weak self] _ in
+                MainActor.assumeIsolated { self?.show(holding: nil) }
+            }
+        }
+        show(holding: nil)
+    }
+
+    /// `holding` is the table's word while it takes or gives up the keyboard, before the window names its first
+    /// responder; nil keeps what it last said.
+    func show(holding: Bool?) {
+        if let holding { self.holding = holding }
+        isHidden = !(self.holding && window?.isKeyWindow == true)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let edge = Self.inset + Self.width / 2
+        let radius = Self.outerRadius - Self.width / 2
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: edge, dy: edge), xRadius: radius, yRadius: radius)
+        path.lineWidth = Self.width
+        NSColor.keyboardFocusIndicatorColor.setStroke()
+        path.stroke()
     }
 }
 
