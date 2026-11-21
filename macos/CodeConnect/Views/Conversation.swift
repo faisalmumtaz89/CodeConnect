@@ -33,8 +33,8 @@ struct Conversation: View {
     }
 }
 
-/// An empty conversation, as the iPhone says it: nothing recorded yet, and, while the run can still record something,
-/// that its events appear here. A run that takes no reply says only the first.
+/// An empty conversation, as the iPhone says it: nothing recorded yet, and that its events appear here; on a run that
+/// takes no reply, only that nothing was recorded.
 private struct NothingRecorded: View {
     let model: AppModel
     let key: String
@@ -46,8 +46,9 @@ private struct NothingRecorded: View {
                 .foregroundStyle(Theme.text3)
                 .padding(.bottom, 4)
                 .accessibilityHidden(true)
-            Text(SessionWords.nothingRecorded).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
-            if model.shownSummary(for: key)?.takesNoReply != true {
+            let ended = model.shownSummary(for: key)?.takesNoReply == true
+            Text(SessionWords.nothingRecorded(endedRun: ended)).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
+            if !ended {
                 Text(SessionWords.eventsAppearHere).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
             }
         }
