@@ -5,8 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# A push to main is its own group, so every commit on main finishes its run and
+# can be tagged (RELEASING.md, step 3); a pull request's newer push cancels its
+# older run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 env:

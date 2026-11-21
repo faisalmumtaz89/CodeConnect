@@ -108,6 +108,10 @@ Each block starts from the repository root.
    passed; a tag pushed too early is built by running the Release workflow
    for it once CI is green.
 
+   Every commit pushed to `main` gets a CI run of its own, and none is
+   cancelled by a later push (ci.yml's `concurrency`), so the newest green
+   commit can always be tagged.
+
    If `mac/push-relay` changed since the last release
    (`git diff --stat vPREVIOUS HEAD -- mac/push-relay`), deploy the relay from
    this commit first ([`ops/push-relay/README.md`](ops/push-relay/README.md#deploy-and-rollback))
