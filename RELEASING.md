@@ -30,8 +30,9 @@ app that speaks it.
   compared against it; rewriting it rewrites their history.
 * **Every release's version is strictly above the last published one.**
   Between releases `PROTOCOL_MINOR`, and `PROTOCOL_VERSION` with it, may move
-  while the workspace version stands still; the release commit (step 2)
-  raises the workspace version, so no two published releases share one.
+  while the workspace version stands still; the commit that opens the next
+  version (step 8) raises the workspace version right after a release, so no
+  two published releases share one.
   Between releases the binaries stay tellable-apart anyway: every build
   embeds its git commit — `codeconnect --version` prints
   `codeconnect X.Y.Z (<12-hex commit>)`, `-dirty` when built from an edited
@@ -79,36 +80,37 @@ Each block starts from the repository root.
      -destination 'platform=macOS' build
    ```
 
-   CI's hygiene job runs on push; do not tag until the release commit is
-   green there too.
+   CI's hygiene job runs on push; do not tag a commit until it is green there
+   too.
 
-2. **Bump.** Set the new version in one place — `mac/Cargo.toml`
-   (`[workspace.package] version`) — and write the release's notes for the
-   Mac app's update window in `macos/release-notes.txt`, one plain paragraph
-   (the GitHub release's own notes are separate). Then build the shipped
-   binary and read the version back:
+2. **Notes, with each merge.** Nothing is written at release time. A merge
+   that changes what a user sees adds its line to `CHANGELOG.md` under the
+   open version's heading (the first such merge after a release writes it,
+   `## CodeConnect X.Y.Z, with the iPhone app A.B.C`, from `mac/Cargo.toml`
+   and the iPhone project's `MARKETING_VERSION`), and rewrites
+   `macos/release-notes.txt`, the Mac app's update window, as one plain
+   paragraph on everything since the last release (the GitHub release's own
+   notes are separate). The release's pin job refuses notes that are still the
+   last release's.
+
+3. **Choose the commit.** On the hour, the tag goes on `main`'s newest
+   commit that every gate of step 1 has passed. No commit is made for the
+   release, so a tag never waits on a fresh CI run: the version was opened
+   right after the last release (step 8). Read it back from the shipped
+   binary; it must be the one you are about to tag:
 
    ```sh
    (cd mac && cargo build --release --bin codeconnect && ./target/release/codeconnect --version)
    ```
 
-   Both shipped binaries (`codeconnect`, `ccd`) inherit the
-   workspace version; the printed version must be the one you are about to
-   tag.
+   Both shipped binaries (`codeconnect`, `ccd`) inherit the workspace
+   version. The release's pin job refuses a commit whose newest CI run has not
+   passed; a tag pushed too early is built by running the Release workflow
+   for it once CI is green.
 
-3. **Commit and push.** The bump rides in the release commit:
-
-   ```sh
-   git add -A && git commit && git push
-   ```
-
-   Wait for CI to go green on that commit before tagging it — a tag is a
-   claim the commit builds, and CI is the proof. The release's pin job
-   refuses a commit whose newest CI run has not passed; a tag pushed too
-   early is built by running the Release workflow for it once CI is green.
-
-   If the release changes `mac/push-relay`, deploy the relay from this commit
-   first ([`ops/push-relay/README.md`](ops/push-relay/README.md#deploy-and-rollback))
+   If `mac/push-relay` changed since the last release
+   (`git diff --stat vPREVIOUS HEAD -- mac/push-relay`), deploy the relay from
+   this commit first ([`ops/push-relay/README.md`](ops/push-relay/README.md#deploy-and-rollback))
    and confirm its `/readyz` reports this commit's SHA before tagging. A Mac
    ahead of the relay still works — it rings a kind the relay refuses as one
    it accepts — but says less than it should until the relay catches up.
@@ -279,6 +281,15 @@ Each block starts from the repository root.
    CodeConnect.app installed CodeConnect learns of it from the app's daily
    update check (Sparkle, `SUEnableAutomaticChecks` in `macos/Info.plist`).
 
+8. **Open the next version**, right after step 6 shows the release as
+   latest: one commit to `main` that raises `mac/Cargo.toml`'s version (and
+   its workspace entries in `mac/Cargo.lock`), `MARKETING_VERSION` in
+   `macos/CodeConnect.xcodeproj/project.pbxproj` (two settings) and in
+   `ios/CodeConnect.xcodeproj/project.pbxproj` (eight), and sets
+   `site/support.md`'s version line to the release just published. The
+   changelog and `macos/release-notes.txt` stay as they are: they describe
+   the published release until a merge writes the next one's (step 2).
+
 ## The iPhone app
 
 * **Xcode Cloud archives `main`** (its workflow lives in App Store Connect).
@@ -286,8 +297,9 @@ Each block starts from the repository root.
   `CI_BUILD_NUMBER` and leaves `MARKETING_VERSION` alone. Once an App Store
   version is approved its train is closed, and every later archive's upload
   is refused until `MARKETING_VERSION` — eight settings in
-  `ios/CodeConnect.xcodeproj/project.pbxproj` — is raised: raise it in the
-  first push to `main` after an approval.
+  `ios/CodeConnect.xcodeproj/project.pbxproj` — is raised. Step 8 raises it
+  right after each release, so `main` is always on a train no approval has
+  closed; the version submitted is the archive of the tagged commit.
 * **App Review pairs with the demo daemon** (`mac/demo-daemon`, a scripted
   fleet deployed on Render), so it must speak the protocol the submitted app
   speaks: after a change to `PROTOCOL_VERSION`, redeploy it from the commit the
