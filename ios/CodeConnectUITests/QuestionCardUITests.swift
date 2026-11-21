@@ -1,5 +1,39 @@
 import XCTest
 
+/// What `QuestionCardUITests` and `QuestionCardTimedUITests` share: how they launch the app and find their way to the state each tests.
+class QuestionCardUITestsBase: XCTestCase {
+    override func setUp() {
+        continueAfterFailure = false
+    }
+
+    /// At AX5 the pinned bar covers the lower part of the sheet, and a plain
+    /// `tap()` on an option behind it presses the bar's Next instead. Taps the
+    /// option's top, after dragging the sheet up while the bar hides it.
+    func tapAboveTheBar(_ element: XCUIElement, in app: XCUIApplication) {
+        let window = app.windows.firstMatch
+        // The bar's highest control: Back stacks above Next at AX5.
+        func barTop() -> CGFloat {
+            ["question-back", "question-next", "question-submit"]
+                .map { app.buttons[$0].firstMatch }
+                .filter(\.exists)
+                .map(\.frame.minY)
+                .min() ?? window.frame.maxY
+        }
+        for _ in 0..<6 where element.frame.minY + 24 > barTop() - 16 {
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.6)).press(
+                forDuration: 0.05,
+                thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.35)),
+                withVelocity: .slow, thenHoldForDuration: 0.25)
+        }
+        XCTAssertLessThan(element.frame.minY + 24, barTop() - 16, "the option is above the bar")
+        window.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: element.frame.midX, dy: element.frame.minY + 12)).tap()
+        let chosen = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isSelected == true"), object: element)
+        XCTAssertEqual(XCTWaiter.wait(for: [chosen], timeout: 3), .completed, "the option was chosen")
+    }
+}
+
 /// Claude's four-question card, answered end to end from the phone.
 ///
 /// Staged by `-CC_QUESTION held`: one session holding the 2.1.286 question card
@@ -9,12 +43,7 @@ import XCTest
 /// and a card that never offers Allow.
 ///
 /// Pins its own Dynamic Type size, as every UI test in this target does.
-final class QuestionCardUITests: XCTestCase {
-
-    override func setUp() {
-        continueAfterFailure = false
-    }
-
+final class QuestionCardUITests: QuestionCardUITestsBase {
     func testAnsweringTheFourQuestionCardEndToEnd() {
         let app = XCUIApplication()
         app.launchArguments = [
@@ -99,34 +128,6 @@ final class QuestionCardUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Allow"].exists)
     }
 
-    /// The card sends what it held when the answer was given, so nothing on
-    /// it can change while that answer is on its way: the step's choices are
-    /// disabled until it lands.
-    func testTheChoicesAreLockedWhileAnAnswerIsSent() {
-        let app = XCUIApplication()
-        app.launchArguments = [
-            "-CC_QUESTION", "held",
-            "-CC_DEEPLINK", "codeconnect://session/01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-            "-CC_FIXTURE_ANSWER_MS", "20000",
-            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
-        ]
-        app.launch()
-        let answer = app.buttons["Answer"].firstMatch
-        XCTAssertTrue(answer.waitForExistence(timeout: 30), "the question's row on the timeline")
-        answer.tap()
-        let option = app.buttons["question-0-option-0"]
-        XCTAssertTrue(option.waitForExistence(timeout: 15))
-        XCTAssertTrue(option.isEnabled, "a choice is live before anything is sent")
-
-        app.buttons["question-decline"].tap()
-        let locked = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "isEnabled == false"), object: option)
-        XCTAssertEqual(
-            XCTWaiter.wait(for: [locked], timeout: 5), .completed,
-            "the choices are locked while the answer is sent")
-        XCTAssertFalse(app.buttons["question-next"].isEnabled, "and so is the step's navigation")
-    }
-
     /// Choosing the answer that completes the card does not move the bar at
     /// AX5, where every line is tallest: Submit's note is cleared, not removed
     /// (removed, Submit moved 22.7pt at L and 105pt here).
@@ -164,33 +165,6 @@ final class QuestionCardUITests: XCTestCase {
         XCTAssertTrue(submit.isEnabled, "every question answered")
         XCTAssertEqual(submit.frame.minY, before.minY, accuracy: 0.5, "the bar did not move")
         XCTAssertEqual(submit.frame.height, before.height, accuracy: 0.5)
-    }
-
-    /// At AX5 the pinned bar covers the lower part of the sheet, and a plain
-    /// `tap()` on an option behind it presses the bar's Next instead. Taps the
-    /// option's top, after dragging the sheet up while the bar hides it.
-    private func tapAboveTheBar(_ element: XCUIElement, in app: XCUIApplication) {
-        let window = app.windows.firstMatch
-        // The bar's highest control: Back stacks above Next at AX5.
-        func barTop() -> CGFloat {
-            ["question-back", "question-next", "question-submit"]
-                .map { app.buttons[$0].firstMatch }
-                .filter(\.exists)
-                .map(\.frame.minY)
-                .min() ?? window.frame.maxY
-        }
-        for _ in 0..<6 where element.frame.minY + 24 > barTop() - 16 {
-            window.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.6)).press(
-                forDuration: 0.05,
-                thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.35)),
-                withVelocity: .slow, thenHoldForDuration: 0.25)
-        }
-        XCTAssertLessThan(element.frame.minY + 24, barTop() - 16, "the option is above the bar")
-        window.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: element.frame.midX, dy: element.frame.minY + 12)).tap()
-        let chosen = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "isSelected == true"), object: element)
-        XCTAssertEqual(XCTWaiter.wait(for: [chosen], timeout: 3), .completed, "the option was chosen")
     }
 
     /// A question only the Mac can answer is still shown whole, its previews

@@ -1,5 +1,97 @@
 import XCTest
 
+/// What `SwipeToRemoveUITests` and `SwipeToRemoveTimedUITests` share: how they launch the app and find their way to the state each tests.
+class SwipeToRemoveUITestsBase: XCTestCase {
+    /// The first uid `Fixtures.Variant.ended` reports.
+    let endedRow = "session-01K1B3XQ8ZC0DE5FGH7JKMNP00"
+
+    /// A blocked, running agent. Never removable.
+    let liveRow = "session-fx-1"
+
+    /// `CCSwipeToRemove.revealWidth` at a non-accessibility type size.
+    let revealWidth: CGFloat = 112
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+    }
+
+    func launchFleet(_ extra: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow"] + extra
+        app.launch()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30))
+        return app
+    }
+
+    func row(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    /// The ended band is collapsed to one footer row by default, which is the
+    /// whole point of it. Nothing below can happen until it is opened.
+    func revealEndedRows(_ app: XCUIApplication) {
+        let show = app.buttons["Show"]
+        XCTAssertTrue(show.waitForExistence(timeout: 20), "no collapsed ended band to open")
+        show.scrollClearOfTheBar(in: app)
+        show.tap()
+        XCTAssertTrue(
+            row(app, endedRow).waitForExistence(timeout: 10), "the ended band did not open")
+    }
+
+    /// A press-and-drag from the middle of a row.
+    ///
+    /// **Not `element.swipeUp()`.** That swipe is scaled to the element, and a
+    /// 76pt row yields a stroke too short to scroll anything — it reported "did
+    /// not scroll" for every row including ones with no gesture on them. This
+    /// travels a fixed distance regardless of what it starts on, which is what
+    /// makes the two rows comparable.
+    func drag(_ app: XCUIApplication, from identifier: String, dx: CGFloat, dy: CGFloat) {
+        let start = row(app, identifier).coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: dx, dy: dy)))
+    }
+
+    /// Scrolls the ended rows clear of the bottom accessory bar. A drag that
+    /// starts under the bar lands on the bar — measured: the first ended row's
+    /// own lower edge starts life beneath it — and a swipe that never touched
+    /// the row proves nothing about the row.
+    func liftRowsClearOfTheBar(_ app: XCUIApplication) {
+        drag(app, from: liveRow, dx: 0, dy: -260)
+    }
+
+    // MARK: Across a link drop
+
+    /// When the fixture drops the link, for the tests below: late enough for
+    /// each one's setup to finish first, which each of them checks. Counted
+    /// here from before the launch and in the app from its fixture loading,
+    /// so the check is stricter than the truth and can only fail safe.
+    let linkDropMS = 30_000
+
+    /// One pixel of a screenshot, at a point in screen coordinates.
+    func pixel(_ image: UIImage, at point: CGPoint) -> (UInt8, UInt8, UInt8) {
+        let one = pixels(image, in: CGRect(origin: point, size: CGSize(width: 1, height: 1)))
+        return (one[0], one[1], one[2])
+    }
+
+    /// The RGBA bytes of a screenshot region, given in screen coordinates.
+    func pixels(_ image: UIImage, in rect: CGRect) -> [UInt8] {
+        let scale = image.scale
+        let width = Int(rect.width * scale)
+        let height = Int(rect.height * scale)
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        let context = CGContext(
+            data: &rgba, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.draw(
+            image.cgImage!,
+            in: CGRect(
+                x: -rect.minX * scale, y: rect.maxY * scale - image.size.height * scale,
+                width: image.size.width * scale, height: image.size.height * scale))
+        return rgba
+    }
+}
+
 /// Proves the removal gesture on the running app, because nothing else can.
 ///
 /// **The defect this exists for was invisible in the source.** `CCSwipeToRemove`
@@ -20,56 +112,7 @@ import XCTest
 /// Runs under `-CC_FIXTURE ended`, the one fixture with exited runs: the swipe
 /// is offered on `lifecycle == .exited` alone, so under the other fixtures the
 /// component is not installed and a green test would mean nothing.
-final class SwipeToRemoveUITests: XCTestCase {
-
-    /// The first uid `Fixtures.Variant.ended` reports.
-    private let endedRow = "session-01K1B3XQ8ZC0DE5FGH7JKMNP00"
-    /// A blocked, running agent. Never removable.
-    private let liveRow = "session-fx-1"
-
-    /// `CCSwipeToRemove.revealWidth` at a non-accessibility type size.
-    private let revealWidth: CGFloat = 112
-
-    override func setUpWithError() throws {
-        continueAfterFailure = false
-    }
-
-    private func launchFleet(_ extra: [String] = []) -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchArguments = ["-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow"] + extra
-        app.launch()
-        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30))
-        return app
-    }
-
-    private func row(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
-        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
-    }
-
-    /// The ended band is collapsed to one footer row by default, which is the
-    /// whole point of it. Nothing below can happen until it is opened.
-    private func revealEndedRows(_ app: XCUIApplication) {
-        let show = app.buttons["Show"]
-        XCTAssertTrue(show.waitForExistence(timeout: 20), "no collapsed ended band to open")
-        show.scrollClearOfTheBar(in: app)
-        show.tap()
-        XCTAssertTrue(
-            row(app, endedRow).waitForExistence(timeout: 10), "the ended band did not open")
-    }
-
-    /// A press-and-drag from the middle of a row.
-    ///
-    /// **Not `element.swipeUp()`.** That swipe is scaled to the element, and a
-    /// 76pt row yields a stroke too short to scroll anything — it reported "did
-    /// not scroll" for every row including ones with no gesture on them. This
-    /// travels a fixed distance regardless of what it starts on, which is what
-    /// makes the two rows comparable.
-    private func drag(_ app: XCUIApplication, from identifier: String, dx: CGFloat, dy: CGFloat) {
-        let start = row(app, identifier).coordinate(
-            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: dx, dy: dy)))
-    }
-
+final class SwipeToRemoveUITests: SwipeToRemoveUITestsBase {
     // MARK: Scrolling must survive the gesture
 
     func testTheListStillScrollsWhenTheDragStartsOnARemovableRow() {
@@ -118,14 +161,6 @@ final class SwipeToRemoveUITests: XCTestCase {
         XCTAssertEqual(
             row(app, endedRow).frame.minX, before - revealWidth, accuracy: 2,
             "a sideways drag must slide the row aside by exactly one button")
-    }
-
-    /// Scrolls the ended rows clear of the bottom accessory bar. A drag that
-    /// starts under the bar lands on the bar — measured: the first ended row's
-    /// own lower edge starts life beneath it — and a swipe that never touched
-    /// the row proves nothing about the row.
-    private func liftRowsClearOfTheBar(_ app: XCUIApplication) {
-        drag(app, from: liveRow, dx: 0, dy: -260)
     }
 
     /// `List`'s `.swipeActions` closes an open row when the list scrolls; this
@@ -257,181 +292,6 @@ final class SwipeToRemoveUITests: XCTestCase {
         wait(for: [redrawn(true)], timeout: 2)
     }
 
-    // MARK: Across a link drop
-
-    /// When the fixture drops the link, for the tests below: late enough for
-    /// each one's setup to finish first, which each of them checks. Counted
-    /// here from before the launch and in the app from its fixture loading,
-    /// so the check is stricter than the truth and can only fail safe.
-    private let linkDropMS = 30_000
-
-    /// The link dropping takes the Mac's removal capability with it, which
-    /// switches every row's swipe off; its return switches them back on, shut.
-    /// Waited out through the one control that says so on screen: Select is
-    /// offered only while the Mac can remove.
-    private func waitForTheLinkToDropAndReturn(_ app: XCUIApplication, launchedAt: Date) {
-        XCTAssertLessThan(
-            Date().timeIntervalSince(launchedAt), Double(linkDropMS) / 1000,
-            "the setup must finish before the link drops, or nothing below is tested")
-        let select = app.buttons["Select"]
-        XCTAssertTrue(select.exists, "Select is offered while the Mac can remove")
-        XCTAssertTrue(select.waitForNonExistence(timeout: 30), "the link never dropped")
-        XCTAssertTrue(select.waitForExistence(timeout: 15), "the link never came back")
-    }
-
-    /// A refusal belongs to the opening that showed it. After the link drops
-    /// and returns the row comes back shut, and opening it again offers
-    /// "Remove", not the old reason.
-    func testARefusedRowReopensOfferingRemoveAfterTheLinkReturns() {
-        let launched = Date()
-        let app = launchFleet(["-CC_FIXTURE_LINK_DROP_MS", "\(linkDropMS)"])
-        revealEndedRows(app)
-        liftRowsClearOfTheBar(app)
-        let middle = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
-
-        drag(app, from: middle, dx: -180, dy: 0)
-        let open = row(app, middle).frame
-        XCTAssertLessThan(open.minX, 16 - revealWidth + 2, "the row is open")
-        let face = CGRect(x: open.maxX, y: open.minY, width: revealWidth, height: open.height)
-        let resting = pixels(app.screenshot().image, in: face)
-        let showsResting = { (expected: Bool) in
-            let shows = XCTNSPredicateExpectation(
-                predicate: NSPredicate { _, _ in
-                    (self.pixels(app.screenshot().image, in: face) == resting) == expected
-                }, object: nil)
-            shows.expectationDescription =
-                expected ? "the reopened row offers Remove, not the old refusal" : "the refusal shows"
-            return shows
-        }
-        app.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: open.maxX + revealWidth / 2, dy: open.midY)).tap()
-        XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5), "Remove asks first")
-        app.buttons["Remove"].tap()
-        wait(for: [showsResting(false)], timeout: 5)
-
-        waitForTheLinkToDropAndReturn(app, launchedAt: launched)
-        XCTAssertEqual(row(app, middle).frame.minX, 16, accuracy: 2, "the row comes back shut")
-
-        drag(app, from: middle, dx: -180, dy: 0)
-        XCTAssertEqual(row(app, middle).frame.minX, open.minX, accuracy: 2, "the row opens again")
-        wait(for: [showsResting(true)], timeout: 3)
-    }
-
-    /// A row left open when the link dropped comes back shut, and a tap on it
-    /// opens its session, as a tap on any shut row does.
-    func testARowOpenAcrossALinkDropOpensItsSessionOnATap() {
-        let launched = Date()
-        let app = launchFleet(["-CC_FIXTURE_LINK_DROP_MS", "\(linkDropMS)"])
-        revealEndedRows(app)
-        liftRowsClearOfTheBar(app)
-
-        drag(app, from: endedRow, dx: -180, dy: 0)
-        XCTAssertLessThan(row(app, endedRow).frame.minX, 16 - revealWidth + 2, "the row is open")
-
-        waitForTheLinkToDropAndReturn(app, launchedAt: launched)
-        XCTAssertEqual(row(app, endedRow).frame.minX, 16, accuracy: 2, "the row comes back shut")
-
-        row(app, endedRow).tap()
-        XCTAssertTrue(
-            app.descendants(matching: .any)["session-timeline"].waitForExistence(timeout: 10),
-            "a tap on the shut row must open its session")
-    }
-
-    /// A removal confirmed in a question asked before the link dropped, and
-    /// refused after it returned, still shows its reason on the row as it is
-    /// now: the answer belongs to the request, not to the swipe that asked.
-    func testARefusalAfterTheLinkReturnsShowsOnTheReopenedRow() {
-        let launched = Date()
-        let app = launchFleet([
-            "-CC_FIXTURE_LINK_DROP_MS", "\(linkDropMS)", "-CC_FIXTURE_REMOVE_MS", "10000",
-        ])
-        revealEndedRows(app)
-        liftRowsClearOfTheBar(app)
-        let middle = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
-
-        drag(app, from: middle, dx: -180, dy: 0)
-        let open = row(app, middle).frame
-        XCTAssertLessThan(open.minX, 16 - revealWidth + 2, "the row is open")
-        let face = CGRect(x: open.maxX, y: open.minY, width: revealWidth, height: open.height)
-        let faceNow = { self.pixels(app.screenshot().image, in: face) }
-        let resting = faceNow()
-        app.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: open.maxX + revealWidth / 2, dy: open.midY)).tap()
-        XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5), "Remove asks first")
-
-        waitForTheLinkToDropAndReturn(app, launchedAt: launched)
-        app.buttons["Remove"].tap()
-        drag(app, from: middle, dx: -180, dy: 0)
-        XCTAssertEqual(row(app, middle).frame.minX, open.minX, accuracy: 2, "the row opens again")
-        let removing = faceNow()
-        XCTAssertNotEqual(removing, resting, "the reopened row reads Removing… while the answer is on its way")
-
-        let refused = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                let now = faceNow()
-                return now != removing && now != resting
-            }, object: nil)
-        refused.expectationDescription = "the refusal shows on the reopened row"
-        wait(for: [refused], timeout: 20)
-        XCTAssertEqual(
-            row(app, middle).frame.minX, open.minX, accuracy: 2,
-            "the row stays open showing why, so a closed row cannot pass for a refusal")
-    }
-
-    /// One pixel of a screenshot, at a point in screen coordinates.
-    private func pixel(_ image: UIImage, at point: CGPoint) -> (UInt8, UInt8, UInt8) {
-        let one = pixels(image, in: CGRect(origin: point, size: CGSize(width: 1, height: 1)))
-        return (one[0], one[1], one[2])
-    }
-
-    /// The RGBA bytes of a screenshot region, given in screen coordinates.
-    private func pixels(_ image: UIImage, in rect: CGRect) -> [UInt8] {
-        let scale = image.scale
-        let width = Int(rect.width * scale)
-        let height = Int(rect.height * scale)
-        var rgba = [UInt8](repeating: 0, count: width * height * 4)
-        let context = CGContext(
-            data: &rgba, width: width, height: height, bitsPerComponent: 8,
-            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        context.draw(
-            image.cgImage!,
-            in: CGRect(
-                x: -rect.minX * scale, y: rect.maxY * scale - image.size.height * scale,
-                width: image.size.width * scale, height: image.size.height * scale))
-        return rgba
-    }
-
-
-
-    /// The worst real fleet on record: 45 ended runs, every one materialized
-    /// the moment the band expands (its VStack is deliberately eager). A smoke
-    /// ceiling, not a benchmark — XCUITest wall-clock includes quiescence waits
-    /// and the 180ms expansion animation, and Apple's own guidance is that
-    /// responsiveness is proven with on-device profiling, not a simulator. What
-    /// this catches is the failure worth catching in CI: expansion degrading
-    /// from "an animation" to "a stall".
-    func testExpandingFortyFiveEndedRowsIsNotAStall() {
-        let app = XCUIApplication()
-        app.launchArguments = ["-CC_FIXTURE", "ended45", "-CC_BIOMETRICS", "allow"]
-        app.launch()
-        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30))
-
-        let show = app.buttons["Show"]
-        XCTAssertTrue(show.waitForExistence(timeout: 20))
-        let last = "session-01K1B3XQ8ZC0DE5FGH7JKMNP44"
-
-        show.scrollClearOfTheBar(in: app)
-        let started = Date()
-        show.tap()
-        XCTAssertTrue(
-            row(app, last).waitForExistence(timeout: 5),
-            "45 ended rows must all exist once the band expands; the band is eager")
-        let elapsed = Date().timeIntervalSince(started)
-        print("MEASURE ended45 expansion wall-clock: \(Int(elapsed * 1000))ms")
-        XCTAssertLessThan(elapsed, 3.0, "expansion degraded from an animation to a stall")
-    }
-
     /// An opened Ended band folds back from its own header, without a relaunch.
     func testTheEndedBandHidesAgain() {
         let app = launchFleet()
@@ -496,24 +356,6 @@ final class SwipeToRemoveUITests: XCTestCase {
         XCTAssertTrue(row(app, endedRow).waitForExistence(timeout: 5))
         XCTAssertEqual(
             row(app, endedRow).frame.minX, 16, accuracy: 2, "the row comes back shut")
-    }
-
-    /// The control for the measurement above: identical instrument, 8 rows.
-    /// The difference between the two isolates the marginal cost of 37 extra
-    /// rows from the harness's own overhead (existence queries, quiescence,
-    /// the fixed 180ms animation).
-    func testExpandingEightRowsCalibratesTheInstrument() {
-        let app = launchFleet()
-        let show = app.buttons["Show"]
-        XCTAssertTrue(show.waitForExistence(timeout: 20))
-        let last = "session-01K1B3XQ8ZC0DE5FGH7JKMNP07"
-
-        show.scrollClearOfTheBar(in: app)
-        let started = Date()
-        show.tap()
-        XCTAssertTrue(row(app, last).waitForExistence(timeout: 5))
-        let elapsed = Date().timeIntervalSince(started)
-        print("MEASURE ended8 expansion wall-clock: \(Int(elapsed * 1000))ms")
     }
 
     // MARK: What is deliberately not tested here

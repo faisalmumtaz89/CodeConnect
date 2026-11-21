@@ -990,7 +990,7 @@ public final class AppModel {
             // one per delay, and delivered in stream order — the shortest delay
             // first — each that many ms after the rest, so a UI test can act
             // first and then see how each event is counted.
-            // `SessionShowAllUITests` and `FleetRowRenderUITests` drive it.
+            // `SessionShowAllTimedUITests` and `FleetRowRenderTimedUITests` drive it.
             let lateEventMS = (UserDefaults.standard.string(forKey: "CC_FIXTURE_LATE_EVENT_MS")
                 ?? "").split(separator: ",").compactMap { Int($0) }.filter { $0 > 0 }.sorted()
             if !lateEventMS.isEmpty, frames.count >= lateEventMS.count {
