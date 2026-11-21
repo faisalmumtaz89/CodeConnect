@@ -90,7 +90,7 @@ struct FolderBrowser: View {
             if let outcome { refusal = outcome } else { go(StartContext.childFolder(creatingIn, folderName)) }
         }
         .confirmation(
-            Binding(get: { naming ? true : nil }, set: { naming = $0 ?? false }), returnsKeyboardTo: $focused
+            Binding(get: { naming ? true : nil }, set: { naming = $0 ?? false }), returnsKeyboard: { focused = true }
         ) { _ in
             Confirmation(
                 title: StartWords.newFolder, message: StartWords.newFolderIn(listing?.path ?? ""),
@@ -104,7 +104,7 @@ struct FolderBrowser: View {
                 ],
                 field: .init(placeholder: StartWords.folderName, text: $folderName))
         }
-        .confirmation($refusal, returnsKeyboardTo: $focused) { refusal in
+        .confirmation($refusal, returnsKeyboard: { focused = true }) { refusal in
             Confirmation(
                 title: StartWords.couldNotMake(folderName), message: refusal,
                 answers: [.init(title: "OK", kind: .ok, id: "folder.new.ok")])

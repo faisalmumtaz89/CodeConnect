@@ -39,14 +39,12 @@ struct Confirmation {
 
 extension View {
     /// Asks while `item` holds something, in the card `ask` makes of it; any answer lets `item` go. The card holds the
-    /// keyboard while it is up; whatever answers it, `returnsKeyboardTo` takes the keyboard back, if no other ask is up
-    /// by then.
+    /// keyboard while it is up; whatever answers it, `returnsKeyboard` gives the keyboard back to what had it, if no
+    /// other ask is up by then.
     func confirmation<Item>(
-        _ item: Binding<Item?>, returnsKeyboardTo focus: FocusState<Bool>.Binding? = nil,
-        _ ask: @escaping (Item) -> Confirmation
+        _ item: Binding<Item?>, returnsKeyboard: (() -> Void)? = nil, _ ask: @escaping (Item) -> Confirmation
     ) -> some View {
-        let returnsKeyboard = focus.map { focus in { focus.wrappedValue = true } }
-        return modifier(Confirms(asking: item.wrappedValue.map(ask), returnsKeyboard: returnsKeyboard) {
+        modifier(Confirms(asking: item.wrappedValue.map(ask), returnsKeyboard: returnsKeyboard) {
             item.wrappedValue = nil
         })
     }
