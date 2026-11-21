@@ -237,7 +237,9 @@ jobs:
           exit "$failed"
 
       # The image carries no iPhone 17 Pro, so the job makes one, fresh each
-      # run, on the newest installed iOS that supports it.
+      # run, on the newest installed iOS that supports it, and boots it and
+      # waits until it has finished booting, as ios/scripts/render-screens.sh
+      # does, before the tests are handed to it.
       - name: A fresh iPhone 17 Pro simulator
         id: sim
         run: |
@@ -252,6 +254,8 @@ jobs:
           udid=$(xcrun simctl create "iPhone 17 Pro" "$type" "$runtime")
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
           echo "iPhone 17 Pro on $runtime: $udid"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
 
       # Signed to run locally, as the Swift job signs, and as Xcode signs the
       # suite by default on a Mac: an unsigned build gets no Keychain.
@@ -264,9 +268,19 @@ jobs:
           skip=()
           for class in $LIVE_CLASSES $TIMED_CLASSES; do skip+=("-skip-testing:CodeConnectUITests/$class"); done
           xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
-            -destination "id=$UDID" \
+            -destination "id=$UDID" -resultBundlePath "$RUNNER_TEMP/ui-tests.xcresult" \
             -only-testing:CodeConnectUITests "${skip[@]}" \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=
+
+      # A failed run's result bundle, crash logs included, to read rather than
+      # guess from the log.
+      - name: Keep the result bundle of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ui-xcresult
+          path: ${{ runner.temp }}/ui-tests.xcresult
+          if-no-files-found: ignore
 
       - name: Delete the simulator
         if: always() && steps.sim.outputs.udid != ''
