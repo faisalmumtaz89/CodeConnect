@@ -157,6 +157,12 @@ struct StartForm: View {
         .task { thisMac = setup.installer.flatMap { LocalDaemon.machineID(root: $0.root) } }
         #if DEBUG
             .task {
+                // Opened once the render has sized its window: a resize closes an open panel.
+                guard RenderWindow.opensComputerPicker else { return }
+                try? await Task.sleep(for: .seconds(1))
+                computerMenuOpen = true
+            }
+            .task {
                 menuOpen = RenderWindow.opensModelMenu
                 browsing = RenderWindow.browsed != nil
                 guard let path = RenderWindow.chosenFolder else { return }
@@ -190,10 +196,12 @@ struct StartForm: View {
                 if let context {
                     computerRow(context)
                         // Its panel opens below it, over what follows.
-                        .zIndex(computerMenuOpen ? 1 : 0)
                         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(AddSheet.space)).minY } action: {
                             rowsTop = $0
                         }
+                        // Its last modifier: a modifier after it hides it from the stack, which then draws the Folder
+                        // section over the panel.
+                        .zIndex(computerMenuOpen ? 1 : 0)
                     folderRows(context)
                     if let folder, context.branchAhead(folder) {
                         BranchRow(
