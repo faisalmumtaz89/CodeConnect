@@ -18,6 +18,18 @@ public struct MenuLight: Equatable, Sendable {
         case close
     }
 
+    /// The key a Mac key press is, if a panel takes it: ↓, ↑, Return or the keypad's Enter, with none of ⌘, ⌃, ⇧ or ⌥
+    /// held. A held one leaves the key to what has the keyboard: ⇧Return and ⌥Return add a line in the reply box.
+    public static func key(code: UInt16, command: Bool, control: Bool, shift: Bool, option: Bool) -> Key? {
+        guard !(command || control || shift || option) else { return nil }
+        switch code {
+        case 125: return .down
+        case 126: return .up
+        case 36, 76: return .return
+        default: return nil
+        }
+    }
+
     /// The lit row, if one is.
     public private(set) var lit: Int?
 

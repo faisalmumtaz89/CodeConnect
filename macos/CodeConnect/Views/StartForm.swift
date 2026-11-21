@@ -738,7 +738,7 @@ private struct FolderStep: View {
 }
 
 /// The computer a start goes to: a button and its panel, the model button's kind, so one sheet has one kind of menu.
-/// The chosen computer carries the check; the row under the pointer is filled.
+/// The chosen computer carries the check; the lit row, by the pointer or the keys, is filled (`panelRow`).
 private struct ComputerButton: View {
     let contexts: [StartContext]
     let chosen: StartContext
@@ -764,17 +764,19 @@ private struct ComputerButton: View {
         .accessibilityIdentifier("start.computer")
         .accessibilityValue(open ? "open" : "closed")
         .overlay(alignment: .topLeading) {
-            if open { panel.offset(y: 24 + Theme.panelGap) }
+            if open { panel.openPanel().offset(y: 24 + Theme.panelGap) }
         }
+        .closesPanel($open)
     }
 
     private var panel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(contexts, id: \.id) { context in
-                Button {
+            ForEach(Array(contexts.enumerated()), id: \.element.id) { index, context in
+                let pick = {
                     choose(context.id)
                     open = false
-                } label: {
+                }
+                Button(action: pick) {
                     HStack(spacing: 8) {
                         Image(systemName: "checkmark")
                             .font(.system(size: 9.5, weight: .bold))
@@ -788,7 +790,8 @@ private struct ComputerButton: View {
                     .frame(height: 24)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.hover(radius: 4, id: "start.computer.\(context.id)"))
+                .buttonStyle(.panelRow)
+                .panelRow(index, id: "start.computer.\(context.id)", choose: pick)
                 .padding(.horizontal, 4)
                 .accessibilityIdentifier("start.computer.\(context.id)")
                 .accessibilityAddTraits(context.id == chosen.id ? .isSelected : [])

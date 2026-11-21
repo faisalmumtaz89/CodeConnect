@@ -61,6 +61,28 @@ final class MenuLightTests: XCTestCase {
         XCTAssertEqual(light.lit, 3)
     }
 
+    /// A panel takes ↓, ↑, Return and the keypad's Enter bare; with ⌘, ⌃, ⇧ or ⌥ held they are what has the keyboard's:
+    /// ⇧Return and ⌥Return add a line in the reply box under an open panel.
+    func testAPanelTakesOnlyBareKeys() {
+        func key(_ code: UInt16, command: Bool = false, control: Bool = false, shift: Bool = false, option: Bool = false)
+            -> MenuLight.Key?
+        {
+            MenuLight.key(code: code, command: command, control: control, shift: shift, option: option)
+        }
+        XCTAssertEqual(key(125), .down)
+        XCTAssertEqual(key(126), .up)
+        XCTAssertEqual(key(36), .return)
+        XCTAssertEqual(key(76), .return, "the keypad's Enter")
+        XCTAssertNil(key(53), "Esc is the panel's closing, not a key of its light")
+        XCTAssertNil(key(0), "a letter goes on to the field")
+        for code: UInt16 in [125, 126, 36, 76] {
+            XCTAssertNil(key(code, command: true), "⌘ \(code)")
+            XCTAssertNil(key(code, control: true), "⌃ \(code)")
+            XCTAssertNil(key(code, shift: true), "⇧ \(code)")
+            XCTAssertNil(key(code, option: true), "⌥ \(code)")
+        }
+    }
+
     /// The pointer and the keys move one light: a key goes on from where the pointer left it, and the pointer takes it
     /// from where the keys left it.
     func testThePointerAndTheKeysMoveOneLight() {

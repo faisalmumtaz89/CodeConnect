@@ -280,6 +280,8 @@ private struct ClosesPanel: ViewModifier {
         let close = $open
         let light = light
         light.opened()
+        // The window the panel opened in, which had the keyboard: keys typed in another window are that window's.
+        let window = NSApp.keyWindow
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]) {
             event in
             // A scroll closes it: an open panel never moves with, or hides behind, what scrolls under it.
@@ -288,14 +290,17 @@ private struct ClosesPanel: ViewModifier {
                 return event
             }
             if event.type == .keyDown {
+                guard event.window === window else { return event }
                 if event.keyCode == 53 {  // Esc
                     close.wrappedValue = false
                     return nil
                 }
-                // ↓ ↑ Return move and choose the panel's light (`PanelLight`); held with ⌘ or ⌃, or over a panel whose
-                // rows take no keys here, they go on as before.
-                guard event.modifierFlags.intersection([.command, .control]).isEmpty,
-                    let key = PanelLight.key(event.keyCode),
+                // ↓ ↑ Return move and choose the panel's light (`PanelLight`); held with ⌘, ⌃, ⇧ or ⌥ (Kit's
+                // `MenuLight.key`), or over a panel whose rows take no keys here, they go on as before.
+                let held = event.modifierFlags
+                guard let key = MenuLight.key(
+                        code: event.keyCode, command: held.contains(.command), control: held.contains(.control),
+                        shift: held.contains(.shift), option: held.contains(.option)),
                     let outcome = MainActor.assumeIsolated({ light.press(key) })
                 else { return event }
                 if outcome == .close { close.wrappedValue = false }
@@ -365,16 +370,6 @@ extension EnvironmentValues {
         let id: String
         let enabled: Bool
         let choose: () -> Void
-    }
-
-    /// The key a key code is, if the panel takes it: ↓, ↑, Return and the keypad's Enter.
-    nonisolated static func key(_ code: UInt16) -> MenuLight.Key? {
-        switch code {
-        case 125: .down
-        case 126: .up
-        case 36, 76: .return
-        default: nil
-        }
     }
 
     /// The panel opened: nothing is lit.
