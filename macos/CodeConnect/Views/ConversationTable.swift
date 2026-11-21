@@ -102,6 +102,9 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
         table.dataSource = self
         table.delegate = self
         scroll.documentView = table
+        // One stop for the keyboard: the column itself, which scrolls by its keys (`ColumnTableView`); its scroll bar
+        // is never a stop.
+        scroll.verticalScroller?.refusesFirstResponder = true
         tail.attach(scroll)
         tail.readerLeaves = { [weak self] in self?.left() }
         tail.isFollowing = { [weak self] in self?.layout.following ?? true }
