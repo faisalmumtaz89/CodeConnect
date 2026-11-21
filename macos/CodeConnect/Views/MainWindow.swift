@@ -558,14 +558,11 @@ private struct ComputerRow: View {
     }
 
     /// What the row does about a link that is not working, where the iPhone's banner offers it: Try Again where the
-    /// link can be asked again (a different version too, once it is cured, since a refusal does not dial again by
-    /// itself), Pair Again where the pairing or its address has to change.
+    /// link can be asked again, Pair Again where the pairing or its address has to change.
     private var act: (title: String, id: String, run: () -> Void)? {
         let health = computer.linkHealth
         switch health.notice?.action {
         case .retry, .tailscale:
-            return (PeerWords.tryAgain, "\(id).tryAgain", { computer.connection.retryNow() })
-        case .settings where health.cause == .refused(.differentVersion):
             return (PeerWords.tryAgain, "\(id).tryAgain", { computer.connection.retryNow() })
         case .settings:
             guard let address else { return nil }

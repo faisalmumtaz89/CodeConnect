@@ -570,7 +570,10 @@ public struct LinkHealth: Sendable, Equatable {
         case .live, .lagging:
             return nil
         case .rejected:
-            return LinkNotice(title: word, sentence: detail, action: .settings)
+            // A different version is cured by updating CodeConnect, then asking again (a refusal does not dial again
+            // by itself); every other refusal by changing the pairing.
+            return LinkNotice(
+                title: word, sentence: detail, action: cause == .refused(.differentVersion) ? .retry : .settings)
         case .blocked:
             // The pairing is still held, so this is not "Pair again": the app reconnects when the computer allows
             // it again, and Try again only asks now.
