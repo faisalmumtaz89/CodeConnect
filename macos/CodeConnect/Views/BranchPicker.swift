@@ -207,24 +207,30 @@ struct BranchMenu: View {
     private var foot: Int { git.branchesTruncated ? 2 : 1 }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ScrollView {
+        // To the keys the entries are rows in reading order (`panelRow`), "New branch…" the last.
+        let here = git.checkout(at: folder.path)
+        let others = git.others(than: folder.path)
+        let first = here == nil ? 0 : 1
+        let branchesFrom = first + others.count
+        return VStack(alignment: .leading, spacing: 0) {
+            PanelScroll {
                 VStack(alignment: .leading, spacing: 0) {
-                    if let here = git.checkout(at: folder.path) {
+                    if let here {
                         header(StartWords.thisFolder, divided: false)
-                        row(.folder, title: here.title, detail: here.notes(running: running))
+                        row(.folder, index: 0, title: here.title, detail: here.notes(running: running))
                     }
-                    let others = git.others(than: folder.path)
                     if !others.isEmpty {
                         header(StartWords.worktrees, divided: true)
-                        ForEach(others, id: \.path) { checkout in
+                        ForEach(Array(others.enumerated()), id: \.element.path) { offset, checkout in
                             row(
-                                .existing(checkout), title: checkout.title, detail: checkout.notes(running: running),
-                                disabled: checkout.missing)
+                                .existing(checkout), index: first + offset, title: checkout.title,
+                                detail: checkout.notes(running: running), disabled: checkout.missing)
                         }
                     }
-                    header(StartWords.newWorktree, divided: git.checkout(at: folder.path) != nil || !others.isEmpty)
-                    ForEach(git.branches, id: \.self) { branch in row(.branch(branch), title: branch, detail: nil) }
+                    header(StartWords.newWorktree, divided: here != nil || !others.isEmpty)
+                    ForEach(Array(git.branches.enumerated()), id: \.element) { offset, branch in
+                        row(.branch(branch), index: branchesFrom + offset, title: branch, detail: nil)
+                    }
                 }
             }
             .frame(height: CGFloat(shownRows - foot) * Self.rowHeight)
@@ -235,7 +241,10 @@ struct BranchMenu: View {
                         .padding(.horizontal, 12)
                         .frame(height: Self.rowHeight)
                 }
-                item(id: "start.branch.new", name: StartWords.newBranch, checked: place == nil, choose: { choose(nil) }) {
+                item(
+                    index: branchesFrom + git.branches.count, id: "start.branch.new", name: StartWords.newBranch,
+                    checked: place == nil, choose: { choose(nil) }
+                ) {
                     Text(StartWords.newBranch).font(Theme.ui(12.5)).foregroundStyle(Theme.text).fixedSize()
                     ModelDetail(text: StartWords.newBranchDetail)
                 }
@@ -261,8 +270,10 @@ struct BranchMenu: View {
     }
 
     /// A checkout or branch by its name, in a terminal's type, with what a start there would share or meet beside it.
-    private func row(_ choice: StartPlace, title: String, detail: String?, disabled: Bool = false) -> some View {
-        item(id: "start.branch.\(title)", name: title, checked: place == choice, choose: { choose(choice) }) {
+    private func row(_ choice: StartPlace, index: Int, title: String, detail: String?, disabled: Bool = false)
+        -> some View
+    {
+        item(index: index, id: "start.branch.\(title)", name: title, checked: place == choice, choose: { choose(choice) }) {
             Text(verbatim: title).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1).fixedSize()
             if let detail { ModelDetail(text: detail) }
         }
@@ -270,9 +281,10 @@ struct BranchMenu: View {
         .opacity(disabled ? 0.45 : 1)
     }
 
-    /// One entry, by `name` to accessibility, its words as `content` draws them.
+    /// Entry `index`, by `name` to accessibility, its words as `content` draws them.
     private func item(
-        id: String, name: String, checked: Bool, choose: @escaping () -> Void, @ViewBuilder content: () -> some View
+        index: Int, id: String, name: String, checked: Bool, choose: @escaping () -> Void,
+        @ViewBuilder content: () -> some View
     ) -> some View {
         Button(action: choose) {
             HStack(spacing: 8) {
@@ -288,7 +300,8 @@ struct BranchMenu: View {
             .frame(height: Self.rowHeight)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 4, id: id))
+        .buttonStyle(.panelRow)
+        .panelRow(index, id: id, choose: choose)
         .accessibilityLabel(name)
         .padding(.horizontal, 4)
         .accessibilityIdentifier(id)

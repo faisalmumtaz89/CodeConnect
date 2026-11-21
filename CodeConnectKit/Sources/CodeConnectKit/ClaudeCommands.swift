@@ -320,15 +320,20 @@ public enum SlashPalette {
 
     /// What `key` does with `rows` rows showing (0: no palette) and row `highlighted` lit. The first row is lit when the
     /// palette shows; ↑ and ↓ move the light and stop at the ends; Return runs the lit row; ⇧Return and ⌥Return add a
-    /// line, palette or not; Esc closes the palette. With no palette every other key is the box's.
+    /// line, palette or not; Esc closes the palette. With no palette every other key is the box's. The light is a menu
+    /// panel's (`MenuLight`), every row one that can be run.
     public static func outcome(of key: Key, rows: Int, highlighted: Int) -> KeyOutcome {
         if case .return(addsLine: true) = key { return .addLine }
         guard rows > 0 else { return .toBox }
+        let lit = min(max(highlighted, 0), rows - 1)
+        var light = MenuLight(lit: lit)
+        let enabled = Array(repeating: true, count: rows)
         switch key {
-        case .up: return .highlight(max(highlighted - 1, 0))
-        case .down: return .highlight(min(highlighted + 1, rows - 1))
+        case .up: _ = light.press(.up, enabled: enabled)
+        case .down: _ = light.press(.down, enabled: enabled)
         case .escape: return .close
-        case .return: return .run(highlighted)
+        case .return: return .run(lit)
         }
+        return .highlight(light.lit ?? lit)
     }
 }

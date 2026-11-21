@@ -323,7 +323,8 @@ private struct Composer: View {
         // The slash palette above the box, clear of it by the panels' one gap, as wide as the reply row.
         .overlay(alignment: .topLeading) {
             if let slash {
-                SlashPanel(content: slash, lit: min(slashLit, slash.rows.count - 1), run: runSlash)
+                SlashPanel(
+                    content: slash, lit: min(slashLit, slash.rows.count - 1), light: { slashLit = $0 }, run: runSlash)
                     .frame(width: rowWidth + 24)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { slashHeight = $0 }
                     .openPanel()

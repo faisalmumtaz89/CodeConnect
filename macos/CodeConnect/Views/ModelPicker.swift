@@ -44,9 +44,18 @@ struct ModelButton: View {
         return context.title(pick)
     }
 
+    /// The rows a choice can be, in the menu's order: each agent's that has its models.
+    private var rows: [StartModelChoice] {
+        StartAgent.allCases.flatMap { agent -> [StartModelChoice] in
+            guard case .choices = context.models(agent) else { return [] }
+            return context.modelChoices.filter { $0.agent == agent }
+        }
+    }
+
     /// As tall as its entries, up to what fits above the composer; longer, it scrolls.
     private var menu: some View {
-        ScrollView {
+        let order = rows
+        return PanelScroll {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(StartAgent.allCases.enumerated()), id: \.element) { index, agent in
                     if index > 0 { divider }
@@ -55,7 +64,9 @@ struct ModelButton: View {
                     case .checking: note(StartContext.checkingTitle)
                     case .missing(let reason), .signedOut(let reason): note(reason)
                     case .choices:
-                        ForEach(context.modelChoices.filter { $0.agent == agent }, id: \.self) { row($0) }
+                        ForEach(context.modelChoices.filter { $0.agent == agent }, id: \.self) { choice in
+                            row(choice, index: order.firstIndex(of: choice) ?? 0)
+                        }
                     }
                 }
             }
@@ -87,12 +98,14 @@ struct ModelButton: View {
         Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, 5)
     }
 
-    /// The model's name, and its description beside it.
-    private func row(_ choice: StartModelChoice) -> some View {
-        Button {
+    /// The model's name, and its description beside it: the menu's row `index`.
+    private func row(_ choice: StartModelChoice, index: Int) -> some View {
+        let id = "start.model.\(choice.agent.rawValue).\(choice.isDefault ? "default" : choice.model ?? "default")"
+        let select = {
             choose(choice)
             open = false
-        } label: {
+        }
+        return Button(action: select) {
             HStack(spacing: 8) {
                 Image(systemName: "checkmark")
                     .font(.system(size: 9.5, weight: .bold))
@@ -109,9 +122,10 @@ struct ModelButton: View {
             .frame(height: 24)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 4, id: "start.model.\(choice.agent.rawValue).\(choice.isDefault ? "default" : choice.model ?? "default")"))
+        .buttonStyle(.panelRow)
+        .panelRow(index, id: id, choose: select)
         .padding(.horizontal, 4)
-        .accessibilityIdentifier("start.model.\(choice.agent.rawValue).\(choice.isDefault ? "default" : choice.model ?? "default")")
+        .accessibilityIdentifier(id)
         .accessibilityAddTraits(choice == pick ? .isSelected : [])
     }
 }
