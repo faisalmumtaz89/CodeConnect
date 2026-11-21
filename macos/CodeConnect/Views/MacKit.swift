@@ -290,6 +290,15 @@ private struct OpenPanel: ViewModifier {
 
     func body(content: Content) -> some View {
         content.onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames?.panel = $0 }
+            #if DEBUG
+                // A panel outside the view its `closesPanel` wraps can't say where it is, so every click on it reads
+                // as outside and closes it before it lands. Said, and a render of it fails.
+                .onAppear {
+                    if frames == nil {
+                        RenderWindow.fault("a panel is drawn outside the closesPanel that closes it: clicks on it close it")
+                    }
+                }
+            #endif
     }
 }
 

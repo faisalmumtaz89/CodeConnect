@@ -146,8 +146,8 @@ struct StartStepsSheet: View {
             guard let shown else { return "Home" }
             return shown == "/" ? "/" : String(shown.split(separator: "/").last ?? "")
         case .agent: return "Which agent?"
-        case .branch: return "Which branch?"
-        case .newWorktree: return "New worktree"
+        case .branch: return StartWords.whichBranch
+        case .newWorktree: return StartWords.newWorktree
         case .start: return "Ready to start"
         case .model: return "Which model?"
         case .trust: return FleetWords.startAnAgent
@@ -501,7 +501,7 @@ struct StartStepsSheet: View {
         if let project, context.git(project.path) == nil {
             HStack(spacing: CC.space.sm) {
                 CCProgressRing()
-                Text("Reading \(project.name)’s branches…")
+                Text(StartWords.readingBranches(project.name))
                     .ccType(CC.type.body)
                     .foregroundStyle(CC.text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -513,24 +513,24 @@ struct StartStepsSheet: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if let here = git.checkout(at: project.path) {
-                        section("This folder")
+                        section(StartWords.thisFolder)
                         placeRow(.folder, title: here.title, detail: here.notes(running: running))
                     }
                     let others = git.others(than: project.path)
                     if !others.isEmpty {
-                        section("Worktrees")
+                        section(StartWords.worktrees)
                         ForEach(others, id: \.path) { checkout in
                             placeRow(
                                 .existing(checkout), title: checkout.title, detail: checkout.notes(running: running),
                                 disabled: checkout.missing)
                         }
                     }
-                    section("New worktree")
+                    section(StartWords.newWorktree)
                     ForEach(git.branches, id: \.self) { branch in
                         placeRow(.branch(branch), title: branch, detail: nil)
                     }
                     if git.branchesTruncated {
-                        Text("Older branches aren’t listed.")
+                        Text(StartWords.olderBranches)
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.tertiary)
                             .padding(.horizontal, CC.space.md)
@@ -540,7 +540,7 @@ struct StartStepsSheet: View {
                         worktreeName = ""
                         go(.newWorktree)
                     } label: {
-                        StartStepRow(title: "New branch…", detail: "A worktree of its own, by name")
+                        StartStepRow(title: StartWords.newBranch, detail: StartWords.newBranchDetail)
                     }
                     .buttonStyle(StartRowStyle())
                     .accessibilityIdentifier("start-new-worktree")
@@ -584,17 +584,17 @@ struct StartStepsSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: CC.space.md) {
                     CCField(
-                        label: "Name", text: $worktreeName, placeholder: "fix-login",
-                        hint: "Letters, digits, . _ and -, with / between parts. Up to 64.",
-                        error: name.isEmpty || valid ? nil : "Letters, digits, . _ and - only, with / between parts.",
+                        label: StartWords.worktreeName, text: $worktreeName, placeholder: StartWords.worktreeNameExample,
+                        hint: StartWords.worktreeNameRule,
+                        error: name.isEmpty || valid ? nil : StartWords.worktreeNameBroken,
                         submitLabel: .continue, autocapitalization: .never, disableAutocorrection: true,
                         isMono: true, labelOnContentColumn: false,
                         onSubmit: { if valid { useNewWorktree(name) } })
                     VStack(alignment: .leading, spacing: CC.space.xs) {
-                        fact("Branch", valid ? StartPlace.newBranch(name, for: agent) : "Not named yet", mono: valid)
-                        fact("From", StartPlace.newWorktreeBase(for: agent, from: here))
+                        fact(StartWords.branch, valid ? StartPlace.newBranch(name, for: agent) : StartWords.notNamedYet, mono: valid)
+                        fact(StartWords.from, StartPlace.newWorktreeBase(for: agent, from: here))
                         if here?.dirty == true {
-                            fact("Changes", "Uncommitted changes stay where they are")
+                            fact(StartWords.changes, StartWords.changesStay)
                         }
                     }
                     // At the accessibility sizes a pinned bar left the field no
@@ -617,7 +617,7 @@ struct StartStepsSheet: View {
             "Continue", fullWidth: true,
             disabledReason: valid
                 ? nil
-                : CCDisabledReason(name.isEmpty ? "Name the worktree." : "The name breaks the rule above.")
+                : CCDisabledReason(name.isEmpty ? StartWords.nameTheWorktree : StartWords.nameBreaksTheRule)
         ) {
             useNewWorktree(name)
         }
@@ -656,7 +656,7 @@ struct StartStepsSheet: View {
                     }
                     if git != nil {
                         summary(
-                            "Branch", startPlaceSummary(place, agent: agent, project: project, git: git), .branch,
+                            StartWords.branch, startPlaceSummary(place, agent: agent, project: project, git: git), .branch,
                             mono: true)
                     }
                     if typeSize.isAccessibilitySize { messagePill(project, agent).padding(CC.space.md) }

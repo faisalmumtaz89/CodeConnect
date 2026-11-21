@@ -213,6 +213,27 @@ public enum StartWords {
     public static func noMoreSends(_ computer: String) -> String {
         "No more sends from this \(HostDevice.current.noun); \(computer) may already have started it."
     }
+
+    // Where in its repository a run starts: the folder as it is, a worktree it has, or a new one.
+    public static let whichBranch = "Which branch?"
+    public static let branch = "Branch"
+    public static func readingBranches(_ folder: String) -> String { "Reading \(folder)’s branches…" }
+    public static let thisFolder = "This folder"
+    public static let worktrees = "Worktrees"
+    public static let newWorktree = "New worktree"
+    public static let olderBranches = "Older branches aren’t listed."
+    public static let newBranch = "New branch…"
+    public static let newBranchDetail = "A worktree of its own, by name"
+    public static let worktreeName = "Name"
+    public static let worktreeNameExample = "fix-login"
+    public static let worktreeNameRule = "Letters, digits, . _ and -, with / between parts. Up to 64."
+    public static let worktreeNameBroken = "Letters, digits, . _ and - only, with / between parts."
+    public static let notNamedYet = "Not named yet"
+    public static let from = "From"
+    public static let changes = "Changes"
+    public static let changesStay = "Uncommitted changes stay where they are"
+    public static let nameTheWorktree = "Name the worktree."
+    public static let nameBreaksTheRule = "The name breaks the rule above."
 }
 
 /// Adding a computer by its address and pairing code.

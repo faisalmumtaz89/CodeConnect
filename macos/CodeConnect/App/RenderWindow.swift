@@ -60,6 +60,19 @@
         static var pickedFolder: String? { UserDefaults.standard.string(forKey: "CC_PICK_FOLDER") }
         /// `-CC_MODEL_MENU YES`: Start an agent opens with its model menu open.
         static var opensModelMenu: Bool { UserDefaults.standard.bool(forKey: "CC_MODEL_MENU") }
+        /// `-CC_BRANCH_MENU YES`: the start form's Branch menu open.
+        static var opensBranchMenu: Bool { UserDefaults.standard.bool(forKey: "CC_BRANCH_MENU") }
+        /// `-CC_BRANCH_PLACE <branch>`: the start form's place, the repository's worktree on that branch.
+        /// `-CC_BRANCH_NAME <name>`: a new worktree being named, as typed.
+        static func branch(in git: StartGit?, place: inout StartPlace, newName: inout String?) {
+            let defaults = UserDefaults.standard
+            if let branch = defaults.string(forKey: "CC_BRANCH_PLACE"),
+                let checkout = git?.others(than: "").first(where: { $0.branch == branch })
+            {
+                place = .existing(checkout)
+            }
+            if let name = defaults.string(forKey: "CC_BRANCH_NAME") { newName = name }
+        }
         /// `-CC_TOOL_INPUT YES`: a Claude card opens its "Full tool input".
         static var opensToolInput: Bool { UserDefaults.standard.bool(forKey: "CC_TOOL_INPUT") }
         /// `-CC_FIELD_UNFOCUSED YES`: an opened run's reply field is not given the keyboard, as when the run is opened
@@ -345,7 +358,9 @@
                     return
                 }
                 started = true
-                RenderWindow.renderAndQuit(window)
+                // A start still reading its folder's repository (`-CC_GIT_PENDING`) shows a turning ring, which never
+                // stops changing.
+                RenderWindow.renderAndQuit(window, still: !UserDefaults.standard.bool(forKey: "CC_GIT_PENDING"))
             }
         }
 
@@ -353,12 +368,21 @@
         /// could not be. `still`: the photograph waits for a frame that stops changing; a step with a moving bar never
         /// stops, so it is taken once the window has had a moment to draw. A window `over` has its frame printed beside
         /// the main window's.
+        /// What this launch drew wrongly in a way no picture shows: said at once, and a render with any fails.
+        @MainActor private(set) static var faults: [String] = []
+
+        @MainActor static func fault(_ what: String) {
+            faults.append(what)
+            FileHandle.standardError.write(Data("fault: \(what)\n".utf8))
+        }
+
         @MainActor static func renderAndQuit(_ window: NSWindow, over: NSWindow? = nil, still: Bool = true) {
             guard let path = UserDefaults.standard.string(forKey: "CC_RENDER_WINDOW") else { return }
             Task { @MainActor in
                 // `-CC_RENDER_DELAY <seconds>`: what a screen shows a while after it is ready.
                 try? await Task.sleep(for: .seconds(UserDefaults.standard.double(forKey: "CC_RENDER_DELAY")))
                 do {
+                    guard faults.isEmpty else { throw RenderFailure(faults.joined(separator: "; ")) }
                     let rep = try await RenderWindow.photograph(window, over: over, still: still)
                     guard let png = rep.representation(using: .png, properties: [:]) else {
                         throw RenderFailure("could not encode the PNG")
