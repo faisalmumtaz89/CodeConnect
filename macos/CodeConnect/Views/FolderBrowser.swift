@@ -21,7 +21,6 @@ struct FolderBrowser: View {
     @State private var creating: String?
     @State private var creatingIn = ""
     @State private var refusal: String?
-    @State private var listHeight: CGFloat = 0
     @FocusState private var focused: Bool
 
     init(context: StartContext, use: @escaping (String) -> Void, recent: @escaping () -> Void) {
@@ -55,12 +54,12 @@ struct FolderBrowser: View {
             ScrollViewReader { list in
                 ScrollView {
                     VStack(spacing: 0) { rows }
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                 }
                 .task(id: selected) { list.scrollTo(selected) }
             }
-            // As the recent folders' box: as tall as its rows, up to 170 pt, giving way first in a short window.
-            .frame(minHeight: min(max(listHeight, 1), 44), maxHeight: min(max(listHeight, 1), 170))
+            // One height whatever the folder holds, so the sheet stays still while you browse: the recent folders'
+            // box at its tallest, 170 pt, giving way first in a short window. A short folder's rows sit at its top.
+            .frame(minHeight: 44, idealHeight: 170, maxHeight: 170)
             .clipShape(RoundedRectangle(cornerRadius: Theme.boxRadius))
             .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
             .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
