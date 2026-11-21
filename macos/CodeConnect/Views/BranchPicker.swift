@@ -45,6 +45,9 @@ struct BranchRow: View {
         .overlay(alignment: .topLeading) {
             if open, let answer = context.git(folder.path), let git = answer { menu(git) }
         }
+        // Around the menu as well as the button: the menu says where it is through what this sets, so a click on one
+        // of its rows is a click inside, not one that closes it before the row is chosen.
+        .closesPanel($open)
     }
 
     private static let space = "start.branch.row"
@@ -101,7 +104,6 @@ struct BranchRow: View {
         .accessibilityIdentifier("start.branch")
         .accessibilityValue(open ? "open" : "closed")
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).maxY } action: { buttonBottom = $0 }
-        .closesPanel($open)
     }
 
     /// A new worktree being named: the menu's button, the name, the rule or what breaks it, and what the name makes.
