@@ -287,6 +287,15 @@ enum Fixtures {
         for json in confirmedFactsJSON(now: now) {
             if let event = decode(json) { messages.append(event) }
         }
+        #if DEBUG
+            // `-CC_ENDED_RECEIPT <name>`: a model change's receipt on the first ended run at seq 3, the event its
+            // model fact (`-CC_ENDED_MODEL`) is read from, in claude's words: Set model to `<name>`.
+            if variant.endedCount > 0, let name = UserDefaults.standard.string(forKey: "CC_ENDED_RECEIPT"),
+                let event = decode(endedReceiptJSON(name, variant: variant, now: now))
+            {
+                messages.append(event)
+            }
+        #endif
         if variant.hasRunningTool || variant == .longOutput {
             // In order, so `fx-5` reads as Running: the turn's last item has
             // to be the tool call.
@@ -364,6 +373,16 @@ enum Fixtures {
             "content":"<local-command-stdout>\(effort)</local-command-stdout>"}}}}
             """,
         ]
+    }
+
+    /// The first ended run's model receipt, as claude writes it to the transcript (`-CC_ENDED_RECEIPT`).
+    private static func endedReceiptJSON(_ name: String, variant: Variant, now: Date) -> String {
+        """
+        {"type":"event","event":{"seq":3,"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNP00",\
+        "session_id":"fx-\(variant.sessionCount + 1)","ts":"\(rfc3339(now))","kind":"user_message","source":"transcript",\
+        "payload":{"type":"user","message":{"role":"user",\
+        "content":"<local-command-stdout>Set model to `\(name)`</local-command-stdout>"}}}}
+        """
     }
 
     /// A diff that exercises every branch of the parser: a modified file
@@ -623,11 +642,13 @@ enum Fixtures {
             let resumes = variant == .ended && offset == 0
             let resumable = resumes ? #""claude_session_id":"5f0c2a8e-1b7d-4c39-9e64-2d8a7f3b1c05","# : ""
             let folder = resumes ? "/Users/dev/clients/northwind/platform-migration-2026/\(projectLabel(index))" : cwd(index)
-            // `-CC_ENDED_MODEL <value>`: the first ended run's model fact, as a daemon sends it.
+            // `-CC_ENDED_MODEL <value>`: the first ended run's model fact, as a daemon sends it: with
+            // `-CC_ENDED_RECEIPT`, read from that receipt, so at its seq.
             var model = ""
             #if DEBUG
                 if offset == 0, let value = UserDefaults.standard.string(forKey: "CC_ENDED_MODEL") {
-                    model = #""model":{"value":"\#(value)","seq":2},"#
+                    let seq = UserDefaults.standard.string(forKey: "CC_ENDED_RECEIPT") == nil ? 2 : 3
+                    model = #""model":{"value":"\#(value)","seq":\#(seq)},"#
                 }
             #endif
             return """

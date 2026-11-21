@@ -1762,6 +1762,41 @@ final class HistoryPagesTests: XCTestCase {
         XCTAssertEqual(confirmed.name, "claude-opus-5[1m]")
     }
 
+    /// The Mac's fact and the window's receipt are one event read twice: the Mac's names the model id its
+    /// start's models resolve the receipt's alias to, and it is the one drawn.
+    func testTheMacsModelWinsATieWithTheReceiptItRead() async throws {
+        let model = try await factsModel(
+            ["model": try fact("model", "claude-sonnet-5-5", seq: 900)]) {
+                $0 == 900 ? try self.modelReceipt($0, "`sonnet (claude-sonnet-5-5)`") : try self.event($0)
+            }
+        XCTAssertEqual(model.statesForTesting[uid]?.lastConfirmedModel?.name, "sonnet (claude-sonnet-5-5)")
+        XCTAssertEqual(model.confirmedModel(for: uid)?.name, "claude-sonnet-5-5")
+    }
+
+    func testAReceiptNewerThanTheMacsModelWins() async throws {
+        let model = try await factsModel(
+            ["model": try fact("model", "claude-sonnet-5-5", seq: 900)]) {
+                $0 == 901 ? try self.modelReceipt($0, "`opus (claude-opus-5-5)`") : try self.event($0)
+            }
+        XCTAssertEqual(model.confirmedModel(for: uid)?.name, "opus (claude-opus-5-5)")
+    }
+
+    /// Claude's receipt of a model change, as a transcript user line.
+    private func modelReceipt(_ seq: UInt64, _ name: String) throws -> ServerMessage {
+        let frame = try eventFrame(seq)
+        let event = try setting(
+            XCTUnwrap(frame.objectValue?["event"]),
+            [
+                "payload": .object([
+                    "message": .object([
+                        "role": .string("user"),
+                        "content": .string("<local-command-stdout>Set model to \(name)</local-command-stdout>"),
+                    ])
+                ])
+            ])
+        return try message(setting(frame, ["event": event]))
+    }
+
     /// A window in a test process is never on a display, so nothing drives
     /// SwiftUI's update pass but a flush.
     private func render(_ model: AppModel) async {
