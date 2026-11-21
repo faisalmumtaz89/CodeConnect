@@ -12,70 +12,23 @@ import SwiftUI
 //  skill or plain text it is.
 // =============================================================================
 
-/// One palette row: the command, what tapping it opens, and the action the
-/// detail view routes — the same `CommandAction` a typed send resolves to,
-/// so a tap and a typed command can never drift apart.
-struct PaletteRow: Equatable, Identifiable {
-    let command: String
-    let subtitle: String
-    let icon: String
-    let action: CommandAction
-
-    var id: String { command }
-    var title: String { "/\(command)" }
-}
-
 /// The palette above the keyboard while the composer holds a bare `/` or a
-/// prefix of a native command. Anything else — arguments, unknown fragments —
-/// shows no palette at all; typing simply continues.
+/// prefix of a native command (Kit's `SlashPalette`: its rows, filter and
+/// caption). Anything else — arguments, unknown fragments — shows no palette
+/// at all; typing simply continues.
 struct CommandPalette: View {
-    /// What the palette shows for one composer text: which rows, and whether
-    /// the discovery caption underneath. `nil` means no palette.
-    struct Content: Equatable {
-        var rows: [PaletteRow]
-        var showsCaption: Bool
-    }
-
-    let content: Content
+    let content: SlashPalette.Content
     let onAction: (CommandAction) -> Void
 
-    /// The five native commands, in the order they are worth a thumb's
-    /// attention: the two levers, the two context acts, then the diff.
-    static let allRows: [PaletteRow] = [
-        PaletteRow(
-            command: "model", subtitle: "Choose model", icon: "cpu",
-            action: .nativeModel),
-        PaletteRow(
-            command: "effort", subtitle: "Choose reasoning effort", icon: "gauge",
-            action: .nativeEffort),
-        PaletteRow(
-            command: "compact", subtitle: CompactPrompt.title,
-            icon: "arrows-in",
-            action: .nativeCompact(prefillInstructions: "")),
-        PaletteRow(
-            command: "clear", subtitle: ClearConfirmation.clear, icon: "eraser",
-            action: .nativeClear),
-        PaletteRow(
-            command: "diff", subtitle: "Review working-tree changes",
-            icon: "plus-minus",
-            action: .nativeDiff),
-    ]
-
-    /// The palette for one composer text, or `nil` for none. Bare `/` is the
-    /// discovery moment: every available row plus the caption. A fragment
-    /// filters case-insensitively. Whitespace after the fragment means
-    /// arguments are coming, and arguments are typing, not browsing.
-    static func content(for typed: String) -> Content? {
-        let afterLeading = typed.drop(while: \.isWhitespace)
-        guard afterLeading.hasPrefix("/") else { return nil }
-        let fragment = afterLeading.dropFirst()
-        if fragment.isEmpty {
-            return Content(rows: allRows, showsCaption: true)
+    /// Each native command's mark in this app's icon set.
+    static func icon(for command: String) -> String {
+        switch command {
+        case "model": "cpu"
+        case "effort": "gauge"
+        case "compact": "arrows-in"
+        case "clear": "eraser"
+        default: "plus-minus"
         }
-        guard !fragment.contains(where: \.isWhitespace) else { return nil }
-        let needle = fragment.lowercased()
-        let matches = allRows.filter { $0.command.hasPrefix(needle) }
-        return matches.isEmpty ? nil : Content(rows: matches, showsCaption: false)
     }
 
     /// One standard row's height, in the reader's type size — the unit the
@@ -94,7 +47,7 @@ struct CommandPalette: View {
                             separator: row != content.rows.last || content.showsCaption,
                             action: { onAction(row.action) }
                         ) {
-                            CCIcon(row.icon, size: 16, weight: .regular, relativeTo: .body)
+                            CCIcon(Self.icon(for: row.command), size: 16, weight: .regular, relativeTo: .body)
                                 .foregroundStyle(CC.text.tertiary)
                         } trailing: {
                             EmptyView()
@@ -110,7 +63,7 @@ struct CommandPalette: View {
                     // scanned the whole list starts wondering where the rest of
                     // the commands went.
                     if content.showsCaption {
-                        Text("Run other commands on the computer.")
+                        Text(SlashPalette.caption)
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.tertiary)
                             .fixedSize(horizontal: false, vertical: true)

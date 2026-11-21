@@ -1436,7 +1436,7 @@ struct SessionDetailView: View {
     /// Catalog fetching keys off any leading `/` (broader than visibility on
     /// purpose — send-time classification needs the catalog even when the
     /// palette shows nothing).
-    private var paletteContent: CommandPalette.Content? {
+    private var paletteContent: SlashPalette.Content? {
         guard composerFocused else { return nil }
         // **Claude Code's slash vocabulary, on a Claude session only.**
         //
@@ -1448,7 +1448,7 @@ struct SessionDetailView: View {
         // is just a message that happens to start with a slash, and it goes
         // through `compose` like any other.
         guard summary?.isCodex != true else { return nil }
-        return CommandPalette.content(for: composeText)
+        return SlashPalette.content(for: composeText)
     }
 
     /// One place to show a compose outcome that did not go through `send()` —

@@ -94,11 +94,11 @@ final class ClaudeCommandPolicyTests: XCTestCase {
 final class PaletteContentTests: XCTestCase {
 
     private func rows(_ typed: String) -> [String]? {
-        CommandPalette.content(for: typed)?.rows.map(\.command)
+        SlashPalette.content(for: typed)?.rows.map(\.command)
     }
 
     func testBareSlashIsDiscoveryWithEveryRowAndTheCaption() {
-        let content = CommandPalette.content(for: "/")
+        let content = SlashPalette.content(for: "/")
         XCTAssertEqual(content?.rows.map(\.command), ["model", "effort", "compact", "clear", "diff"])
         XCTAssertEqual(content?.showsCaption, true)
         XCTAssertEqual(
@@ -116,7 +116,7 @@ final class PaletteContentTests: XCTestCase {
         XCTAssertNil(rows("/s"), "no row, no palette")
         for typed in ["/c", "/e"] {
             XCTAssertEqual(
-                CommandPalette.content(for: typed)?.showsCaption,
+                SlashPalette.content(for: typed)?.showsCaption,
                 false, "the caption belongs to discovery, not filtering")
         }
     }
@@ -130,7 +130,7 @@ final class PaletteContentTests: XCTestCase {
     /// A tapped row and the typed command resolve to the same action — the
     /// palette can never do something typing would not.
     func testRowActionsMatchTheTypedPolicy() {
-        for row in CommandPalette.allRows {
+        for row in SlashPalette.allRows {
             XCTAssertEqual(
                 row.action,
                 ClaudeCommandPolicy.action(for: "/\(row.command)"),

@@ -2,7 +2,7 @@ import Foundation
 
 /// What the composer should do with one piece of typed text, decided before
 /// anything reaches the Mac.
-public enum CommandAction: Equatable {
+public enum CommandAction: Equatable, Sendable {
     /// `/model` — the run's settings sheet; nothing is typed.
     case nativeModel
     /// `/diff` — the app renders this itself, better than the Mac's own
@@ -224,5 +224,56 @@ public enum CompactConfirmation: Hashable, Sendable {
         if line.hasPrefix("Compacted") { return .compacted }
         if line == "Not enough messages to compact." { return .notEnoughMessages }
         return nil
+    }
+}
+
+/// One row of the slash palette: the command and what choosing it opens, through the same `CommandAction` a typed send
+/// resolves to, so a choice and a typed command can never drift apart.
+public struct SlashRow: Equatable, Identifiable, Sendable {
+    public let command: String
+    public let subtitle: String
+    public let action: CommandAction
+
+    public var id: String { command }
+    public var title: String { "/\(command)" }
+}
+
+/// What the slash palette shows above a Claude run's reply box while the box holds a bare `/` or a prefix of a command
+/// this app answers itself. Anything else (arguments, unknown fragments) shows no palette; typing simply continues.
+public enum SlashPalette {
+    /// The rows for one text, and whether the discovery caption goes under them.
+    public struct Content: Equatable, Sendable {
+        public var rows: [SlashRow]
+        public var showsCaption: Bool
+    }
+
+    /// Under the rows of a bare `/`: the commands this app doesn't answer itself still run.
+    public static let caption = "Run other commands on the computer."
+
+    /// The five native commands, in the order they are worth attention: the two levers, the two context acts, then
+    /// the diff.
+    public static let allRows: [SlashRow] = [
+        SlashRow(command: "model", subtitle: "Choose model", action: .nativeModel),
+        SlashRow(command: "effort", subtitle: "Choose reasoning effort", action: .nativeEffort),
+        SlashRow(
+            command: "compact", subtitle: CompactPrompt.title, action: .nativeCompact(prefillInstructions: "")),
+        SlashRow(command: "clear", subtitle: ClearConfirmation.clear, action: .nativeClear),
+        SlashRow(command: "diff", subtitle: "Review working-tree changes", action: .nativeDiff),
+    ]
+
+    /// The palette for one text, or nil for none. Bare `/` is the discovery moment: every row and the caption. A
+    /// fragment filters case-insensitively. Whitespace after the fragment means arguments are coming, and arguments
+    /// are typing, not browsing.
+    public static func content(for typed: String) -> Content? {
+        let afterLeading = typed.drop(while: \.isWhitespace)
+        guard afterLeading.hasPrefix("/") else { return nil }
+        let fragment = afterLeading.dropFirst()
+        if fragment.isEmpty {
+            return Content(rows: allRows, showsCaption: true)
+        }
+        guard !fragment.contains(where: \.isWhitespace) else { return nil }
+        let needle = fragment.lowercased()
+        let matches = allRows.filter { $0.command.hasPrefix(needle) }
+        return matches.isEmpty ? nil : Content(rows: matches, showsCaption: false)
     }
 }
