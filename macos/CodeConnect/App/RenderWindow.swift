@@ -63,9 +63,9 @@
         /// `-CC_BRANCH_MENU YES`: the start form's Branch menu open.
         static var opensBranchMenu: Bool { UserDefaults.standard.bool(forKey: "CC_BRANCH_MENU") }
         /// `-CC_BROWSE <path>`: the start form opens browsing that folder of a computer that is not this Mac; `~` is
-        /// its home. `-CC_BROWSE_HIDDEN YES` shows hidden folders, `-CC_BROWSE_UNASKED YES` never asks for the listing,
-        /// so the form stays on reading it, and `-CC_NEW_FOLDER <name>` opens New Folder's card with that name typed
-        /// (`-CC_NEW_FOLDER ""` for none).
+        /// its home. `-CC_BROWSE_HIDDEN YES` shows hidden folders, `-CC_BROWSE_UNASKED YES` with fixtures leaves the
+        /// listing unanswered (the Kit's `listFolder`), so the form stays on reading it, and `-CC_NEW_FOLDER <name>` opens
+        /// New Folder's card with that name typed (`-CC_NEW_FOLDER ""` for none).
         static var browsed: String? { UserDefaults.standard.string(forKey: "CC_BROWSE") }
         static var browsesHidden: Bool { UserDefaults.standard.bool(forKey: "CC_BROWSE_HIDDEN") }
         static var browseUnasked: Bool { UserDefaults.standard.bool(forKey: "CC_BROWSE_UNASKED") }

@@ -75,12 +75,7 @@ struct FolderBrowser: View {
             .onKeyPress(.delete) { up() }
             bar
         }
-        .task(id: request) {
-            #if DEBUG
-                if RenderWindow.browseUnasked { return }
-            #endif
-            context.listFolder(request)
-        }
+        .task(id: request) { context.listFolder(request) }
         #if DEBUG
             .task {
                 guard let name = RenderWindow.newFolderName else { return }

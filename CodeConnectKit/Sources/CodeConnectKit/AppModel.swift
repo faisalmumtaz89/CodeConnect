@@ -1214,6 +1214,8 @@ public final class AppModel {
     public func listFolder(_ request: StartFolderRequest) {
         #if DEBUG
             if fixturesActive {
+                // `-CC_BROWSE_UNASKED YES`: a render of either app's browser while the computer is still listing.
+                if UserDefaults.standard.bool(forKey: "CC_BROWSE_UNASKED") { return }
                 starter.receive(
                     SessionStarter.fixtureListing(request, projects: starter.projects ?? [], made: madeFolders),
                     for: request)
