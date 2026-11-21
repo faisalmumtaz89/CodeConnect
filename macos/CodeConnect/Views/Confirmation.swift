@@ -181,10 +181,12 @@ private struct ConfirmationCard: View {
             id: each.id
         ) { answer(each) }
         .disabled(blank && each.kind != .cancel)
-        switch each.kind {
-        case .cancel: face.keyboardShortcut(.cancelAction)
-        case .ok, .plain where takesReturn: face.keyboardShortcut(.defaultAction)
-        case .destructive, .plain: face
+        if each.kind == .cancel {
+            face.keyboardShortcut(.cancelAction)
+        } else if takesReturn {
+            face.keyboardShortcut(.defaultAction)
+        } else {
+            face
         }
     }
 }
