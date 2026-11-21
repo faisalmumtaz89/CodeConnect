@@ -38,9 +38,17 @@ struct Confirmation {
 }
 
 extension View {
-    /// Asks while `item` holds something, in the card `ask` makes of it; any answer lets `item` go.
-    func confirmation<Item>(_ item: Binding<Item?>, _ ask: @escaping (Item) -> Confirmation) -> some View {
-        modifier(Confirms(asking: item.wrappedValue.map(ask)) { item.wrappedValue = nil })
+    /// Asks while `item` holds something, in the card `ask` makes of it; any answer lets `item` go. The card holds the
+    /// keyboard while it is up; whatever answers it, `returnsKeyboardTo` takes the keyboard back, if no other ask is up
+    /// by then.
+    func confirmation<Item>(
+        _ item: Binding<Item?>, returnsKeyboardTo focus: FocusState<Bool>.Binding? = nil,
+        _ ask: @escaping (Item) -> Confirmation
+    ) -> some View {
+        let returnsKeyboard = focus.map { focus in { focus.wrappedValue = true } }
+        return modifier(Confirms(asking: item.wrappedValue.map(ask), returnsKeyboard: returnsKeyboard) {
+            item.wrappedValue = nil
+        })
     }
 
     /// The window that draws the asks of every view in it, centred on itself.
@@ -57,6 +65,7 @@ extension View {
     fileprivate struct Shown {
         let owner: UUID
         let confirmation: Confirmation
+        let returnsKeyboard: (() -> Void)?
         let close: () -> Void
     }
 }
@@ -65,13 +74,17 @@ private struct Confirms: ViewModifier {
     @Environment(ConfirmationQueue.self) private var queue
     @State private var owner = UUID()
     let asking: Confirmation?
+    let returnsKeyboard: (() -> Void)?
     let close: () -> Void
 
     func body(content: Content) -> some View {
         content
             .onChange(of: asking == nil, initial: true) { _, idle in
                 queue.shown.removeAll { $0.owner == owner }
-                if let asking, !idle { queue.shown.append(.init(owner: owner, confirmation: asking, close: close)) }
+                if let asking, !idle {
+                    queue.shown.append(
+                        .init(owner: owner, confirmation: asking, returnsKeyboard: returnsKeyboard, close: close))
+                }
             }
             .onDisappear { queue.shown.removeAll { $0.owner == owner } }
     }
@@ -95,6 +108,11 @@ private struct ConfirmationHost: ViewModifier {
                             queue.shown.removeAll { $0.owner == shown.owner }
                             shown.close()
                             answer.perform()
+                            // A turn later, once AppKit has settled the keyboard after the card is gone; an ask the
+                            // answer raised holds it instead, and returns it when it is answered in turn.
+                            if let returnsKeyboard = shown.returnsKeyboard {
+                                DispatchQueue.main.async { if !queue.isAsking { returnsKeyboard() } }
+                            }
                         }
                     }
                     .ignoresSafeArea()

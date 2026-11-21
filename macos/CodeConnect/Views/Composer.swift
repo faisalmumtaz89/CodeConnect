@@ -219,7 +219,9 @@ private struct Composer: View {
                 compacting = false
             }
         }
-        .confirmation(Binding(get: { clearing ? true : nil }, set: { clearing = $0 ?? false })) { _ in
+        .confirmation(
+            Binding(get: { clearing ? true : nil }, set: { clearing = $0 ?? false }), returnsKeyboardTo: $fieldFocused
+        ) { _ in
             Confirmation(title: ClearConfirmation.title, message: ClearConfirmation.message, answers: [
                 .init(title: ClearConfirmation.keep, kind: .cancel, id: "session.composer.clear.cancel"),
                 .init(title: ClearConfirmation.clear, kind: .destructive, id: "session.composer.clear.confirm") {
@@ -228,7 +230,7 @@ private struct Composer: View {
             ])
         }
         // Kit's words for the run's agent; Keep Asking and Esc send nothing, and the mode stays as it was.
-        .confirmation($confirmingMode) { mode in
+        .confirmation($confirmingMode, returnsKeyboardTo: $fieldFocused) { mode in
             Confirmation(title: modeWords.title, message: modeWords.message, answers: [
                 .init(title: modeWords.cancel, kind: .cancel, id: "session.composer.mode.cancel"),
                 .init(title: modeWords.confirm, kind: .destructive, id: "session.composer.mode.confirm") {
