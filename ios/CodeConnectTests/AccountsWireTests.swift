@@ -312,7 +312,7 @@ final class AccountsWireTests: XCTestCase {
         }
         let frame = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: data).arrayValue?.first)
         guard case .accounts(nil, let book) = try JSONDecoder().decode(ServerMessage.self, from: Data(frame.canonicalJSONString.utf8))
-        else { return try XCTSkip("not a pushed accounts listing") }
+        else { throw XCTSkip("not a pushed accounts listing") }
         return book
     }
 
