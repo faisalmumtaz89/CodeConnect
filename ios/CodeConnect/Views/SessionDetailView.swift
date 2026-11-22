@@ -1033,8 +1033,11 @@ struct SessionDetailView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 // A run that takes no reply has no reply box, as on the Mac:
-                // one quiet line in its place says it has ended.
+                // one quiet line in its place says it has ended. Over it, the
+                // settings line, read only (an ended run has no menus), names
+                // the model it ran on, which the Mac names in its pane heading.
                 if summary?.takesNoReply == true {
+                    HostedSettingsBar(model: model, key: key, onOpen: { showHostedSettingsSheet = true })
                     EndedLine()
                 } else {
                     if let palette = paletteContent {
@@ -2432,6 +2435,8 @@ private struct RunFacts: View {
 
 /// In an ended run's reply box's place: a hairline, then the run's end said
 /// quietly, a check mark on the text's first line (`SessionWords.runEnded`).
+/// It keeps the room the box keeps above itself (`SessionComposeBar`), so the
+/// settings line over it stands as clear of it as of the box.
 private struct EndedLine: View {
     var body: some View {
         VStack(spacing: 0) {
@@ -2450,6 +2455,7 @@ private struct EndedLine: View {
             .padding(.vertical, CC.space.sm)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(.top, CC.space.xs)
         .background(CC.color.bg)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("session-ended-line")
