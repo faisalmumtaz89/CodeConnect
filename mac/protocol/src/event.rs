@@ -97,6 +97,9 @@ pub fn sdk_event_id(message_uuid: &str, kind: &EventKind, block: usize) -> Strin
 
 /// The `notification_type` values of the [`EventKind::Notification`] events the
 /// engine files itself, beside the ones Claude's own notifications carry.
+/// The payload key of a [`EventKind::SessionEnd`] that is a switch of account.
+pub const SWITCHED_TO: &str = "switched_to";
+
 pub mod notice {
     /// `/clear` reset the conversation; the run's Claude session id changes.
     pub const CONVERSATION_CLEARED: &str = "conversation_cleared";
@@ -124,6 +127,12 @@ pub enum EventKind {
     /// Reserved for that, and only that — a finished turn is
     /// [`EventKind::TurnComplete`]. Conflating them is what made the phone
     /// render "session ended" after every single reply.
+    ///
+    /// One whose payload carries [`SWITCHED_TO`] (`{"account_id": <id, or null for
+    /// Default>, "label": <the account's name>}`, minor 47) is a switch of account, not an
+    /// end: the process ended between turns and is started again at once on that account,
+    /// the run reading live throughout; the next [`EventKind::SessionStart`] is that
+    /// restart.
     SessionEnd,
     /// The agent finished a turn. For a hosted Claude run it is filed from the
     /// SDK's `result`, which the run's agent host relays as the turn ends (an

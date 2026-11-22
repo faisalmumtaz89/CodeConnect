@@ -7,9 +7,9 @@
 //! already on the active account when its idle point comes only loses its mark, so choosing again, or choosing back,
 //! is never a lock: each run moves once, to the latest choice, or not at all.
 //!
-//! Accepted misses: a message queued inside Codex itself (`codex queue`) does not survive the app-server's restart;
-//! a choice made while a run is still starting again on the previous one leaves it on that previous one; a Codex run
-//! whose link is not attached when the choice is made moves only at a later choice.
+//! A choice made while a run is still starting again moves it once more as it settles; a Codex run with no link when
+//! the choice is made moves when its link attaches. Accepted miss: a message queued inside Codex itself
+//! (`codex queue`) does not survive the app-server's restart.
 
 use std::sync::Arc;
 
@@ -82,6 +82,33 @@ pub(crate) async fn at_idle(daemon: &Arc<Daemon>, uid: &str) {
     daemon.stop_through_link(uid).await;
 }
 
+/// The run `uid`'s switch is over (started again, or not): its mark goes, and when the active account changed
+/// meanwhile, it moves again, as a choice made now would move it.
+pub(crate) async fn settled(daemon: &Arc<Daemon>, uid: &str) {
+    if let Err(err) = daemon.db.clear_switching(uid.to_string()).await {
+        crate::log_error!("{uid}: could not clear its switch: {err:#}");
+        return;
+    }
+    let Ok(Some(row)) = daemon.db.get_session(uid.to_string()).await else {
+        return;
+    };
+    let active = daemon
+        .store
+        .active_account(row.agent.as_str())
+        .ok()
+        .flatten()
+        .map(|account| account.id);
+    let current = daemon
+        .store
+        .run_account(uid)
+        .ok()
+        .flatten()
+        .map(|account| account.id);
+    if active != current {
+        begin(daemon, &row.agent).await;
+    }
+}
+
 /// The run `uid`, its end filed as switched, started again on its agent's active account with no message.
 pub(crate) fn relaunch(daemon: &Arc<Daemon>, uid: &str, agent: &AgentKind) {
     let (daemon, uid) = (Arc::clone(daemon), uid.to_string());
@@ -109,13 +136,99 @@ async fn idle(daemon: &Arc<Daemon>, uid: &str, agent: &AgentKind) -> bool {
             .unwrap_or(false)
 }
 
-/// The label a switched run's end names: its agent's active account's, or Default.
-pub(crate) fn target_label(daemon: &Daemon, agent: &AgentKind) -> String {
-    daemon
-        .store
-        .active_account(agent.as_str())
-        .ok()
-        .flatten()
-        .map(|account| account.label)
-        .unwrap_or_else(|| "Default".to_string())
+/// A switched run's end: the account it goes on, its agent's active one (Default for none), typed
+/// ([`protocol::event::SWITCHED_TO`]) and in words.
+pub(crate) fn switched_end(daemon: &Daemon, agent: &AgentKind) -> serde_json::Value {
+    let active = daemon.store.active_account(agent.as_str()).ok().flatten();
+    let label = active
+        .as_ref()
+        .map_or("Default", |account| account.label.as_str());
+    serde_json::json!({
+        "exit_code": null,
+        "reason": switched_reason(label),
+        protocol::event::SWITCHED_TO: {
+            "account_id": active.as_ref().map(|account| account.id.clone()),
+            "label": label,
+        },
+    })
+}
+
+/// What a connected device is sent across a switch, for the tests that pin it.
+#[cfg(test)]
+pub(crate) mod window {
+    use std::sync::Arc;
+
+    use crate::state::Daemon;
+
+    /// Each of `uid`'s events broadcast from now until `stop` fires, as the `event` frame a device is sent, each
+    /// followed by the `sessions` frame (that run's row only) a device listing then would read.
+    pub(crate) fn record(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+    ) -> (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<Vec<serde_json::Value>>,
+    ) {
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let mut events = daemon.events_tx.subscribe();
+        let (daemon, uid) = (Arc::clone(daemon), uid.to_string());
+        let recording = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            loop {
+                let event = tokio::select! {
+                    event = events.recv() => match event {
+                        Ok(event) => event,
+                        Err(_) => break,
+                    },
+                    _ = &mut stopped => break,
+                };
+                if event.session_uid != uid {
+                    continue;
+                }
+                let sessions = daemon
+                    .sessions()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|row| row.session_uid == uid)
+                    .collect();
+                frames.push(
+                    serde_json::to_value(protocol::ws::ServerMessage::Event { event }).unwrap(),
+                );
+                frames.push(
+                    serde_json::to_value(protocol::ws::ServerMessage::Sessions { sessions })
+                        .unwrap(),
+                );
+            }
+            frames
+        });
+        (stop, recording)
+    }
+
+    /// `frames` hold exactly one end, the switch's, typed with `label`, and every listing among them reads the run
+    /// live; written to `fixtures/accounts/<name>` when `CC_RECORD_SWITCH` is set.
+    pub(crate) fn check(frames: &[serde_json::Value], label: &str, name: &str) {
+        let ends: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame["type"] == "event" && frame["event"]["kind"] == "session_end")
+            .collect();
+        assert_eq!(ends.len(), 1, "{frames:#?}");
+        assert_eq!(
+            ends[0]["event"]["payload"][protocol::event::SWITCHED_TO]["label"],
+            label,
+            "{ends:?}"
+        );
+        for listing in frames.iter().filter(|frame| frame["type"] == "sessions") {
+            assert_eq!(
+                listing["sessions"][0]["lifecycle"], "live",
+                "never listed ended: {listing}"
+            );
+        }
+        if std::env::var_os("CC_RECORD_SWITCH").is_some() {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/accounts")
+                .join(name);
+            std::fs::write(path, serde_json::to_string_pretty(frames).unwrap() + "\n").unwrap();
+        }
+    }
 }

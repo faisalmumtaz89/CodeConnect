@@ -3387,6 +3387,9 @@ impl Daemon {
     /// before. This is a *display*: it is re-read continuously, it resolves itself on the
     /// next listing, and nothing is actuated from it.
     pub async fn sessions(&self) -> Result<Vec<SessionSummary>> {
+        // A run moving to another account reads live throughout (306 Slice E, S1). Its mark is read before its row:
+        // the mark goes only once the run is live again, so a row read after it is never an earlier one unmarked.
+        let switching: HashSet<String> = self.db.switching_runs().await?.into_iter().collect();
         let rows = self.db.list_sessions().await?;
         // Read up front, before the lock is taken, one query per row.
         let mut last_seqs: HashMap<String, u64> = HashMap::with_capacity(rows.len());
@@ -3463,8 +3466,6 @@ impl Daemon {
                 relaunchable.insert(row.session_uid.clone());
             }
         }
-        // A run moving to another account reads live throughout (306 Slice E, S1).
-        let switching: HashSet<String> = self.db.switching_runs().await?.into_iter().collect();
         let inner = self.inner.lock().await;
         let mut model_ids: HashMap<String, String> = HashMap::new();
         let mut model_labels: HashMap<String, String> = HashMap::new();

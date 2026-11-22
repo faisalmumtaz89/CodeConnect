@@ -922,9 +922,10 @@ async fn link(
                     Ok(true) => {
                         live = lifecycle == Lifecycle::Live;
                         if switching {
-                            if let Err(err) = daemon.db.clear_switching(uid.clone()).await {
-                                crate::log_error!("{uid}: could not clear its switch: {err:#}");
-                            }
+                            tokio::spawn({
+                                let (daemon, uid) = (Arc::clone(&daemon), uid.clone());
+                                async move { crate::switch::settled(&daemon, &uid).await }
+                            });
                         }
                         // From the outcome, not the lifecycle committed: a refused relaunch is
                         // `exited`, and its host's `exited` is still acknowledged so it ends.
@@ -1010,10 +1011,7 @@ async fn link(
                 let (from, payload) = if switched {
                     (
                         Lifecycle::Live,
-                        serde_json::json!({
-                            "exit_code": null,
-                            "reason": crate::switch::switched_reason(&crate::switch::target_label(&daemon, &AgentKind::Claude)),
-                        }),
+                        crate::switch::switched_end(&daemon, &AgentKind::Claude),
                     )
                 } else if stopping {
                     (Lifecycle::Stopping, stopped_end())
@@ -1220,10 +1218,7 @@ pub(crate) async fn end_if_host_gone(daemon: &Arc<Daemon>, uid: &str) {
         _ => None,
     };
     let payload = if let Some(agent) = &switched {
-        serde_json::json!({
-            "exit_code": null,
-            "reason": crate::switch::switched_reason(&crate::switch::target_label(daemon, agent)),
-        })
+        crate::switch::switched_end(daemon, agent)
     } else if watch.lifecycle == Lifecycle::Stopping {
         stopped_end()
     } else {
@@ -12064,6 +12059,7 @@ mod tests {
             .store
             .activate_account("claude", Some(&b.id))
             .unwrap());
+        let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
         crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
         let marked = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
         assert_eq!(
@@ -12175,6 +12171,104 @@ mod tests {
             .collect();
         assert_eq!(ends.len(), 1, "{ends:?}");
         assert_eq!(ends[0]["payload"]["reason"], "Switched to B", "{ends:?}");
+        assert_eq!(
+            ends[0]["payload"]["switched_to"],
+            serde_json::json!({"account_id": b.id, "label": "B"}),
+            "typed"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        window_over.send(()).unwrap();
+        crate::switch::window::check(&window.await.unwrap(), "B", "switch-claude-wire.json");
+        stop(&relaunched.dir);
+    }
+
+    /// **A choice made while a run starts again moves it once more** (306 Slice E): a run moving from A to B is
+    /// starting again when C is chosen; as it goes live on B it is not idle on the active account, so it is stopped
+    /// again, to move to C.
+    #[tokio::test]
+    async fn a_choice_made_while_a_run_starts_again_moves_it_once_more() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let a = rig.daemon.store.add_account("claude", "A").unwrap();
+        let b = rig.daemon.store.add_account("claude", "B").unwrap();
+        let c = rig.daemon.store.add_account("claude", "C").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("claude", Some(&a.id))
+            .unwrap());
+        rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        sdk(
+            &mut played.write,
+            4,
+            serde_json::json!({"type": "result", "subtype": "success", "uuid": "r1",
+                               "is_error": false, "num_turns": 1, "usage": {}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("claude", Some(&b.id))
+            .unwrap());
+        crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
+        assert!(
+            matches!(next(&mut played.lines).await, Some(ToHost::Stop { .. })),
+            "idle: stopped at once"
+        );
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let Played {
+            dir, lines, write, ..
+        } = played;
+        drop((lines, write));
+        let mut relaunched = play_relaunched(&dir, old).await;
+
+        // C is chosen while the run starts again on B.
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("claude", Some(&c.id))
+            .unwrap());
+        crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
+        let ToHost::Start { uuid, .. } = relaunched.start.clone() else {
+            panic!("not a start: {:?}", relaunched.start);
+        };
+        say(
+            &mut relaunched.write,
+            serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                           "status": "done", "initialize": initialize_answer()}),
+        )
+        .await;
+        assert_eq!(
+            next(&mut relaunched.lines).await,
+            Some(ToHost::Ack { seq: 2 })
+        );
+        assert_eq!(
+            rig.daemon.store.run_account(&uid).unwrap(),
+            Some(b),
+            "live on B"
+        );
+        assert!(
+            matches!(
+                tokio::time::timeout(Duration::from_secs(5), next(&mut relaunched.lines)).await,
+                Ok(Some(ToHost::Stop { .. }))
+            ),
+            "stopped again, to move to C"
+        );
+        let marked = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(marked["switching"], true, "{marked}");
         stop(&relaunched.dir);
     }
 
