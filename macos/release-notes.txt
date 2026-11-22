@@ -1,1 +1,1 @@
-The conversation shows a focus ring while it has the keyboard, so you can see where the arrow and Page keys will scroll.
+A run’s model now reads by its menu’s name, such as Sonnet, while it runs and after it ends, and the reply row shows the effort in use beside it. While a turn runs, the send button is Stop. Replies read at a comfortable width, with tables that fit the window and lists drawn as lists. The foot of the left panel shows this Mac’s Tailscale and opens Settings, and the conversation shows a focus ring while it has the keyboard.
