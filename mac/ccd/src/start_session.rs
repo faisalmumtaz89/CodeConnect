@@ -69,16 +69,37 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                 Err(err) => folder_trust_unavailable("forget the folder's answer", err),
             }
         }
+        ClientMessage::SignInAccount {
+            request_id,
+            account_id,
+        } => {
+            let environment = phone_environment();
+            let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
+            crate::accounts::sign_in(
+                &daemon.store,
+                &daemon.sign_ins,
+                &environment,
+                codex.as_deref(),
+                request_id,
+                account_id,
+                crate::accounts::SIGN_IN_WAIT,
+            )
+            .await
+        }
         ClientMessage::ListAccounts { .. }
         | ClientMessage::AddAccount { .. }
         | ClientMessage::ActivateAccount { .. } => {
             let store = daemon.store.clone();
             let request_id = crate::accounts::request_id(&message);
-            tokio::task::spawn_blocking(move || crate::accounts::answer(&store, message))
-                .await
-                .unwrap_or_else(|err| {
-                    crate::accounts::unavailable(request_id, "answer", anyhow::anyhow!("{err}"))
-                })
+            let reply =
+                tokio::task::spawn_blocking(move || crate::accounts::answer(&store, message))
+                    .await
+                    .unwrap_or_else(|err| {
+                        crate::accounts::unavailable(request_id, "answer", anyhow::anyhow!("{err}"))
+                    });
+            let environment = phone_environment();
+            let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
+            crate::accounts::with_signed_in(&environment, codex.as_deref(), reply).await
         }
         ClientMessage::GetProjectGit { path } => project_git(daemon, path).await,
         // Off the async workers: a read can wait on macOS asking the user.
@@ -1659,7 +1680,7 @@ fn offer_from(agent: &AgentKind, said: &[serde_json::Value]) -> Option<Offer> {
 
 /// Whether `login status` says the codex at `codex` is signed in. It reads the stored
 /// sign-in and starts nothing, so, unlike an ask, it leaves nothing behind.
-async fn codex_signed_in(
+pub(crate) async fn codex_signed_in(
     environment: &HashMap<OsString, OsString>,
     account: Option<&crate::accounts::AccountEnv>,
     codex: &Path,

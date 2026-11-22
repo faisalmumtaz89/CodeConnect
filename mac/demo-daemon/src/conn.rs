@@ -276,7 +276,8 @@ where
         | ClientMessage::ForgetFolderTrust { .. }
         | ClientMessage::ListAccounts { .. }
         | ClientMessage::AddAccount { .. }
-        | ClientMessage::ActivateAccount { .. } => {
+        | ClientMessage::ActivateAccount { .. }
+        | ClientMessage::SignInAccount { .. } => {
             send(
                 sink,
                 &ServerMessage::Error {

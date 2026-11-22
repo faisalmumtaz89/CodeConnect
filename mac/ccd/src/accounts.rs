@@ -243,9 +243,151 @@ fn listing(store: &crate::store::Store, request_id: String) -> protocol::ws::Ser
                 id: account.id,
                 agent: AgentKind::from_str_lossy(&account.agent),
                 label: account.label,
+                signed_in: None,
             })
             .collect(),
         active,
+    }
+}
+
+/// The sign-in a computer is running, by its number, and how to end it. One at a time: the agent's callback is one port.
+#[derive(Default)]
+pub(crate) struct SignIns {
+    going: std::sync::Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>>,
+    count: std::sync::atomic::AtomicU64,
+}
+
+/// How long a sign-in may wait for the person in the browser before its login is ended.
+pub(crate) const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// `reply`, an accounts listing, with each Codex account's `signed_in` as `codex login status` says with its home
+/// (`codex`, none when Codex is not here). Claude Code's accounts are not asked yet.
+pub(crate) async fn with_signed_in(
+    environment: &HashMap<OsString, OsString>,
+    codex: Option<&Path>,
+    mut reply: protocol::ws::ServerMessage,
+) -> protocol::ws::ServerMessage {
+    let (protocol::ws::ServerMessage::Accounts { accounts, .. }, Some(codex)) = (&mut reply, codex)
+    else {
+        return reply;
+    };
+    let root = protocol::root_dir();
+    for account in accounts
+        .iter_mut()
+        .filter(|account| account.agent == AgentKind::Codex)
+    {
+        let row = Account {
+            id: account.id.clone(),
+            agent: "codex".into(),
+            label: account.label.clone(),
+        };
+        if let Ok(Some(home)) = AccountEnv::for_account(&root, &row) {
+            account.signed_in =
+                Some(crate::start_session::codex_signed_in(environment, Some(&home), codex).await);
+        }
+    }
+    reply
+}
+
+/// Signs `account_id` in with its agent's own login on this computer, `codex` being Codex's path here, and answers
+/// once the login ends: the listing (`signed_in` as it then stands), or `sign_in_timed_out` after `wait`. A sign-in
+/// already going is ended first and its own request answered with the listing as it stands.
+pub(crate) async fn sign_in(
+    store: &crate::store::Store,
+    sign_ins: &SignIns,
+    environment: &HashMap<OsString, OsString>,
+    codex: Option<&Path>,
+    request_id: String,
+    account_id: String,
+    wait: std::time::Duration,
+) -> protocol::ws::ServerMessage {
+    let account = match store.accounts() {
+        Ok(accounts) => accounts
+            .into_iter()
+            .find(|account| account.id == account_id),
+        Err(err) => return unavailable(request_id, "read the accounts", err),
+    };
+    let Some(account) = account else {
+        return refused(
+            request_id,
+            "that is not one of this computer's accounts".into(),
+        );
+    };
+    if account.agent != "codex" {
+        return refused(
+            request_id,
+            "Claude Code's sign-in can't be started from here yet".into(),
+        );
+    }
+    let Some(codex) = codex else {
+        return refused(request_id, "Codex isn't installed on this computer".into());
+    };
+    let home = match AccountEnv::for_account(&protocol::root_dir(), &account) {
+        Ok(Some(home)) => home,
+        Ok(None) => {
+            return refused(
+                request_id,
+                "this account's agent has no sign-in here".into(),
+            )
+        }
+        Err(err) => return unavailable(request_id, "make the account's home", err.into()),
+    };
+    let (end, ended) = tokio::sync::oneshot::channel();
+    let mine = sign_ins
+        .count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some((_, earlier)) = sign_ins.going.lock().unwrap().replace((mine, end)) {
+        let _ = earlier.send(());
+    }
+    let mut login = crate::start_session::login_shell_command(
+        environment,
+        Some(&home),
+        &[codex.as_os_str(), std::ffi::OsStr::new("login")],
+    );
+    login
+        .current_dir(protocol::home_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let outcome = match login.spawn() {
+        Ok(mut child) => {
+            let outcome = tokio::select! {
+                _ = child.wait() => None,
+                _ = ended => None,
+                _ = tokio::time::sleep(wait) => Some(refused_as(
+                    request_id.clone(),
+                    "sign_in_timed_out",
+                    "the sign-in wasn't finished in the browser within ten minutes".into(),
+                )),
+            };
+            let _ = child.kill().await;
+            outcome
+        }
+        Err(err) => Some(unavailable(
+            request_id.clone(),
+            "start the sign-in",
+            err.into(),
+        )),
+    };
+    {
+        let mut going = sign_ins.going.lock().unwrap();
+        if going.as_ref().is_some_and(|(number, _)| *number == mine) {
+            *going = None;
+        }
+    }
+    if let Some(outcome) = outcome {
+        return outcome;
+    }
+    let listing = listing(store, request_id);
+    with_signed_in(environment, Some(codex), listing).await
+}
+
+fn refused_as(request_id: String, code: &str, message: String) -> protocol::ws::ServerMessage {
+    protocol::ws::ServerMessage::AccountsRefused {
+        request_id,
+        code: code.into(),
+        message,
     }
 }
 
@@ -275,6 +417,250 @@ mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::path::Path;
+
+    /// A stand-in codex in `dir`: `login` writes `auth.json` into its `CODEX_HOME` (or, while `dir/hang` exists,
+    /// writes its pid to `dir/pid` and waits); `login status` succeeds once that home has one.
+    fn stand_in_codex(dir: &Path) -> std::path::PathBuf {
+        let path = dir.join("codex");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nhere=$(dirname \"$0\")\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then [ -f \"$CODEX_HOME/auth.json\" ]; exit $?; fi\n\
+             if [ \"$1\" = login ]; then if [ -e \"$here/hang\" ]; then echo $$ > \"$here/pid\"; exec sleep 30; fi; echo '{}' > \"$CODEX_HOME/auth.json\"; fi\n",
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&path)
+            .status()
+            .unwrap();
+        path
+    }
+
+    /// Every entry under `dir`, with its kind and bytes, to compare a tree before and after.
+    fn tree(dir: &Path) -> Vec<(String, bool, Vec<u8>)> {
+        let mut out = Vec::new();
+        for entry in walk(dir) {
+            let meta = entry.symlink_metadata().unwrap();
+            let bytes = if meta.is_file() {
+                std::fs::read(&entry).unwrap()
+            } else {
+                Vec::new()
+            };
+            out.push((
+                entry.strip_prefix(dir).unwrap().display().to_string(),
+                meta.is_dir(),
+                bytes,
+            ));
+        }
+        out.sort();
+        out
+    }
+
+    fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                out.extend(walk(&path));
+            }
+            out.push(path);
+        }
+        out
+    }
+
+    /// **A sign-in writes only the account's own credential, and its listing says so** (306 Slice B, B1, B2): the
+    /// stand-in codex's login, run by the service with A's home, leaves the person's own Codex home and B's home as
+    /// they were; the reply names A signed in and B not.
+    #[tokio::test]
+    async fn a_sign_in_writes_only_its_own_credential() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-signin.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
+        std::fs::write(home.join(".codex").join("config.toml"), "x").unwrap();
+        let codex = stand_in_codex(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.clone().into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-signin");
+        let _db = store.temp_db();
+        let a = store.add_account("codex", "A").unwrap();
+        let b = store.add_account("codex", "B").unwrap();
+        let folder = |id: &str| protocol::root_dir().join("accounts").join("codex").join(id);
+        let person_before = tree(&home);
+        let reply = super::sign_in(
+            &store,
+            &super::SignIns::default(),
+            &environment,
+            Some(&codex),
+            "s1".into(),
+            a.id.clone(),
+            std::time::Duration::from_secs(20),
+        )
+        .await;
+        let reply = serde_json::to_value(&reply).unwrap();
+        assert_eq!(reply["type"], "accounts", "{reply}");
+        let signed = |id: &str| {
+            reply["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == id)
+                .unwrap()["signed_in"]
+                .clone()
+        };
+        assert_eq!(
+            (signed(&a.id), signed(&b.id)),
+            (serde_json::json!(true), serde_json::json!(false)),
+            "B2"
+        );
+        assert!(
+            folder(&a.id)
+                .join("auth.json")
+                .symlink_metadata()
+                .unwrap()
+                .is_file(),
+            "A's own credential"
+        );
+        assert!(
+            folder(&b.id).join("auth.json").symlink_metadata().is_err(),
+            "B untouched"
+        );
+        assert_eq!(
+            tree(&home),
+            person_before,
+            "B1: the person's home is as it was"
+        );
+        let _ = std::fs::remove_dir_all(folder(&a.id));
+        let _ = std::fs::remove_dir_all(folder(&b.id));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A sign-in not finished ends, and a new one replaces the one going** (306 Slice B, B3): a login that waits past
+    /// its bound is ended and refused `sign_in_timed_out`; a second sign-in ends the first's login, whose request is
+    /// answered with the listing as it stands, and runs its own.
+    #[tokio::test]
+    async fn a_sign_in_times_out_and_a_new_one_replaces_the_one_going() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-signin2.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let codex = stand_in_codex(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.clone().into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-signin2");
+        let _db = store.temp_db();
+        let a = store.add_account("codex", "A").unwrap();
+        let sign_ins = super::SignIns::default();
+        let gone = |pid: i32| async move {
+            for _ in 0..100 {
+                // SAFETY: kill(2) with signal 0 only asks whether the process exists.
+                if unsafe { libc::kill(pid, 0) } != 0 {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            false
+        };
+        let pid = || async {
+            for _ in 0..200 {
+                if let Some(pid) = std::fs::read_to_string(root.join("pid"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+                {
+                    return pid;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            panic!("the login never started");
+        };
+
+        std::fs::write(root.join("hang"), "").unwrap();
+        let late = super::sign_in(
+            &store,
+            &sign_ins,
+            &environment,
+            Some(&codex),
+            "s1".into(),
+            a.id.clone(),
+            std::time::Duration::from_millis(600),
+        )
+        .await;
+        let late = serde_json::to_value(&late).unwrap();
+        assert_eq!(
+            (late["type"].as_str(), late["code"].as_str()),
+            (Some("accounts_refused"), Some("sign_in_timed_out")),
+            "{late}"
+        );
+        assert!(gone(pid().await).await, "the timed-out login is ended");
+        std::fs::remove_file(root.join("pid")).unwrap();
+
+        let (first, second) = tokio::join!(
+            super::sign_in(
+                &store,
+                &sign_ins,
+                &environment,
+                Some(&codex),
+                "s2".into(),
+                a.id.clone(),
+                std::time::Duration::from_secs(20)
+            ),
+            async {
+                let first_pid = pid().await;
+                std::fs::remove_file(root.join("hang")).unwrap();
+                let second = super::sign_in(
+                    &store,
+                    &sign_ins,
+                    &environment,
+                    Some(&codex),
+                    "s3".into(),
+                    a.id.clone(),
+                    std::time::Duration::from_secs(20),
+                )
+                .await;
+                assert!(
+                    gone(first_pid).await,
+                    "the first login is ended by the second sign-in"
+                );
+                second
+            }
+        );
+        let (first, second) = (
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&second).unwrap(),
+        );
+        assert_eq!(
+            (first["type"].as_str(), first["request_id"].as_str()),
+            (Some("accounts"), Some("s2")),
+            "{first}"
+        );
+        assert_eq!(
+            (
+                second["type"].as_str(),
+                second["accounts"][0]["signed_in"].as_bool()
+            ),
+            (Some("accounts"), Some(true)),
+            "{second}"
+        );
+        let _ = std::fs::remove_dir_all(
+            protocol::root_dir()
+                .join("accounts")
+                .join("codex")
+                .join(&a.id),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// **A Codex account's home is the person's, but for its credential** (306 Slice A, gates A1–A3): after a launch's
     /// linking, the account sees the person's config; a file one account writes under `sessions/` is the other's too;

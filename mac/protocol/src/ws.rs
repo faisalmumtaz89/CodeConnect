@@ -416,6 +416,14 @@ pub enum ClientMessage {
         #[serde(default)]
         account_id: Option<String>,
     },
+    /// **Signs `account_id` in with its agent's own login, on this computer**: the agent opens the sign-in in a
+    /// browser here and waits for it. Answered with one [`ServerMessage::Accounts`] once the login ends (the account's
+    /// `signed_in` says how it went), or [`ServerMessage::AccountsRefused`]: `sign_in_timed_out` after ten minutes. A
+    /// new one replaces the one going (its request is answered as the list then stands). Codex only, for now.
+    SignInAccount {
+        request_id: String,
+        account_id: String,
+    },
     /// **The git worktrees and branches of one folder** (minor 29,
     /// `start_worktree`), answered with one [`ServerMessage::ProjectGit`]. Read
     /// only: nothing is fetched, written or run. `path` is absolute.
@@ -895,6 +903,9 @@ pub struct AgentAccount {
     pub id: String,
     pub agent: crate::agent::AgentKind,
     pub label: String,
+    /// Whether its agent says it is signed in, asked with the account's home; absent when not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
 }
 
 /// The account an agent's starts use now.
@@ -3081,6 +3092,7 @@ mod tests {
                 id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
                 agent: crate::agent::AgentKind::Codex,
                 label: "Work".into(),
+                signed_in: None,
             }],
             active: vec![ActiveAccount {
                 agent: crate::agent::AgentKind::Codex,
@@ -3093,6 +3105,34 @@ mod tests {
         assert_eq!(serde_json::to_value(&reply).unwrap(), expected);
         let decoded: ServerMessage = serde_json::from_value(expected.clone()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+
+        // A sign-in names the account; a listed account says whether it is signed in, when that is known.
+        round_trip_client(
+            ClientMessage::SignInAccount {
+                request_id: "a7".into(),
+                account_id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+            },
+            serde_json::json!({"type": "sign_in_account", "request_id": "a7",
+                "account_id": "01M80QGTWR9RCHBSJWR169GXCN"}),
+        );
+        let known = AgentAccount {
+            id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+            agent: crate::agent::AgentKind::Codex,
+            label: "Work".into(),
+            signed_in: Some(true),
+        };
+        assert_eq!(
+            serde_json::to_value(&known).unwrap(),
+            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work", "signed_in": true})
+        );
+        let older: AgentAccount = serde_json::from_value(
+            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work"}),
+        )
+        .unwrap();
+        assert_eq!(
+            older.signed_in, None,
+            "a listing without it reads not known"
+        );
 
         // A refusal names the request it answers.
         let refused = ServerMessage::AccountsRefused {

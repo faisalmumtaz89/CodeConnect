@@ -676,6 +676,7 @@ where
                         | ClientMessage::ListAccounts { .. }
                         | ClientMessage::AddAccount { .. }
                         | ClientMessage::ActivateAccount { .. }
+                        | ClientMessage::SignInAccount { .. }
                 ) {
                     if device_id.is_none() {
                         send(&mut sink, &ServerMessage::Error {
@@ -1002,6 +1003,7 @@ where
         | ClientMessage::ListAccounts { .. }
         | ClientMessage::AddAccount { .. }
         | ClientMessage::ActivateAccount { .. }
+        | ClientMessage::SignInAccount { .. }
         | ClientMessage::GetMachineStats => {}
         ClientMessage::RegisterPush {
             token,
