@@ -58,6 +58,9 @@ Each block starts from the repository root.
    push and then posts. The release's pin job refuses a commit whose status is
    not success. The status is posted only by the script, by the session that
    ran it on this Mac, for a commit on `main` or about to be; never by hand.
+   The unit target runs beside the suite's gate, each on its own simulator:
+   the suite takes as long as alone and its status comes about nine minutes
+   sooner, while both builds load the Mac heavily for their first minutes.
    The live classes run against a computer given by `TEST_RUNNER_CC_HOST` and
    `TEST_RUNNER_CC_TOKEN`, outside the gate:
 
