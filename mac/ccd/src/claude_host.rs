@@ -12167,6 +12167,25 @@ mod tests {
     /// A run on `rig` moved from A to B (306 Slice E): idle on A, B chosen, ended at once by its switch, its host
     /// gone and its socket closed. Its uid, its folder, the ended host's pid and B.
     async fn moved_to_b(rig: &mut Rig) -> (String, PathBuf, i32, crate::store::Account) {
+        let (uid, dir, old, b, _) = moved_to_b_recorded(rig, false).await;
+        (uid, dir, old, b)
+    }
+
+    /// [`moved_to_b`], recording the run's window from just before its switch when `record`.
+    #[allow(clippy::type_complexity)]
+    async fn moved_to_b_recorded(
+        rig: &mut Rig,
+        record: bool,
+    ) -> (
+        String,
+        PathBuf,
+        i32,
+        crate::store::Account,
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::task::JoinHandle<Vec<serde_json::Value>>,
+        )>,
+    ) {
         let a = rig.daemon.store.add_account("claude", "A").unwrap();
         let b = rig.daemon.store.add_account("claude", "B").unwrap();
         assert!(rig
@@ -12192,6 +12211,7 @@ mod tests {
             .store
             .activate_account("claude", Some(&b.id))
             .unwrap());
+        let window = record.then(|| crate::switch::window::record(&rig.daemon, &uid));
         crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
         assert!(
             matches!(next(&mut played.lines).await, Some(ToHost::Stop { .. })),
@@ -12210,7 +12230,7 @@ mod tests {
             dir, lines, write, ..
         } = played;
         drop((lines, write));
-        (uid, dir, old, b)
+        (uid, dir, old, b, window)
     }
 
     /// **A relaunch that cannot start on the new account does not end the run quietly** (306 S9): a run moved from A
@@ -12325,8 +12345,9 @@ mod tests {
     async fn end_run_on_a_moved_run_ends_it() {
         let _env = crate::ProcessEnvRead::take();
         let mut rig = relaunch_rig();
-        let (uid, _dir, _old, _b) = moved_to_b(&mut rig).await;
-        let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
+        // Recorded from just before the switch, so the window holds the switch's typed end and End's.
+        let (uid, _dir, _old, _b, window) = moved_to_b_recorded(&mut rig, true).await;
+        let (window_over, window) = window.unwrap();
         assert_eq!(
             stop_run(&rig.daemon, &uid).await,
             StopRunResult::AlreadyEnded
@@ -12351,7 +12372,9 @@ mod tests {
             .filter(|frame| frame["type"] == "event" && frame["event"]["kind"] == "session_end")
             .map(|frame| frame["event"]["payload"].clone())
             .collect();
-        assert_eq!(ends, [stopped_end()], "End files the end End run files");
+        assert_eq!(ends.len(), 2, "the switch's end, then End's: {ends:?}");
+        assert_eq!(ends[0]["switched_to"]["label"], "B", "{ends:?}");
+        assert_eq!(ends[1], stopped_end(), "End files the end End run files");
         crate::switch::window::keep(&frames, "switch-then-end-claude-wire.json");
     }
 
