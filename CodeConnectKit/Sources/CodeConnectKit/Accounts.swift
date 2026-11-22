@@ -161,14 +161,33 @@ public enum AccountSwitchWords {
         }
     }
 
-    /// In amber under the group: the sessions that couldn't start on `target`, named when one; nil with none.
+    /// In amber under the group: the sessions that couldn't start on `target`, named when one; nil with none. The
+    /// service's own sentence is in each conversation, where its warning row stands.
     public static func failure(to target: String, sessions: [String]) -> String? {
         switch sessions.count {
         case 0: return nil
-        case 1: return "\(sessions[0]) couldn't start on \(target)."
-        default: return "\(sessions.count) sessions couldn't start on \(target)."
+        case 1: return "\(sessions[0]) couldn't start on \(target). Its conversation says why."
+        default: return "\(sessions.count) sessions couldn't start on \(target). Their conversations say why."
         }
     }
+
+    /// A usage window's caption, from its own length as the service names it.
+    public static func caption(minutes: Int) -> String {
+        switch minutes {
+        case 300: "5-hour"
+        case 10080: "Week"
+        case let m where m % 1440 == 0: "\(m / 1440)-day"
+        case let m where m % 60 == 0: "\(m / 60)-hour"
+        default: "\(minutes)-minute"
+        }
+    }
+
+    /// In a row's figures' place: its agent says the plan has no limits.
+    public static let noPlanLimits = "No plan limits"
+    /// In a row's figures' place: its agent hasn't said yet.
+    public static let notReported = "Not reported yet"
+    /// A row's second line while its sign-in waits on the browser; the computer ends it after ten minutes.
+    public static let signingIn = "Finish signing in in your browser. This stops by itself after 10 minutes."
 
     /// A row's second line when another account is signed in as the same address.
     public static func sameSignIn(as email: String) -> String { "The same sign-in as \(email)" }
