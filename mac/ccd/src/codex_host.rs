@@ -2005,8 +2005,12 @@ async fn keep_plan(
 /// `kept`, a run's newest `codex_settings` fact, when it is narrower than the preset Default:
 /// Read Only or Plan as the apps read it ([`protocol::facts::codex_mode`]). A run whose Codex is
 /// started again comes back in that mode, and in Default otherwise, Full Access included
-/// (decisions 233 and 253).
-fn narrower_than_default(kept: Value) -> Option<Value> {
+/// (decisions 233 and 253); but one started again by a switch of account comes back as it was,
+/// Full Access included (decision 308).
+fn narrower_than_default(kept: Value, switched: bool) -> Option<Value> {
+    if switched {
+        return Some(kept);
+    }
     let text = |key: &str| kept[key].as_str().unwrap_or_default();
     matches!(
         protocol::facts::codex_mode(
@@ -2227,7 +2231,7 @@ async fn new_thread(
 /// narrower than Default ([`narrower_than_default`]: Read Only or Plan, put back before the
 /// message is sent) and at Default's approval and sandbox otherwise, Full Access included: a
 /// run never gains permissions by restarting, and a new app-server is not given Full Access
-/// (decisions 233 and 253). The run is then `live`, before its link is in
+/// (decisions 233 and 253), but by a switch of account, which comes back as it was (decision 308). The run is then `live`, before its link is in
 /// place, its start is filed under this launch so the apps' timeline reopens, and its [`link`]
 /// takes `ask` as its first command.
 ///
@@ -2419,7 +2423,7 @@ async fn launch_again(
         .newest_codex_settings(uid.clone())
         .await
         .map_err(|err| format!("could not read its settings: {err:#}"))?
-        .and_then(narrower_than_default);
+        .and_then(|kept| narrower_than_default(kept, ask.is_none()));
     let client = bring_up(daemon, uid, &launch, &folders, log, deadline, launched).await?;
     // The run's effort needs nothing here: Codex's own resume restores the thread's effort (seen on 0.170.0 on
     // 2026-11-22).
@@ -8249,6 +8253,13 @@ mod tests {
         let uid = started_uid(&result);
         row_once(&rig, &uid, Lifecycle::Live).await;
         link_attached(&rig.daemon, &uid).await;
+        // The person had set Full Access (decision 308: a switch keeps it).
+        tell(
+            &mut ws,
+            &settings_report("gpt-test", "high", "never", "dangerFullAccess", "default"),
+        )
+        .await;
+        settings_as_sent(&rig.daemon, &uid, "full-access").await;
         let leader = rig
             .daemon
             .db
@@ -8295,6 +8306,14 @@ mod tests {
         assert_eq!(
             resumed["params"]["threadId"], thread,
             "the same thread, resumed"
+        );
+        assert_eq!(
+            (
+                &resumed["params"]["approvalPolicy"],
+                &resumed["params"]["sandbox"]
+            ),
+            (&json!("never"), &json!("danger-full-access")),
+            "Full Access kept"
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         let settled = loop {

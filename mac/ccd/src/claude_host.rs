@@ -1323,12 +1323,13 @@ const MODES: [(&str, &str, bool); 4] = [
 /// since a new claude given none starts in the person's own `defaultMode`, which can be wider
 /// (decision 253); none for Bypass permissions, which comes back at that default and is
 /// turned on again only with a confirmation (decisions 214 and 215), and none for a mode the
-/// apps do not offer.
-fn relaunch_mode(kept: Option<String>) -> Option<String> {
+/// apps do not offer. A relaunch by a switch of account keeps the mode whatever it is, Bypass
+/// permissions included (decision 308): the person chose that mode for this session.
+fn relaunch_mode(kept: Option<String>, switched: bool) -> Option<String> {
     kept.filter(|kept| {
         MODES
             .iter()
-            .any(|(mode, _, confirm)| mode == kept && !confirm)
+            .any(|(mode, _, confirm)| mode == kept && (switched || !confirm))
     })
 }
 
@@ -1934,7 +1935,7 @@ const RELAUNCH_WAIT: Duration = Duration::from_secs(15);
 /// folder has since been answered not trusted; the mode the run was in when it is one an app
 /// may choose without the person's confirmation ([`relaunch_mode`]), so a run never gains
 /// permissions by starting again, and none otherwise, so a run in Bypass permissions comes
-/// back in the person's own default; and the message as its prompt under the send's uuid. One write moves the
+/// back in the person's own default (a switch's relaunch keeps even that, [`relaunch_mode`]); and the message as its prompt under the send's uuid. One write moves the
 /// run `exited` → `starting`, its host cleared, its cursor zeroed and that start line kept
 /// ([`crate::store::Store::begin_claude_relaunch`]), so a second message meets `starting`.
 /// The host is spawned into the run's folder and sent the start ([`bring_up`]); a failure
@@ -2040,10 +2041,14 @@ async fn relaunch(
             kept.model.clone()
         }
     };
-    // The run goes on with the settings it ended with: its model, its mode (but Bypass) and its effort.
+    // The run goes on with the settings it ended with: its model, its mode (but Bypass, unless a switch) and its
+    // effort.
     let (mode, effort) = match daemon.db.session_facts(uid.to_string()).await {
         Ok(facts) => (
-            relaunch_mode(facts.permission_mode.map(|fact| fact.value)),
+            relaunch_mode(
+                facts.permission_mode.map(|fact| fact.value),
+                request.is_none(),
+            ),
             facts.ended_with.map(|fact| fact.value),
         ),
         Err(err) => {
@@ -12042,6 +12047,17 @@ mod tests {
         sdk(&mut played.write, 3, init_in(&rig.root)).await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
         let session_id = capture()[2]["session_id"].as_str().unwrap().to_string();
+        // The person had put the session in Bypass permissions (decision 308: a switch keeps it).
+        sdk(
+            &mut played.write,
+            4,
+            serde_json::json!({"type": "system", "subtype": "status", "status": null,
+                "permissionMode": "bypassPermissions",
+                "uuid": "9d1f0000-0000-4000-8000-0000000002b1",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
 
         assert!(rig
             .daemon
@@ -12064,22 +12080,22 @@ mod tests {
 
         sdk(
             &mut played.write,
-            4,
+            5,
             serde_json::json!({"type": "result", "subtype": "success", "uuid": "r1",
                                "is_error": false, "num_turns": 1, "usage": {}}),
         )
         .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
         assert!(
             matches!(next(&mut played.lines).await, Some(ToHost::Stop { .. })),
             "stopped once its turn is over"
         );
         say(
             &mut played.write,
-            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+            serde_json::json!({"type": "exited", "seq": 6, "code": 0}),
         )
         .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 6 }));
         let between = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
         assert_eq!(
             (
@@ -12115,6 +12131,11 @@ mod tests {
             panic!("not a start: {:?}", relaunched.start);
         };
         assert_eq!(prompt, "", "no message");
+        assert_eq!(
+            options.permission_mode.as_deref(),
+            Some("bypassPermissions"),
+            "the mode kept"
+        );
         assert_eq!(
             options.resume.as_deref(),
             Some(session_id.as_str()),
