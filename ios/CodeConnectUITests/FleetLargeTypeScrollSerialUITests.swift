@@ -13,7 +13,7 @@ import XCTest
 /// several screens tall, and under `-CC_RENDER_PROBE`, so each pass proves it
 /// laid out at the size it asked for: a launch can silently fall back to `L`,
 /// where nothing here can fail.
-final class FleetLargeTypeScrollTimedUITests: XCTestCase {
+final class FleetLargeTypeScrollSerialUITests: XCTestCase {
 
     /// A blocked agent's row, at the top of the fleet.
     private let firstRow = "session-fx-1"

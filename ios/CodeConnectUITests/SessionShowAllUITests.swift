@@ -11,7 +11,7 @@ import XCTest
 ///
 /// Scrolling is coordinate drags in the trailing margin, for the reasons
 /// `SessionFollowUITests` gives.
-final class SessionShowAllTimedUITests: XCTestCase {
+final class SessionShowAllUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false

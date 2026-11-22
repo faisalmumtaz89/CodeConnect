@@ -1,12 +1,18 @@
 import XCTest
 
-/// What `FleetRowChangeUITests` and `FleetRowChangeTimedUITests` share: how they launch the app and find their way to the state each tests.
-class FleetRowChangeUITestsBase: XCTestCase {
+/// A change to a row reaches that row while the fleet is on screen.
+///
+/// A fleet row is redrawn only when what it draws has changed (`FleetRowCell`),
+/// so a fact the row draws but its comparison misses would freeze the row until
+/// something else about it changed. Every case here changes a row **after** it
+/// first drew and reads what the row then says.
+final class FleetRowChangeUITests: XCTestCase {
+
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
 
-    func launch(_ arguments: [String], signals: FixtureSignals? = nil) -> XCUIApplication {
+    private func launch(_ arguments: [String], signals: FixtureSignals? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments =
             arguments + [
@@ -18,27 +24,46 @@ class FleetRowChangeUITestsBase: XCTestCase {
         return app
     }
 
-    func row(_ app: XCUIApplication, _ key: String) -> XCUIElement {
+    private func row(_ app: XCUIApplication, _ key: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: "session-\(key)").firstMatch
     }
 
-    func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
-        }
-        return condition()
-    }
-}
+    /// The cards, `fx-4`'s finished turn and `fx-5`'s running one arrive after
+    /// the rows have drawn: the blocked rows gain their card and their clock
+    /// moves to it, and two rows change band. Before that, a blocked row's own
+    /// clock ticks.
+    func testWhatArrivesLaterReachesItsRows() {
+        let signals = FixtureSignals()
+        let app = launch(["-CC_FIXTURE", "stacked", "-CC_FIXTURE_LATE_APPROVALS", "YES"], signals: signals)
+        let high = row(app, "fx-1")
+        XCTAssertTrue(high.waitForExistence(timeout: 25), "the fleet")
+        XCTAssertFalse(high.label.contains("git push"), "no card yet: \(high.label)")
+        XCTAssertFalse(row(app, "fx-4").label.contains("Done"), row(app, "fx-4").label)
+        XCTAssertFalse(row(app, "fx-5").label.contains("Running"), row(app, "fx-5").label)
 
-/// A change to a row reaches that row while the fleet is on screen.
-///
-/// A fleet row is redrawn only when what it draws has changed (`FleetRowCell`),
-/// so a fact the row draws but its comparison misses would freeze the row until
-/// something else about it changed. Every case here changes a row **after** it
-/// first drew and reads what the row then says.
-final class FleetRowChangeUITests: FleetRowChangeUITestsBase {
+        let ticked = high.label
+        XCTAssertTrue(
+            waitUntil(timeout: 5) { high.label != ticked && !high.label.contains("git push") },
+            "the wait clock ticks on its own row: \(ticked)")
+
+        signals.send("late-approvals")
+        XCTAssertTrue(
+            waitUntil(timeout: 25) { high.label.contains("git push --force origin main") },
+            "the card reaches its row: \(high.label)")
+        XCTAssertTrue(high.label.contains("risk HIGH"), high.label)
+        XCTAssertTrue(
+            high.label.contains("waiting 1 minute"), "the clock counts from the card: \(high.label)")
+        XCTAssertTrue(
+            waitUntil(timeout: 5) { self.row(app, "fx-4").label.contains("Done") },
+            "fx-4's finished turn moves it to Done: \(row(app, "fx-4").label)")
+        XCTAssertTrue(
+            waitUntil(timeout: 5) {
+                let label = self.row(app, "fx-5").label
+                return label.contains("Running") && label.contains("--pass 8")
+            },
+            "fx-5's turn moves it to Running, on its last command: \(row(app, "fx-5").label)")
+    }
+
     /// A refused Stop says so in Stop's own place on its row, the daemon's
     /// sentence a tap away and Stop offered beside it: greyed for the
     /// refusal's cooldown, saying why, and then back.
@@ -64,5 +89,34 @@ final class FleetRowChangeUITests: FleetRowChangeUITestsBase {
         XCTAssertFalse(again.isEnabled, "the refusal greys Stop")
         XCTAssertTrue(reason.exists, "and says why")
         XCTAssertTrue(waitUntil(timeout: 15) { again.isEnabled }, "and Stop comes back")
+    }
+
+    /// The link drops and returns: the run's capability is unknown while it is
+    /// away and known again after, on the row.
+    func testCapabilityFollowsTheLinkOnItsRow() {
+        let signals = FixtureSignals()
+        let app = launch(["-CC_FIXTURE", "ended", "-CC_FIXTURE_LINK_DROP", "YES"], signals: signals)
+        let live = row(app, "fx-1")
+        XCTAssertTrue(live.waitForExistence(timeout: 25))
+        XCTAssertTrue(
+            waitUntil(timeout: 5) { live.label.hasSuffix("control") },
+            "a known capability is spoken: \(live.label)")
+        signals.send("link-drop")
+        XCTAssertTrue(
+            waitUntil(timeout: 15) { !live.label.hasSuffix("control") },
+            "while the link is down nothing is claimed: \(live.label)")
+        signals.send("link-return")
+        XCTAssertTrue(
+            waitUntil(timeout: 15) { live.label.hasSuffix("control") },
+            "and it is claimed again when the link returns: \(live.label)")
+    }
+
+    private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        return condition()
     }
 }

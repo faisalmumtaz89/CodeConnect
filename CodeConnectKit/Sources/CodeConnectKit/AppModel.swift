@@ -986,14 +986,14 @@ public final class AppModel {
             // on the test's `late-approvals` signal (`FixtureSignal`), in order —
             // held back whole rather than approvals alone, because a fixture that
             // skips ahead reads as a gap. `DeepLinkTests` and
-            // `FleetRowChangeTimedUITests` drive it.
+            // `FleetRowChangeUITests` drive it.
             let lateApprovals = UserDefaults.standard.bool(forKey: "CC_FIXTURE_LATE_APPROVALS")
             var frames = Fixtures.frames(variant: variant)
             // **`-CC_FIXTURE_LATE_EVENTS <n>` is events arriving while the
             // reader is on screen.** The stream's last `n` frames are held back
             // and delivered in stream order, the `i`th on the test's `late-<i>`
             // signal, so a UI test can act first and then see how each event is
-            // counted. `SessionShowAllTimedUITests` and `FleetRowRenderTimedUITests`
+            // counted. `SessionShowAllUITests` and `FleetRowRenderSerialUITests`
             // drive it.
             let lateEvents = UserDefaults.standard.integer(forKey: "CC_FIXTURE_LATE_EVENTS")
             if lateEvents > 0, frames.count >= lateEvents {

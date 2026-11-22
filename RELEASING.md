@@ -48,7 +48,7 @@ Each block starts from the repository root.
 
 1. **Gates.** Everything CI runs, and the whole iPhone UI suite on a Mac.
    CI runs no UI tests: a GitHub runner has no computer for the live classes,
-   and the timed ones' measurements hold on a Mac, not on a runner. The
+   and the serial ones' measurements hold on a Mac, not on a runner. The
    suite's gate is `ios/scripts/ui-suite-gate.sh <commit>`: in a clean
    checkout of exactly that commit it runs the whole suite, one test at a
    time, on a fresh iPhone 17 Pro with no computer given, so the live classes

@@ -1,8 +1,8 @@
 import XCTest
 
-/// `CardReorderUITests`'s tests that rest on time: a fixture clock set at launch, an elapsed-time budget or a long press.
-/// They run on this Mac before every release and are left off the CI runner, which is slower than they allow.
-final class CardReorderTimedUITests: CardReorderUITestsBase {
+/// `CardReorderUITests`'s test that measures time: a long press into a drag. It has a class of its own, the
+/// serial rule's (ios/README.md).
+final class CardReorderSerialUITests: CardReorderUITestsBase {
     func testADraggedCardKeepsItsPlaceAcrossALaunch() throws {
         let app = launch()
         let order = settled(app)

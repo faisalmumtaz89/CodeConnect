@@ -1,6 +1,6 @@
 import XCTest
 
-/// What `CardReorderUITests` and `CardReorderTimedUITests` share: how they launch the app and find their way to the state each tests.
+/// What `CardReorderUITests` and `CardReorderSerialUITests` share: how they launch the app and find their way to the state each tests.
 class CardReorderUITestsBase: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false

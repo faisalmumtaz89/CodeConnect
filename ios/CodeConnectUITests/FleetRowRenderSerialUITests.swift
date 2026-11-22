@@ -22,7 +22,7 @@ import XCTest
 /// counted as the tick's, so `testAnEventRedrawsOnlyItsOwnRow` can miss that
 /// one redraw: about one frame in sixty at 60 Hz, some 1.7% of runs. It can
 /// hide a redraw, never invent one, so it cannot fail a correct build.
-final class FleetRowRenderTimedUITests: XCTestCase {
+final class FleetRowRenderSerialUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
