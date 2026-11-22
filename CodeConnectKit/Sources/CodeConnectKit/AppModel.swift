@@ -1251,6 +1251,19 @@ public final class AppModel {
             failed: moving.filter { $0.switching == .failed }.map(\.projectLabel))
     }
 
+    /// Adds an account for `agent` and starts its sign-in in the browser at once; no name is asked of the person (an
+    /// account reads as its email once signed in). The name the computer keeps is composed: the agent's own name and the
+    /// next number no account of it bears, "Codex 2", within the computer's rule (1 to 64 characters, one per name).
+    @discardableResult
+    public func addAndSignIn(agent: StartAgent) async -> Bool {
+        let taken = Set(accountBook?.accounts(for: agent).map(\.label) ?? [])
+        let label = (2...).lazy.map { "\(agent.displayName) \($0)" }.first { !taken.contains($0) }!
+        guard await addAccount(agent: agent, label: label),
+            let added = accountBook?.accounts(for: agent).first(where: { $0.label == label })
+        else { return false }
+        return await signInAccount(accountID: added.id)
+    }
+
     /// Removes `accountID` (its agent signs it out first); true once the computer has removed it.
     @discardableResult
     public func removeAccount(accountID: String) async -> Bool {

@@ -421,4 +421,33 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertEqual(
             AccountSwitchWords.signingIn, "Finish signing in in your browser. This stops by itself after 10 minutes.")
     }
+
+    /// Add account… asks no name: the account is added under a composed name, the agent's own and the next number no
+    /// account of it bears, and its sign-in starts at once.
+    func testAddingAnAccountNamesItAndStartsItsSignIn() async throws {
+        let (model, sent) = try model()
+        let before = try book("list_after")
+        async let loaded: Void = model.loadAccounts()
+        await waitUntil({ sent.sent.count == 1 }, "the list to be sent")
+        model.connection.injectForTesting(.accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: before))
+        await loaded
+
+        async let added = model.addAndSignIn(agent: .codex)
+        await waitUntil({ sent.sent.count == 2 }, "the add to be sent")
+        guard case .addAccount(let addID, "codex", let label)? = sent.sent.last else { return XCTFail("\(String(describing: sent.sent.last))") }
+        XCTAssertEqual(label, "Codex 2", "Codex's only account is named Work, so 2 is free")
+        let id = "01M8NEWACCOUNT0000000000AB"
+        let after = try JSONDecoder().decode(ServerMessage.self, from: Data(#"""
+            {"type": "accounts", "request_id": "\#(addID)", "accounts": [
+              {"id": "01M80T9Q0VFB9FYGMSDGHYJ45K", "agent": "codex", "label": "Work"},
+              {"id": "\#(id)", "agent": "codex", "label": "Codex 2"}], "active": []}
+            """#.utf8))
+        model.connection.injectForTesting(after)
+        await waitUntil({ sent.sent.count == 3 }, "the sign-in to be sent")
+        guard case .signInAccount(_, let signing)? = sent.sent.last else { return XCTFail("\(String(describing: sent.sent.last))") }
+        XCTAssertEqual(signing, id)
+        model.connection.injectForTesting(.accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: try book("list_after")))
+        let wasAdded = await added
+        XCTAssertTrue(wasAdded)
+    }
 }

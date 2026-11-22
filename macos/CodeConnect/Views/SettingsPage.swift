@@ -450,12 +450,11 @@ private struct AccountSettings: View {
 /// each by the email its agent signs in as and its plan beneath; the share used of each window the agent names, in
 /// columns captioned on the group's title line; the row in use filled, with a check at its leading edge; a click on
 /// another uses it. "…" on hover (and a right-click) holds Sign In Again… on a signed-out row and Remove… on an added
-/// one. "Add account…" is the group's quiet last row. Under the group, a switch in progress in words.
+/// one. "Add account…" is the group's quiet last row: it adds an account and starts its sign-in in the browser at once,
+/// no name asked (the row reads its email once signed in). Under the group, a switch in progress in words.
 private struct AgentAccounts: View {
     let model: AppModel
     let agent: StartAgent
-    @State private var naming = false
-    @State private var name = ""
     @State private var removing: AgentAccount?
 
     /// The windows the agent names across its accounts, in the order it names them: the group's columns.
@@ -494,7 +493,7 @@ private struct AgentAccounts: View {
                             note: note(account, in: book), columns: columns, inUse: active == account.id,
                             remove: { removing = account })
                     }
-                    Button { name = ""; naming = true } label: {
+                    Button { Task { await model.addAndSignIn(agent: agent) } } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "plus").font(.system(size: 11, weight: .medium)).frame(width: AccountRow.lead)
                             Text("Add account…").font(Theme.ui(13))
@@ -520,19 +519,6 @@ private struct AgentAccounts: View {
                 if let sentence = move.sentence { line(sentence, Theme.text3, id: "switching") }
                 if let failure = move.failure { line(failure, Theme.amber, id: "switchFailed") }
             }
-        }
-        .confirmation(Binding(get: { naming ? true : nil }, set: { naming = $0 ?? false })) { _ in
-            Confirmation(
-                title: "Add a \(agent.displayName) account",
-                message: "Its name, 1 to 64 characters. New runs start on it once you choose it.",
-                answers: [
-                    .init(title: "Cancel", kind: .cancel, id: "settings.accounts.add.cancel"),
-                    .init(title: "Add", kind: .plain, id: "settings.accounts.add.confirm") {
-                        let label = name
-                        Task { await model.addAccount(agent: agent, label: label) }
-                    },
-                ],
-                field: .init(placeholder: "Name", text: $name))
         }
         .confirmation(Binding(get: { removing }, set: { removing = $0 })) { account in
             Confirmation(
@@ -631,6 +617,7 @@ private struct AccountRow: View {
                 in: RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
         }
+        .accessibilityIdentifier(rowID)
         .buttonStyle(.plain)
         .disabled(model.accountsBusy)
         .onHover { inside in
@@ -638,8 +625,6 @@ private struct AccountRow: View {
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
         .contextMenu { menuItems }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(rowID)
     }
 
     /// Its share used of each column's window, right-aligned, an empty cell where it names no such window; or, in
@@ -675,8 +660,11 @@ private struct AccountRow: View {
     @ViewBuilder private var menuItems: some View {
         if signedOut, let id {
             Button("Sign In Again…") { Task { await model.signInAccount(accountID: id) } }
+                .accessibilityIdentifier("\(rowID).signInAgain")
         }
-        if let remove { Button("Remove…", role: .destructive, action: remove) }
+        if let remove {
+            Button("Remove…", role: .destructive, action: remove).accessibilityIdentifier("\(rowID).remove")
+        }
     }
 
     private var menuButton: some View {
