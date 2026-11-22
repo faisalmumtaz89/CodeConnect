@@ -2435,6 +2435,8 @@ private struct RunFacts: View {
 
 /// In an ended run's reply box's place: a hairline, then the run's end said
 /// quietly, a check mark on the text's first line (`SessionWords.runEnded`).
+/// It keeps the room the box keeps above itself (`SessionComposeBar`), so the
+/// settings line over it stands as clear of it as of the box.
 private struct EndedLine: View {
     var body: some View {
         VStack(spacing: 0) {
@@ -2453,6 +2455,7 @@ private struct EndedLine: View {
             .padding(.vertical, CC.space.sm)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(.top, CC.space.xs)
         .background(CC.color.bg)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("session-ended-line")
