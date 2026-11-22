@@ -4596,7 +4596,14 @@ impl Daemon {
                 pending,
                 model: facts.and_then(|facts| facts.model.clone()),
                 permission_mode: facts.and_then(|facts| facts.permission_mode.clone()),
-                effort: facts.and_then(|facts| facts.effort.clone()),
+                // An ended run names the effort its process ended with; any other, the effort its process has now.
+                effort: facts.and_then(|facts| {
+                    if row.lifecycle == Lifecycle::Exited {
+                        facts.ended_with.clone()
+                    } else {
+                        facts.effort.clone()
+                    }
+                }),
                 menus: menus.get(&row.session_uid).cloned(),
                 model_label: None,
                 // Read from the cache `refresh_tree` fills, never from git here:

@@ -11509,6 +11509,108 @@ mod tests {
         stop(&played.dir);
     }
 
+    /// **An ended run names the effort its process ended with; a relaunched process never inherits it** (decision
+    /// 210, narrowed). A run ends at High: while it is ended its summary says High. A message relaunches it and the
+    /// new process names no effort: live again, the summary names none (Default), and when that process ends
+    /// without naming one, the ended run names none either: High is never carried across the relaunch.
+    #[tokio::test]
+    async fn an_ended_run_names_the_effort_it_ended_with_and_a_relaunch_never_inherits_it() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = relaunch_rig();
+        let effort =
+            |summary: protocol::event::SessionSummary| summary.effort.map(|fact| fact.value);
+        let ended = |rig: &Rig, uid: String| {
+            let daemon = Arc::clone(&rig.daemon);
+            async move {
+                for _ in 0..200 {
+                    let now = summary(&daemon, &uid).await;
+                    if now.lifecycle != Lifecycle::Live {
+                        return now;
+                    }
+                    tokio::time::sleep(POLL).await;
+                }
+                panic!("the run did not end");
+            }
+        };
+        let mut played = live_run_on(&rig, &rig.root.join("stub-host")).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        tokio::join!(
+            rig.daemon.set_setting(&uid, set_model(None, Some("high"))),
+            host_answers_setting(&mut played, 4, "done", None)
+        );
+        assert_eq!(
+            effort(summary(&rig.daemon, &uid).await).as_deref(),
+            Some("high")
+        );
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        assert_eq!(
+            effort(ended(&rig, uid.clone()).await).as_deref(),
+            Some("high"),
+            "ended at High"
+        );
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        assert_eq!(
+            effort(summary(&restarted, &uid).await).as_deref(),
+            Some("high"),
+            "read back after a restart"
+        );
+
+        let dir = played.dir.clone();
+        let (_, mut played) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-again", "carry on"),
+            async {
+                let mut played = play_relaunched(&dir, old).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                   "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        assert_eq!(summary(&rig.daemon, &uid).await.lifecycle, Lifecycle::Live);
+        assert_eq!(
+            effort(summary(&rig.daemon, &uid).await),
+            None,
+            "the relaunched process is at its default"
+        );
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 3, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let again = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(again).await;
+        assert_eq!(
+            effort(ended(&rig, uid.clone()).await),
+            None,
+            "it ended naming none: never the old High"
+        );
+        let restarted = daemon_on(&rig.root);
+        restarted.recover().await;
+        assert_eq!(
+            effort(summary(&restarted, &uid).await),
+            None,
+            "nor after a restart"
+        );
+    }
+
     /// **A relaunch names the mode the run was in, but Bypass permissions** (decision 253): a
     /// run in Plan, Ask before edits or Accept edits whose claude ended on its own starts again
     /// in that mode, so a new claude does not start in the person's own default, which can be

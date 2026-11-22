@@ -53,6 +53,9 @@ pub struct SessionFacts {
     /// restates the model and the mode but not the effort, so an effort decided before
     /// the end no longer holds.
     pub ended: u64,
+    /// The effort the run's process held when its newest end came: what the ended run shows. None when that process
+    /// named none. Kept only by an in-order fold, as the live path folds; an effort folded after its end is left out.
+    pub ended_with: Option<Fact>,
 }
 
 impl SessionFacts {
@@ -75,12 +78,13 @@ impl SessionFacts {
         }
         if event.kind == EventKind::SessionEnd && event.seq > self.ended {
             self.ended = event.seq;
+            self.ended_with = None;
             if self
                 .effort
                 .as_ref()
                 .is_some_and(|held| held.seq < self.ended)
             {
-                self.effort = None;
+                self.ended_with = self.effort.take();
             }
         }
         if let Some(fact) = effort_fact(event) {
@@ -629,6 +633,49 @@ mod tests {
                 value: "low".into(),
                 seq: 8
             })
+        );
+    }
+
+    /// **The effort a run's process ended with is kept for the ended run** (decision 210, narrowed): High at the end
+    /// is `ended_with`; a relaunched process that names none ends with none, never the earlier High. Folded in order,
+    /// as the live path folds; an effort folded after its end is left out (Default), the safe side.
+    #[test]
+    fn the_effort_a_process_ended_with_is_kept_and_never_carried_on() {
+        let effort = |seq, level: &str| {
+            event(
+                seq,
+                EventKind::Notification,
+                Source::Daemon,
+                json!({"notification_type": "model_set", "effort": level}),
+            )
+        };
+        let end = |seq| {
+            event(
+                seq,
+                EventKind::SessionEnd,
+                Source::Daemon,
+                json!({"exit_code": 1}),
+            )
+        };
+        let mut facts = SessionFacts::default();
+        facts.observe(&effort(3, "high"));
+        facts.observe(&end(5));
+        assert_eq!(
+            facts.ended_with,
+            Some(Fact {
+                value: "high".into(),
+                seq: 3
+            })
+        );
+        assert_eq!(facts.effort, None);
+        facts.observe(&end(9));
+        assert_eq!(facts.ended_with, None, "the relaunched process named none");
+        let mut late = SessionFacts::default();
+        late.observe(&end(5));
+        late.observe(&effort(3, "high"));
+        assert_eq!(
+            late.ended_with, None,
+            "an effort folded after its end is left out"
         );
     }
 
