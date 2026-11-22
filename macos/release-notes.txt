@@ -1,1 +1,1 @@
-The start form’s model and branch menus stay inside the form at small window sizes, the model menu scrolls instead of running past the top of the window, and the model button names its model whole.
+When you have not chosen an effort, the reply row and the settings name the model’s own default effort and mark it as the default; choosing it makes it yours. An ended conversation that cannot be continued names the effort it ended with in its header.
