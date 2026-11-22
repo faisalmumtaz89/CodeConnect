@@ -204,6 +204,14 @@ struct MainWindow: View {
             chosen = nil
             // A run opened shows, even with its pane hidden; with none open, the list shows again.
             if opened != nil { runHidden = false } else { listHidden = false }
+            // The start's own run, opened from the list as it launches: the start is done, so New Agent shows a fresh
+            // form rather than the start's progress opening it again.
+            if let opened, let id = startDraft.sent?.requestID,
+                case .started(let uid, _)? = machines.models.lazy.compactMap({ $0.starter.starts[id] }).first?.outcome,
+                uid == opened
+            {
+                startDraft.didOpen()
+            }
         }
         // A computer removed, here or from Settings: the list lets go of its narrowing to it and of its run, which
         // has left the list with it.

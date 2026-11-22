@@ -78,9 +78,22 @@ struct StartForm: View {
         return (start, owner)
     }
 
+    /// What the form asks now, once it can ask anything.
+    private var ask: StartDraft.Ask? {
+        guard let context, let folder, let pick else { return nil }
+        return StartDraft.Ask(
+            computerID: context.id, folderPath: folder.path, place: startPlace, agent: pick.agent, model: pick.model,
+            message: draft.message)
+    }
+
+    /// The draft's page: the sent start found on its computer, or let go when that computer is gone.
+    private var phase: StartDraft.Phase {
+        draft.phase(outcome: sentStart?.start.outcome, asking: ask, computerKnown: sentStart != nil)
+    }
+
     /// Start can be pressed: the form is composing, nothing blocks it, no ask is up and none of its panels is open.
     private var startable: Bool {
-        draft.phase(outcome: sentStart?.start.outcome) == .composing && blocked == nil && !asks.isAsking
+        phase == .composing && blocked == nil && !asks.isAsking
             && !folderOpen && !computerMenuOpen && !menuOpen && !branchMenuOpen
     }
 
@@ -128,7 +141,7 @@ struct StartForm: View {
         Group {
             // The draft's page: the form while composing, else the sent start's page in the form's column, as tall as
             // its content.
-            if let sentStart, draft.phase(outcome: sentStart.start.outcome) != .composing {
+            if let sentStart, phase != .composing {
                 sent(sentStart.start, on: sentStart.owner)
                     .frame(maxWidth: Self.column)
                     .fixedSize(horizontal: false, vertical: true)
@@ -303,11 +316,8 @@ struct StartForm: View {
     /// Start: the withdrawn start again under its own id when the form asks exactly what it asked, else a new start
     /// (`StartDraft.send`), so one ask never runs twice.
     private func start() {
-        guard startable, let context, let folder, let pick else { return }
-        let ask = StartDraft.Ask(
-            computerID: context.id, folderPath: folder.path, place: startPlace, agent: pick.agent, model: pick.model,
-            message: draft.message)
-        switch draft.send(for: ask, outcome: sentStart?.start.outcome) {
+        guard startable, let context, let folder, let pick, let ask else { return }
+        switch draft.send(for: ask, outcome: sentStart?.start.outcome, computerKnown: sentStart != nil) {
         case .resume(let requestID):
             context.resume(requestID)
             draft.didResume()

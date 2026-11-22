@@ -87,8 +87,10 @@ public final class StartDraft {
         choices[computer] = each
     }
 
-    /// A folder the person picks starts in the folder as it is, until they choose a place in it.
+    /// A folder the person picks starts in the folder as it is, until they choose a place in it. The same folder again
+    /// changes nothing.
     public func chooseFolder(_ path: String?, on computer: String) {
+        guard choices(on: computer).folderPath != path else { return }
         edit(on: computer) {
             $0.folderPath = path
             $0.query = ""
@@ -97,11 +99,14 @@ public final class StartDraft {
         }
     }
 
-    /// The page for the sent start's answer (`outcome`, the computer's for `sent`). A withdrawn start shows the form
-    /// again while it has no answer, and also after an answer that started nothing; one that started after all is
-    /// opened, as the draft still asks for exactly it.
-    public func phase(outcome: StartOutcome?) -> Phase {
-        guard let sent else { return .composing }
+    /// The page for the sent start's answer (`outcome`, the computer's for `sent`), given what the form asks now
+    /// (`asking`) and whether the start's computer is still one of the app's (`computerKnown`). A start whose computer
+    /// was removed is let go. A withdrawn start shows the form again while it has no answer, and after an answer that
+    /// started nothing; it is let go the moment the form asks anything else, so it never takes the form over again.
+    /// One that started after all while the form still asks exactly it is opened.
+    public func phase(outcome: StartOutcome?, asking: Ask?, computerKnown: Bool) -> Phase {
+        guard let sent, computerKnown else { return .composing }
+        if sent.withdrawn, asking != sent.ask { return .composing }
         switch outcome {
         case .started(let uid, _)?: return .started(sessionUID: uid)
         case nil: return sent.withdrawn ? .composing : .sending
@@ -112,8 +117,8 @@ public final class StartDraft {
 
     /// What Start sends for `ask`: the withdrawn start again when it asks exactly this and has no answer yet, else a
     /// new start.
-    public func send(for ask: Ask, outcome: StartOutcome?) -> Send {
-        guard let sent, sent.withdrawn, outcome == nil, sent.ask == ask else { return .new }
+    public func send(for ask: Ask, outcome: StartOutcome?, computerKnown: Bool) -> Send {
+        guard let sent, computerKnown, sent.withdrawn, outcome == nil, sent.ask == ask else { return .new }
         return .resume(requestID: sent.requestID)
     }
 
