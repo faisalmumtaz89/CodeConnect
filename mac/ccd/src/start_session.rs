@@ -1426,23 +1426,41 @@ async fn claude_path(
     let path_hits = login_path_hits(environment, &home, "claude").await;
     let launcher = crate::state::codex_launcher().ok();
     protocol::claude_bin::first_runnable(
-        not_installed_in_tests(protocol::claude_bin::candidates(
-            claude_bin, &home, path_hits,
-        )),
+        not_installed_in_tests(
+            protocol::claude_bin::candidates(claude_bin, &home, path_hits.clone()),
+            claude_bin,
+            &path_hits,
+        ),
         launcher.as_deref(),
     )
 }
 
-/// `candidates` as a run takes them; in a test, without the computer's own install locations, so no test ever runs
-/// an agent installed on the computer: only one it names, one on its fenced `PATH`, or one in its own home.
-fn not_installed_in_tests(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
+/// `candidates` as a run takes them; in a test, only the one it names (`configured`), one on its fenced `PATH`
+/// (`path_hits`) and one in a temporary folder (a test's own home): never the computer's install locations nor a
+/// person's own home, so no test runs an agent installed there, whatever `HOME` it was given.
+fn not_installed_in_tests(
+    candidates: Vec<PathBuf>,
+    configured: Option<&str>,
+    path_hits: &[PathBuf],
+) -> Vec<PathBuf> {
     #[cfg(test)]
-    let candidates = candidates
-        .into_iter()
-        .filter(|candidate| {
-            !candidate.starts_with("/opt/homebrew") && !candidate.starts_with("/usr/local")
-        })
-        .collect();
+    let candidates = {
+        let temporary = [
+            std::env::temp_dir(),
+            PathBuf::from("/tmp"),
+            PathBuf::from("/private/tmp"),
+        ];
+        candidates
+            .into_iter()
+            .filter(|candidate| {
+                configured.is_some_and(|configured| candidate == Path::new(configured))
+                    || path_hits.contains(candidate)
+                    || temporary.iter().any(|folder| candidate.starts_with(folder))
+            })
+            .collect()
+    };
+    #[cfg(not(test))]
+    let _ = (configured, path_hits);
     candidates
 }
 
@@ -1457,7 +1475,11 @@ pub(crate) async fn codex_path(
     let path_hits = login_path_hits(environment, &home, "codex").await;
     let launcher = crate::state::codex_launcher().ok();
     protocol::claude_bin::first_runnable(
-        not_installed_in_tests(protocol::codex_bin::candidates(codex_bin, &home, path_hits)),
+        not_installed_in_tests(
+            protocol::codex_bin::candidates(codex_bin, &home, path_hits.clone()),
+            codex_bin,
+            &path_hits,
+        ),
         launcher.as_deref(),
     )
 }
@@ -1546,17 +1568,13 @@ async fn probe_output(
     account: Option<&crate::accounts::AccountEnv>,
     args: &[&OsStr],
 ) -> Option<std::process::Output> {
-    let mut command = login_shell_command(environment, account, args);
+    let mut command = agent_command(environment, account, args);
     command
         .current_dir(home_in(environment))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    tokio::time::timeout(PROBE_TIMEOUT, command.output())
-        .await
-        .ok()?
-        .ok()
+        .stderr(Stdio::null());
+    agent_output(command, PROBE_TIMEOUT).await
 }
 
 /// The home folder `environment` names, else this daemon's.
@@ -1728,15 +1746,14 @@ async fn ask(
     };
     let mut args = program.to_vec();
     args.extend(flags.iter().map(OsStr::new));
-    let mut command = login_shell_command(environment, account, &args);
+    let mut command = agent_command(environment, account, &args);
     command
         .current_dir(home_in(environment))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
+        .stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
     let asked = async {
-        let mut child = command.spawn().ok()?;
         let mut stdin = child.stdin.take()?;
         stdin.write_all(asking.as_bytes()).await.ok()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
@@ -1754,7 +1771,15 @@ async fn ask(
         }
         offer_from(agent, &said)
     };
-    tokio::time::timeout(PROBE_TIMEOUT, asked).await.ok()?
+    let offer = tokio::time::timeout(PROBE_TIMEOUT, asked)
+        .await
+        .ok()
+        .flatten();
+    // A signed-in app-server keeps running, and one that did not answer is ended too, with what it started.
+    if *agent != AgentKind::Claude || offer.is_none() {
+        end_agent(&mut child).await;
+    }
+    offer
 }
 
 /// Whether `said` holds every answer `agent` gives to the ask: for Codex, its
@@ -1830,7 +1855,7 @@ pub(crate) async fn codex_signed_in(
     account: Option<&crate::accounts::AccountEnv>,
     codex: &Path,
 ) -> bool {
-    let mut command = login_shell_command(
+    let mut command = agent_command(
         environment,
         account,
         &[codex.as_os_str(), OsStr::new("login"), OsStr::new("status")],
@@ -1839,12 +1864,10 @@ pub(crate) async fn codex_signed_in(
         .current_dir(protocol::home_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    matches!(
-        tokio::time::timeout(PROBE_TIMEOUT, command.status()).await,
-        Ok(Ok(status)) if status.success()
-    )
+        .stderr(Stdio::null());
+    agent_output(command, PROBE_TIMEOUT)
+        .await
+        .is_some_and(|output| output.status.success())
 }
 
 /// `args` run through the user's login shell, as one argv each, never one string,
@@ -1886,6 +1909,91 @@ pub(crate) fn login_shell_command(
         .args(account.map(|account| account.argv()).into_iter().flatten())
         .args(args);
     command
+}
+
+/// `args`, an agent's program, run through the user's login shell ([`login_shell_command`]) in a session of its own,
+/// so ending it ends what it started: Codex's npm launcher runs its native program as a child and passes on only some
+/// signals. Every agent process ccd starts but a run's host ([`spawn_detached`], which lives on) is started here and,
+/// when it is not let end by itself, ended by [`end_agent`].
+pub(crate) fn agent_command(
+    environment: &HashMap<OsString, OsString>,
+    account: Option<&crate::accounts::AccountEnv>,
+    args: &[&OsStr],
+) -> tokio::process::Command {
+    let mut command = login_shell_command(environment, account, args);
+    command.kill_on_drop(true);
+    // SAFETY: `setsid` is async-signal-safe and touches nothing of the parent's.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
+}
+
+/// The agent process `child` ([`agent_command`]) and everything it started, ended as a run host's group is: SIGTERM,
+/// then SIGKILL after the grace ([`crate::claude_host::stop_group`]), the leader reaped meanwhile.
+pub(crate) async fn end_agent(child: &mut tokio::process::Child) {
+    // Only a process leading its own group (as `agent_command` starts one) is ended by its group.
+    let leader = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        // SAFETY: getpgid(2) only reads the process's group.
+        .filter(|pid| unsafe { libc::getpgid(*pid) } == *pid)
+        .and_then(|pid| Some((pid, protocol::proc_identity::read_birth_identity(pid)?)))
+        .zip(protocol::proc_identity::boot_identity());
+    match leader {
+        Some(((pid, birth), boot)) => {
+            let _ = tokio::join!(
+                crate::claude_host::stop_group(
+                    protocol::proc_identity::ProcessIdentity { pid, birth },
+                    boot
+                ),
+                child.wait()
+            );
+        }
+        None => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+    }
+}
+
+/// `command` ([`agent_command`]) run to its end within `wait`, with what it printed; past `wait`, its group is ended
+/// and there is none.
+pub(crate) async fn agent_output(
+    mut command: tokio::process::Command,
+    wait: std::time::Duration,
+) -> Option<std::process::Output> {
+    async fn all<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut pipe, &mut bytes).await;
+        }
+        bytes
+    }
+    let mut child = command.spawn().ok()?;
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    let ran = tokio::time::timeout(wait, async {
+        let (stdout, stderr) = tokio::join!(all(stdout), all(stderr));
+        let status = child.wait().await.ok()?;
+        Some(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    })
+    .await;
+    match ran {
+        Ok(output) => output,
+        Err(_) => {
+            end_agent(&mut child).await;
+            None
+        }
+    }
 }
 
 /// `args` run as a run's agent host: through the user's login shell
@@ -5039,23 +5147,48 @@ esac"#;
     }
 
     /// **No test can reach an agent installed on the computer**: the places a test looks for codex or claude are the
-    /// one it names, its fenced `PATH` and its own home, never the computer's install locations (Homebrew's,
-    /// `/usr/local`), which exist on a developer's Mac and are not the rig's to hide.
+    /// one it names, its fenced `PATH` and a temporary home of its own, never the computer's install locations
+    /// (Homebrew's, `/usr/local`) nor a person's own home, which a bare `cargo test` would be given.
     #[test]
     fn no_test_looks_in_the_computers_install_locations() {
-        let home = Path::new("/rig-home");
-        for candidates in [
-            not_installed_in_tests(protocol::codex_bin::candidates(None, home, Vec::new())),
-            not_installed_in_tests(protocol::claude_bin::candidates(None, home, Vec::new())),
-        ] {
-            assert!(!candidates.is_empty());
-            assert!(
-                candidates
-                    .iter()
-                    .all(|candidate| candidate.starts_with(home)),
-                "{candidates:?}"
-            );
-        }
+        // A person's own home, as a bare `cargo test` would be given, and a test's own temporary one.
+        let person = Path::new("/Users/person");
+        let rig = std::env::temp_dir().join("rig-home");
+        let codex = not_installed_in_tests(
+            protocol::codex_bin::candidates(None, person, Vec::new()),
+            None,
+            &[],
+        );
+        let claude = not_installed_in_tests(
+            protocol::claude_bin::candidates(None, person, Vec::new()),
+            None,
+            &[],
+        );
+        assert_eq!(
+            (codex, claude),
+            (Vec::new(), Vec::new()),
+            "nothing of the computer's or the person's"
+        );
+        let kept = not_installed_in_tests(
+            protocol::codex_bin::candidates(None, &rig, Vec::new()),
+            None,
+            &[],
+        );
+        assert_eq!(
+            kept,
+            [rig.join(".local/bin/codex")],
+            "a test's own home is searched"
+        );
+        let named = not_installed_in_tests(
+            protocol::codex_bin::candidates(Some("/opt/stand-in/codex"), person, Vec::new()),
+            Some("/opt/stand-in/codex"),
+            &[],
+        );
+        assert_eq!(
+            named,
+            [PathBuf::from("/opt/stand-in/codex")],
+            "the one a test names"
+        );
     }
 
     /// **A codex that cannot be found is not available**, with the sentence that says

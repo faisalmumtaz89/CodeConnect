@@ -389,7 +389,7 @@ pub(crate) async fn read_facts(
         r#"{"id":3,"method":"account/rateLimits/read","params":{}}"#,
         "\n",
     );
-    let mut command = crate::start_session::login_shell_command(
+    let mut command = crate::start_session::agent_command(
         environment,
         account,
         &[codex.as_os_str(), std::ffi::OsStr::new("app-server")],
@@ -398,10 +398,9 @@ pub(crate) async fn read_facts(
         .current_dir(protocol::home_dir())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
+        .stderr(std::process::Stdio::null());
+    let mut child = command.spawn().ok()?;
     let asked = async {
-        let mut child = command.spawn().ok()?;
         let mut stdin = child.stdin.take()?;
         stdin.write_all(asking.as_bytes()).await.ok()?;
         let mut lines = tokio::io::BufReader::new(child.stdout.take()?).lines();
@@ -444,7 +443,10 @@ pub(crate) async fn read_facts(
             read_at: protocol::time::now_rfc3339(),
         })
     };
-    tokio::time::timeout(FACTS_WAIT, asked).await.ok()?
+    let facts = tokio::time::timeout(FACTS_WAIT, asked).await.ok().flatten();
+    // A signed-in app-server keeps running: it is ended, with what it started, answered or not.
+    crate::start_session::end_agent(&mut child).await;
+    facts
 }
 
 /// How a sign-in going is ended: it is sent where to say its login's group is gone.
@@ -567,7 +569,8 @@ pub(crate) async fn sign_in(
             )
         }
     };
-    let mut login = crate::start_session::login_shell_command(
+    // In a group of its own, so ending it ends what it started ([`crate::start_session::agent_command`]).
+    let mut login = crate::start_session::agent_command(
         environment,
         Some(&home),
         &[codex.as_os_str(), std::ffi::OsStr::new("login")],
@@ -576,19 +579,7 @@ pub(crate) async fn sign_in(
         .current_dir(protocol::home_dir())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    // In a group of its own, so ending it ends what it started: a launcher (Codex's npm one) runs the login as its
-    // child and passes on only some signals.
-    // SAFETY: `setsid` is async-signal-safe and touches nothing of the parent's.
-    unsafe {
-        login.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+        .stderr(std::process::Stdio::null());
     let (end, ended) = tokio::sync::oneshot::channel::<tokio::sync::oneshot::Sender<()>>();
     let mine = sign_ins
         .count
@@ -621,11 +612,6 @@ pub(crate) async fn sign_in(
             );
         }
     };
-    let leader = child
-        .id()
-        .and_then(|pid| i32::try_from(pid).ok())
-        .and_then(|pid| Some((pid, protocol::proc_identity::read_birth_identity(pid)?)))
-        .zip(protocol::proc_identity::boot_identity());
     let running = {
         let sign_ins = Arc::clone(sign_ins);
         tokio::spawn(async move {
@@ -635,23 +621,8 @@ pub(crate) async fn sign_in(
                 ending = ended => told = ending.ok(),
                 _ = tokio::time::sleep(wait) => {}
             }
-            // Its group ended as a run host's is: SIGTERM, then SIGKILL after the grace (`stop_group`), the login
-            // reaped meanwhile so the group empties as soon as it ends.
-            match leader {
-                Some(((pid, birth), boot)) => {
-                    let _ = tokio::join!(
-                        crate::claude_host::stop_group(
-                            protocol::proc_identity::ProcessIdentity { pid, birth },
-                            boot
-                        ),
-                        child.wait()
-                    );
-                }
-                None => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                }
-            }
+            // Its group ended as a run host's is ([`crate::start_session::end_agent`]).
+            crate::start_session::end_agent(&mut child).await;
             sign_ins.forget(mine);
             if let Some(told) = told {
                 let _ = told.send(());
@@ -769,7 +740,7 @@ pub(crate) async fn remove_with(
         }
         Err(err) => return unavailable(request_id, "find the account's home", err.into()),
     };
-    let mut logout = crate::start_session::login_shell_command(
+    let mut logout = crate::start_session::agent_command(
         environment,
         Some(&home),
         &[codex.as_os_str(), std::ffi::OsStr::new("logout")],
@@ -778,11 +749,8 @@ pub(crate) async fn remove_with(
         .current_dir(protocol::home_dir())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    if let Ok(mut child) = logout.spawn() {
-        let _ = tokio::time::timeout(LOGOUT_WAIT, child.wait()).await;
-    }
+        .stderr(std::process::Stdio::null());
+    let _ = crate::start_session::agent_output(logout, LOGOUT_WAIT).await;
     if home.folder().join("auth.json").symlink_metadata().is_ok() {
         return refused_as(
             request_id,
@@ -843,6 +811,7 @@ mod tests {
             "#!/bin/sh\nhere=$(dirname \"$0\")\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then [ -f \"$CODEX_HOME/auth.json\" ] || [ -f \"$here/keyring-login\" ]; exit $?; fi\n\
              if [ \"$1\" = login ] && [ -e \"$here/keyring\" ]; then echo '{}' > \"$here/keyring-login\"; exit 0; fi\n\
              if [ \"$1\" = login ]; then if [ -e \"$here/hang\" ]; then sleep 30 & kid=$!; echo $kid > \"$here/kid\"; echo $$ > \"$here/pid\"; trap 'kill -TERM $kid; exit 0' TERM; wait; fi; echo '{}' > \"$CODEX_HOME/auth.json\"; fi\n\
+             if [ \"$1\" = app-server ] && [ -e \"$here/hangfacts\" ]; then sleep 120 & kid=$!; echo $kid > \"$here/kid\"; wait; fi\n\
              if [ \"$1\" = app-server ]; then n=$(basename \"${CODEX_HOME:-default}\"); while IFS= read -r line; do case \"$line\" in *'\"id\":1,'*) printf '{\"id\":1,\"result\":{\"userAgent\":\"stand-in\"}}\\n';; *account/rateLimits/read*) printf '{\"id\":3,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":42,\"windowDurationMins\":300,\"resetsAt\":1800000000},\"secondary\":null,\"planType\":\"plus\"}}}\\n';; *account/read*) [ -e \"$here/same\" ] && n=same; printf '{\"id\":2,\"result\":{\"account\":{\"email\":\"%s@example.test\",\"planType\":\"plus\",\"type\":\"chatgpt\",\"workspaceName\":null},\"requiresOpenaiAuth\":true}}\\n' \"$n\";; esac; done; exit 0; fi\n\
              if [ \"$1\" = logout ]; then echo \"$CODEX_HOME\" >> \"$here/logouts\"; [ -e \"$here/keep\" ] || rm -f \"$CODEX_HOME/auth.json\"; fi\n",
         )
@@ -1100,6 +1069,43 @@ mod tests {
             let _ = std::fs::remove_dir_all(
                 protocol::root_dir().join("accounts").join("codex").join(id),
             );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A facts read that hangs leaves nothing running** (the agent-launch class): an app-server that starts a child
+    /// of its own, as Codex's npm launcher does, and never answers is ended at the read's bound with what it started.
+    #[tokio::test]
+    async fn a_facts_read_that_hangs_leaves_nothing_running() {
+        let _env = crate::ProcessEnvRead::take();
+        let root =
+            std::env::temp_dir().join(format!("ccs-hang.{}", &protocol::uid::new().unwrap()[20..]));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let codex = stand_in_codex(&root);
+        std::fs::write(root.join("hangfacts"), "").unwrap();
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.clone().into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        assert_eq!(
+            super::read_facts(&environment, None, &codex).await,
+            None,
+            "no answer, no facts"
+        );
+        let kid: i32 = std::fs::read_to_string(root.join("kid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while unsafe { libc::kill(kid, 0) } == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the app-server's child {kid} was left running"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let _ = std::fs::remove_dir_all(&root);
     }

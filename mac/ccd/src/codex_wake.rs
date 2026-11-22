@@ -88,7 +88,7 @@ fn through_login_shell(
     let args = queue_args(as_sock, thread_id, nudge);
     let mut argv: Vec<&OsStr> = vec![codex.as_os_str()];
     argv.extend(args.iter().map(OsString::as_os_str));
-    crate::start_session::login_shell_command(environment, None, &argv)
+    crate::start_session::agent_command(environment, None, &argv)
 }
 
 /// The arguments of `codex queue` that put `nudge` on `thread_id` through `as_sock`.
@@ -107,16 +107,16 @@ fn queue_args(as_sock: &Path, thread_id: &str, nudge: &str) -> Vec<OsString> {
 
 /// Run a `codex queue` `command` within `deadline`; its stderr's tail is the error.
 async fn run(mut command: tokio::process::Command, codex: &Path, deadline: Duration) -> Result<()> {
-    let output = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        // The deadline drops the future; this makes that a kill rather than a leak.
-        .kill_on_drop(true)
-        .output();
-    let output = match tokio::time::timeout(deadline, output).await {
-        Ok(output) => output.with_context(|| format!("running {} queue", codex.display()))?,
-        Err(_) => bail!("codex queue did not answer within {deadline:?}"),
+        .stderr(Stdio::piped());
+    // Past the deadline its group is ended, what it started with it.
+    let Some(output) = crate::start_session::agent_output(command, deadline).await else {
+        bail!(
+            "{} queue did not answer within {deadline:?}",
+            codex.display()
+        );
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
