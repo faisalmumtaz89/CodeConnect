@@ -176,3 +176,16 @@ public enum AccountSwitchWords {
     /// A row's second line when Codex keeps its sign-in in the computer's own store.
     public static let notSeparate = "Uses this computer's own Codex sign-in, so it isn't a separate account"
 }
+
+/// A switch in progress for one agent's sessions on a computer: the account they move to (its email where its agent
+/// says it, else its name), how many still finish a turn first, how many move with their next message, and the ones
+/// whose start there was refused, by their folder's name.
+public struct AccountSwitch: Equatable, Sendable {
+    public let target: String
+    public let waiting: Int
+    public let moved: Int
+    public let failed: [String]
+
+    public var sentence: String? { AccountSwitchWords.sentence(to: target, waiting: waiting, moved: moved) }
+    public var failure: String? { AccountSwitchWords.failure(to: target, sessions: failed) }
+}

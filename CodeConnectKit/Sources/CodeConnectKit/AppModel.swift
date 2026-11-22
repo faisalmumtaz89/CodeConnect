@@ -1229,6 +1229,28 @@ public final class AppModel {
         await accountsRequest { try await $0.activateAccount(agent: agent, accountID: accountID) }
     }
 
+    /// The switch `agent`'s sessions on this computer are in (their summaries' `switching`), toward the account its
+    /// new starts now use; nil while none is moving.
+    public func accountSwitch(for agent: StartAgent) -> AccountSwitch? {
+        let moving = summaries.filter { summary in
+            guard summary.switching != nil else { return false }
+            switch (summary.agent, agent) {
+            case (.claude, .claude), (.codex, .codex): return true
+            default: return false
+            }
+        }
+        guard !moving.isEmpty else { return nil }
+        let active = accountBook?.activeID(for: agent)
+        let target = accountBook?.facts(for: agent, accountID: active)?.email
+            ?? active.flatMap { id in accountBook?.accounts(for: agent).first { $0.id == id }?.label }
+            ?? "Default"
+        return AccountSwitch(
+            target: target,
+            waiting: moving.count { $0.switching == .waiting },
+            moved: moving.count { $0.switching == .moved },
+            failed: moving.filter { $0.switching == .failed }.map(\.projectLabel))
+    }
+
     /// Removes `accountID` (its agent signs it out first); true once the computer has removed it.
     @discardableResult
     public func removeAccount(accountID: String) async -> Bool {
