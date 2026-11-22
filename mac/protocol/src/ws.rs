@@ -2127,7 +2127,7 @@ mod tests {
         );
         const _: () = assert!(
             crate::PROTOCOL_MINOR >= 48,
-            "several accounts per agent (`list_accounts`, `accounts`) are minor 48"
+            "several accounts per agent (`list_accounts`, `add_account`, `activate_account`) is minor 48"
         );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
