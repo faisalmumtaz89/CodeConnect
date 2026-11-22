@@ -2514,6 +2514,7 @@ pub(crate) fn menus(models: &[Value]) -> RunMenus {
                     detail: text(model, "description"),
                     // A Codex entry's value is the model it runs.
                     resolved_model: None,
+                    default_effort: text(model, "defaultReasoningEffort"),
                     efforts: model
                         .get("supportedReasoningEfforts")
                         .and_then(Value::as_array)

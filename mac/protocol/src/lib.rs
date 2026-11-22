@@ -853,7 +853,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     start's entry for its model, by the rule the apps name a live run's model by, so an ended run
 ///     reads "Opus", not `claude-opus-5-5`. A daemon below 46 sends none, and an app shows the model as
 ///     reported.
-pub const PROTOCOL_MINOR: u32 = 46;
+///   * `47` — **A run's menu names each model's default effort.**
+///
+///     No message changes shape. Each [`event::MenuModel`] of a Codex run's `menus` may carry
+///     `default_effort`, the effort Codex runs that model at when none is chosen (its `model/list`'s
+///     `defaultReasoningEffort`), so an app names and marks it while the run reports no effort. A Claude
+///     entry carries none: Claude Code's list names no default. A daemon below 47 sends none.
+pub const PROTOCOL_MINOR: u32 = 47;
 
 #[cfg(test)]
 mod ledger_tests {
