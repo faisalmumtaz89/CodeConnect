@@ -960,6 +960,10 @@ pub struct AccountFacts {
     /// figure from its own `window_minutes`, never from a guess.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<UsageWindow>,
+    /// Whether plan limits apply to this sign-in, where the agent says (Claude Code's `rate_limits_available`): false
+    /// for a sign-in with none (an API key's), so an app says "no plan limits"; absent while not reported yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits_available: Option<bool>,
     /// When the computer read these (RFC 3339), so an app says "as of".
     pub read_at: String,
 }
@@ -3223,6 +3227,7 @@ mod tests {
         // What the agent says of an account, and of its Default, made-up values in the agent's shapes: each window
         // the agent names, an unnamed one absent.
         let facts = AccountFacts {
+            limits_available: None,
             email: Some("work@example.test".into()),
             plan: Some("plus".into()),
             windows: vec![UsageWindow {

@@ -30,6 +30,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { createLink } from './link.ts';
 import { createPermissions } from './permissions.ts';
+import { printUsage } from './usage.ts';
 import { HOST_PROTOCOL_VERSION, type HostFile, type ToHost } from './protocol.ts';
 import {
   type Facts,
@@ -45,6 +46,12 @@ import {
   userMessage,
   type Wake,
 } from './start.ts';
+
+// `cc-agent-host --usage <claude>`: ccd's short launch for an account's plan limits (usage.ts), then out.
+if (process.argv[2] === '--usage') {
+  await printUsage(process.argv[3]!);
+  process.exit(0);
+}
 
 const runDir = process.argv[2];
 const recordPath = join(runDir, 'host.json');

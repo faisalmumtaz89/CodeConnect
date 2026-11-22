@@ -168,7 +168,7 @@ async fn push_accounts(daemon: &Arc<Daemon>) {
 
 /// Each account, and each agent's Default, whose facts are old or missing and not being read, read again (one read
 /// at a time per account, all at once), then the listing pushed once.
-async fn refresh_facts(daemon: &Arc<Daemon>) {
+pub(crate) async fn refresh_facts(daemon: &Arc<Daemon>) {
     let environment = phone_environment();
     let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
     let claude = claude_path(&environment, daemon.config.claude_bin.as_deref()).await;
@@ -221,7 +221,29 @@ async fn refresh_facts(daemon: &Arc<Daemon>) {
                         crate::accounts::read_facts(environment, home.as_ref(), codex).await
                     }
                     (AgentKind::Claude, _, Some(claude)) => {
-                        crate::accounts::read_claude_facts(environment, home.as_ref(), claude).await
+                        let facts =
+                            crate::accounts::read_claude_facts(environment, home.as_ref(), claude)
+                                .await;
+                        // Its plan's limits, through the host, for a signed-in account only.
+                        match (facts, crate::claude_host::host_binary(&daemon.config)) {
+                            (Some(mut facts), Ok(host)) => {
+                                if let Some((available, plan, windows)) =
+                                    crate::accounts::read_claude_usage(
+                                        environment,
+                                        home.as_ref(),
+                                        claude,
+                                        &host,
+                                    )
+                                    .await
+                                {
+                                    facts.limits_available = Some(available);
+                                    facts.plan = facts.plan.or(plan);
+                                    facts.windows = windows;
+                                }
+                                Some(facts)
+                            }
+                            (facts, _) => facts,
+                        }
                     }
                     _ => None,
                 };

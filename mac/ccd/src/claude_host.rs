@@ -627,6 +627,19 @@ async fn apply_sdk(
     write: &mut OwnedWriteHalf,
 ) -> Result<(), String> {
     let text = |key: &str| message.get(key).and_then(serde_json::Value::as_str);
+    // claude says its plan's limits changed (306 Slice F): the run's account's are read again, through the host, and
+    // pushed. The event's own figures are not read: their units are not part of the SDK's word.
+    if text("type") == Some("rate_limit_event") {
+        if let Ok(account) = daemon.store.run_account(uid) {
+            let key = account.map_or_else(
+                || crate::accounts::default_key(&AgentKind::Claude),
+                |account| account.id,
+            );
+            daemon.account_facts.forget(&key);
+            let daemon = Arc::clone(daemon);
+            tokio::spawn(async move { crate::start_session::refresh_facts(&daemon).await });
+        }
+    }
     // Why a session starts, where ccd knows it, on the init's `session_start` as Claude
     // Code's own SessionStart hook names it: the launch's first init starts the session, or resumes
     // it after a relaunch, and the first after a `/clear` begins the cleared conversation. A
@@ -7142,6 +7155,48 @@ mod tests {
             }
             seq += 2;
         }
+        stop(&played.dir);
+    }
+
+    /// **claude's word that its plan's limits changed reads the run's account again** (306 Slice F): a
+    /// `rate_limit_event` on a Default run leaves the Default's facts to be read anew, and is acknowledged.
+    #[tokio::test]
+    async fn a_rate_limit_event_reads_the_runs_account_again() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let key = crate::accounts::default_key(&AgentKind::Claude);
+        rig.daemon.account_facts.read(
+            &key,
+            Some(protocol::ws::AccountFacts {
+                limits_available: None,
+                email: Some("default@example.test".into()),
+                plan: None,
+                windows: Vec::new(),
+                read_at: protocol::time::now_rfc3339(),
+            }),
+        );
+        assert!(
+            rig.daemon
+                .account_facts
+                .claim_stale(std::slice::from_ref(&key))
+                .is_empty(),
+            "fresh before"
+        );
+        sdk(
+            &mut played.write,
+            3,
+            serde_json::json!({"type": "rate_limit_event", "uuid": "l1", "session_id": "s1",
+                "rate_limit_info": {"status": "allowed", "rateLimitType": "seven_day", "utilization": 0.4}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(
+            rig.daemon
+                .account_facts
+                .claim_stale(std::slice::from_ref(&key)),
+            [key],
+            "read again"
+        );
         stop(&played.dir);
     }
 

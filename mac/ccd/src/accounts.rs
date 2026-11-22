@@ -456,11 +456,64 @@ pub(crate) async fn read_claude_facts(
         return None;
     }
     Some(protocol::ws::AccountFacts {
+        limits_available: None,
         email: status["email"].as_str().map(str::to_string),
         plan: status["subscriptionType"].as_str().map(str::to_string),
         windows: Vec::new(),
         read_at: protocol::time::now_rfc3339(),
     })
+}
+
+/// What Claude Code at `claude` says of its plan's limits for the account whose folder `account` gives (its Default for
+/// none), asked through the agent host's short `--usage` launch (agent-host/src/usage.ts) with the account's variables:
+/// whether plan limits apply, its plan, and each plan-wide window it names (five hours, seven days). None when the
+/// host did not answer within [`FACTS_WAIT`].
+pub(crate) async fn read_claude_usage(
+    environment: &HashMap<OsString, OsString>,
+    account: Option<&AccountEnv>,
+    claude: &Path,
+    host: &Path,
+) -> Option<(bool, Option<String>, Vec<protocol::ws::UsageWindow>)> {
+    let signing = account.map(AccountEnv::signing);
+    let mut command = crate::start_session::agent_command(
+        environment,
+        signing.as_ref(),
+        &[
+            host.as_os_str(),
+            std::ffi::OsStr::new("--usage"),
+            claude.as_os_str(),
+        ],
+    );
+    command
+        .current_dir(protocol::home_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let output = crate::start_session::agent_output(command, FACTS_WAIT).await?;
+    // The host's one line, after whatever the user's shell printed as it started.
+    let text = String::from_utf8_lossy(&output.stdout);
+    let said: serde_json::Value = serde_json::from_str(text.lines().last()?).ok()?;
+    let windows = said["windows"]
+        .as_array()?
+        .iter()
+        .filter_map(|window| {
+            let minutes = match window["name"].as_str()? {
+                "five_hour" => 5 * 60,
+                "seven_day" => 7 * 24 * 60,
+                _ => return None,
+            };
+            Some(protocol::ws::UsageWindow {
+                used_percent: window["utilization"].as_f64()?.round().clamp(0.0, 100.0) as u32,
+                window_minutes: minutes,
+                resets_at: window["resets_at"].as_i64()?,
+            })
+        })
+        .collect();
+    Some((
+        said["available"].as_bool()?,
+        said["plan"].as_str().map(str::to_string),
+        windows,
+    ))
 }
 
 /// What the codex at `codex` says of the account whose home `account` gives (its Default for none): its email and
@@ -527,6 +580,7 @@ pub(crate) async fn read_facts(
             })
         };
         Some(protocol::ws::AccountFacts {
+            limits_available: None,
             email: account["account"]["email"].as_str().map(str::to_string),
             plan: account["account"]["planType"].as_str().map(str::to_string),
             windows: ["primary", "secondary"]
@@ -1356,6 +1410,71 @@ mod tests {
             "the person's own is untouched"
         );
         let _ = std::fs::remove_dir_all(&folder);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A Claude Code account's plan limits are read through the host's `--usage` launch** (306 Slice F) with the
+    /// account's two variables: the plan-wide windows it names become usage windows (seven days as 10 080 minutes, the
+    /// share rounded to a whole percent, the reset in Unix seconds), with whether plan limits apply and the plan; a line
+    /// the user's shell printed first is passed over.
+    #[tokio::test]
+    async fn a_claude_accounts_plan_limits_are_read_through_the_host() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-usage.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let host = root.join("cc-agent-host");
+        std::fs::write(
+            &host,
+            "#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" \"$CLAUDE_CONFIG_DIR\" > \"$(dirname \"$0\")/asked\"\n\
+             echo 'a line from the shell'\n\
+             echo '{\"available\":true,\"plan\":\"max\",\"windows\":[{\"name\":\"seven_day\",\"utilization\":41.6,\"resets_at\":1795928400}]}'\n",
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&host)
+            .status()
+            .unwrap();
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), root.join("home").into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-claude-usage");
+        let _db = store.temp_db();
+        let a = store.add_account("claude", "A").unwrap();
+        let on_a = super::AccountEnv::for_account(&protocol::root_dir(), &a)
+            .unwrap()
+            .unwrap();
+        let read = super::read_claude_usage(
+            &environment,
+            Some(&on_a),
+            Path::new("/stand-in/claude"),
+            &host,
+        )
+        .await;
+        assert_eq!(
+            read,
+            Some((
+                true,
+                Some("max".to_string()),
+                vec![protocol::ws::UsageWindow {
+                    used_percent: 42,
+                    window_minutes: 7 * 24 * 60,
+                    resets_at: 1_795_928_400
+                }]
+            ))
+        );
+        let folder = on_a.folder().display().to_string();
+        assert_eq!(
+            std::fs::read_to_string(root.join("asked")).unwrap().trim(),
+            format!("--usage {folder} {folder}"),
+            "asked with both of the account's variables"
+        );
+        let _ = std::fs::remove_dir_all(on_a.folder());
         let _ = std::fs::remove_dir_all(&root);
     }
 
