@@ -1042,6 +1042,9 @@ struct SessionDetailView: View {
                         focused: $composerFocused)
                 }
             }
+            // One ground under the whole block — the settings line and the reply box together — so the
+            // conversation ends at its top edge and never shows through either.
+            .background { BottomBlockGround() }
             .onChange(of: composeText) { old, new in
                 // If the draft has moved off the words it held — the same
                 // normalisation the send's mutation key uses, so a whitespace-only
@@ -1957,6 +1960,23 @@ private struct SessionBanner: View {
     }
 }
 
+/// The ground under the screen's bottom block (the settings line over the reply box): the page's own ground,
+/// faded in over the block's top padding, so a row scrolled under it ends softly instead of at a slab's edge and
+/// every line of the block reads on solid ground.
+private struct BottomBlockGround: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            LinearGradient(
+                colors: [CC.color.bg.opacity(0), CC.color.bg],
+                startPoint: .top, endPoint: .bottom
+            )
+            .frame(height: CC.space.xs)
+            CC.color.bg
+        }
+        .ignoresSafeArea(.container, edges: .bottom)
+    }
+}
+
 /// **The compose bar, clocked by itself.**
 ///
 /// A pill floating on the conversation, on the page's own ground — no slab, no
@@ -2006,27 +2026,11 @@ private struct SessionComposeBar: View {
         // At rest the pill sits on the safe-area line, just above the home
         // indicator; over the keyboard it keeps 8pt of air.
         .padding(.bottom, focused.wrappedValue ? CC.space.xs : 0)
-        .background { ground }
         // Typing is the user's next act as much as retrying the mic is; a
         // stale mic-failure note must not stand over a hand-typed message.
         .onChange(of: text) { _, _ in dictation.clearFailure() }
         // A hot mic must not outlive the composer that started it.
         .onDisappear { dictation.cancel() }
-    }
-
-    /// The page's own ground, faded in over the top padding: a row scrolled
-    /// under the bar ends softly instead of at a slab's edge, and the note line
-    /// always reads on solid ground.
-    private var ground: some View {
-        VStack(spacing: 0) {
-            LinearGradient(
-                colors: [CC.color.bg.opacity(0), CC.color.bg],
-                startPoint: .top, endPoint: .bottom
-            )
-            .frame(height: CC.space.xs)
-            CC.color.bg
-        }
-        .ignoresSafeArea(.container, edges: .bottom)
     }
 
     // MARK: The pill
