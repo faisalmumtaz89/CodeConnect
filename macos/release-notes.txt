@@ -1,1 +1,1 @@
-You start an agent in the main area of the window now: choose the folder and the computer, then type the first message, with the model in the same box. A table too wide for a reply scrolls sideways inside it, and Settings › Accounts says when this Mac’s service is offline.
+This release brings the Mac’s Stop and the effort in use to the iPhone app’s reply box. The Mac app itself is unchanged.
