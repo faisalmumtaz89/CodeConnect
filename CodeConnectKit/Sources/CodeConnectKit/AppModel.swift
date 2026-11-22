@@ -969,6 +969,18 @@ public final class AppModel {
                 keepFixtureLinkFresh()
                 return
             }
+            // `-CC_SWITCH <recording>` replays the daemon's recording of a run moved to another account, to the step
+            // `-CC_SWITCH_STEP` names (`SwitchFixtures`).
+            if let recording = SwitchFixtures.recording {
+                fixturesActive = true
+                connection.fixtureAnswers = true
+                connection.simulateConnectedForTesting()
+                for message in SwitchFixtures.frames(recording: recording) {
+                    connection.injectForTesting(message)
+                }
+                keepFixtureLinkFresh()
+                return
+            }
             // `-CC_FIXTURE stacked` is the same fleet with one agent holding two
             // decisions — the state where "count the agents" and "count the
             // cards" stop agreeing.

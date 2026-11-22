@@ -450,7 +450,7 @@ enum Fixtures {
     /// this ack; see `sampleHelloAckJSON`. `machine_name` and `machine_os`
     /// are what a minor-25 daemon sends, set here so the cards show a
     /// computer; the phone decodes them at any minor.
-    private static let helloAckJSON = """
+    static let helloAckJSON = """
         {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
         "capabilities":{"can_approve_reliably":true,\

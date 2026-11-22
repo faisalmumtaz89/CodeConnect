@@ -107,6 +107,11 @@ final class RenderPass: XCTestCase {
 
     func testRendersTheSettingsLineAtAX5() throws { try render(at: .ax5, Self.settingsLine) }
 
+    /// A run moved to another account, from the daemon's recordings.
+    private static let switchedRun = RenderCatalog.all.filter { $0.name.hasPrefix("switch-") }
+
+    func testRendersTheSwitchedRunAtLarge() throws { try render(at: .large, Self.switchedRun) }
+
     // MARK: - The pass
 
     private func render(at size: Size, _ scenarios: [RenderScenario] = RenderCatalog.all) throws {

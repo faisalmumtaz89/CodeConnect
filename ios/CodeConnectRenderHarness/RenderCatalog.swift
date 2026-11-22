@@ -851,6 +851,68 @@ enum RenderCatalog {
                     throw RenderFailure.unreachable("the reply box, not the ended line")
                 }
             }),
+        // **A run moved to another account** (decision 306), from the daemon's own recordings (`SwitchFixtures`):
+        // waiting and moved runs stay live with their reply box, one quiet "Switched to" row and no "Run ended"; a
+        // failed move reads Ended with one warning row and keeps its box; End run after a move ends it.
+        RenderScenario(
+            name: "switch-claude-waiting-fleet",
+            purpose: "a Claude run waiting to move to another account, in the fleet's live list",
+            arguments: ["-CC_SWITCH", "switch-claude", "-CC_SWITCH_STEP", "2"],
+            reach: { app, driver in
+                try driver.requireExists(app.buttons["session-01M8299ZGSRFFX29Z8KF3Q5Q2V"], "the waiting run's row")
+            }),
+        RenderScenario(
+            name: "switch-claude-moved-session",
+            purpose: "a Claude run moved to another account: one Switched to row, its reply box kept",
+            arguments: [
+                "-CC_SWITCH", "switch-claude", "-CC_SWITCH_STEP", "6",
+                "-CC_DEEPLINK", "codeconnect://session/01M8299ZGSRFFX29Z8KF3Q5Q2V",
+            ],
+            reach: { app, driver in
+                try driver.requireExists(driver.text(containing: "Switched to", in: app), "the Switched to row")
+            }),
+        RenderScenario(
+            name: "switch-codex-moved-session",
+            purpose: "a Codex run moved to another account: one Switched to row, its reply box kept",
+            arguments: [
+                "-CC_SWITCH", "switch-codex", "-CC_SWITCH_STEP", "6",
+                "-CC_DEEPLINK", "codeconnect://session/01M8299ZJQXMP43MZH8JY9VYMD",
+            ],
+            reach: { app, driver in
+                try driver.requireExists(driver.text(containing: "Switched to", in: app), "the Switched to row")
+            }),
+        RenderScenario(
+            name: "switch-failed-session",
+            purpose: "a move that could not start: Ended, one warning row, its reply box kept",
+            arguments: [
+                "-CC_SWITCH", "switch-failed-then-recovered-claude", "-CC_SWITCH_STEP", "4",
+                "-CC_DEEPLINK", "codeconnect://session/01M82B4K7A2XN1X22R98H2XB80",
+            ],
+            reach: { app, driver in
+                try driver.requireExists(driver.text(containing: "Couldn", in: app), "the warning row")
+            }),
+        RenderScenario(
+            name: "switch-failed-recovered-session",
+            purpose: "the failed move's run after its next message started it on the new account",
+            arguments: [
+                "-CC_SWITCH", "switch-failed-then-recovered-claude",
+                "-CC_DEEPLINK", "codeconnect://session/01M82B4K7A2XN1X22R98H2XB80",
+            ],
+            reach: { app, driver in
+                try driver.requireExists(driver.text(containing: "on B now?", in: app), "the message that started it")
+            }),
+        RenderScenario(
+            name: "switch-then-end-session",
+            purpose: "End run after a move: Switched to, then Run ended, and no reply box",
+            arguments: [
+                "-CC_SWITCH", "switch-then-end-claude",
+                "-CC_DEEPLINK", "codeconnect://session/01M82B4K7A2XN1X22R98H2XB7Z",
+            ],
+            reach: { app, driver in
+                try driver.requireExists(
+                    app.descendants(matching: .any).matching(identifier: "session-ended-line").firstMatch,
+                    "the ended line")
+            }),
         // The header's one line, when the computer's name is longer than it.
         RenderScenario(
             name: "session-header-long-name",
