@@ -2149,6 +2149,11 @@ async fn resume_thread(
     Ok((adapter, owed, cards))
 }
 
+/// Why a run that has had a message is not relaunched when Codex has no record of its thread (its logged reason
+/// begins so; a switch's line says it in the person's words, [`crate::switch::relaunched`]).
+pub(crate) const NO_ROLLOUT_AFTER_A_MESSAGE: &str =
+    "Codex has no rollout of the run's thread, and the run has had a message";
+
 /// A new thread for the run `run`, whose thread has no rollout (it never ran a turn) and so
 /// cannot be resumed: `thread/start` as the run's first start sends it, on the model, approval
 /// policy and sandbox `kept` names (the settings Codex last named for the run, which a resume
@@ -2189,7 +2194,7 @@ async fn new_thread(
         Ok(true) => {}
         Ok(false) => {
             return Err(format!(
-                "Codex has no rollout of thread {}, and the run has had a message",
+                "{NO_ROLLOUT_AFTER_A_MESSAGE} (thread {})",
                 run.thread
             ))
         }
@@ -8601,8 +8606,12 @@ mod tests {
             .filter(|event| event.payload["notification_type"] == "switch_failed")
             .map(|event| event.payload["message"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(why.len(), 1, "{why:?}");
-        assert!(why[0].contains("no rollout"), "{why:?}");
+        assert_eq!(
+            why,
+            ["This conversation could not be continued on B: its record was not found. Choose the account it ran on \
+              to continue it."],
+            "in the person's words"
+        );
         drop(ws);
     }
 

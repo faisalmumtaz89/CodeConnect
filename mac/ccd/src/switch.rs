@@ -149,7 +149,15 @@ pub(crate) async fn relaunched(daemon: &Arc<Daemon>, uid: &str, outcome: Result<
         protocol::event::EventKind::Notification,
         serde_json::json!({
             "notification_type": protocol::event::notice::SWITCH_FAILED,
-            "message": format!("Couldn’t start on {label}: {why}"),
+            "message": if why.starts_with(crate::codex_host::NO_ROLLOUT_AFTER_A_MESSAGE) {
+                // Its conversation's record is not where the account's home can see it; the account it ran on can.
+                format!(
+                    "This conversation could not be continued on {label}: its record was not found. Choose the \
+                     account it ran on to continue it."
+                )
+            } else {
+                format!("Couldn’t start on {label}: {why}")
+            },
             protocol::event::SWITCHED_TO: {
                 "account_id": active.as_ref().map(|account| account.id.clone()),
                 "label": label,
