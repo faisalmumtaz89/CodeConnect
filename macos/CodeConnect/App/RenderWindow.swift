@@ -53,6 +53,13 @@
         /// `-CC_ADD_AGENT YES`: the same sheet, on its Agent side.
         static var opensOnAgent: Bool { UserDefaults.standard.bool(forKey: "CC_ADD_AGENT") }
 
+        /// `-CC_FOLDER_PANEL YES`: the start form opens with its folder panel open.
+        static var opensFolderPanel: Bool { UserDefaults.standard.bool(forKey: "CC_FOLDER_PANEL") }
+        /// `-CC_START_MESSAGE <words>`: the start form's first message, typed.
+        static var startMessage: String? { UserDefaults.standard.string(forKey: "CC_START_MESSAGE") }
+        /// `-CC_START_SEND YES`: the start form presses Start once it can (with `-CC_START_OUTCOME` for its answer).
+        static var startSends: Bool { UserDefaults.standard.bool(forKey: "CC_START_SEND") }
+
         /// `-CC_RENDER_FOLDER <folder>`: Start an agent chooses that recent folder once listed, and starts nothing.
         static var chosenFolder: String? { UserDefaults.standard.string(forKey: "CC_RENDER_FOLDER") }
         /// `-CC_PICK_FOLDER <path>`: Start an agent's Choose a folder… takes that path in place of the folder panel, a

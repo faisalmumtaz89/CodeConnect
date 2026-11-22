@@ -1,16 +1,20 @@
 import CodeConnectKit
 import SwiftUI
 
-/// The main window: the sidebar's agents, computers and projects, and the fleet's runs beside it, or Settings in their
-/// place; before any computer is paired, what to do first in the list's place. Agents and computers are added the
-/// same way: the + on their sidebar section, one sheet, and File > New Agent (⌘N) and Add Computer (⇧⌘N); an iPhone
-/// from File > Add iPhone.
+/// The main window: the sidebar's agents, computers and projects, the fleet's runs beside it, and the run open beside
+/// them, or with none open the start form (`StartPane`); or Settings in the place of the list and the main area
+/// together; before any computer is paired, what to do first in the list's place. An agent is started from the start
+/// form: the + on the sidebar's Agents and File > New Agent (⌘N) leave Settings, close the open run and give the form the
+/// keyboard. A computer is added from a sheet: the + on Computers and File > Add Computer (⇧⌘N); an iPhone from File >
+/// Add iPhone.
 struct MainWindow: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
     /// The one "…" menu a row of the list or the sidebar opens, drawn over the whole window.
     @State private var rowMenu = RowMenu()
     @State private var adding: AddKind?
+    /// Raised by New Agent: the start form's first message takes the keyboard.
+    @State private var startFocus = 0
     /// The address Add a computer starts with, when a refused computer asked to pair again.
     @State private var repairing: String?
     /// The list, what it is narrowed to, and the run open beside it: the app's, so a closed window opens on them again.
@@ -74,17 +78,20 @@ struct MainWindow: View {
                 let showsRun = model != nil && !runHidden
                 // The list hides only beside a run that shows: the window is never left empty.
                 let showsList = !listHidden || !showsRun
+                // With no run open, the start form is beside the list.
+                let showsStart = open == nil
                 if showsList {
                     FleetList(
                         scope: $scope, grouping: $grouping, filter: $filter, opened: $opened, pairAgain: pairAgain
                     ) { adding = .agent }
                         // Kept when the person changes it, never at launch.
                         .onChange(of: grouping) { _, kind in kind.keep(in: .standard) }
-                        // Beside an open run the list gives way first: the pane keeps room for a card's answers in
-                        // one row (450), and the list takes what is left, between what its rows still read at (290)
-                        // and 580.
-                        .frame(width: showsRun ? min(580, max(290, width - (sidebarHidden ? 0 : 218) - 450)) : nil)
-                        .environment(\.headerClearance, clearance(first: sidebarHidden, last: !showsRun))
+                        // Beside an open run, or the start form, the list gives way first: the pane keeps room for a
+                        // card's answers in one row (450), and the list takes what is left, between what its rows still
+                        // read at (290) and 580.
+                        .frame(
+                            width: showsRun || showsStart ? min(580, max(290, width - (sidebarHidden ? 0 : 218) - 450)) : nil)
+                        .environment(\.headerClearance, clearance(first: sidebarHidden, last: !showsRun && !showsStart))
                         // The arrows open a run; Return then puts the cursor in its reply box.
                         .onKeyPress(.return) {
                             guard opened != nil else { return .ignored }
@@ -98,6 +105,10 @@ struct MainWindow: View {
                         .id(open.id)
                         .environment(\.replyFocusRequest, replyFocus)
                         .environment(\.headerClearance, clearance(first: sidebarHidden && !showsList, last: true))
+                } else if showsStart {
+                    if showsList { Rectangle().fill(Theme.hairline).frame(width: 1) }
+                    StartPane(addComputer: { adding = .computer }, started: started)
+                        .environment(\.startFocusRequest, startFocus)
                 }
             } else {
                 EmptyFleet(adding: $adding)
@@ -169,6 +180,13 @@ struct MainWindow: View {
         // host, which closes with every other panel.
         .environment(\.agentsShown, settings == nil)
         .focusedSceneValue(\.adding, $adding)
+        // New Agent is the start form in the main area: the open run closes, and the form takes the keyboard.
+        .onChange(of: adding, initial: true) { _, kind in
+            guard kind == .agent else { return }
+            adding = nil
+            opened = nil
+            startFocus += 1
+        }
         .onChange(of: pendingAdd != nil, initial: true) {
             guard let pendingAdd else { return }
             adding = pendingAdd
@@ -226,12 +244,7 @@ struct MainWindow: View {
             }
         #endif
         .sheet(item: $adding, onDismiss: { repairing = nil }) { kind in
-            AddSheet(kind: kind, address: $repairing) { run in
-                // The run just started is open, in the list of every active agent, unfiltered.
-                scope = .active
-                filter = nil
-                opened = run
-            }
+            AddSheet(kind: kind, address: $repairing)
             // A sheet stands in the middle of the window: clear of the 52-point header above it, so as far from the
             // bottom edge.
             .environment(\.sheetRoom, height - 2 * 52)
@@ -239,6 +252,13 @@ struct MainWindow: View {
                     .renderLook()
                 #endif
         }
+    }
+
+    /// The run just started is open, in the list of every active agent, unfiltered.
+    private func started(_ run: String) {
+        scope = .active
+        filter = nil
+        opened = run
     }
 
     /// A run's tab. It is another than the conversation only while that run is the one it was chosen on, so a run

@@ -16,7 +16,7 @@ struct BranchRow: View {
     /// The highest the menu may reach in the sheet: under the heading, so it never covers part of a line there.
     let top: CGFloat
 
-    @Environment(\.sheetHeight) private var sheetHeight
+    @Environment(\.startHeight) private var startHeight
     /// The row, label to last line, in the sheet's coordinates.
     @State private var frame: CGRect = .zero
     /// The button's bottom edge, in the row's coordinates.
@@ -24,7 +24,6 @@ struct BranchRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(StartWords.branch).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.text3)
             if let answer = context.git(folder.path), let git = answer {
                 if let newName {
                     naming(newName, git: git)
@@ -41,7 +40,7 @@ struct BranchRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .coordinateSpace(.named(Self.space))
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(AddSheet.space)) } action: { frame = $0 }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(StartForm.space)) } action: { frame = $0 }
         .overlay(alignment: .topLeading) {
             if open, let answer = context.git(folder.path), let git = answer { menu(git) }
         }
@@ -51,7 +50,7 @@ struct BranchRow: View {
     }
 
     private nonisolated static let space = "start.branch.row"
-    /// The least a menu keeps from the sheet's edges.
+    /// The least a menu keeps from the form's edges.
     private static let margin: CGFloat = 8
 
     /// The menu, as tall as its rows up to `BranchMenu.mostRows` and no wider than the row. It opens above the row,
@@ -63,7 +62,7 @@ struct BranchRow: View {
         let gap = Theme.panelGap
         let highest = max(top, Self.margin)
         let above = frame.minY - gap - highest
-        let below = sheetHeight - frame.minY - buttonBottom - gap - Self.margin
+        let below = startHeight - frame.minY - buttonBottom - gap - Self.margin
         let opensAbove = BranchMenu.height(rows: rows) <= above || above > below
         let shown = BranchMenu.rows(fitting: opensAbove ? above : below, of: rows)
         let cut = shown < min(rows, BranchMenu.mostRows)

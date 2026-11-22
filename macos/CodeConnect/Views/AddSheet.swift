@@ -2,8 +2,8 @@ import CodeConnectKit
 import CoreImage.CIFilterBuiltins
 import SwiftUI
 
-/// What the Add sheet adds, and the side it opens on. The sidebar's + and ⌘N/⇧⌘N open an agent or a computer;
-/// the iPhone has a menu item and is one click from either side.
+/// What is added, and how: an agent from the start form in the window's main area (the sidebar's +, ⌘N); a computer or
+/// an iPhone from the Add sheet, which opens on either (the sidebar's +, ⇧⌘N, the iPhone's menu item).
 enum AddKind: String, Identifiable, CaseIterable {
     case agent, computer, iPhone
 
@@ -40,26 +40,23 @@ extension KeyHint {
     init(_ kind: AddKind) { self.init(keys: kind.shortcut.map { [$0] } ?? [], label: kind.title.titleStyle) }
 }
 
-/// The one way anything is added: a sheet with Agent, Computer and iPhone side by side.
+/// The way a computer or an iPhone is added: a sheet with the two side by side.
 struct AddSheet: View {
     @State private var kind: AddKind
     /// The address Add a computer starts with: a refused computer pairing again. A binding, so the sheet reads the
     /// address as it is when it opens, not as the window last rendered it.
     @Binding private var address: String?
-    /// An agent was started and is in the list, by its id.
-    private let started: (String) -> Void
 
-    init(kind: AddKind, address: Binding<String?> = .constant(nil), started: @escaping (String) -> Void = { _ in }) {
+    init(kind: AddKind, address: Binding<String?> = .constant(nil)) {
         _kind = State(initialValue: kind)
         _address = address
-        self.started = started
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 SegmentedTrack(
-                    options: AddKind.allCases, chosen: kind, fill: Theme.window,
+                    options: [AddKind.computer, .iPhone], chosen: kind, fill: Theme.window,
                     id: { "add.tab.\($0.rawValue.lowercased())" }, choose: { kind = $0 }
                 ) { option, chosen in
                     Text(option.tab).font(Theme.ui(12, chosen ? .medium : .regular))
@@ -73,8 +70,8 @@ struct AddSheet: View {
             .frame(height: 50)
             Rectangle().fill(Theme.hairline).frame(height: 1)
             switch kind {
-            case .agent: AgentSide(addComputer: { kind = .computer }, started: started)
-            case .computer: ComputerForm(address: address)
+            // An agent is started from the window, never here.
+            case .agent, .computer: ComputerForm(address: address)
             case .iPhone: IPhoneSide()
             }
         }
@@ -82,26 +79,21 @@ struct AddSheet: View {
         // never taller than the window has room for, where the side gives way.
         .frame(width: 640)
         .frame(maxHeight: room)
-        .coordinateSpace(.named(AddSheet.space))
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
-        .environment(\.sheetHeight, height)
         .background(Theme.sheet)
         // A question asked in the sheet, such as New Folder's, is drawn over the sheet, not in the window behind it.
         .confirmationHost()
     }
 
     @Environment(\.sheetRoom) private var room
-    @State private var height: CGFloat = 0
-
-    /// The sheet's own coordinates, top-left origin, in which a panel inside it finds the room it has.
-    nonisolated static let space = "add.sheet"
 }
 
 extension EnvironmentValues {
     /// How tall a sheet over the window may be.
     @Entry var sheetRoom: CGFloat = .infinity
-    /// How tall the sheet a view is in stands, in `AddSheet.space`.
-    @Entry var sheetHeight: CGFloat = 0
+    /// How tall the start form's pane stands, in `StartForm.space`.
+    @Entry var startHeight: CGFloat = 0
+    /// Raised by New Agent: the start form's first message takes the keyboard.
+    @Entry var startFocusRequest = 0
 }
 
 /// The bottom bar every side shares: a note on the left, the answer on the right.
@@ -143,56 +135,6 @@ struct SheetBar<Leading: View>: View {
             .frame(height: 50)
         }
     }
-}
-
-/// The Agent side: the start form once a computer can start an agent, or while a start this Mac sent has no answer
-/// yet, which the form opens on; before that, why none can (none paired, none connected, or a computer's CodeConnect
-/// too old to start one from here).
-private struct AgentSide: View {
-    @Environment(Machines.self) private var machines
-    @Environment(\.dismiss) private var dismiss
-    let addComputer: () -> Void
-    let started: (String) -> Void
-    /// The form has been shown. It stays when its computer's link drops, which empties the computers that can start,
-    /// so what was typed and chosen is there when the link is back.
-    @State private var formShown = false
-
-    var body: some View {
-        if formShown || !machines.startContexts.isEmpty || machines.outstandingStart != nil {
-            StartForm(resuming: machines.outstandingStart?.requestID, whyNone: why, started: started)
-                .onAppear { formShown = true }
-        } else {
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Start an agent").font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
-                    Text(why)
-                        .font(Theme.ui(13.5))
-                        .foregroundStyle(Theme.text2)
-                        .lineSpacing(3)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if !machines.showsFleet {
-                        ActionButton(title: AddKind.computer.title, key: nil, prominent: false, id: "agent.addComputer", action: addComputer)
-                            .padding(.top, 6)
-                    }
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 18)
-                Spacer(minLength: 18)
-                SheetBar(
-                    action: refused == nil ? nil : "Try Again", actionID: "agent.tryAgain", blocked: false,
-                    perform: { refused?.connection.retryNow() }, cancel: { dismiss() }, cancelID: "agent.cancel"
-                ) {
-                    EmptyView()
-                }
-            }
-        }
-    }
-
-    /// A computer refused for running a different version of CodeConnect, which only updating cures.
-    private var refused: AppModel? { machines.startRefusedComputer }
-
-    /// Why no computer can start an agent, in the words the iPhone says it with.
-    private var why: String { machines.noStartReason }
 }
 
 /// Add a computer: CodeConnect on it, signed in to the same Tailscale account, and it joins the list by itself. A
