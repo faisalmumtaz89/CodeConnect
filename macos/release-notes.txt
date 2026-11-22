@@ -1,1 +1,1 @@
-Settings is now a page of the main window, opened from the gear at the foot of the left panel or with ⌘,. Its Accounts section shows whether Claude Code and Codex are installed and signed in on this Mac.
+You start an agent in the main area of the window now: choose the folder and the computer, then type the first message, with the model in the same box. A table too wide for a reply scrolls sideways inside it, and Settings › Accounts says when this Mac’s service is offline.
