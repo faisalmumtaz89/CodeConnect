@@ -96,6 +96,17 @@ final class RenderPass: XCTestCase {
         try render(at: .ax5, RenderCatalog.all.filter { $0.name.hasPrefix("session-hosted-settings") })
     }
 
+    /// The settings line over the reply box: under a long reply, read-only on an ended run, and beside a live
+    /// Codex turn's Stop.
+    private static let settingsLine = RenderCatalog.all.filter {
+        ["session-settings-over-a-long-reply", "session-ended-relaunchable", "codex-stop-offered-session"]
+            .contains($0.name)
+    }
+
+    func testRendersTheSettingsLineAtLarge() throws { try render(at: .large, Self.settingsLine) }
+
+    func testRendersTheSettingsLineAtAX5() throws { try render(at: .ax5, Self.settingsLine) }
+
     // MARK: - The pass
 
     private func render(at size: Size, _ scenarios: [RenderScenario] = RenderCatalog.all) throws {

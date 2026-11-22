@@ -277,7 +277,18 @@ enum Fixtures {
         }
         // The hosted-settings fixture is one run and its summary — no cards, turns or receipt events;
         // everything the sheet draws is on the summary's menus and facts.
-        if variant == .hostedSettings { return messages }
+        if variant == .hostedSettings {
+            #if DEBUG
+                // `-CC_FIXTURE_LONG_REPLY YES`: a reply longer than the screen on `fx-2`, so a render can put its
+                // text where the settings line stands.
+                if UserDefaults.standard.bool(forKey: "CC_FIXTURE_LONG_REPLY") {
+                    for json in longReplyJSON(now: now) {
+                        if let event = decode(json) { messages.append(event) }
+                    }
+                }
+            #endif
+            return messages
+        }
         for (index, card) in cards.enumerated() {
             if let event = decode(approvalEventJSON(card, seq: UInt64(index + 2), now: now)) {
                 messages.append(event)
@@ -877,6 +888,27 @@ enum Fixtures {
             "kind":"tool_call","source":"hook",\
             "payload":{"tool_use_id":"toolu_fixture_soak8","tool_name":"Bash",\
             "tool_input":{"command":"./soak/run.sh --pass 8"}}}}
+            """,
+        ]
+    }
+
+    /// `fx-2`'s question and a reply in numbered sections, longer than the screen at every size.
+    private static func longReplyJSON(now: Date) -> [String] {
+        let stamp = rfc3339(now)
+        let reply = (1...8).map { n in
+            "## \(n). Section \(n) of the setup\n\nThis part of the answer explains step \(n) in plain words, "
+                + "long enough to wrap over several lines on a phone, so the text reaches the bottom of the screen."
+        }.joined(separator: "\n\n")
+        return [
+            """
+            {"type":"event","event":{"seq":1,"session_id":"fx-2","session_uid":"01CL000000000000000000DEF2","ts":"\(stamp)",\
+            "kind":"user_message","source":"transcript",\
+            "payload":{"message":{"content":"How is this project set up?"}}}}
+            """,
+            """
+            {"type":"event","event":{"seq":2,"session_id":"fx-2","session_uid":"01CL000000000000000000DEF2","ts":"\(stamp)",\
+            "kind":"agent_message","source":"transcript",\
+            "payload":{"message":{"content":[{"type":"text","text":\(quoted(reply))}]}}}}
             """,
         ]
     }

@@ -1001,6 +1001,26 @@ enum RenderCatalog {
                     app.buttons["session.composer.settings"], "the composer settings control")
             }),
         RenderScenario(
+            name: "session-settings-over-a-long-reply",
+            purpose:
+                "Claude in Bypass permissions under a reply scrolled back a little, so its text runs where the "
+                + "settings line stands: the line and the reply box are one block on the page's ground",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_FIXTURE_LONG_REPLY", "YES",
+                "-CC_DEEPLINK", "codeconnect://session/fx-2",
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+                // The reply folds behind "Show more"; unfolded, it runs past the screen.
+                try driver.require(app.buttons["Show more"], "the long reply's Show more").tap()
+                try driver.require(driver.text(containing: "Section 8", in: app), "the long reply's last section")
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.40))
+                    .press(
+                        forDuration: 0.05,
+                        thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.50)))
+            }),
+        RenderScenario(
             name: "session-settings-codex-default",
             purpose: "the composer settings control — a live Codex run at its default, the model named alone",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1"],
