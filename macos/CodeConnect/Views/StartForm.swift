@@ -123,7 +123,10 @@ struct StartForm: View {
             if let requestID, let owner = machines.models.first(where: { $0.starter.starts[requestID] != nil }),
                 let start = owner.starter.starts[requestID]
             {
+                // A page of its own in the form's column, as tall as its content.
                 sent(start, on: owner)
+                    .frame(maxWidth: Self.column)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 form
             }
@@ -164,7 +167,7 @@ struct StartForm: View {
                 if let words = RenderWindow.startMessage { message = words }
                 if browsing || RenderWindow.opensFolderPanel {
                     // Opened once the render has sized its window: a resize closes an open panel.
-                    try? await Task.sleep(for: .seconds(1))
+                    try? await Task.sleep(for: .seconds(2))
                     folderOpen = true
                 }
                 if let path = RenderWindow.chosenFolder {
