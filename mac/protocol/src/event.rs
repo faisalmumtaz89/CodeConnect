@@ -613,7 +613,7 @@ mod tests {
                 .unwrap();
         let ended: SessionSummary =
             serde_json::from_value(wire["session_hosted_ended"].clone()).unwrap();
-        assert_eq!(ended.model_label.as_deref(), Some("Opus"));
+        assert_eq!(ended.model_label.as_deref(), Some("Opus 5.5"));
         assert_eq!(
             serde_json::to_value(&ended).unwrap(),
             wire["session_hosted_ended"]

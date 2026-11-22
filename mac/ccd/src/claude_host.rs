@@ -1352,12 +1352,11 @@ pub(crate) fn entry_label(models: &[serde_json::Value], id: &str) -> Option<Stri
 }
 
 /// A model's name, as the apps name it (the Kit's `RunSettings.modelName`, the same words): the part of its entry's
-/// description before the first " · " (the whole description when it has none), when that part begins with the
-/// entry's label; otherwise the entry's label. "Sonnet" / "Sonnet 5.5 · Efficient for routine tasks" is "Sonnet 5.5".
+/// description before the first " · ", when the description has one and that part begins with the entry's label;
+/// otherwise the entry's label. "Sonnet" / "Sonnet 5.5 · Efficient for routine tasks" is "Sonnet 5.5".
 pub(crate) fn model_name(label: &str, description: Option<&str>) -> String {
-    let first = description.map(|description| description.split(" · ").next().unwrap_or_default());
-    match first {
-        Some(first) if !first.is_empty() && first.starts_with(label) => first.to_string(),
+    match description.and_then(|description| description.split_once(" · ")) {
+        Some((first, _)) if first.starts_with(label) => first.to_string(),
         _ => label.to_string(),
     }
 }
@@ -9597,8 +9596,8 @@ mod tests {
     }
 
     /// **A model's name** (the same rule as the Kit's `RunSettings.modelName`): the part of its entry's description
-    /// before the first " · " (the whole description when it has none), when that part begins with the entry's label;
-    /// otherwise the entry's label.
+    /// before the first " · ", when the description has one and that part begins with the entry's label; otherwise the
+    /// entry's label.
     #[test]
     fn a_models_name_is_its_descriptions_first_part_when_it_begins_with_the_label() {
         for (label, description, name) in [
@@ -9629,7 +9628,12 @@ mod tests {
                 Some("Command Code API, 1M context"),
                 "GLM-5.3 · Command Code",
             ),
-            ("Sonnet", Some("Sonnet 5.5"), "Sonnet 5.5"),
+            ("Sonnet", Some("Sonnet 5.5"), "Sonnet"),
+            (
+                "Sonnet",
+                Some("Sonnet is efficient for routine tasks"),
+                "Sonnet",
+            ),
             ("sonnet", Some("Sonnet 5.5 · Efficient"), "sonnet"),
             ("Sonnet", None, "Sonnet"),
             ("Sonnet", Some(""), "Sonnet"),
