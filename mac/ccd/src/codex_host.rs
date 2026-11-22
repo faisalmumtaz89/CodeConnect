@@ -2356,6 +2356,8 @@ async fn launch_again(
         .map_err(|err| format!("could not read its settings: {err:#}"))?
         .and_then(narrower_than_default);
     let client = bring_up(daemon, uid, &launch, &folders, log, deadline, launched).await?;
+    // The run's effort needs nothing here: Codex's own resume restores the thread's effort (seen on 0.170.0 on
+    // 2026-11-22).
     let (adapter, owed, cards) = resume_thread(daemon, &client, run, &codeconnect, kept).await?;
     Ok((client, adapter, owed, cards))
 }
