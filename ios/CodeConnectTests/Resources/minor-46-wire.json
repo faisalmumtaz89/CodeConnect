@@ -33,6 +33,7 @@
     "menus": {
       "models": [
         {
+          "default_effort": "medium",
           "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
           "efforts": [
             "low",
@@ -46,6 +47,7 @@
           "value": "default"
         },
         {
+          "default_effort": "medium",
           "detail": "Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok",
           "efforts": [
             "low",
@@ -72,6 +74,7 @@
           "value": "fable"
         },
         {
+          "default_effort": "medium",
           "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
           "efforts": [
             "low",
@@ -85,6 +88,7 @@
           "value": "sonnet"
         },
         {
+          "default_effort": "medium",
           "detail": "Haiku 5.5 · Fastest for quick answers · $0.10/$0.50 per Mtok ($0.50/$2.50 for prompts over 100k)",
           "efforts": [
             "low",

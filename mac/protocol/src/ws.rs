@@ -2070,9 +2070,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 46,
             "an ended run naming its model by its menu's label (`model_label`) is minor 46"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 47,
+            "a menu entry naming its model's default effort (`default_effort`) is minor 47"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 46);
+        assert_eq!(crate::PROTOCOL_MINOR, 47);
     }
 
     /// **The tags, pinned on this side too.**

@@ -1,7 +1,8 @@
 import XCTest
 
 /// The settings line above the reply box names the effort in use after the model, at rest, by Kit's one rule
-/// (`RunSettings.effortName`): the effort the agent named, or "Default" while it has named none. The model's own words
+/// (`RunSettings.effortName`): the effort the agent named, or while it has named none its model's own default, by name
+/// (decision 313). The model's own words
 /// are `RunSettings`' to choose, so only what follows them is asserted.
 final class EffortAtRestUITests: XCTestCase {
 
@@ -28,9 +29,9 @@ final class EffortAtRestUITests: XCTestCase {
         XCTAssertTrue(label.hasSuffix(", High effort, Plan"), label)
     }
 
-    func testARunWhoseAgentNamedNoEffortReadsDefault() {
-        // cx-1: a Codex run whose model offers efforts and whose agent has named none, in its default mode.
+    func testARunWhoseAgentNamedNoEffortReadsItsModelsDefault() {
+        // cx-1: a Codex run on GPT-6.1-Sol, whose default effort is Low, whose agent has named none, in its default mode.
         let label = settingsLine("cx-1").label
-        XCTAssertTrue(label.hasSuffix(", Default effort"), label)
+        XCTAssertTrue(label.hasSuffix(", Low effort"), label)
     }
 }

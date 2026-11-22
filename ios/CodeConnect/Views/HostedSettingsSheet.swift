@@ -83,9 +83,12 @@ struct HostedSettingsSheet: View {
             CCSectionHeader("Effort")
             card {
                 ForEach(Array(live.efforts.enumerated()), id: \.element.value) { index, entry in
+                    let isSelected = live.selectedEffort?.value == entry.value
                     choiceRow(
                         title: entry.label,
-                        isSelected: live.selectedEffort?.value == entry.value,
+                        // The model's own default, marked while no effort is chosen (decision 318).
+                        detail: isSelected && live.effortIsDefault ? "Default" : nil,
+                        isSelected: isSelected, offered: live.offers(entry),
                         isLast: index == live.efforts.count - 1, disabled: live.inFlight
                     ) { await model.setEffort(for: sessionKey, effortValue: entry.value) }
                 }
@@ -117,9 +120,10 @@ struct HostedSettingsSheet: View {
 
     /// One selectable row: its label, a check when it is the current value, and
     /// its tap — disabled while any call is in flight (the menus are one unit) and on the row already in
-    /// force (there is nothing to apply).
+    /// force (there is nothing to apply), unless the row says it is still on offer (`offered`: an effort marked as
+    /// the model's default, which choosing makes the person's own).
     private func choiceRow(
-        title: String, detail: String? = nil, isSelected: Bool, isLast: Bool, disabled: Bool,
+        title: String, detail: String? = nil, isSelected: Bool, offered: Bool? = nil, isLast: Bool, disabled: Bool,
         apply: @escaping () async -> SettingResult?
     ) -> some View {
         CCRow(
@@ -127,7 +131,7 @@ struct HostedSettingsSheet: View {
             titleDetail: detail,
             showsChevron: false,
             separator: !isLast,
-            action: (disabled || isSelected) ? nil : { run(apply) }
+            action: (disabled || !(offered ?? !isSelected)) ? nil : { run(apply) }
         ) {
             CCIcon(isSelected ? "check-circle-fill" : "circle", size: 18, relativeTo: .body)
                 .foregroundStyle(isSelected ? CC.text.primary : CC.text.tertiary)

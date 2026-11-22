@@ -1,0 +1,84 @@
+{
+ "codex": "0.170.0",
+ "signed_out": true,
+ "runs": {
+  "noconfig": {
+   "config_toml": null,
+   "default_model": {
+    "id": "gpt-6.2-sol",
+    "model": "gpt-6.2-sol",
+    "isDefault": true,
+    "defaultReasoningEffort": "low",
+    "supported": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max",
+     "ultra"
+    ]
+   },
+   "thread_start_keys": [
+    "activePermissionProfile",
+    "approvalPolicy",
+    "approvalsReviewer",
+    "cwd",
+    "disabledPluginIds",
+    "instructionSources",
+    "model",
+    "modelProvider",
+    "multiAgentMode",
+    "reasoningEffort",
+    "runtimeWorkspaceRoots",
+    "sandbox",
+    "serviceTier",
+    "thread"
+   ],
+   "thread_start": {
+    "model": "gpt-6.2-sol",
+    "modelProvider": "openai",
+    "reasoningEffort": null,
+    "approvalPolicy": "on-request"
+   }
+  },
+  "config-high": {
+   "config_toml": "model_reasoning_effort = \"high\"\n",
+   "default_model": {
+    "id": "gpt-6.2-sol",
+    "model": "gpt-6.2-sol",
+    "isDefault": true,
+    "defaultReasoningEffort": "low",
+    "supported": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max",
+     "ultra"
+    ]
+   },
+   "thread_start_keys": [
+    "activePermissionProfile",
+    "approvalPolicy",
+    "approvalsReviewer",
+    "cwd",
+    "disabledPluginIds",
+    "instructionSources",
+    "model",
+    "modelProvider",
+    "multiAgentMode",
+    "reasoningEffort",
+    "runtimeWorkspaceRoots",
+    "sandbox",
+    "serviceTier",
+    "thread"
+   ],
+   "thread_start": {
+    "model": "gpt-6.2-sol",
+    "modelProvider": "openai",
+    "reasoningEffort": "high",
+    "approvalPolicy": "on-request"
+   }
+  }
+ }
+}

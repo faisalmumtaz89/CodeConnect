@@ -796,18 +796,26 @@ public struct MenuModel: Codable, Sendable, Hashable {
     /// The model id the agent says this entry runs now (minor 45; Claude Code's `resolvedModel`), absent from a
     /// Codex entry, whose `value` is the model, and from a daemon below 45.
     public let resolvedModel: String?
+    /// The effort this model runs at when none is chosen, as the daemon names it (`default_effort`): Codex's own
+    /// `defaultReasoningEffort`, Claude Code's documented default (decision 313); absent when neither names one.
+    public let defaultEffort: String?
 
     enum CodingKeys: String, CodingKey {
         case value, label, efforts, detail
         case resolvedModel = "resolved_model"
+        case defaultEffort = "default_effort"
     }
 
-    public init(value: String, label: String, efforts: [String], detail: String? = nil, resolvedModel: String? = nil) {
+    public init(
+        value: String, label: String, efforts: [String], detail: String? = nil, resolvedModel: String? = nil,
+        defaultEffort: String? = nil
+    ) {
         self.value = value
         self.label = label
         self.efforts = efforts
         self.detail = detail
         self.resolvedModel = resolvedModel
+        self.defaultEffort = defaultEffort
     }
 
     /// The name an app shows for a model: the agent's own label, except its default entry, which is "Default" for
@@ -818,7 +826,7 @@ public struct MenuModel: Codable, Sendable, Hashable {
     var shown: MenuModel {
         MenuModel(
             value: value, label: Self.shownLabel(value: value, label: label), efforts: efforts, detail: detail,
-            resolvedModel: resolvedModel)
+            resolvedModel: resolvedModel, defaultEffort: defaultEffort)
     }
 }
 

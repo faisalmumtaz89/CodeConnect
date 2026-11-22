@@ -1061,6 +1061,23 @@ enum RenderCatalog {
                     "the settings sheet, opened by the control")
             }),
         RenderScenario(
+            name: "session-hosted-settings-codex-default-effort",
+            purpose:
+                "a live Codex run that chose no effort: its model's own default, Low, marked with a Default note",
+            arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1"],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control").tap()
+                try driver.require(
+                    driver.element(containing: "Medium", in: app), "the Effort rows under the marked default",
+                    scrollingWithin: driver.list(holding: "Permission mode", in: app))
+                // The list stops at its end, with the marked row under the sheet's bar: back a row's height.
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.40))
+                    .press(
+                        forDuration: 0.05,
+                        thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.50)))
+            }),
+        RenderScenario(
             name: "session-compact-sheet",
             purpose: "the /compact sheet — optional field, always-active button",
             arguments: [
