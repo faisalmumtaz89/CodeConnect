@@ -233,6 +233,14 @@ struct MainWindow: View {
                 settings = .general
             }
             .task {
+                guard RenderWindow.resizeAfter > 0 else { return }
+                try? await Task.sleep(for: .seconds(RenderWindow.resizeAfter))
+                guard let window = NSApp.windows.first(where: \.canBecomeMain) else { return }
+                var frame = window.frame
+                frame.size.width += 40
+                window.setFrame(frame, display: true)
+            }
+            .task {
                 // A test launch's fleet is in place a moment after the window is.
                 try? await Task.sleep(for: .seconds(1))
                 let active = FleetScope.active.rows(machines.fleet)

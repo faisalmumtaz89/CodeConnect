@@ -53,6 +53,9 @@
         /// `-CC_ADD_AGENT YES`: the same sheet, on its Agent side.
         static var opensOnAgent: Bool { UserDefaults.standard.bool(forKey: "CC_ADD_AGENT") }
 
+        /// `-CC_RESIZE_AFTER <seconds>`: that long after launch, the main window grows 40 pt wider, as a person
+        /// dragging its edge does (an open panel closes).
+        static var resizeAfter: Double { UserDefaults.standard.double(forKey: "CC_RESIZE_AFTER") }
         /// `-CC_FOLDER_PANEL YES`: the start form opens with its folder panel open.
         static var opensFolderPanel: Bool { UserDefaults.standard.bool(forKey: "CC_FOLDER_PANEL") }
         /// `-CC_START_MESSAGE <words>`: the start form's first message, typed.
