@@ -138,7 +138,7 @@ final class DraftsKeptUITests: XCTestCase {
     /// screen for a run the phone does not list (here a link to a run that is not there) has none.
     func testAScreenForARunThePhoneDoesNotListHasNoReplyBox() {
         let app = launch(["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/no-such-run"])
-        let empty = app.staticTexts.matching(NSPredicate(format: "label == 'Nothing recorded yet'")).firstMatch
+        let empty = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Not on your computer'")).firstMatch
         XCTAssertTrue(empty.waitForExistence(timeout: 25), "the screen for a run that is not listed")
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "unlisted-run"
