@@ -348,35 +348,14 @@ private struct Composer: View {
         }
     }
 
-    /// Send, or while a turn runs (a Codex run's, or a Claude run's started from the app: whenever Kit says it can be
-    /// stopped) Stop, as chat apps do. Return still sends what is typed: a Codex run takes it into the running turn,
-    /// a Claude run takes it once the turn ends. The note above the box says what became of a stop.
+    /// Send, or while a turn runs Stop (`StopTurnButton`), as chat apps do. Return still sends what is typed: a Codex
+    /// run takes it into the running turn, a Claude run takes it once the turn ends.
     @ViewBuilder private var sendButton: some View {
         if model.stopUnavailable(for: key) == nil {
-            stopButton
+            StopTurnButton(model: model, key: key)
         } else {
             plainSendButton
         }
-    }
-
-    /// Greyed while the stop is on its way, and for a moment after a turn changes, as Kit rules.
-    private var stopButton: some View {
-        let stopping = model.codexStop(for: key) == .inFlight
-        let greyed = model.codexControls(for: key).isStopGreyed(now: model.now)
-        return Button {
-            Task { await model.stopCodexTurn(sessionKey: key) }
-        } label: {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(Color.black)
-                .frame(width: 8, height: 8)
-                .frame(width: Self.sendSize, height: Self.sendSize)
-                .background(Circle().fill(Theme.text))
-        }
-        .buttonStyle(.hover(radius: 12, over: true, id: "session.composer.stop"))
-        .disabled(stopping || greyed)
-        .help(stopping ? SessionWords.stopping : greyed ? SessionWords.tryAgainInAMoment : SessionWords.stopHelp)
-        .accessibilityLabel("Stop")
-        .accessibilityIdentifier("session.composer.stop")
     }
 
     private var plainSendButton: some View {

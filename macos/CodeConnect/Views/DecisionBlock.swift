@@ -98,7 +98,7 @@ struct DecisionBlock: View {
                                 VStack(alignment: .leading, spacing: 10) { controls }
                                     .padding(.horizontal, 28).padding(.bottom, 14)
                             } else {
-                                ReplyBoxFrame {
+                                ReplyBoxFrame(model: model, key: approval.sessionKey) {
                                     outcomeLine
                                     controls
                                 }
