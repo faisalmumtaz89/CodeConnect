@@ -142,3 +142,37 @@ public struct AccountsRefusal: LocalizedError, Sendable, Equatable {
     public let message: String
     public var errorDescription: String? { message }
 }
+
+/// The Accounts page's words for a switch in progress and for a row's quiet second line (design A). A switch is lazy:
+/// each session moves with its next message, and one still in a turn finishes it first.
+public enum AccountSwitchWords {
+    /// Under the group while sessions are moving to `target`; nil with none live.
+    public static func sentence(to target: String, waiting: Int, moved: Int) -> String? {
+        let total = waiting + moved
+        guard total > 0 else { return nil }
+        let move = total == 1
+            ? "1 session will use \(target) from its next message."
+            : "\(total) sessions will use \(target) from their next message."
+        switch waiting {
+        case 0: return move
+        case 1 where total == 1: return "\(move) It finishes its turn first."
+        case 1: return "\(move) 1 finishes its turn first."
+        default: return "\(move) \(waiting) finish their turn first."
+        }
+    }
+
+    /// In amber under the group: the sessions that couldn't start on `target`, named when one; nil with none.
+    public static func failure(to target: String, sessions: [String]) -> String? {
+        switch sessions.count {
+        case 0: return nil
+        case 1: return "\(sessions[0]) couldn't start on \(target)."
+        default: return "\(sessions.count) sessions couldn't start on \(target)."
+        }
+    }
+
+    /// A row's second line when another account is signed in as the same address.
+    public static func sameSignIn(as email: String) -> String { "The same sign-in as \(email)" }
+
+    /// A row's second line when Codex keeps its sign-in in the computer's own store.
+    public static let notSeparate = "Uses this computer's own Codex sign-in, so it isn't a separate account"
+}
