@@ -62,10 +62,13 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             account_id,
         } => {
             let ended = Arc::clone(daemon);
+            let signed = account_id.clone();
             crate::accounts::sign_in(
                 &daemon.store,
                 &daemon.sign_ins,
                 move || {
+                    // What the account said of itself was its old sign-in's.
+                    ended.account_facts.forget(&signed);
                     tokio::spawn(async move { push_accounts(&ended).await });
                 },
                 &environment,
@@ -81,6 +84,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             request_id,
             account_id,
         } => {
+            daemon.account_facts.forget(&account_id);
             crate::accounts::remove_with(
                 &daemon.store,
                 &daemon.sign_ins,
@@ -103,7 +107,12 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             crate::accounts::with_signed_in(&environment, codex.as_deref(), reply).await
         }
     };
-    let reply = daemon.sign_ins.marked(reply);
+    let reply = daemon.account_facts.told(daemon.sign_ins.marked(reply));
+    // A device asking for the listing is what reads the accounts' own facts again, when they are old.
+    if !changes && matches!(reply, ServerMessage::Accounts { .. }) {
+        let daemon = Arc::clone(daemon);
+        tokio::spawn(async move { refresh_facts(&daemon).await });
+    }
     // A choice made moves the agent's live runs to it (306 Slice E).
     if let (Some(agent), ServerMessage::Accounts { .. }) = (chosen, &reply) {
         let daemon = Arc::clone(daemon);
@@ -112,7 +121,10 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
     if let (
         true,
         ServerMessage::Accounts {
-            accounts, active, ..
+            accounts,
+            active,
+            defaults,
+            ..
         },
     ) = (changes, &reply)
     {
@@ -120,6 +132,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             request_id: None,
             accounts: accounts.clone(),
             active: active.clone(),
+            defaults: defaults.clone(),
         });
     }
     reply
@@ -138,8 +151,56 @@ async fn push_accounts(daemon: &Arc<Daemon>) {
     if matches!(listing, ServerMessage::Accounts { .. }) {
         let listing =
             crate::accounts::with_signed_in(&environment, codex.as_deref(), listing).await;
-        let _ = daemon.accounts_tx.send(daemon.sign_ins.marked(listing));
+        let _ = daemon
+            .accounts_tx
+            .send(daemon.account_facts.told(daemon.sign_ins.marked(listing)));
     }
+}
+
+/// Each Codex account, and the Default, whose facts are old or missing and not being read, read again (one read at a
+/// time per account, all at once), then the listing pushed once.
+async fn refresh_facts(daemon: &Arc<Daemon>) {
+    let environment = phone_environment();
+    let Some(codex) = codex_path(&environment, daemon.config.codex_bin.as_deref()).await else {
+        return;
+    };
+    let Ok(accounts) = daemon.store.accounts() else {
+        return;
+    };
+    let codex_accounts: Vec<_> = accounts
+        .into_iter()
+        .filter(|account| account.agent == "codex")
+        .collect();
+    let keys: Vec<String> = codex_accounts
+        .iter()
+        .map(|account| account.id.clone())
+        .chain(std::iter::once(crate::accounts::DEFAULT.to_string()))
+        .collect();
+    let claimed = daemon.account_facts.claim_stale(&keys);
+    if claimed.is_empty() {
+        return;
+    }
+    let root = protocol::root_dir();
+    let reads = claimed.iter().map(|key| {
+        let account = codex_accounts.iter().find(|account| &account.id == key);
+        let (environment, codex, root) = (&environment, &codex, &root);
+        async move {
+            let home = match account {
+                Some(account) => match crate::accounts::AccountEnv::for_account(root, account) {
+                    Ok(home) => home,
+                    Err(_) => {
+                        daemon.account_facts.read(key, None);
+                        return;
+                    }
+                },
+                None => None,
+            };
+            let facts = crate::accounts::read_facts(environment, home.as_ref(), codex).await;
+            daemon.account_facts.read(key, facts);
+        }
+    });
+    futures_util::future::join_all(reads).await;
+    push_accounts(daemon).await;
 }
 
 /// The agents the phone can start.

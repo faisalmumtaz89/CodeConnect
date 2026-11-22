@@ -267,10 +267,177 @@ pub(crate) fn listing(
                 signed_in: None,
                 signing_in: false,
                 not_separate: false,
+                facts: None,
+                same_as_another: false,
             })
             .collect(),
         active,
+        defaults: Vec::new(),
     }
+}
+
+/// What each Codex account (and the Default, keyed [`DEFAULT`]) says of itself, read on demand and kept in memory
+/// only: never stored, never logged. A read happens only when a device asks for the listing and what is held for
+/// that account is older than [`FACTS_FRESH`] (or missing), one at a time per account.
+#[derive(Default)]
+pub(crate) struct Facts {
+    known: std::sync::Mutex<HashMap<String, (protocol::ws::AccountFacts, std::time::Instant)>>,
+    reading: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+/// The key of an agent's Default among [`Facts`].
+pub(crate) const DEFAULT: &str = "default";
+
+/// How long what an account says of itself is shown without reading it again.
+pub(crate) const FACTS_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long one read of an account may take: an app-server started, two questions, ended.
+const FACTS_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+impl Facts {
+    /// The keys among `keys` held for less than [`FACTS_FRESH`] are left; each other one not being read now is
+    /// claimed for a read and returned.
+    pub(crate) fn claim_stale(&self, keys: &[String]) -> Vec<String> {
+        let known = self.known.lock().unwrap();
+        let mut reading = self.reading.lock().unwrap();
+        keys.iter()
+            .filter(|key| {
+                known
+                    .get(*key)
+                    .is_none_or(|(_, at)| at.elapsed() >= FACTS_FRESH)
+            })
+            .filter(|key| reading.insert((*key).clone()))
+            .cloned()
+            .collect()
+    }
+
+    /// The read of `key` is over: what it found, if anything, is kept.
+    pub(crate) fn read(&self, key: &str, facts: Option<protocol::ws::AccountFacts>) {
+        if let Some(facts) = facts {
+            self.known
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), (facts, std::time::Instant::now()));
+        }
+        self.reading.lock().unwrap().remove(key);
+    }
+
+    /// What is held for `key` goes (its sign-in changed, or it was removed).
+    pub(crate) fn forget(&self, key: &str) {
+        self.known.lock().unwrap().remove(key);
+    }
+
+    /// `reply`, an accounts listing, with what is held: each Codex account's facts, the Codex Default's, and an
+    /// account marked `same_as_another` when another account of its agent, or its Default, has its email.
+    pub(crate) fn told(
+        &self,
+        mut reply: protocol::ws::ServerMessage,
+    ) -> protocol::ws::ServerMessage {
+        let protocol::ws::ServerMessage::Accounts {
+            accounts, defaults, ..
+        } = &mut reply
+        else {
+            return reply;
+        };
+        let known = self.known.lock().unwrap();
+        for account in accounts
+            .iter_mut()
+            .filter(|account| account.agent == AgentKind::Codex)
+        {
+            account.facts = known.get(&account.id).map(|(facts, _)| facts.clone());
+        }
+        let default = known.get(DEFAULT).map(|(facts, _)| facts.clone());
+        let emails: Vec<String> = accounts
+            .iter()
+            .filter(|account| account.agent == AgentKind::Codex)
+            .filter_map(|account| account.facts.as_ref()?.email.clone())
+            .chain(default.as_ref().and_then(|facts| facts.email.clone()))
+            .collect();
+        for account in accounts.iter_mut() {
+            account.same_as_another = account
+                .facts
+                .as_ref()
+                .and_then(|facts| facts.email.as_ref())
+                .is_some_and(|email| emails.iter().filter(|other| *other == email).count() > 1);
+        }
+        if let Some(facts) = default {
+            defaults.push(protocol::ws::DefaultAccount {
+                agent: AgentKind::Codex,
+                facts,
+            });
+        }
+        reply
+    }
+}
+
+/// What the codex at `codex` says of the account whose home `account` gives (its Default for none): its email and
+/// plan (`account/read`) and its usage windows (`account/rateLimits/read`), asked of an app-server started in that
+/// home and ended once it has answered. None when it could not be asked or did not answer within [`FACTS_WAIT`].
+pub(crate) async fn read_facts(
+    environment: &HashMap<OsString, OsString>,
+    account: Option<&AccountEnv>,
+    codex: &Path,
+) -> Option<protocol::ws::AccountFacts> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let asking = concat!(
+        r#"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codeconnect-ccd","title":"CodeConnect daemon","version":"0"}}}"#,
+        "\n",
+        r#"{"method":"initialized"}"#,
+        "\n",
+        r#"{"id":2,"method":"account/read","params":{}}"#,
+        "\n",
+        r#"{"id":3,"method":"account/rateLimits/read","params":{}}"#,
+        "\n",
+    );
+    let mut command = crate::start_session::login_shell_command(
+        environment,
+        account,
+        &[codex.as_os_str(), std::ffi::OsStr::new("app-server")],
+    );
+    command
+        .current_dir(protocol::home_dir())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let asked = async {
+        let mut child = command.spawn().ok()?;
+        let mut stdin = child.stdin.take()?;
+        stdin.write_all(asking.as_bytes()).await.ok()?;
+        let mut lines = tokio::io::BufReader::new(child.stdout.take()?).lines();
+        let (mut said_account, mut said_limits) = (None, None);
+        while said_account.is_none() || said_limits.is_none() {
+            let line = lines.next_line().await.ok()??;
+            // What the user's shell prints as it starts is not the agent's.
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            match value["id"].as_u64() {
+                Some(2) => said_account = Some(value["result"].clone()),
+                Some(3) => said_limits = Some(value["result"].clone()),
+                _ => {}
+            }
+        }
+        drop(stdin);
+        let (account, limits) = (said_account?, said_limits?);
+        let window = |window: &serde_json::Value| {
+            Some(protocol::ws::UsageWindow {
+                used_percent: u32::try_from(window["usedPercent"].as_u64()?).ok()?,
+                window_minutes: window["windowDurationMins"].as_u64()?,
+                resets_at: window["resetsAt"].as_i64()?,
+            })
+        };
+        Some(protocol::ws::AccountFacts {
+            email: account["account"]["email"].as_str().map(str::to_string),
+            plan: account["account"]["planType"].as_str().map(str::to_string),
+            windows: ["primary", "secondary"]
+                .iter()
+                .filter_map(|which| window(&limits["rateLimits"][which]))
+                .collect(),
+            read_at: protocol::time::now_rfc3339(),
+        })
+    };
+    tokio::time::timeout(FACTS_WAIT, asked).await.ok()?
 }
 
 /// How a sign-in going is ended: it is sent where to say its login's group is gone.
@@ -669,6 +836,7 @@ mod tests {
             "#!/bin/sh\nhere=$(dirname \"$0\")\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then [ -f \"$CODEX_HOME/auth.json\" ] || [ -f \"$here/keyring-login\" ]; exit $?; fi\n\
              if [ \"$1\" = login ] && [ -e \"$here/keyring\" ]; then echo '{}' > \"$here/keyring-login\"; exit 0; fi\n\
              if [ \"$1\" = login ]; then if [ -e \"$here/hang\" ]; then sleep 30 & kid=$!; echo $kid > \"$here/kid\"; echo $$ > \"$here/pid\"; trap 'kill -TERM $kid; exit 0' TERM; wait; fi; echo '{}' > \"$CODEX_HOME/auth.json\"; fi\n\
+             if [ \"$1\" = app-server ]; then n=$(basename \"${CODEX_HOME:-default}\"); while IFS= read -r line; do case \"$line\" in *'\"id\":1,'*) printf '{\"id\":1,\"result\":{\"userAgent\":\"stand-in\"}}\\n';; *account/rateLimits/read*) printf '{\"id\":3,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":42,\"windowDurationMins\":300,\"resetsAt\":1800000000},\"secondary\":null,\"planType\":\"plus\"}}}\\n';; *account/read*) [ -e \"$here/same\" ] && n=same; printf '{\"id\":2,\"result\":{\"account\":{\"email\":\"%s@example.test\",\"planType\":\"plus\",\"type\":\"chatgpt\",\"workspaceName\":null},\"requiresOpenaiAuth\":true}}\\n' \"$n\";; esac; done; exit 0; fi\n\
              if [ \"$1\" = logout ]; then echo \"$CODEX_HOME\" >> \"$here/logouts\"; [ -e \"$here/keep\" ] || rm -f \"$CODEX_HOME/auth.json\"; fi\n",
         )
         .unwrap();
@@ -814,6 +982,118 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(folder(&a.id));
         let _ = std::fs::remove_dir_all(folder(&b.id));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **What a Codex account says of itself is read in its own home, shown, and never stored** (306 Slices C and F):
+    /// email and plan from `account/read`, each usage window `account/rateLimits/read` names (an unnamed one absent),
+    /// with when it was read; the Default's too, from the person's own home; two accounts signed in as one email are
+    /// marked; and none of it reaches the store.
+    #[tokio::test]
+    async fn what_a_codex_account_says_of_itself_is_shown_and_never_stored() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-facts.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let codex = stand_in_codex(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.clone().into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-facts");
+        let db = store.temp_db();
+        let a = store.add_account("codex", "A").unwrap();
+        let on_a = super::AccountEnv::for_account(&protocol::root_dir(), &a)
+            .unwrap()
+            .unwrap();
+        let facts = super::Facts::default();
+        let mut keys = vec![a.id.clone(), super::DEFAULT.to_string()];
+        assert_eq!(facts.claim_stale(&keys), keys, "nothing held: both read");
+        assert_eq!(
+            facts.claim_stale(&keys),
+            Vec::<String>::new(),
+            "one read at a time per account"
+        );
+        facts.read(
+            &a.id,
+            super::read_facts(&environment, Some(&on_a), &codex).await,
+        );
+        facts.read(
+            super::DEFAULT,
+            super::read_facts(&environment, None, &codex).await,
+        );
+        assert_eq!(
+            facts.claim_stale(&keys),
+            Vec::<String>::new(),
+            "fresh: not read again"
+        );
+        let told = serde_json::to_value(facts.told(super::listing(&store, None))).unwrap();
+        let row = &told["accounts"][0];
+        assert_eq!(
+            row["facts"]["email"],
+            format!("{}@example.test", a.id),
+            "{told}"
+        );
+        assert_eq!(row["facts"]["plan"], "plus");
+        assert_eq!(
+            row["facts"]["windows"],
+            serde_json::json!([{"used_percent": 42, "window_minutes": 300, "resets_at": 1800000000}]),
+            "the one window Codex names; the other absent"
+        );
+        assert!(row["facts"]["read_at"].is_string());
+        assert_eq!(row.get("same_as_another"), None);
+        assert_eq!(
+            told["defaults"][0]["facts"]["email"], "default@example.test",
+            "{told}"
+        );
+        // Two accounts signed in as one email are marked.
+        std::fs::write(root.join("same"), "").unwrap();
+        let b = store.add_account("codex", "B").unwrap();
+        let on_b = super::AccountEnv::for_account(&protocol::root_dir(), &b)
+            .unwrap()
+            .unwrap();
+        facts.forget(&a.id);
+        keys.push(b.id.clone());
+        for key in facts.claim_stale(&keys) {
+            let home = if key == a.id {
+                Some(&on_a)
+            } else {
+                Some(&on_b)
+            };
+            facts.read(&key, super::read_facts(&environment, home, &codex).await);
+        }
+        let told = serde_json::to_value(facts.told(super::listing(&store, None))).unwrap();
+        assert_eq!(
+            (
+                told["accounts"][0]["same_as_another"].as_bool(),
+                told["accounts"][1]["same_as_another"].as_bool()
+            ),
+            (Some(true), Some(true)),
+            "{told}"
+        );
+        crate::switch::window::keep(&[told.clone()], "accounts-facts-wire.json");
+        // Held in memory only: not a byte of it in the store.
+        drop(store);
+        for file in [db.path().to_path_buf(), db.path().with_extension("db-wal")] {
+            if let Ok(bytes) = std::fs::read(&file) {
+                assert!(
+                    !bytes
+                        .windows(b"example.test".len())
+                        .any(|window| window == b"example.test"),
+                    "{} holds an email",
+                    file.display()
+                );
+            }
+        }
+        for id in [&a.id, &b.id] {
+            let _ = std::fs::remove_dir_all(
+                protocol::root_dir().join("accounts").join("codex").join(id),
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

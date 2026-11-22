@@ -872,7 +872,9 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     [`event::SWITCHED_TO`], and its next message starts it on the account active then; it reads live meanwhile,
 ///     [`event::SessionSummary::switching`] saying where its move stands, and a start that did not go through files
 ///     [`event::notice::SWITCH_FAILED`]. Each run CodeConnect started names the account its process runs on
-///     ([`event::SessionSummary::account`]; Default is `id` null). An account whose Codex sign-in is kept outside its home reads
+///     ([`event::SessionSummary::account`]; Default is `id` null). A listing carries what each Codex account and the
+///     Default say of themselves ([`ws::AccountFacts`]: email, plan, usage windows, read on demand and held in the
+///     computer's memory only), and marks two signed in as one email. An account whose Codex sign-in is kept outside its home reads
 ///     [`ws::AgentAccount::not_separate`]. A daemon below 48 answers them `bad_request` and advertises no
 ///     `accounts`.
 pub const PROTOCOL_MINOR: u32 = 48;

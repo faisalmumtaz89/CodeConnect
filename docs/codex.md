@@ -15,6 +15,10 @@ A message queued in Codex itself (`codex queue`) is not kept across that, and a 
 helper an agent left running in the background is stopped when its session moves. A moved
 session's settings can be changed once your next message has started it.
 
+For each Codex account, and the Default, the Accounts page shows the email and plan it is signed
+in as and its usage as Codex reports it, read from Codex when you open the page (at most once a
+minute per account) and kept in memory only, never written to disk or to the log.
+
 So: **turns your phone starts are your turns.** Saying something from the phone spends the
 same account allowance as a turn you start in Codex yourself. There is no CodeConnect
 account, no proxy key and no separate meter.

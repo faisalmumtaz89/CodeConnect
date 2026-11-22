@@ -202,6 +202,8 @@ pub struct Daemon {
     pub(crate) agents: crate::start_session::KnownAgents,
     /// The account sign-in this computer is running, if any ([`crate::accounts::sign_in`]).
     pub(crate) sign_ins: Arc<crate::accounts::SignIns>,
+    /// What each account says of itself (email, plan, usage), held in memory only ([`crate::accounts::Facts`]).
+    pub(crate) account_facts: crate::accounts::Facts,
     /// The accounts listing, sent once whenever it changes, for each connection that reads accounts to push.
     pub(crate) accounts_tx: broadcast::Sender<protocol::ws::ServerMessage>,
 }
@@ -537,6 +539,7 @@ impl Daemon {
             starts: crate::start_session::Starts::default(),
             agents: crate::start_session::KnownAgents::default(),
             sign_ins: Arc::default(),
+            account_facts: crate::accounts::Facts::default(),
             accounts_tx: broadcast::channel(16).0,
         })
     }

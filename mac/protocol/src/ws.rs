@@ -655,6 +655,9 @@ pub enum ServerMessage {
         request_id: Option<String>,
         accounts: Vec<AgentAccount>,
         active: Vec<ActiveAccount>,
+        /// Each agent's Default with what it says of it, once read; omitted when none is.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        defaults: Vec<DefaultAccount>,
     },
     /// A refused account request (any of [`ClientMessage::ListAccounts`], [`ClientMessage::AddAccount`],
     /// [`ClientMessage::ActivateAccount`], [`ClientMessage::SignInAccount`], [`ClientMessage::RemoveAccount`]), naming
@@ -933,6 +936,50 @@ pub struct AgentAccount {
     /// separate. `signed_in` then reads false. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub not_separate: bool,
+    /// What its agent says of the account, read on demand ([`AccountFacts`]); absent until read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<AccountFacts>,
+    /// Another of its agent's accounts on this computer, its Default included, is signed in as the same email: the
+    /// two are one account. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub same_as_another: bool,
+}
+
+/// What an agent says of one of its accounts, read from it on demand (Codex: `account/read` and
+/// `account/rateLimits/read` in that account's home) and kept in the computer's memory only: never stored, never
+/// logged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountFacts {
+    /// The address it is signed in as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Its plan, in the agent's own word (Codex's `planType`: `plus`, `pro`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Each usage window the agent names, as it names it; a window it does not name is absent, so an app labels a
+    /// figure from its own `window_minutes`, never from a guess.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<UsageWindow>,
+    /// When the computer read these (RFC 3339), so an app says "as of".
+    pub read_at: String,
+}
+
+/// One usage window, as the agent reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    /// The share of the window used, in percent.
+    pub used_percent: u32,
+    /// The window's length, in minutes.
+    pub window_minutes: u64,
+    /// When the window resets (Unix seconds).
+    pub resets_at: i64,
+}
+
+/// An agent's Default account (the agent as it is on the computer), with what it says of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultAccount {
+    pub agent: crate::agent::AgentKind,
+    pub facts: AccountFacts,
 }
 
 /// The account an agent's starts use now.
@@ -3123,11 +3170,14 @@ mod tests {
                 signed_in: None,
                 signing_in: false,
                 not_separate: false,
+                facts: None,
+                same_as_another: false,
             }],
             active: vec![ActiveAccount {
                 agent: crate::agent::AgentKind::Codex,
                 account_id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
             }],
+            defaults: Vec::new(),
         };
         let expected = serde_json::json!({"type": "accounts", "request_id": "a2",
             "accounts": [{"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work"}],
@@ -3152,6 +3202,8 @@ mod tests {
             signed_in: Some(true),
             signing_in: true,
             not_separate: false,
+            facts: None,
+            same_as_another: false,
         };
         assert_eq!(
             serde_json::to_value(&known).unwrap(),
@@ -3168,6 +3220,49 @@ mod tests {
         );
         assert!(!older.signing_in, "nor signing in");
         assert!(!older.not_separate, "nor not separate");
+        // What the agent says of an account, and of its Default, made-up values in the agent's shapes: each window
+        // the agent names, an unnamed one absent.
+        let facts = AccountFacts {
+            email: Some("work@example.test".into()),
+            plan: Some("plus".into()),
+            windows: vec![UsageWindow {
+                used_percent: 42,
+                window_minutes: 300,
+                resets_at: 1_800_000_000,
+            }],
+            read_at: "2026-11-22T21:00:00.000Z".into(),
+        };
+        let told = ServerMessage::Accounts {
+            request_id: None,
+            accounts: vec![AgentAccount {
+                id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+                agent: crate::agent::AgentKind::Codex,
+                label: "Work".into(),
+                signed_in: Some(true),
+                signing_in: false,
+                not_separate: false,
+                facts: Some(facts.clone()),
+                same_as_another: true,
+            }],
+            active: Vec::new(),
+            defaults: vec![DefaultAccount {
+                agent: crate::agent::AgentKind::Codex,
+                facts: AccountFacts {
+                    windows: Vec::new(),
+                    ..facts
+                },
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&told).unwrap(),
+            serde_json::json!({"type": "accounts", "active": [],
+                "accounts": [{"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work",
+                    "signed_in": true, "same_as_another": true,
+                    "facts": {"email": "work@example.test", "plan": "plus", "read_at": "2026-11-22T21:00:00.000Z",
+                        "windows": [{"used_percent": 42, "window_minutes": 300, "resets_at": 1800000000}]}}],
+                "defaults": [{"agent": "codex",
+                    "facts": {"email": "work@example.test", "plan": "plus", "read_at": "2026-11-22T21:00:00.000Z"}}]})
+        );
         let shared = AgentAccount {
             id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
             agent: crate::agent::AgentKind::Codex,
@@ -3175,6 +3270,8 @@ mod tests {
             signed_in: Some(false),
             signing_in: false,
             not_separate: true,
+            facts: None,
+            same_as_another: false,
         };
         assert_eq!(
             serde_json::to_value(&shared).unwrap(),
@@ -3186,6 +3283,7 @@ mod tests {
             request_id: None,
             accounts: Vec::new(),
             active: Vec::new(),
+            defaults: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(&pushed).unwrap(),
