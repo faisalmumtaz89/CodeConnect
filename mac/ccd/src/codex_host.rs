@@ -8809,6 +8809,7 @@ mod tests {
             .activate_account("codex", Some(&b.id))
             .unwrap());
         app_server_ended(&rig, &uid, ws).await;
+        let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
         let said = saying(&rig.daemon, &uid, "say-plan", "go on");
         let dir = run_folder(&rig).await;
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -8885,6 +8886,12 @@ mod tests {
             menu,
             ["gpt-6-luna", "gpt-5.6-terra"],
             "the new plan's models"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        window_over.send(()).unwrap();
+        crate::switch::window::keep(
+            &window.await.unwrap(),
+            "relaunch-plan-default-codex-wire.json",
         );
         drop(ws);
         end_run(&rig, &uid).await;
