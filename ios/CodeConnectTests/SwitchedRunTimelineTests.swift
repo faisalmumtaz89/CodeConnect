@@ -5,7 +5,7 @@ import XCTest
 /// **A run moved to another account never reads as ended** (decision 306).
 ///
 /// ccd ends the run's process at its idle point and files a `session_end` whose payload carries `switched_to`
-/// (`{"account_id", "label"}`, minor 47); the person's next message starts it again on the new account, which for a
+/// (`{"account_id", "label"}`, minor 48); the person's next message starts it again on the new account, which for a
 /// Codex run files the thread's resume start. The conversation draws one quiet row, "Switched to <label>", in place of
 /// "Run ended", and the first start after it draws nothing, however much later it comes; every listing in the window
 /// reads live, so neither app shows the Ended band or loses the reply box.
@@ -142,16 +142,16 @@ final class SwitchedRunTimelineTests: XCTestCase {
         XCTAssertFalse(last.status == .ended || last.status == .failed, "recovered, it reads live: \(last.status)")
     }
 
-    /// **End run on a moved run** files an ordinary end: it draws "Run ended" and the run reads ended, relaunchable;
-    /// the message after it relaunches it and it reads live.
+    /// **End run on a moved run** files an ordinary end after the switch's typed one: "Switched to B", then "Run
+    /// ended"; the moved listing reads live, and the ended one reads ended with no reply box.
     func testEndRunOnAMovedRunReadsRunEnded() async throws {
-        let all = events(try frames("switch-then-end-then-message-claude-wire"))
-        let drawn = await state(all)
-        XCTAssertEqual(notices(drawn).map(\.title), ["Run ended"])
-        let read = try await listings("switch-then-end-then-message-claude-wire")
-        XCTAssertEqual(read.first?.status, .ended)
-        XCTAssertFalse(read.first?.summary.takesNoReply ?? true)
-        XCTAssertFalse(read.last.map { $0.status == .ended || $0.status == .failed } ?? true)
+        let drawn = await state(events(try frames("switch-then-end-claude-wire")))
+        XCTAssertEqual(notices(drawn).map(\.title), ["Switched to B", "Run ended"])
+        let read = try await listings("switch-then-end-claude-wire")
+        XCTAssertEqual(read.map(\.summary.lifecycle), [.live, .exited])
+        XCTAssertFalse(read.first.map { $0.status == .ended || $0.status == .failed } ?? true, "moved, it reads live")
+        XCTAssertEqual(read.last?.status, .ended)
+        XCTAssertTrue(read.last?.summary.takesNoReply ?? false, "ended by End run, it takes no reply")
     }
 
     /// A moved run's listing, the one right after the typed end, carries no menus until its next message starts it,

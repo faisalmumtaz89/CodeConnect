@@ -240,7 +240,7 @@ extension Event {
     }
 
     public var exitCode: Int? { payload["exit_code"]?.intValue }
-    /// The account a run was moved to, by its name (`switched_to`, minor 47): on the end ccd files for a switch, and
+    /// The account a run was moved to, by its name (`switched_to`, minor 48): on the end ccd files for a switch, and
     /// on its `switch_failed` notice when the start there was refused.
     var switchedToLabel: String? { payload["switched_to"]?["label"]?.stringValue }
     var lastAssistantMessage: String? { payload["last_assistant_message"]?.stringValue }

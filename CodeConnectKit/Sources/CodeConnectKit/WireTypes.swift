@@ -83,7 +83,7 @@ public enum EngineNotice {
     public static let modeSet = "mode_set"
     /// Claude compacted the conversation (`/compact`, or on its own).
     public static let compacted = "compacted"
-    /// A run moving to another account could not start there (`{message, switched_to}`, minor 47).
+    /// A run moving to another account could not start there (`{message, switched_to}`, minor 48).
     public static let switchFailed = "switch_failed"
 }
 
