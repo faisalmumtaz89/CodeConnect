@@ -6510,7 +6510,7 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     ),
     // A Codex question card's answer, kept whole (X7b).
     ("mutation_ledger", "question_decision", "TEXT"),
-    // The account a run started on (minor 47); null is its agent's Default, and every run recorded before accounts.
+    // The account a run started on (minor 48); null is its agent's Default, and every run recorded before accounts.
     ("run_hosts", "account_id", "TEXT"),
     ("run_hosts", "switching", "INTEGER"),
 ];

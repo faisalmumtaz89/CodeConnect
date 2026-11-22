@@ -392,7 +392,7 @@ where
     // message is already queued on this receiver when the id arrives, and the
     // authentication path re-checks `revoked` itself.
     let mut revocations = daemon.revocations_tx.subscribe();
-    // The accounts listing, pushed whenever it changes (minor 47), once this connection has itself sent an accounts
+    // The accounts listing, pushed whenever it changes (minor 48), once this connection has itself sent an accounts
     // request: an app too old to read the frame never asks, and an iPhone's warns of every frame it can't read.
     // Subscribed at that first request, so nothing older than its answer follows it.
     let mut accounts_pushed: Option<broadcast::Receiver<ServerMessage>> = None;
@@ -6714,7 +6714,7 @@ mod tests {
         );
     }
 
-    /// **Accounts are kept and chosen by a paired device only** (minor 47): advertised to it and not to the bootstrap
+    /// **Accounts are kept and chosen by a paired device only** (minor 48): advertised to it and not to the bootstrap
     /// token, which is refused all three asks. An account is added for its agent, made active, and set back to
     /// Default; another agent's id is refused and nothing changes.
     #[tokio::test]

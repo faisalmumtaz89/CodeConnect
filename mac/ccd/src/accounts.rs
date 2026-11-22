@@ -1,4 +1,4 @@
-//! An agent's accounts on this computer (N4, protocol minor 47).
+//! An agent's accounts on this computer (N4, protocol minor 48).
 //!
 //! An account is a row in the store ([`crate::store::Account`]) and a folder of ccd's own, `<root>/accounts/<agent>/<id>/`
 //! (0700), named only by the id ccd made. A start on it is given the folder in the one variable its agent reads for
@@ -1291,14 +1291,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// **The accounts wire the apps read is what ccd answers** (`fixtures/accounts/minor-47-wire.json`, recorded from a
+    /// **The accounts wire the apps read is what ccd answers** (`fixtures/accounts/minor-48-wire.json`, recorded from a
     /// ccd at 05faeaa3 by one paired device). Each request, in the recorded order, is answered by this build on a store
     /// of its own; the reply's bytes are the recorded reply's, the ids aside: ccd makes new ones, so each is read as the
     /// recorded id it stands for, in the order the replies first name them.
     #[test]
     fn the_recorded_accounts_wire_is_what_this_build_answers() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../fixtures/accounts/minor-47-wire.json"
+            "../../../fixtures/accounts/minor-48-wire.json"
         ))
         .unwrap();
         let store = crate::store::Store::open_temp("ccd-accounts-wire");

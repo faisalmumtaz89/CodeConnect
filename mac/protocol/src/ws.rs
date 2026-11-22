@@ -395,7 +395,7 @@ pub enum ClientMessage {
         request_id: String,
         path: String,
     },
-    /// **Each agent's accounts on this computer, and the one its starts use** (minor 47, `accounts`),
+    /// **Each agent's accounts on this computer, and the one its starts use** (minor 48, `accounts`),
     /// answered with one [`ServerMessage::Accounts`] carrying the same `request_id`. Paired devices only.
     ListAccounts {
         request_id: String,
@@ -1232,7 +1232,7 @@ pub struct Capabilities {
     pub claude_interrupt: bool,
     /// **This daemon keeps several accounts per agent** ([`ClientMessage::ListAccounts`],
     /// [`ClientMessage::AddAccount`], [`ClientMessage::ActivateAccount`], [`ClientMessage::SignInAccount`],
-    /// [`ClientMessage::RemoveAccount`], and the pushed [`ServerMessage::Accounts`], minor 47), to paired devices only. Absent
+    /// [`ClientMessage::RemoveAccount`], and the pushed [`ServerMessage::Accounts`], minor 48), to paired devices only. Absent
     /// decodes `false`: an older daemon answers them with `bad_request`, so a client asks only when this is
     /// advertised.
     #[serde(default)]
@@ -3058,7 +3058,7 @@ mod tests {
         }
     }
 
-    /// **The accounts wire, pinned as the apps will match it** (minor 47). Each frame encodes to exactly this JSON
+    /// **The accounts wire, pinned as the apps will match it** (minor 48). Each frame encodes to exactly this JSON
     /// and decodes back to it; Default is an explicit null; an older daemon's capabilities decode `accounts` false.
     #[test]
     fn the_accounts_wire_is_pinned() {

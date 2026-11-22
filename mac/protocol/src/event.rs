@@ -114,7 +114,7 @@ pub mod notice {
     /// (`reason: "stopped"`): it was never sent to the model.
     pub const SEND_NOT_SENT: &str = "send_not_sent";
     /// A run moving to another account could not start there (`{message}`, and the account typed as on the
-    /// switch's end, [`super::SWITCHED_TO`], minor 47): it is ended and relaunchable ([`super::Switching::Failed`]).
+    /// switch's end, [`super::SWITCHED_TO`], minor 48): it is ended and relaunchable ([`super::Switching::Failed`]).
     pub const SWITCH_FAILED: &str = "switch_failed";
 }
 
@@ -132,7 +132,7 @@ pub enum EventKind {
     /// render "session ended" after every single reply.
     ///
     /// One whose payload carries [`SWITCHED_TO`] (`{"account_id": <id, or null for
-    /// Default>, "label": <the account's name>}`, minor 47) is a switch of account, not an
+    /// Default>, "label": <the account's name>}`, minor 48) is a switch of account, not an
     /// end: the process ended between turns and is started again at once on that account,
     /// the run reading live throughout; the next [`EventKind::SessionStart`] is that
     /// restart.
@@ -531,7 +531,7 @@ pub struct SessionSummary {
     /// Omitted when false, and from an older daemon, whose ended runs stay ended.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub relaunchable: bool,
-    /// The run's move to its agent's active account (minor 47); absent when it has none. A moving run reads live
+    /// The run's move to its agent's active account (minor 48); absent when it has none. A moving run reads live
     /// throughout, its `lifecycle` aside, until its next message is running on the new account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switching: Option<Switching>,
