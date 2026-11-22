@@ -17,9 +17,13 @@ enum CCVoiceButtonPhase: Equatable {
     /// The daemon is typing the text. A spinner, **not** the disabled palette —
     /// a busy button is not an unavailable one.
     case sending
+    /// A turn runs and the field is empty. Tapping stops the turn, as the Mac's
+    /// send button does while a turn runs.
+    case stopTurn
 }
 
-/// A circle whose face *is* the state: mic, arrow, stop, spinner.
+/// A circle whose face *is* the state: mic, arrow, stop, spinner, or the
+/// running turn's stop square.
 ///
 /// One control in one position doing the compose bar's whole job, so the pill
 /// never grows a second button for the thumb to arbitrate at 2am. The disc is
@@ -34,9 +38,9 @@ enum CCVoiceButtonPhase: Equatable {
 /// VoiceOver reads.
 struct CCVoiceButton: View {
     let phase: CCVoiceButtonPhase
-    /// Why `dictate` and `send` cannot act right now (stale link, a daemon
-    /// that refuses typed text). Never blocks `stop`: a recording can always
-    /// be ended.
+    /// Why `dictate`, `send` or `stopTurn` cannot act right now (stale link, a
+    /// daemon that refuses typed text, a stop on its way). Never blocks `stop`:
+    /// a recording can always be ended.
     var blockedReason: String?
     let action: () -> Void
 
@@ -44,7 +48,7 @@ struct CCVoiceButton: View {
     @State private var ringDimmed = false
 
     private var isBlocked: Bool {
-        blockedReason != nil && (phase == .dictate || phase == .send)
+        blockedReason != nil && (phase == .dictate || phase == .send || phase == .stopTurn)
     }
 
     var body: some View {
@@ -111,7 +115,7 @@ struct CCVoiceButton: View {
             CCIcon(
                 "arrow-up", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
                 maxSize: Self.glyphCap)
-        case .stop:
+        case .stop, .stopTurn:
             CCIcon(
                 "stop-fill", size: Self.stopGlyph, weight: .semibold, relativeTo: .body,
                 maxSize: Self.glyphCap)
@@ -151,6 +155,7 @@ struct CCVoiceButton: View {
         case .send: return "Send"
         case .stop: return "Stop dictation"
         case .sending: return "Send"
+        case .stopTurn: return "Stop"
         }
     }
 
@@ -161,6 +166,7 @@ struct CCVoiceButton: View {
         case .send: return "Types this into the agent’s prompt."
         case .stop: return "Keeps the transcript in the field for review."
         case .sending: return ""
+        case .stopTurn: return SessionWords.stopHelp
         }
     }
 }
@@ -184,6 +190,7 @@ private struct CCVoiceButtonStyle: ButtonStyle {
             CCVoiceButton(phase: .send) {}
             CCVoiceButton(phase: .stop) {}
             CCVoiceButton(phase: .sending) {}
+            CCVoiceButton(phase: .stopTurn) {}
         }
         HStack(spacing: CC.space.md) {
             CCVoiceButton(phase: .dictate, blockedReason: "Link stale.") {}

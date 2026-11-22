@@ -1587,6 +1587,31 @@ enum RenderCatalog {
                     "the indeterminate banner under the session's Stop")
             }),
 
+        // **Stop in the composer's circle** (N7): while a turn runs, the empty field's circle is the run's Stop; a
+        // typed message turns it back to Send; a stopped turn leaves the circle to dictation.
+        RenderScenario(
+            name: "codex-stop-offered-session",
+            purpose: "a running turn: the empty field's circle is Stop",
+            arguments: ["-CC_CODEX", "stop-offered", "-CC_DEEPLINK", "codeconnect://session/\(codexSessionKey)"],
+            reach: { app, driver in
+                try driver.require(app.buttons["stop-\(codexSessionKey)"], "the circle's Stop face")
+            }),
+        RenderScenario(
+            name: "codex-stop-offered-typed",
+            purpose: "a running turn with a message typed: the circle is Send, so the message can still go",
+            arguments: ["-CC_CODEX", "stop-offered", "-CC_DEEPLINK", "codeconnect://session/\(codexSessionKey)"],
+            reach: { app, driver in
+                try driver.typeIntoComposer(app, "Also run the linter.")
+                try driver.require(app.buttons["Send"], "the circle's Send face")
+            }),
+        RenderScenario(
+            name: "codex-stop-aborted-session",
+            purpose: "a stopped turn on the session screen: no Stop, the circle back to dictation",
+            arguments: ["-CC_CODEX", "stop-aborted", "-CC_DEEPLINK", "codeconnect://session/\(codexSessionKey)"],
+            reach: { app, driver in
+                try driver.require(app.buttons["Start dictation"], "the circle's dictation face")
+            }),
+
         // ---- C-series: Compose -----------------------------------------
         codexScenario(
             "compose-started", purpose: "Codex was idle: your words began a turn, and nothing says so but the conversation",
