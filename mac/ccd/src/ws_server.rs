@@ -6687,6 +6687,8 @@ mod tests {
     /// Default; another agent's id is refused and nothing changes.
     #[tokio::test]
     async fn accounts_are_kept_and_chosen_by_a_paired_device() {
+        // Every listing asks the agent, from the session's environment.
+        let _env = crate::ProcessEnvRead::take();
         use protocol::agent::AgentKind;
         let (server, _) = live_server(protocol::config::Config::default()).await;
         let frame =
