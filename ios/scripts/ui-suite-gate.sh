@@ -67,12 +67,13 @@ fi
 [[ $VERDICT == success ]] || grep -E "error: -\[|' failed \(" "$LOG" | head -20
 
 SLUG=$(cd "$REPO_DIR" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)
+[[ -n $SLUG ]] || { print "ui-suite-gate: cannot reach GitHub; no status posted"; exit 1; }
 for _ in $(seq 0 "$WAIT_MIN"); do
     gh api "repos/$SLUG/commits/$SHA" --jq .sha >/dev/null 2>&1 && break
     [[ $WAIT_MIN -eq 0 ]] && break
     sleep 60
 done
-if [[ -n $SLUG ]] && gh api "repos/$SLUG/commits/$SHA" --jq .sha >/dev/null 2>&1; then
+if gh api "repos/$SLUG/commits/$SHA" --jq .sha >/dev/null 2>&1; then
     gh api -X POST "repos/$SLUG/statuses/$SHA" -f state="$VERDICT" -f context="$CONTEXT" \
         -f description="${${EXECUTED:-no closing line}[1,140]}" >/dev/null && POSTED=yes
 else
