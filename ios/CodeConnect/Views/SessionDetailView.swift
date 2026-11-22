@@ -930,10 +930,6 @@ struct SessionDetailView: View {
 
     @Environment(AppModel.self) private var model
     @Environment(Machines.self) private var machines
-    /// Read for one decision only: the Stop control's label. "Stop this turn"
-    /// clipped mid-word at AX5 and grew the header enough to push the pending
-    /// card's own controls off screen.
-    @Environment(\.dynamicTypeSize) private var screenTypeSize
     @State private var composeText = ""
     @State private var openApproval: ApprovalItem?
     /// The note over the composer. **Never set inside `withAnimation`.** It
@@ -1301,7 +1297,6 @@ struct SessionDetailView: View {
                         .padding(.top, CC.space.xxs)
                         .accessibilityIdentifier("session-permission-notice")
                 }
-                codexStopBlock
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, CC.space.md)
@@ -1309,72 +1304,6 @@ struct SessionDetailView: View {
             .background(CC.color.surface)
             .overlay(alignment: .bottom) { CCHairline() }
         }
-    }
-
-    // MARK: Stop
-
-    /// **Stop, in the strip under the bar**, where the reader is already
-    /// looking at the turn they want to end.
-    ///
-    /// Absent when the phone holds no turn to name — the one honest hide. There
-    /// is no "turn started" fact on the Codex wire at all, so the running turn
-    /// is derived from the event envelopes, and a session with none has nothing
-    /// this control could send.
-    @ViewBuilder
-    private var codexStopBlock: some View {
-        // **One reader of the rule.** `stopUnavailable(for:)` is the same
-        // function `AppModel.stopCodexTurn` consults before it mints anything,
-        // so the control and the frame can never disagree — which they did:
-        // this checked agent + capability + turn and left the link state to the
-        // send path, which did not check it either.
-        if model.stopUnavailable(for: key) == nil {
-            CCButton(
-                // **Two words at AX5, and that is not cosmetic.** "Stop this
-                // turn" clipped mid-word to `▪ this` in a box the header had
-                // grown to fit — and the header growing is the real cost: it
-                // squeezed the timeline until the pending card's own `Review`
-                // button sat under the compose bar, unreachable by scrolling.
-                // Measured on `codex-card-command-worst--ax5.png`. The header
-                // carries the control; its outcome goes where every other
-                // mutation's outcome already goes, above the composer.
-                stopLabel,
-                icon: isStopping ? nil : "stop-fill",
-                variant: .secondary,
-                size: .md,
-                isLoading: isStopping,
-                disabledReason: CCDisabledReason(stopGreyedReason)
-            ) {
-                stopCodexTurn()
-            }
-            .accessibilityIdentifier("stop-\(key)")
-            .accessibilityLabel(SessionWords.stopHelp)
-            .padding(.top, CC.space.sm)
-        }
-    }
-
-    private var stopLabel: String {
-        if isStopping { return SessionWords.stopping }
-        return screenTypeSize.isAccessibilitySize ? "Stop" : SessionWords.stopThisTurn
-    }
-
-    private var isStopping: Bool {
-        if case .inFlight = model.codexStop(for: key) { return true }
-        return false
-    }
-
-    /// Why the control is greyed, or nil.
-    ///
-    /// **Short, and only during the cooldown** — the same rule the fleet row
-    /// follows, and for the same two reasons. Not the link state: the summary
-    /// cannot tell a subscribed link from a reconnecting one, so Stop is
-    /// offered and the daemon's refusal is what the operator reads. And not the
-    /// daemon's sentence: the composer's own standing note is already printing
-    /// it verbatim, and handing it to the button as well prints the same refusal
-    /// twice — measured on the fleet, where it also rendered as a twelve-line
-    /// column that pushed the row out of line with its Claude neighbour.
-    private var stopGreyedReason: String? {
-        model.codexControls(for: key).isStopGreyed(now: model.now)
-            ? SessionWords.tryAgainInAMoment : nil
     }
 
     private var dotColour: Color {
@@ -1532,12 +1461,6 @@ struct SessionDetailView: View {
                 tailWatch.arrive()
             }
         }
-    }
-
-    /// **Stop the running turn.** Codex's `interrupt` aborts the turn over its
-    /// own link, with no keyboard involved.
-    private func stopCodexTurn() {
-        Task { await model.stopCodexTurn(sessionKey: key) }
     }
 
     /// `/clear`, past its confirmation. A landed send says nothing;
@@ -2154,7 +2077,8 @@ private struct SessionComposeBar: View {
                 if dictation.isRecording {
                     cancelButton
                 }
-                CCVoiceButton(phase: phase, blockedReason: model.sendBlockedReason(for: key, draft: text)) { act() }
+                CCVoiceButton(phase: phase, blockedReason: blockedReason) { act() }
+                    .accessibilityIdentifier(phase == .stopTurn ? "stop-\(key)" : "session.composer.send")
             }
             // 4pt round the 44pt frame puts the 36pt disc 8pt inside the
             // pill's bottom and trailing edges.
@@ -2247,7 +2171,19 @@ private struct SessionComposeBar: View {
         // one is "this cancels what you started".
         if dictation.isRecording || dictation.isStarting { return .stop }
         if sending { return .sending }
-        return text.isEmpty ? .dictate : .send
+        // While a turn runs the circle stops it, by Kit's one rule (`stopUnavailable`), unless a typed message can be
+        // sent now, since the field's Return is a new line; a message that must wait (the note says why) keeps Stop.
+        let canStop = model.stopUnavailable(for: key) == nil
+        if !text.isEmpty, !canStop || model.sendBlockedReason(for: key, draft: text) == nil { return .send }
+        return canStop ? .stopTurn : .dictate
+    }
+
+    /// Why the circle cannot act: Stop's own (on its way, or a moment after a turn changes, as Kit rules), else the
+    /// send path's.
+    private var blockedReason: String? {
+        guard phase == .stopTurn else { return model.sendBlockedReason(for: key, draft: text) }
+        if model.codexStop(for: key) == .inFlight { return SessionWords.stopping }
+        return model.codexControls(for: key).isStopGreyed(now: model.now) ? SessionWords.tryAgainInAMoment : nil
     }
 
     private func act() {
@@ -2277,6 +2213,8 @@ private struct SessionComposeBar: View {
             onSend()
         case .sending:
             break
+        case .stopTurn:
+            Task { await model.stopCodexTurn(sessionKey: key) }
         }
     }
 

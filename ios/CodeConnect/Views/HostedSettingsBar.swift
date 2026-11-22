@@ -6,7 +6,8 @@ import SwiftUI
 /// menu's first mode — so a run left in another mode says so at rest (decision 228); a mode the menu marks `confirm`
 /// (one that lets the agent work without asking) is in the alert's red. The disabled check follows the run's facts:
 /// the sheet's calls are refused while a card waits on the run or it is still starting, so the control is dead then
-/// (the Mac's rule, through the same `sendBlockedReason`).
+/// (the Mac's rule, through the same `sendBlockedReason`). The effort in use is named after the model, by Kit's one rule
+/// (`RunSettings.effortName`), as the Mac names it.
 ///
 /// **At accessibility sizes the label is two lines**: the model — which may truncate — over the mode — which may not,
 /// because the mode is the one thing this label exists to show. A run with no menus shows its model as a read-only
@@ -22,6 +23,8 @@ struct HostedSettingsBar: View {
     /// The sheet's calls are refused while a card waits or the run is starting; the empty draft keeps a long Codex
     /// draft's own ceiling — a send concern, not a settings one — out of this check.
     private var blocked: Bool { model.sendBlockedReason(for: key, draft: "") != nil }
+    /// The effort in use, by Kit's one rule.
+    private var effort: String? { model.shownSummary(for: key).flatMap(RunSettings.effortName) }
 
     var body: some View {
         switch model.runSettings(for: key) {
@@ -32,7 +35,7 @@ struct HostedSettingsBar: View {
             // still-starting run has no model fact yet; it shows nothing rather than a "Model" placeholder.
             if let fact, !fact.text.isEmpty {
                 row {
-                    label(modelName: fact.text, mono: fact.reported, mode: nil)
+                    label(modelName: fact.text, mono: fact.reported, effort: effort, mode: nil)
                         .foregroundStyle(CC.text.secondary)
                         .accessibilityIdentifier("session.composer.model")
                 }
@@ -44,7 +47,7 @@ struct HostedSettingsBar: View {
                 Button(action: onOpen) {
                     label(modelName: settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay,
                           mono: settings.modelDisplayReported && !settings.modelDisplay.isEmpty,
-                          mode: settings.standingMode)
+                          effort: effort, mode: settings.standingMode)
                         .frame(minHeight: 44)
                         .contentShape(Rectangle())
                 }
@@ -52,8 +55,9 @@ struct HostedSettingsBar: View {
                 .disabled(blocked)
                 .accessibilityIdentifier("session.composer.settings")
                 .accessibilityLabel(
-                    settings.standingMode.map { "\(settings.modelDisplay), \($0.label)" }
-                        ?? (settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay))
+                    [settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay,
+                     effort.map { "\($0) effort" }, settings.standingMode?.label]
+                        .compactMap { $0 }.joined(separator: ", "))
             }
         }
     }
@@ -70,19 +74,24 @@ struct HostedSettingsBar: View {
 
     @ViewBuilder
     /// `mono`: the name is the agent's own report of the model (an id), drawn in code type.
-    private func label(modelName: String, mono: Bool, mode: MenuMode?) -> some View {
+    private func label(modelName: String, mono: Bool, effort: String?, mode: MenuMode?) -> some View {
         let icon = Image(systemName: "slider.horizontal.3").accessibilityHidden(true)
         let name = Text(modelName).fontDesign(mono ? .monospaced : nil)
         Group {
             if typeSize.isAccessibilitySize, let mode {
                 VStack(alignment: .trailing, spacing: 1) {
-                    HStack(spacing: 4) { icon; name.lineLimit(1).truncationMode(.tail) }
+                    HStack(spacing: 4) {
+                        icon
+                        name.lineLimit(1).truncationMode(.tail)
+                        if let effort { Text("· \(effort)").lineLimit(1).layoutPriority(1) }
+                    }
                     Text(mode.label).lineLimit(1).foregroundStyle(modeStyle(mode))
                 }
             } else {
                 HStack(spacing: 4) {
                     icon
                     name.lineLimit(1).truncationMode(.tail)
+                    if let effort { Text("· \(effort)").lineLimit(1).layoutPriority(1) }
                     if let mode {
                         Text("·")
                         // The model yields first (no priority, truncates) so the mode — the one thing this
