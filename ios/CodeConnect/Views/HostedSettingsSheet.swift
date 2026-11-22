@@ -152,12 +152,12 @@ struct HostedSettingsSheet: View {
     // MARK: Read-only
 
     @ViewBuilder
-    private func readOnly(_ modelFact: String?) -> some View {
+    private func readOnly(_ modelFact: RunModelName?) -> some View {
         CCSectionHeader("Model")
         card {
-            if let modelFact, !modelFact.isEmpty {
-                // The model as the run reported it: an id, in code type.
-                CCRow(modelFact, titleIsMono: true, showsChevron: false, separator: false) {
+            if let modelFact, !modelFact.text.isEmpty {
+                // The model by its menu's name, or as the run reported it: an id, in code type.
+                CCRow(modelFact.text, titleIsMono: modelFact.reported, showsChevron: false, separator: false) {
                     CCIcon("check-circle-fill", size: 18, relativeTo: .body)
                         .foregroundStyle(CC.text.primary)
                 } trailing: { EmptyView() } meta: { EmptyView() }

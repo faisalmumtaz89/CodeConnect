@@ -128,7 +128,24 @@ final class RunSettingsTests: XCTestCase {
             return XCTFail("a hosted run with no menus is hostedReadOnly")
         }
         // The daemon names the fact by the chosen entry's id, so a run with no menus reads it bare too.
-        XCTAssertEqual(model, "claude-sonnet-5-5")
+        XCTAssertEqual(model, RunModelName(text: "claude-sonnet-5-5", reported: true))
+    }
+
+    /// **An ended run names its model as its menu did (minor 46)**, from the daemon's own `minor-46-wire.json`:
+    /// a run on the default model reads "Opus" while live, by its menu, and once it has ended, by the daemon's
+    /// `model_label`, both in the header and in the reply box's read-only label. Must-fail: a build that draws
+    /// an ended run's fact as reported reads `claude-opus-5-5`.
+    func testAnEndedRunReadsByTheLabelTheDaemonNamesItsModelBy() throws {
+        let live = try summary("session_hosted_live", in: "minor-46-wire")
+        let ended = try summary("session_hosted_ended", in: "minor-46-wire")
+        let opus = RunModelName(text: "Opus", reported: false)
+        XCTAssertEqual(RunSettings.modelName(confirmed: "claude-opus-5-5", menus: live.menus), opus)
+        XCTAssertNil(ended.menus)
+        XCTAssertEqual(ended.model?.value, "claude-opus-5-5")
+        XCTAssertEqual(ended.modelLabel, "Opus")
+        XCTAssertEqual(
+            RunSettings.modelName(confirmed: "claude-opus-5-5", menus: ended.menus, label: ended.modelLabel), opus)
+        XCTAssertEqual(RunSettings.of(summary: ended), .hostedReadOnly(model: opus))
     }
 
     /// Each answer class words itself as the control should show it: the applied cases name the setting

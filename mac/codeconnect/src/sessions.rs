@@ -247,6 +247,7 @@ mod tests {
             permission_mode: None,
             effort: None,
             menus: None,
+            model_label: None,
             git_branch: None,
             diff_stat: None,
             relaunchable: false,

@@ -11,9 +11,9 @@ public enum RunSettings: Sendable, Hashable {
     /// nothing.
     case deferToOtherPath
     /// A hosted Claude run with no menus — detached, ended, still starting, or a daemon below minor 39.
-    /// No picker: the model fact shows read-only, exactly as it arrived (no label lookup without a menu to
-    /// match against), and no effort or mode line at all.
-    case hostedReadOnly(model: String?)
+    /// No picker: the model shows read-only, by the label the daemon names it by (minor 46) or else exactly as it
+    /// arrived, and no effort or mode line at all.
+    case hostedReadOnly(model: RunModelName?)
     /// A live hosted Claude run offering its menus.
     case hostedLive(HostedSettings)
 
@@ -41,7 +41,13 @@ public enum RunSettings: Sendable, Hashable {
         lastOutcome: SettingOutcome? = nil
     ) -> RunSettings {
         guard summary.agent == .claude || summary.agent == .codex else { return .deferToOtherPath }
-        guard let menus = summary.menus else { return .hostedReadOnly(model: summary.model?.value) }
+        guard let menus = summary.menus else {
+            return .hostedReadOnly(
+                model: summary.model.map {
+                    summary.modelLabel.map { RunModelName(text: $0, reported: false) }
+                        ?? RunModelName(text: $0.value, reported: true)
+                })
+        }
         let models = menus.models.map(\.shown)
 
         // The model the daemon states as chosen — never re-derived from the fact's text here, because
@@ -80,9 +86,10 @@ public enum RunSettings: Sendable, Hashable {
     /// Codex run's), else of the entry that runs it (its `resolvedModel`, the id a Claude run reports). The Default
     /// entry is never the one: its label names no model, so a run on the default model reads by the entry of the
     /// model it runs. Claude's receipt of a change is no id: it reads by the entry the daemon says is chosen, by the
-    /// model that entry runs, and by its own label when the agent gives it no id. A model no entry names reads as the
+    /// model that entry runs, and by its own label when the agent gives it no id. A run sent no menus (it has ended)
+    /// reads by the label the daemon names its model by (`label`, minor 46). A model no entry names reads as the
     /// agent reported it.
-    public static func modelName(confirmed: String, menus: RunMenus?) -> RunModelName {
+    public static func modelName(confirmed: String, menus: RunMenus?, label: String? = nil) -> RunModelName {
         let models = menus?.models ?? []
         func entry(running id: String) -> MenuModel? {
             models.first { $0.value == id } ?? models.first { $0.value != "default" && $0.resolvedModel == id }
@@ -93,6 +100,7 @@ public enum RunSettings: Sendable, Hashable {
             return entry(running: id).map { RunModelName(text: $0.shown.label, reported: false) }
                 ?? RunModelName(text: id, reported: true)
         }
+        if menus == nil, let label { return RunModelName(text: label, reported: false) }
         return RunModelName(text: confirmed, reported: true)
     }
 }

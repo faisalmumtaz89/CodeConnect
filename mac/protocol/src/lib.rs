@@ -846,7 +846,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     `resolved_model`, the model id Claude Code's own list gives the entry (`resolvedModel`), so an
 ///     app names the model a run is on by that id, never by the text of claude's receipt of a change.
 ///     A Codex entry carries none: its `value` is the model. A daemon below 45 sends none.
-pub const PROTOCOL_MINOR: u32 = 45;
+///   * `46` — **An ended run names its model as its menu did.**
+///
+///     No message changes shape. A [`event::SessionSummary`] of a Claude run CodeConnect started that is
+///     sent no `menus` (it has ended) may carry `model_label`, the label of the start's entry for its
+///     model, by the rule the apps name a live run's model by, so an ended run reads "Opus", not
+///     `claude-opus-5-5`. A daemon below 46 sends none, and an app shows the model as reported.
+pub const PROTOCOL_MINOR: u32 = 46;
 
 #[cfg(test)]
 mod ledger_tests {

@@ -643,12 +643,16 @@ enum Fixtures {
             let resumable = resumes ? #""claude_session_id":"5f0c2a8e-1b7d-4c39-9e64-2d8a7f3b1c05","# : ""
             let folder = resumes ? "/Users/dev/clients/northwind/platform-migration-2026/\(projectLabel(index))" : cwd(index)
             // `-CC_ENDED_MODEL <value>`: the first ended run's model fact, as a daemon sends it: with
-            // `-CC_ENDED_RECEIPT`, read from that receipt, so at its seq.
+            // `-CC_ENDED_RECEIPT`, read from that receipt, so at its seq. `-CC_ENDED_MODEL_LABEL <label>`: the
+            // name a daemon of minor 46 gives that model (`model_label`).
             var model = ""
             #if DEBUG
                 if offset == 0, let value = UserDefaults.standard.string(forKey: "CC_ENDED_MODEL") {
                     let seq = UserDefaults.standard.string(forKey: "CC_ENDED_RECEIPT") == nil ? 2 : 3
                     model = #""model":{"value":"\#(value)","seq":\#(seq)},"#
+                    if let label = UserDefaults.standard.string(forKey: "CC_ENDED_MODEL_LABEL") {
+                        model += #""model_label":"\#(label)","#
+                    }
                 }
             #endif
             return """

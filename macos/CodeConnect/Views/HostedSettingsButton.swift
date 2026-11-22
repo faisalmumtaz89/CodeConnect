@@ -281,18 +281,20 @@ struct HostedSettingsButton: View {
 }
 
 /// A Claude or Codex run started from the app that offers no menus (its link is down, it has ended or is starting, or
-/// its computer's CodeConnect is older): no list, the run's agent mark and the model as the run's fact names it.
+/// its computer's CodeConnect is older): no list, the run's agent mark and its model, by its menu's name when the
+/// daemon gives one, else as the run's fact names it.
 struct ModelFactLabel: View {
     let agent: AgentKind
-    let fact: String?
+    let fact: RunModelName?
     /// The effort the agent named, if it named one (`RunSettings.effortName`).
     let effort: String?
 
     var body: some View {
         HStack(spacing: 5) {
             AgentMark(agent: agent)
-            // The model as the run reported it, in code type; "Model" while it has reported none.
-            Text(fact ?? "Model").font(fact == nil ? Theme.ui(12) : Theme.mono(11.5)).foregroundStyle(Theme.text)
+            // By its menu's name, or as the run reported it in code type; "Model" while it has reported none.
+            Text(fact?.text ?? "Model").font(fact?.reported == true ? Theme.mono(11.5) : Theme.ui(12))
+                .foregroundStyle(Theme.text)
             if let effort { Text("· \(effort)").foregroundStyle(Theme.text2) }
         }
         .font(Theme.ui(12))

@@ -30,9 +30,9 @@ struct HostedSettingsBar: View {
         case .hostedReadOnly(let fact):
             // A run with no menus shows its model as a read-only fact — but only when there is one. A
             // still-starting run has no model fact yet; it shows nothing rather than a "Model" placeholder.
-            if let fact, !fact.isEmpty {
+            if let fact, !fact.text.isEmpty {
                 row {
-                    label(modelName: fact, mono: true, mode: nil)
+                    label(modelName: fact.text, mono: fact.reported, mode: nil)
                         .foregroundStyle(CC.text.secondary)
                         .accessibilityIdentifier("session.composer.model")
                 }

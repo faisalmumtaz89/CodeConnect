@@ -3459,6 +3459,7 @@ impl Daemon {
         }
         let inner = self.inner.lock().await;
         let mut model_ids: HashMap<String, String> = HashMap::new();
+        let mut model_labels: HashMap<String, String> = HashMap::new();
         for (uid, models, receipt) in &choosing {
             let fact = inner
                 .session_facts
@@ -3471,6 +3472,11 @@ impl Daemon {
                 .as_deref()
                 .and_then(|value| crate::claude_host::entry_model_id(models, value))
             {
+                if !menus.contains_key(uid) {
+                    if let Some(label) = crate::claude_host::entry_label(models, &id) {
+                        model_labels.insert(uid.clone(), label);
+                    }
+                }
                 model_ids.insert(uid.clone(), id);
             }
             if let Some(menu) = menus.get_mut(uid) {
@@ -3498,6 +3504,7 @@ impl Daemon {
             {
                 fact.value = id.clone();
             }
+            session.model_label = model_labels.remove(&session.session_uid);
         }
         Ok(sessions)
     }
@@ -4591,6 +4598,7 @@ impl Daemon {
                 permission_mode: facts.and_then(|facts| facts.permission_mode.clone()),
                 effort: facts.and_then(|facts| facts.effort.clone()),
                 menus: menus.get(&row.session_uid).cloned(),
+                model_label: None,
                 // Read from the cache `refresh_tree` fills, never from git here:
                 // this listing is answered on every fleet refresh.
                 git_branch: tree.and_then(|tree| tree.branch.clone()),
