@@ -10,6 +10,11 @@ struct ModelButton: View {
     @Binding var open: Bool
     let choose: (StartModelChoice) -> Void
 
+    @Environment(\.startWidth) private var startWidth
+    /// The button's leading edge, in `StartForm.space`.
+    @State private var minX: CGFloat = 0
+    private static let menuWidth: CGFloat = 440
+
     private var checking: Bool { StartAgent.allCases.contains { context.models($0) == .checking } }
 
     var body: some View {
@@ -30,10 +35,15 @@ struct ModelButton: View {
         .disabled(checking)
         .accessibilityIdentifier("start.model")
         .accessibilityValue(open ? "open" : "closed")
-        // Above the button, clear of it by the panels' one gap, its leading edge on the composer box's: the button
-        // stands 3 pt in from that edge (the box's 10 pt inset, less the button's own 7).
+        // Above the button, clear of it by the panels' one gap, its leading edge on the composer box's (the button
+        // stands 3 pt in from that edge: the box's 10 pt inset, less the button's own 7), moved left as far as it must
+        // to end 8 pt inside the pane, as the branch menu keeps from the form's edges.
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(StartForm.space)).minX } action: { minX = $0 }
         .overlay(alignment: .bottomLeading) {
-            if open { menu.openPanel().offset(x: -3, y: -(22 + Theme.panelGap)) }
+            if open {
+                menu.openPanel()
+                    .offset(x: -3 + min(0, startWidth - 8 - (minX - 3 + Self.menuWidth)), y: -(22 + Theme.panelGap))
+            }
         }
         .closesPanel($open)
     }
@@ -72,7 +82,7 @@ struct ModelButton: View {
             }
             .padding(.vertical, 5)
         }
-        .frame(width: 440)
+        .frame(width: Self.menuWidth)
         .frame(maxHeight: 360)
         .fixedSize(horizontal: false, vertical: true)
         .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))

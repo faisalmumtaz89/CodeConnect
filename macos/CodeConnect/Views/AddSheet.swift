@@ -92,6 +92,8 @@ extension EnvironmentValues {
     @Entry var sheetRoom: CGFloat = .infinity
     /// How tall the start form's pane stands, in `StartForm.space`.
     @Entry var startHeight: CGFloat = 0
+    /// How wide the start form's pane stands, in `StartForm.space`: no panel of the form reaches past it.
+    @Entry var startWidth: CGFloat = 0
 }
 
 /// The bottom bar every side shares: a note on the left, the answer on the right.
