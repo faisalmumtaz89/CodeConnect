@@ -1456,9 +1456,8 @@ async fn claude_path(
     let launcher = crate::state::codex_launcher().ok();
     protocol::claude_bin::first_runnable(
         not_installed_in_tests(
-            protocol::claude_bin::candidates(claude_bin, &home, path_hits.clone()),
+            protocol::claude_bin::candidates(claude_bin, &home, path_hits),
             claude_bin,
-            &path_hits,
         ),
         launcher.as_deref(),
     )
@@ -1467,30 +1466,30 @@ async fn claude_path(
 /// `candidates` as a run takes them; in a test, only the one it names (`configured`) and one in a temporary folder
 /// (its rig: its own home, or a folder of its own it put on `PATH`): never the computer's install locations, a
 /// person's own home, nor a system folder a login shell's `PATH` adds, so no test runs an agent installed there.
-fn not_installed_in_tests(
-    candidates: Vec<PathBuf>,
-    configured: Option<&str>,
-    path_hits: &[PathBuf],
-) -> Vec<PathBuf> {
+fn not_installed_in_tests(candidates: Vec<PathBuf>, configured: Option<&str>) -> Vec<PathBuf> {
     #[cfg(test)]
-    let candidates = {
-        let temporary = [
-            std::env::temp_dir(),
-            PathBuf::from("/tmp"),
-            PathBuf::from("/private/tmp"),
-        ];
-        candidates
-            .into_iter()
-            .filter(|candidate| {
-                configured.is_some_and(|configured| candidate == Path::new(configured))
-                    || temporary.iter().any(|folder| candidate.starts_with(folder))
-            })
-            .collect()
-    };
-    let _ = path_hits;
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| {
+            configured.is_some_and(|configured| candidate == Path::new(configured))
+                || under_temporary(candidate)
+        })
+        .collect();
     #[cfg(not(test))]
     let _ = configured;
     candidates
+}
+
+/// Whether `path` is inside a temporary folder: where a test's rig, its homes and its stand-ins live.
+#[cfg(test)]
+pub(crate) fn under_temporary(path: &Path) -> bool {
+    [
+        std::env::temp_dir(),
+        PathBuf::from("/tmp"),
+        PathBuf::from("/private/tmp"),
+    ]
+    .iter()
+    .any(|folder| path.starts_with(folder))
 }
 
 /// Where the codex a start runs is, from [`protocol::codex_bin`]'s list with the login
@@ -1505,9 +1504,8 @@ pub(crate) async fn codex_path(
     let launcher = crate::state::codex_launcher().ok();
     protocol::claude_bin::first_runnable(
         not_installed_in_tests(
-            protocol::codex_bin::candidates(codex_bin, &home, path_hits.clone()),
+            protocol::codex_bin::candidates(codex_bin, &home, path_hits),
             codex_bin,
-            &path_hits,
         ),
         launcher.as_deref(),
     )
@@ -1927,6 +1925,15 @@ pub(crate) fn login_shell_command(
     if let Some(account) = account {
         account.link_shared(environment);
     }
+    // A test's login shell never starts in a person's home, whose start-up files it would run.
+    #[cfg(test)]
+    assert!(
+        environment
+            .get(OsStr::new("HOME"))
+            .is_some_and(|home| under_temporary(Path::new(home))),
+        "a test's login shell would start outside a temporary home: {:?}",
+        environment.get(OsStr::new("HOME"))
+    );
     let mut command = tokio::process::Command::new(program);
     command
         .env_clear()
@@ -2136,7 +2143,19 @@ pub(crate) fn phone_environment() -> HashMap<OsString, OsString> {
     let session = (crate::state::launchd_label().as_deref() == Some(protocol::launchd_label()))
         .then(|| session_environment(&own))
         .flatten();
-    phone_environment_from(own, session)
+    #[allow(unused_mut)]
+    let mut environment = phone_environment_from(own, session);
+    // A test given a person's own home (a bare `cargo test`) runs in a temporary one, so nothing it starts sees theirs.
+    #[cfg(test)]
+    if !environment
+        .get(OsStr::new("HOME"))
+        .is_some_and(|home| under_temporary(Path::new(home)))
+    {
+        let home = std::env::temp_dir().join("ccd-test-home");
+        std::fs::create_dir_all(&home).unwrap();
+        environment.insert("HOME".into(), home.into_os_string());
+    }
+    environment
 }
 
 /// [`phone_environment`], from the daemon's environment and, when it was read, the
@@ -5175,6 +5194,18 @@ esac"#;
         );
     }
 
+    /// **A test's login shell never starts in a person's home**, whose start-up files it would run: refused before
+    /// anything is started.
+    #[test]
+    #[should_panic(expected = "outside a temporary home")]
+    fn a_tests_login_shell_never_starts_in_a_persons_home() {
+        let environment = HashMap::from([
+            (OsString::from("HOME"), OsString::from("/Users/person")),
+            (OsString::from("SHELL"), OsString::from("/bin/zsh")),
+        ]);
+        let _ = login_shell_command(&environment, None, &[OsStr::new("/nonexistent/agent")]);
+    }
+
     /// **No test can reach an agent installed on the computer**: the places a test looks for codex or claude are the
     /// one it names, its fenced `PATH` and a temporary home of its own, never the computer's install locations
     /// (Homebrew's, `/usr/local`) nor a person's own home, which a bare `cargo test` would be given.
@@ -5186,12 +5217,10 @@ esac"#;
         let codex = not_installed_in_tests(
             protocol::codex_bin::candidates(None, person, Vec::new()),
             None,
-            &[],
         );
         let claude = not_installed_in_tests(
             protocol::claude_bin::candidates(None, person, Vec::new()),
             None,
-            &[],
         );
         assert_eq!(
             (codex, claude),
@@ -5207,12 +5236,10 @@ esac"#;
         let codex = not_installed_in_tests(
             protocol::codex_bin::candidates(None, person, hits[..1].to_vec()),
             None,
-            &hits[..1],
         );
         let claude = not_installed_in_tests(
             protocol::claude_bin::candidates(None, person, hits[1..].to_vec()),
             None,
-            &hits[1..],
         );
         assert_eq!(
             (codex, claude),
@@ -5222,7 +5249,6 @@ esac"#;
         let kept = not_installed_in_tests(
             protocol::codex_bin::candidates(None, &rig, Vec::new()),
             None,
-            &[],
         );
         assert_eq!(
             kept,
@@ -5232,7 +5258,6 @@ esac"#;
         let named = not_installed_in_tests(
             protocol::codex_bin::candidates(Some("/opt/stand-in/codex"), person, Vec::new()),
             Some("/opt/stand-in/codex"),
-            &[],
         );
         assert_eq!(
             named,
