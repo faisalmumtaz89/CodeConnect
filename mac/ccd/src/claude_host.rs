@@ -1334,9 +1334,9 @@ pub(crate) fn entry_model_id(models: &[serde_json::Value], value: &str) -> Optio
 }
 
 /// The name the apps give the model `id` on a run whose start answered `models`, by the rule
-/// they name a live run's model by: the label of the entry whose value `id` is, else of the
-/// entry, the default one aside, whose `resolvedModel` it is; the default entry's own label is
-/// "Default", as the apps show it. None when no entry names it.
+/// they name a live run's model by: the name ([`model_name`]) of the entry whose value `id` is,
+/// else of the entry, the default one aside, whose `resolvedModel` it is; the default entry's
+/// own is "Default", as the apps show it. None when no entry names it.
 pub(crate) fn entry_label(models: &[serde_json::Value], id: &str) -> Option<String> {
     let models = menus(models).models;
     let entry = models.iter().find(|model| model.value == id).or_else(|| {
@@ -1347,8 +1347,18 @@ pub(crate) fn entry_label(models: &[serde_json::Value], id: &str) -> Option<Stri
     Some(if entry.value == "default" {
         "Default".to_string()
     } else {
-        entry.label.clone()
+        model_name(&entry.label, entry.detail.as_deref())
     })
+}
+
+/// A model's name, as the apps name it (the Kit's `RunSettings.modelName`, the same words): the part of its entry's
+/// description before the first " · ", when the description has one and that part begins with the entry's label;
+/// otherwise the entry's label. "Sonnet" / "Sonnet 5.5 · Efficient for routine tasks" is "Sonnet 5.5".
+pub(crate) fn model_name(label: &str, description: Option<&str>) -> String {
+    match description.and_then(|description| description.split_once(" · ")) {
+        Some((first, _)) if first.starts_with(label) => first.to_string(),
+        _ => label.to_string(),
+    }
 }
 
 /// Which `value` of `models` (the start's answer, as [`menus`] reads it) claude's model fact
@@ -9574,15 +9584,66 @@ mod tests {
         let models = answer["models"].as_array().unwrap();
         assert_eq!(
             entry_label(models, "claude-opus-5-5").as_deref(),
-            Some("Opus")
+            Some("Opus 5.5")
         );
         assert_eq!(
             entry_label(models, "claude-sonnet-5-5").as_deref(),
-            Some("Sonnet")
+            Some("Sonnet 5.5")
         );
-        assert_eq!(entry_label(models, "opus").as_deref(), Some("Opus"));
+        assert_eq!(entry_label(models, "opus").as_deref(), Some("Opus 5.5"));
         assert_eq!(entry_label(models, "default").as_deref(), Some("Default"));
         assert_eq!(entry_label(models, "claude-opus-6"), None);
+    }
+
+    /// **A model's name** (the same rule as the Kit's `RunSettings.modelName`): the part of its entry's description
+    /// before the first " · ", when the description has one and that part begins with the entry's label; otherwise the
+    /// entry's label.
+    #[test]
+    fn a_models_name_is_its_descriptions_first_part_when_it_begins_with_the_label() {
+        for (label, description, name) in [
+            (
+                "Sonnet",
+                Some("Sonnet 5.5 · Efficient for routine tasks"),
+                "Sonnet 5.5",
+            ),
+            (
+                "Opus",
+                Some("Opus 5.5 · Best for everyday, complex tasks"),
+                "Opus 5.5",
+            ),
+            ("Fable", Some("Fable 5.2 · Most capable"), "Fable 5.2"),
+            (
+                "Haiku",
+                Some("Haiku 5.5 · Fastest for quick answers"),
+                "Haiku 5.5",
+            ),
+            (
+                "Default",
+                Some("Opus 5.5 · Use the default model"),
+                "Default",
+            ),
+            ("Qwen3.8-27B", Some("Local model on the box"), "Qwen3.8-27B"),
+            (
+                "GLM-5.3 · Command Code",
+                Some("Command Code API, 1M context"),
+                "GLM-5.3 · Command Code",
+            ),
+            ("Sonnet", Some("Sonnet 5.5"), "Sonnet"),
+            (
+                "Sonnet",
+                Some("Sonnet is efficient for routine tasks"),
+                "Sonnet",
+            ),
+            ("sonnet", Some("Sonnet 5.5 · Efficient"), "sonnet"),
+            ("Sonnet", None, "Sonnet"),
+            ("Sonnet", Some(""), "Sonnet"),
+        ] {
+            assert_eq!(
+                model_name(label, description),
+                name,
+                "{label} / {description:?}"
+            );
+        }
     }
 
     /// **An ended run names its model as its menu did (minor 46).** While the run is live its
@@ -9595,7 +9656,7 @@ mod tests {
         assert_eq!(derived["session_hosted_live"].get("model_label"), None);
         assert!(derived["session_hosted_live"].get("menus").is_some());
         assert_eq!(derived["session_hosted_ended"].get("menus"), None);
-        assert_eq!(derived["session_hosted_ended"]["model_label"], "Opus");
+        assert_eq!(derived["session_hosted_ended"]["model_label"], "Opus 5.5");
         assert_eq!(
             derived["session_hosted_ended"]["model"]["value"],
             "claude-opus-5-5"
