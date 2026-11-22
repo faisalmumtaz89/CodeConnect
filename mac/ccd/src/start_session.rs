@@ -46,6 +46,76 @@ const BRANCH_READS_AT_ONCE: usize = 8;
 /// How long the login shell and the launcher may take to say an agent is there.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// An account request answered; a change it made (anything but a listing) is pushed to every paired device.
+async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessage {
+    let environment = phone_environment();
+    let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
+    let changes = !matches!(message, ClientMessage::ListAccounts { .. });
+    let reply = match message {
+        ClientMessage::SignInAccount {
+            request_id,
+            account_id,
+        } => {
+            crate::accounts::sign_in(
+                &daemon.store,
+                &daemon.sign_ins,
+                &daemon.accounts_tx,
+                &environment,
+                codex.as_deref(),
+                request_id,
+                account_id,
+                crate::accounts::SIGN_IN_WAIT,
+            )
+            .await
+            .0
+        }
+        ClientMessage::RemoveAccount {
+            request_id,
+            account_id,
+        } => {
+            crate::accounts::remove_with(
+                &daemon.store,
+                &daemon.sign_ins,
+                &environment,
+                codex.as_deref(),
+                request_id,
+                account_id,
+            )
+            .await
+        }
+        message => {
+            let store = daemon.store.clone();
+            let request_id = crate::accounts::request_id(&message);
+            let reply =
+                tokio::task::spawn_blocking(move || crate::accounts::answer(&store, message))
+                    .await
+                    .unwrap_or_else(|err| {
+                        crate::accounts::unavailable(request_id, "answer", anyhow::anyhow!("{err}"))
+                    });
+            crate::accounts::with_signed_in(&environment, codex.as_deref(), reply).await
+        }
+    };
+    let reply = daemon.sign_ins.marked(reply);
+    if changes && matches!(reply, ServerMessage::Accounts { .. }) {
+        let _ = daemon.accounts_tx.send(());
+    }
+    reply
+}
+
+/// The accounts listing pushed to a paired device when it changes: no request named.
+pub(crate) async fn accounts_pushed(daemon: &Arc<Daemon>) -> ServerMessage {
+    let environment = phone_environment();
+    let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
+    let store = daemon.store.clone();
+    let reply = tokio::task::spawn_blocking(move || crate::accounts::listing(&store, None))
+        .await
+        .unwrap_or_else(|err| {
+            crate::accounts::unavailable(String::new(), "list", anyhow::anyhow!("{err}"))
+        });
+    let reply = crate::accounts::with_signed_in(&environment, codex.as_deref(), reply).await;
+    daemon.sign_ins.marked(reply)
+}
+
 /// The agents the phone can start.
 const AGENTS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
 
@@ -69,54 +139,11 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                 Err(err) => folder_trust_unavailable("forget the folder's answer", err),
             }
         }
-        ClientMessage::SignInAccount {
-            request_id,
-            account_id,
-        } => {
-            let environment = phone_environment();
-            let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
-            crate::accounts::sign_in(
-                &daemon.store,
-                &daemon.sign_ins,
-                &environment,
-                codex.as_deref(),
-                request_id,
-                account_id,
-                crate::accounts::SIGN_IN_WAIT,
-            )
-            .await
-        }
-        ClientMessage::RemoveAccount {
-            request_id,
-            account_id,
-        } => {
-            let environment = phone_environment();
-            let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
-            crate::accounts::remove_with(
-                &daemon.store,
-                &daemon.sign_ins,
-                &environment,
-                codex.as_deref(),
-                request_id,
-                account_id,
-            )
-            .await
-        }
         ClientMessage::ListAccounts { .. }
         | ClientMessage::AddAccount { .. }
-        | ClientMessage::ActivateAccount { .. } => {
-            let store = daemon.store.clone();
-            let request_id = crate::accounts::request_id(&message);
-            let reply =
-                tokio::task::spawn_blocking(move || crate::accounts::answer(&store, message))
-                    .await
-                    .unwrap_or_else(|err| {
-                        crate::accounts::unavailable(request_id, "answer", anyhow::anyhow!("{err}"))
-                    });
-            let environment = phone_environment();
-            let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
-            crate::accounts::with_signed_in(&environment, codex.as_deref(), reply).await
-        }
+        | ClientMessage::ActivateAccount { .. }
+        | ClientMessage::SignInAccount { .. }
+        | ClientMessage::RemoveAccount { .. } => accounts_answer(daemon, message).await,
         ClientMessage::GetProjectGit { path } => project_git(daemon, path).await,
         // Off the async workers: a read can wait on macOS asking the user.
         ClientMessage::ListFolder {

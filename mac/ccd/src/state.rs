@@ -201,7 +201,9 @@ pub struct Daemon {
     /// Which agents could start, as last checked.
     pub(crate) agents: crate::start_session::KnownAgents,
     /// The account sign-in this computer is running, if any ([`crate::accounts::sign_in`]).
-    pub(crate) sign_ins: crate::accounts::SignIns,
+    pub(crate) sign_ins: Arc<crate::accounts::SignIns>,
+    /// Told whenever the accounts listing changes, so each paired device is pushed it.
+    pub(crate) accounts_tx: broadcast::Sender<()>,
 }
 
 /// **What the Claude-only gate found** — see [`Daemon::refuse_unless_claude`].
@@ -534,7 +536,8 @@ impl Daemon {
             actuation_gates: Mutex::new(HashMap::new()),
             starts: crate::start_session::Starts::default(),
             agents: crate::start_session::KnownAgents::default(),
-            sign_ins: crate::accounts::SignIns::default(),
+            sign_ins: Arc::default(),
+            accounts_tx: broadcast::channel(16).0,
         })
     }
 

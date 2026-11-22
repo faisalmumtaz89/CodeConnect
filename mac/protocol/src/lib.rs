@@ -862,11 +862,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     for a model it does not name. A daemon below 47 sends none.
 ///   * `48` — **Several accounts per agent.**
 ///
-///     [`ws::ClientMessage::ListAccounts`], [`ws::ClientMessage::AddAccount`] and
-///     [`ws::ClientMessage::ActivateAccount`], each answered with one [`ws::ServerMessage::Accounts`], to paired
-///     devices only, behind [`ws::Capabilities::accounts`]. An account is a folder of the computer's own that a start
-///     on it is given; an agent's Default is the agent as it is. A daemon below 48 answers them `bad_request` and
-///     advertises no `accounts`.
+///     [`ws::ClientMessage::ListAccounts`], [`ws::ClientMessage::AddAccount`], [`ws::ClientMessage::ActivateAccount`],
+///     [`ws::ClientMessage::SignInAccount`] and [`ws::ClientMessage::RemoveAccount`], each answered with one
+///     [`ws::ServerMessage::Accounts`] naming its request, or [`ws::ServerMessage::AccountsRefused`]; the same
+///     listing pushed, with no request id, whenever it changes. To paired devices only, behind
+///     [`ws::Capabilities::accounts`]. An account is a folder of the computer's own that a start on it is given, its
+///     agent's credential its own and the rest of the person's home shared; an agent's Default is the agent as it is.
+///     A daemon below 48 answers them `bad_request` and advertises no `accounts`.
 pub const PROTOCOL_MINOR: u32 = 48;
 
 #[cfg(test)]

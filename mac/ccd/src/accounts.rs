@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use protocol::agent::AgentKind;
 
@@ -210,7 +211,7 @@ pub(crate) fn answer(
         },
         _ => unreachable!("only the account frames are answered here"),
     }
-    listing(store, request_id)
+    listing(store, Some(request_id))
 }
 
 /// The request an accounts ask names.
@@ -224,10 +225,19 @@ pub(crate) fn request_id(message: &protocol::ws::ClientMessage) -> String {
     }
 }
 
-fn listing(store: &crate::store::Store, request_id: String) -> protocol::ws::ServerMessage {
+pub(crate) fn listing(
+    store: &crate::store::Store,
+    request_id: Option<String>,
+) -> protocol::ws::ServerMessage {
     let accounts = match store.accounts() {
         Ok(accounts) => accounts,
-        Err(err) => return unavailable(request_id, "read the accounts", err),
+        Err(err) => {
+            return unavailable(
+                request_id.clone().unwrap_or_default(),
+                "read the accounts",
+                err,
+            )
+        }
     };
     let mut active = Vec::new();
     for agent in [AgentKind::Claude, AgentKind::Codex] {
@@ -237,7 +247,13 @@ fn listing(store: &crate::store::Store, request_id: String) -> protocol::ws::Ser
                 account_id: account.id,
             }),
             Ok(None) => {}
-            Err(err) => return unavailable(request_id, "read the accounts", err),
+            Err(err) => {
+                return unavailable(
+                    request_id.clone().unwrap_or_default(),
+                    "read the accounts",
+                    err,
+                )
+            }
         }
     }
     protocol::ws::ServerMessage::Accounts {
@@ -249,6 +265,7 @@ fn listing(store: &crate::store::Store, request_id: String) -> protocol::ws::Ser
                 agent: AgentKind::from_str_lossy(&account.agent),
                 label: account.label,
                 signed_in: None,
+                signing_in: false,
             })
             .collect(),
         active,
@@ -305,62 +322,72 @@ pub(crate) async fn with_signed_in(
     reply
 }
 
-/// Signs `account_id` in with its agent's own login on this computer, `codex` being Codex's path here, and answers
-/// once the login ends: the listing (`signed_in` as it then stands), or `sign_in_timed_out` after `wait`. A sign-in
-/// already going is ended first and its own request answered with the listing as it stands.
+/// Signs `account_id` in with its agent's own login on this computer, `codex` being Codex's path here. Answers at
+/// once: the listing, that account `signing_in`. The login runs on in a group of its own; when it ends (finished in
+/// the browser, after `wait`, or replaced by a newer sign-in), its group is ended and `changed` is told, so the
+/// list is pushed. The handle is the login's, for a test to wait on.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn sign_in(
     store: &crate::store::Store,
-    sign_ins: &SignIns,
+    sign_ins: &Arc<SignIns>,
+    changed: &tokio::sync::broadcast::Sender<()>,
     environment: &HashMap<OsString, OsString>,
     codex: Option<&Path>,
     request_id: String,
     account_id: String,
     wait: std::time::Duration,
-) -> protocol::ws::ServerMessage {
+) -> (
+    protocol::ws::ServerMessage,
+    Option<tokio::task::JoinHandle<()>>,
+) {
     let account = match store.accounts() {
         Ok(accounts) => accounts
             .into_iter()
             .find(|account| account.id == account_id),
-        Err(err) => return unavailable(request_id, "read the accounts", err),
+        Err(err) => return (unavailable(request_id, "read the accounts", err), None),
     };
     let Some(account) = account else {
-        return refused(
-            request_id,
-            "that is not one of this computer's accounts".into(),
+        return (
+            refused(
+                request_id,
+                "that is not one of this computer's accounts".into(),
+            ),
+            None,
         );
     };
     if account.agent != "codex" {
-        return refused(
-            request_id,
-            "Claude Code's sign-in can't be started from here yet".into(),
+        return (
+            refused(
+                request_id,
+                "Claude Code's sign-in can't be started from here yet".into(),
+            ),
+            None,
         );
     }
     let Some(codex) = codex else {
-        return refused(request_id, "Codex isn't installed on this computer".into());
+        return (
+            refused(request_id, "Codex isn't installed on this computer".into()),
+            None,
+        );
     };
     let home = match AccountEnv::for_account(&protocol::root_dir(), &account) {
         Ok(Some(home)) => home,
         Ok(None) => {
-            return refused(
-                request_id,
-                "this account's agent has no sign-in here".into(),
+            return (
+                refused(
+                    request_id,
+                    "this account's agent has no sign-in here".into(),
+                ),
+                None,
             )
         }
-        Err(err) => return unavailable(request_id, "make the account's home", err.into()),
+        Err(err) => {
+            return (
+                unavailable(request_id, "make the account's home", err.into()),
+                None,
+            )
+        }
     };
-    let (end, ended) = tokio::sync::oneshot::channel::<tokio::sync::oneshot::Sender<()>>();
-    let mine = sign_ins
-        .count
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some((_, _, earlier)) =
-        sign_ins
-            .going
-            .lock()
-            .unwrap()
-            .replace((mine, account.id.clone(), end))
-    {
-        let _ = earlier.send(tokio::sync::oneshot::channel().0);
-    }
     let mut login = crate::start_session::login_shell_command(
         environment,
         Some(&home),
@@ -383,26 +410,44 @@ pub(crate) async fn sign_in(
             Ok(())
         });
     }
-    let outcome = match login.spawn() {
-        Ok(mut child) => {
-            let leader = child
-                .id()
-                .and_then(|pid| i32::try_from(pid).ok())
-                .and_then(|pid| Some((pid, protocol::proc_identity::read_birth_identity(pid)?)))
-                .zip(protocol::proc_identity::boot_identity());
+    let (end, ended) = tokio::sync::oneshot::channel::<tokio::sync::oneshot::Sender<()>>();
+    let mine = sign_ins
+        .count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some((_, _, earlier)) =
+        sign_ins
+            .going
+            .lock()
+            .unwrap()
+            .replace((mine, account.id.clone(), end))
+    {
+        let _ = earlier.send(tokio::sync::oneshot::channel().0);
+    }
+    let mut child = match login.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            sign_ins.forget(mine);
+            return (
+                unavailable(request_id, "start the sign-in", err.into()),
+                None,
+            );
+        }
+    };
+    let leader = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(|pid| Some((pid, protocol::proc_identity::read_birth_identity(pid)?)))
+        .zip(protocol::proc_identity::boot_identity());
+    let running = {
+        let sign_ins = Arc::clone(sign_ins);
+        let changed = changed.clone();
+        tokio::spawn(async move {
             let mut told = None;
-            let outcome = tokio::select! {
-                _ = child.wait() => None,
-                ending = ended => {
-                    told = ending.ok();
-                    None
-                }
-                _ = tokio::time::sleep(wait) => Some(refused_as(
-                    request_id.clone(),
-                    "sign_in_timed_out",
-                    "the sign-in wasn't finished in the browser within ten minutes".into(),
-                )),
-            };
+            tokio::select! {
+                _ = child.wait() => {}
+                ending = ended => told = ending.ok(),
+                _ = tokio::time::sleep(wait) => {}
+            }
             // Its group ended as a run host's is: SIGTERM, then SIGKILL after the grace (`stop_group`), the login
             // reaped meanwhile so the group empties as soon as it ends.
             match leader {
@@ -410,7 +455,7 @@ pub(crate) async fn sign_in(
                     let _ = tokio::join!(
                         crate::claude_host::stop_group(
                             protocol::proc_identity::ProcessIdentity { pid, birth },
-                            boot,
+                            boot
                         ),
                         child.wait()
                     );
@@ -420,31 +465,48 @@ pub(crate) async fn sign_in(
                     let _ = child.wait().await;
                 }
             }
+            sign_ins.forget(mine);
             if let Some(told) = told {
                 let _ = told.send(());
             }
-            outcome
-        }
-        Err(err) => Some(unavailable(
-            request_id.clone(),
-            "start the sign-in",
-            err.into(),
-        )),
+            let _ = changed.send(());
+        })
     };
-    {
-        let mut going = sign_ins.going.lock().unwrap();
+    let reply = listing(store, Some(request_id));
+    let reply = with_signed_in(environment, Some(codex), reply).await;
+    (sign_ins.marked(reply), Some(running))
+}
+
+impl SignIns {
+    /// The sign-in numbered `mine` is over: it is no longer the one going.
+    fn forget(&self, mine: u64) {
+        let mut going = self.going.lock().unwrap();
         if going.as_ref().is_some_and(|(number, _, _)| *number == mine) {
             *going = None;
         }
     }
-    if let Some(outcome) = outcome {
-        return outcome;
-    }
-    let listing = listing(store, request_id);
-    with_signed_in(environment, Some(codex), listing).await
-}
 
-impl SignIns {
+    /// `reply`, an accounts listing, with the account a sign-in is going for marked `signing_in`.
+    pub(crate) fn marked(
+        &self,
+        mut reply: protocol::ws::ServerMessage,
+    ) -> protocol::ws::ServerMessage {
+        let going = self
+            .going
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, account, _)| account.clone());
+        if let (protocol::ws::ServerMessage::Accounts { accounts, .. }, Some(going)) =
+            (&mut reply, going)
+        {
+            for account in accounts.iter_mut().filter(|account| account.id == going) {
+                account.signing_in = true;
+            }
+        }
+        reply
+    }
+
     /// Ends the sign-in going for `account_id`, if one is, and waits until its login's group is gone.
     async fn end_for(&self, account_id: &str) {
         let going = {
@@ -546,7 +608,7 @@ pub(crate) async fn remove_with(
     if let Err(err) = store.remove_account(&account.id) {
         return unavailable(request_id, "remove the account", err);
     }
-    let listing = listing(store, request_id);
+    let listing = listing(store, Some(request_id));
     with_signed_in(environment, Some(codex), listing).await
 }
 
@@ -584,6 +646,7 @@ mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::path::Path;
+    use std::sync::Arc;
 
     /// A stand-in codex in `dir`: `login` writes `auth.json` into its `CODEX_HOME`, or, while `dir/hang` exists, waits
     /// as the npm launcher does: its native login a child (pid in `dir/kid`), passed SIGTERM and nothing else (its own
@@ -662,9 +725,12 @@ mod tests {
         let b = store.add_account("codex", "B").unwrap();
         let folder = |id: &str| protocol::root_dir().join("accounts").join("codex").join(id);
         let person_before = tree(&home);
-        let reply = super::sign_in(
+        let sign_ins = Arc::new(super::SignIns::default());
+        let (changed, mut heard) = tokio::sync::broadcast::channel(4);
+        let (answered, running) = super::sign_in(
             &store,
-            &super::SignIns::default(),
+            &sign_ins,
+            &changed,
             &environment,
             Some(&codex),
             "s1".into(),
@@ -672,8 +738,32 @@ mod tests {
             std::time::Duration::from_secs(20),
         )
         .await;
-        let reply = serde_json::to_value(&reply).unwrap();
-        assert_eq!(reply["type"], "accounts", "{reply}");
+        let answered = serde_json::to_value(&answered).unwrap();
+        let row_of = |reply: &serde_json::Value, id: &str| {
+            reply["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(answered["request_id"], "s1", "answered at once: {answered}");
+        assert_eq!(row_of(&answered, &a.id)["signing_in"], true, "{answered}");
+        running.unwrap().await.unwrap();
+        assert!(
+            heard.try_recv().is_ok(),
+            "the list is pushed when the login ends"
+        );
+        let reply = serde_json::to_value(sign_ins.marked(
+            super::with_signed_in(&environment, Some(&codex), super::listing(&store, None)).await,
+        ))
+        .unwrap();
+        assert_eq!(
+            row_of(&reply, &a.id).get("signing_in"),
+            None,
+            "no longer signing in: {reply}"
+        );
         let signed = |id: &str| {
             reply["accounts"]
                 .as_array()
@@ -731,7 +821,14 @@ mod tests {
         let store = crate::store::Store::open_temp("ccd-signin2");
         let _db = store.temp_db();
         let a = store.add_account("codex", "A").unwrap();
-        let sign_ins = super::SignIns::default();
+        let sign_ins = Arc::new(super::SignIns::default());
+        let (changed, mut heard) = tokio::sync::broadcast::channel(8);
+        let signed_in = || async {
+            let reply =
+                super::with_signed_in(&environment, Some(&codex), super::listing(&store, None))
+                    .await;
+            serde_json::to_value(&reply).unwrap()["accounts"][0]["signed_in"].clone()
+        };
         let gone = |pid: i32| async move {
             for _ in 0..100 {
                 // SAFETY: kill(2) with signal 0 only asks whether the process exists.
@@ -756,9 +853,10 @@ mod tests {
         };
 
         std::fs::write(root.join("hang"), "").unwrap();
-        let late = super::sign_in(
+        let (_, late) = super::sign_in(
             &store,
             &sign_ins,
+            &changed,
             &environment,
             Some(&codex),
             "s1".into(),
@@ -766,11 +864,15 @@ mod tests {
             std::time::Duration::from_millis(600),
         )
         .await;
-        let late = serde_json::to_value(&late).unwrap();
+        late.unwrap().await.unwrap();
+        assert!(
+            heard.try_recv().is_ok(),
+            "the list is pushed when the bound ends the login"
+        );
         assert_eq!(
-            (late["type"].as_str(), late["code"].as_str()),
-            (Some("accounts_refused"), Some("sign_in_timed_out")),
-            "{late}"
+            signed_in().await,
+            false,
+            "a login ended by the bound signed nothing in"
         );
         let kid = || {
             std::fs::read_to_string(root.join("kid"))
@@ -786,54 +888,42 @@ mod tests {
         );
         std::fs::remove_file(root.join("pid")).unwrap();
 
-        let (first, second) = tokio::join!(
-            super::sign_in(
-                &store,
-                &sign_ins,
-                &environment,
-                Some(&codex),
-                "s2".into(),
-                a.id.clone(),
-                std::time::Duration::from_secs(20)
-            ),
-            async {
-                let first_pid = pid().await;
-                let first_kid = kid();
-                std::fs::remove_file(root.join("hang")).unwrap();
-                let second = super::sign_in(
-                    &store,
-                    &sign_ins,
-                    &environment,
-                    Some(&codex),
-                    "s3".into(),
-                    a.id.clone(),
-                    std::time::Duration::from_secs(20),
-                )
-                .await;
-                assert!(
-                    gone(first_pid).await,
-                    "the first login is ended by the second sign-in"
-                );
-                assert!(gone(first_kid).await, "and the login it started");
-                second
-            }
+        let (_, first) = super::sign_in(
+            &store,
+            &sign_ins,
+            &changed,
+            &environment,
+            Some(&codex),
+            "s2".into(),
+            a.id.clone(),
+            std::time::Duration::from_secs(20),
+        )
+        .await;
+        let first_pid = pid().await;
+        let first_kid = kid();
+        std::fs::remove_file(root.join("hang")).unwrap();
+        let (_, second) = super::sign_in(
+            &store,
+            &sign_ins,
+            &changed,
+            &environment,
+            Some(&codex),
+            "s3".into(),
+            a.id.clone(),
+            std::time::Duration::from_secs(20),
+        )
+        .await;
+        first.unwrap().await.unwrap();
+        assert!(
+            gone(first_pid).await,
+            "the first login is ended by the second sign-in"
         );
-        let (first, second) = (
-            serde_json::to_value(&first).unwrap(),
-            serde_json::to_value(&second).unwrap(),
-        );
+        assert!(gone(first_kid).await, "and the login it started");
+        second.unwrap().await.unwrap();
         assert_eq!(
-            (first["type"].as_str(), first["request_id"].as_str()),
-            (Some("accounts"), Some("s2")),
-            "{first}"
-        );
-        assert_eq!(
-            (
-                second["type"].as_str(),
-                second["accounts"][0]["signed_in"].as_bool()
-            ),
-            (Some("accounts"), Some(true)),
-            "{second}"
+            signed_in().await,
+            true,
+            "the second sign-in's login signed A in"
         );
         let _ = std::fs::remove_dir_all(
             protocol::root_dir()
@@ -876,9 +966,10 @@ mod tests {
             .join("accounts")
             .join("codex")
             .join(&a.id);
-        let signed = super::sign_in(
+        let (_, running) = super::sign_in(
             &store,
-            &super::SignIns::default(),
+            &Arc::new(super::SignIns::default()),
+            &tokio::sync::broadcast::channel(4).0,
             &environment,
             Some(&codex),
             "s1".into(),
@@ -886,10 +977,8 @@ mod tests {
             std::time::Duration::from_secs(20),
         )
         .await;
-        assert_eq!(
-            serde_json::to_value(&signed).unwrap()["accounts"][0]["signed_in"],
-            true
-        );
+        running.unwrap().await.unwrap();
+        assert!(folder.join("auth.json").exists(), "signed in");
 
         std::fs::write(root.join("keep"), "").unwrap();
         let kept = serde_json::to_value(
@@ -988,7 +1077,7 @@ mod tests {
         let store = crate::store::Store::open_temp("ccd-remove2");
         let _db = store.temp_db();
         let a = store.add_account("codex", "A").unwrap();
-        let sign_ins = super::SignIns::default();
+        let sign_ins = Arc::new(super::SignIns::default());
         std::fs::write(root.join("hang"), "").unwrap();
         let read = |name: &str| -> Option<i32> {
             std::fs::read_to_string(root.join(name))
@@ -998,37 +1087,35 @@ mod tests {
                 .ok()
         };
         let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
-        let (_, removed) = tokio::join!(
-            super::sign_in(
-                &store,
-                &sign_ins,
-                &environment,
-                Some(&codex),
-                "s1".into(),
-                a.id.clone(),
-                std::time::Duration::from_secs(20)
-            ),
-            async {
-                while read("kid").is_none() {
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-                let removed = super::remove_with(
-                    &store,
-                    &sign_ins,
-                    &environment,
-                    Some(&codex),
-                    "r1".into(),
-                    a.id.clone(),
-                )
-                .await;
-                assert!(
-                    !alive(read("pid").unwrap()),
-                    "the login is gone when the removal answers"
-                );
-                assert!(!alive(read("kid").unwrap()), "and the login it started");
-                removed
-            }
+        let (_, running) = super::sign_in(
+            &store,
+            &sign_ins,
+            &tokio::sync::broadcast::channel(4).0,
+            &environment,
+            Some(&codex),
+            "s1".into(),
+            a.id.clone(),
+            std::time::Duration::from_secs(20),
+        )
+        .await;
+        while read("kid").is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let removed = super::remove_with(
+            &store,
+            &sign_ins,
+            &environment,
+            Some(&codex),
+            "r1".into(),
+            a.id.clone(),
+        )
+        .await;
+        assert!(
+            !alive(read("pid").unwrap()),
+            "the login is gone when the removal answers"
         );
+        assert!(!alive(read("kid").unwrap()), "and the login it started");
+        running.unwrap().await.unwrap();
         assert_eq!(
             serde_json::to_value(&removed).unwrap()["accounts"],
             serde_json::json!([])

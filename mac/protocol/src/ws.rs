@@ -417,9 +417,10 @@ pub enum ClientMessage {
         account_id: Option<String>,
     },
     /// **Signs `account_id` in with its agent's own login, on this computer**: the agent opens the sign-in in a
-    /// browser here and waits for it. Answered with one [`ServerMessage::Accounts`] once the login ends (the account's
-    /// `signed_in` says how it went), or [`ServerMessage::AccountsRefused`]: `sign_in_timed_out` after ten minutes. A
-    /// new one replaces the one going (its request is answered as the list then stands). Codex only, for now.
+    /// browser here. Answered at once with one [`ServerMessage::Accounts`] in which that account is `signing_in`; when
+    /// the login ends (finished in the browser, replaced by a newer sign-in, or after ten minutes) the list is pushed
+    /// with its `signed_in` as it then is and `signing_in` gone. One sign-in at a time per computer: a new one
+    /// replaces the one going. Codex only, for now.
     SignInAccount {
         request_id: String,
         account_id: String,
@@ -640,18 +641,25 @@ pub enum ServerMessage {
         request_id: String,
         folders: Vec<FolderAnswer>,
     },
-    /// The answer to [`ClientMessage::ListAccounts`], [`ClientMessage::AddAccount`] and
-    /// [`ClientMessage::ActivateAccount`]: every account, oldest first, and the one each agent's starts use, once the
-    /// request's change is made. An agent missing from `active` uses its Default.
+    /// Every account, oldest first, and the one each agent's starts use. The answer to
+    /// [`ClientMessage::ListAccounts`], [`ClientMessage::AddAccount`], [`ClientMessage::ActivateAccount`],
+    /// [`ClientMessage::SignInAccount`] and [`ClientMessage::RemoveAccount`] once the request's change is made, naming
+    /// its `request_id`; and pushed, with no `request_id`, to every paired device whenever the list changes (an
+    /// account added, chosen or removed from any device, a sign-in started or ended). A reader keeps the latest. An
+    /// agent missing from `active` uses its Default.
     Accounts {
-        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
         accounts: Vec<AgentAccount>,
         active: Vec<ActiveAccount>,
     },
-    /// A refused [`ClientMessage::ListAccounts`], [`ClientMessage::AddAccount`] or [`ClientMessage::ActivateAccount`],
-    /// naming the request, as a refused start or folder names its own: nothing changed. `code` is `bad_request` (an
-    /// agent with no accounts, an id not the agent's, a name outside 1 to 64 characters) or `accounts_unavailable`
-    /// (the computer could not read or keep its accounts); `message` says which, in words.
+    /// A refused account request (any of [`ClientMessage::ListAccounts`], [`ClientMessage::AddAccount`],
+    /// [`ClientMessage::ActivateAccount`], [`ClientMessage::SignInAccount`], [`ClientMessage::RemoveAccount`]), naming
+    /// the request, as a refused start or folder names its own: nothing changed. `code` is `bad_request` (an agent with
+    /// no accounts, an id not the agent's or not one of the computer's, a name outside 1 to 64 characters, an agent
+    /// whose sign-in or removal is not offered here yet, Codex not installed), `accounts_in_use` (a removal while a
+    /// session runs on the account) or `accounts_unavailable` (the computer could not read or keep its accounts, or
+    /// the agent could not sign the account out); `message` says which, in words.
     AccountsRefused {
         request_id: String,
         code: String,
@@ -914,6 +922,9 @@ pub struct AgentAccount {
     /// Whether its agent says it is signed in, asked with the account's home; absent when not known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_in: Option<bool>,
+    /// A sign-in for it is going on this computer, waiting on the browser. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signing_in: bool,
 }
 
 /// The account an agent's starts use now.
@@ -1212,7 +1223,8 @@ pub struct Capabilities {
     #[serde(default)]
     pub claude_interrupt: bool,
     /// **This daemon keeps several accounts per agent** ([`ClientMessage::ListAccounts`],
-    /// [`ClientMessage::AddAccount`], [`ClientMessage::ActivateAccount`], minor 47), to paired devices only. Absent
+    /// [`ClientMessage::AddAccount`], [`ClientMessage::ActivateAccount`], [`ClientMessage::SignInAccount`],
+    /// [`ClientMessage::RemoveAccount`], and the pushed [`ServerMessage::Accounts`], minor 47), to paired devices only. Absent
     /// decodes `false`: an older daemon answers them with `bad_request`, so a client asks only when this is
     /// advertised.
     #[serde(default)]
@@ -3095,12 +3107,13 @@ mod tests {
         // An id ccd made (a store's `add_account` in a test run), as every account id is.
         assert!(crate::uid::is_well_formed("01M80QGTWR9RCHBSJWR169GXCN"));
         let reply = ServerMessage::Accounts {
-            request_id: "a2".into(),
+            request_id: Some("a2".into()),
             accounts: vec![AgentAccount {
                 id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
                 agent: crate::agent::AgentKind::Codex,
                 label: "Work".into(),
                 signed_in: None,
+                signing_in: false,
             }],
             active: vec![ActiveAccount {
                 agent: crate::agent::AgentKind::Codex,
@@ -3128,10 +3141,12 @@ mod tests {
             agent: crate::agent::AgentKind::Codex,
             label: "Work".into(),
             signed_in: Some(true),
+            signing_in: true,
         };
         assert_eq!(
             serde_json::to_value(&known).unwrap(),
-            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work", "signed_in": true})
+            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work", "signed_in": true,
+                "signing_in": true})
         );
         let older: AgentAccount = serde_json::from_value(
             serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work"}),
@@ -3140,6 +3155,26 @@ mod tests {
         assert_eq!(
             older.signed_in, None,
             "a listing without it reads not known"
+        );
+        assert!(!older.signing_in, "nor signing in");
+        // Pushed, a listing names no request.
+        let pushed = ServerMessage::Accounts {
+            request_id: None,
+            accounts: Vec::new(),
+            active: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&pushed).unwrap(),
+            serde_json::json!({"type": "accounts", "accounts": [], "active": []})
+        );
+        // A removal names the account.
+        round_trip_client(
+            ClientMessage::RemoveAccount {
+                request_id: "a8".into(),
+                account_id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+            },
+            serde_json::json!({"type": "remove_account", "request_id": "a8",
+                "account_id": "01M80QGTWR9RCHBSJWR169GXCN"}),
         );
 
         // A refusal names the request it answers.
