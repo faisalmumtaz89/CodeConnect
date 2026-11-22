@@ -5198,6 +5198,27 @@ esac"#;
             (Vec::new(), Vec::new()),
             "nothing of the computer's or the person's"
         );
+        // Found on the login shell's `PATH` (path_helper adds Homebrew's folder; a person's shell adds their own):
+        // still not a test's.
+        let hits = [
+            PathBuf::from("/opt/homebrew/bin/codex"),
+            person.join(".local/bin/claude"),
+        ];
+        let codex = not_installed_in_tests(
+            protocol::codex_bin::candidates(None, person, hits[..1].to_vec()),
+            None,
+            &hits[..1],
+        );
+        let claude = not_installed_in_tests(
+            protocol::claude_bin::candidates(None, person, hits[1..].to_vec()),
+            None,
+            &hits[1..],
+        );
+        assert_eq!(
+            (codex, claude),
+            (Vec::new(), Vec::new()),
+            "nothing found on PATH outside a test's own folders"
+        );
         let kept = not_installed_in_tests(
             protocol::codex_bin::candidates(None, &rig, Vec::new()),
             None,
