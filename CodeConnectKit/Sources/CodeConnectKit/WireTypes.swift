@@ -945,6 +945,8 @@ public struct Capabilities: Codable, Sendable, Hashable {
     var servesCommandCatalog: Bool { advertises(["command_catalog"]) }
     /// `list_projects` and `start_session` are answerable.
     public var startsSessions: Bool { advertises(["start_session"]) }
+    /// `list_accounts`, `add_account` and `activate_account` are answerable (minor 47, paired devices only).
+    public var keepsAccounts: Bool { advertises(["accounts"]) }
     /// `get_project_git` is answerable, and `start_session` takes a
     /// `worktree` (minor 29). Without it a `worktree` is ignored and the start
     /// runs in the folder, so none is sent.
@@ -2029,6 +2031,14 @@ public enum ClientMessage: Sendable {
     /// Forget one folder's answer, so the next start there asks again; answered
     /// `folderTrust`.
     case forgetFolderTrust(requestID: String, path: String)
+    /// Each agent's accounts on the computer and the one its starts use, answered `accounts`. Minor 47, sent only
+    /// when `Capabilities.keepsAccounts`.
+    case listAccounts(requestID: String)
+    /// Adds an account for `agent` named `label` (1 to 64 characters); it is not made the one its starts use.
+    /// Answered `accounts`.
+    case addAccount(requestID: String, agent: String, label: String)
+    /// Makes `accountID` the account `agent`'s next starts use, or its Default for nil. Answered `accounts`.
+    case activateAccount(requestID: String, agent: String, accountID: String?)
     /// One folder's repository: its checkouts and free branches. Minor 29,
     /// sent only when `Capabilities.startsInWorktrees`.
     case getProjectGit(path: String)
@@ -2077,6 +2087,8 @@ extension ClientMessage: Encodable {
         case submit
         case turnID = "turn_id"
         case trust
+        case label
+        case accountID = "account_id"
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -2222,6 +2234,20 @@ extension ClientMessage: Encodable {
             try c.encode("forget_folder_trust", forKey: .type)
             try c.encode(requestID, forKey: .requestID)
             try c.encode(path, forKey: .path)
+        case .listAccounts(let requestID):
+            try c.encode("list_accounts", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+        case .addAccount(let requestID, let agent, let label):
+            try c.encode("add_account", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(agent, forKey: .agent)
+            try c.encode(label, forKey: .label)
+        case .activateAccount(let requestID, let agent, let accountID):
+            try c.encode("activate_account", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(agent, forKey: .agent)
+            // Null names the Default, as the daemon reads an absent or null id.
+            try c.encode(accountID, forKey: .accountID)
         case .getProjectGit(let path):
             try c.encode("get_project_git", forKey: .type)
             try c.encode(path, forKey: .path)
@@ -2495,6 +2521,9 @@ public enum ServerMessage: Sendable {
     /// `forget_folder_trust`: every answer the computer keeps, newest first, once
     /// the request's change is made.
     case folderTrust(requestID: String, folders: [FolderAnswer])
+    /// The answer to `list_accounts`, `add_account` and `activate_account`: every account and the one each agent's
+    /// starts use, once the request's change is made.
+    case accounts(requestID: String, book: AccountBook)
     /// The answer to `get_project_git`: nil when the folder is not a repository.
     case projectGit(path: String, git: StartGit?)
     /// The answer to `list_folder`.
@@ -2545,6 +2574,8 @@ extension ServerMessage: Decodable {
         case git
         case folders
         case truncated
+        case accounts
+        case active
     }
 
     public init(from decoder: Decoder) throws {
@@ -2636,6 +2667,12 @@ extension ServerMessage: Decodable {
             self = .folderTrust(
                 requestID: try c.decode(String.self, forKey: .requestID),
                 folders: try c.decode([FolderAnswer].self, forKey: .folders))
+        case "accounts":
+            self = .accounts(
+                requestID: try c.decode(String.self, forKey: .requestID),
+                book: AccountBook(
+                    accounts: try c.decode([AgentAccount].self, forKey: .accounts),
+                    active: try c.decode([ActiveAccount].self, forKey: .active)))
         case "project_git":
             self = .projectGit(
                 path: try c.decode(String.self, forKey: .path),

@@ -1186,6 +1186,75 @@ public final class AppModel {
     /// This computer's projects, and the sessions this phone started on it.
     public let starter = SessionStarter()
 
+    // MARK: Accounts (minor 47)
+
+    /// This computer's accounts per agent and the one each agent's starts use, once asked; nil before.
+    public private(set) var accountBook: AccountBook?
+    /// What the computer said when it refused, or could not answer, the last accounts request; cleared by its next
+    /// answer.
+    public private(set) var accountsProblem: String?
+    /// An accounts request is in flight: one at a time, since a refusal names no request.
+    public private(set) var accountsBusy = false
+
+    /// This computer keeps accounts per agent: it advertises `accounts`. A computer that does not shows none.
+    public var keepsAccounts: Bool {
+        #if DEBUG
+            if fixtureAccountBook != nil { return true }
+        #endif
+        return connection.capabilities?.keepsAccounts == true
+    }
+
+    /// Asks this computer for its accounts.
+    public func loadAccounts() async {
+        #if DEBUG
+            if let fixture = fixtureAccountBook {
+                accountBook = fixture
+                return
+            }
+        #endif
+        _ = await accountsRequest { try await $0.listAccounts() }
+    }
+
+    /// Adds an account for `agent` named `label`; true once the computer has it.
+    @discardableResult
+    public func addAccount(agent: StartAgent, label: String) async -> Bool {
+        await accountsRequest { try await $0.addAccount(agent: agent, label: label) }
+    }
+
+    /// Makes `accountID` (nil: Default) the account `agent`'s next starts use; true once the computer has made it.
+    @discardableResult
+    public func activateAccount(agent: StartAgent, accountID: String?) async -> Bool {
+        await accountsRequest { try await $0.activateAccount(agent: agent, accountID: accountID) }
+    }
+
+    private func accountsRequest(_ ask: (DaemonConnection) async throws -> AccountBook) async -> Bool {
+        guard keepsAccounts, !accountsBusy else { return false }
+        accountsBusy = true
+        defer { accountsBusy = false }
+        do {
+            accountBook = try await ask(connection)
+            accountsProblem = nil
+            return true
+        } catch {
+            accountsProblem = error.localizedDescription
+            return false
+        }
+    }
+
+    #if DEBUG
+        /// `-CC_ACCOUNTS_WIRE <frame>`: a recorded `accounts` reply (fixtures/accounts/minor-47-wire.json) this computer
+        /// is taken to answer with, read from the arguments as given, so a fixture launch draws its accounts.
+        private var fixtureAccountBook: AccountBook? {
+            guard fixturesActive else { return nil }
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let flag = arguments.firstIndex(of: "-CC_ACCOUNTS_WIRE"), flag + 1 < arguments.count,
+                case .accounts(_, let book)? = try? JSONDecoder().decode(
+                    ServerMessage.self, from: Data(arguments[flag + 1].utf8))
+            else { return nil }
+            return book
+        }
+    #endif
+
     /// Ask this computer for its projects. Only a computer that advertises
     /// `start_session` is asked; the answer arrives as `projects`.
     public func listProjects() {
@@ -2211,9 +2280,10 @@ public final class AppModel {
         case .testPushResult:
             // Same shape: the sheet's own request awaits the reply by id.
             break
-        case .folderTrust:
+        case .folderTrust, .accounts:
             // The same again: `listFolderTrust`, `setFolderTrust` and
-            // `forgetFolderTrust` each await their reply by id.
+            // `forgetFolderTrust`, and the three accounts requests, each await
+            // their reply by id.
             break
         case .projects(let projects, let agents):
             starter.receive(projects: projects, agents: agents)
