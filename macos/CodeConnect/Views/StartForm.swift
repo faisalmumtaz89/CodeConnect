@@ -607,6 +607,8 @@ struct StartForm: View {
                 .padding(.horizontal, 4)
             HStack(alignment: .bottom, spacing: 2) {
                 ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }
+                    // Its name whole before the branch row, which stretches, takes the rest: cut only when the row has none.
+                    .layoutPriority(1)
                 if let folder, context.branchAhead(folder) {
                     BranchRow(
                         context: context, folder: folder, agent: pick?.agent, place: choice(\.place), newName: choice(\.newName),
