@@ -9,6 +9,10 @@ User-facing changes, newest first. Mac releases are cut per
   session header and model button and on the iPhone's model button, while the run is live and after it has ended; this
   replaces the id 0.19.5 showed for an ended run. With an older CodeConnect on the computer, or an older app, the id
   shows as before.
+- An agent's reply reads as a document. On the Mac it is held to a reading width, a table has a bold header and a rule
+  under each row and wraps its columns to fit the pane, code within a line is tinted, and links are underlined; on the
+  Mac and the iPhone, nested, numbered and task lists draw as lists, with a marker for each level and a box for each
+  task.
 - On the Mac, the conversation shows a ring in the focus colour while it has the keyboard, so after Tab it is clear
   where the arrow, Page, Home and End keys will scroll; the ring goes when the keyboard moves on or the window is not
   in front.
