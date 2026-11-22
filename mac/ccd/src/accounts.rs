@@ -208,3 +208,61 @@ pub(crate) fn unavailable(what: &str, err: anyhow::Error) -> protocol::ws::Serve
         message: format!("could not {what}: {err}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// **The accounts wire the apps read is what ccd answers** (`fixtures/accounts/minor-47-wire.json`, recorded from a
+    /// ccd at 35433a6f by one paired device). Each request, in the recorded order, is answered by this build on a store
+    /// of its own; the reply's bytes are the recorded reply's, the ids aside: ccd makes new ones, so each is read as the
+    /// recorded id it stands for, in the order the replies first name them.
+    #[test]
+    fn the_recorded_accounts_wire_is_what_this_build_answers() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/accounts/minor-47-wire.json"
+        ))
+        .unwrap();
+        let store = crate::store::Store::open_temp("ccd-accounts-wire");
+        let _db = store.temp_db();
+        let mut ids: Vec<(String, String)> = Vec::new(); // (recorded, made here)
+                                                         // In the order they were recorded (their request ids, fx-a1 on): a JSON object keeps no order.
+        let mut exchanges: Vec<_> = fixture
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, exchange)| exchange.is_object())
+            .collect();
+        exchanges.sort_by_key(|(_, exchange)| {
+            exchange["request"]["request_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        });
+        for (name, exchange) in exchanges {
+            let mut request = exchange["request"].to_string();
+            for (recorded, made) in &ids {
+                request = request.replace(recorded, made);
+            }
+            let reply = super::answer(&store, serde_json::from_str(&request).unwrap());
+            let mut said = serde_json::to_value(&reply).unwrap();
+            let recorded_ids: Vec<&str> = exchange["reply"]["accounts"]
+                .as_array()
+                .map(|accounts| accounts.iter().map(|a| a["id"].as_str().unwrap()).collect())
+                .unwrap_or_default();
+            if let Some(accounts) = said["accounts"].as_array() {
+                for (account, recorded) in accounts.iter().zip(&recorded_ids) {
+                    let made = account["id"].as_str().unwrap();
+                    if !ids.iter().any(|(_, m)| m == made) {
+                        ids.push((recorded.to_string(), made.to_string()));
+                    }
+                }
+            }
+            let mut text = said.to_string();
+            for (recorded, made) in &ids {
+                text = text.replace(made, recorded);
+            }
+            said = serde_json::from_str(&text).unwrap();
+            assert_eq!(said, exchange["reply"], "{name}");
+        }
+        assert_eq!(fixture["hello_ack_capabilities_accounts"], true);
+    }
+}

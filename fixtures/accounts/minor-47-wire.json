@@ -1,0 +1,181 @@
+{
+  "hello_ack_capabilities_accounts": true,
+  "list_empty": {
+    "request": {
+      "type": "list_accounts",
+      "request_id": "fx-a1"
+    },
+    "reply": {
+      "type": "accounts",
+      "request_id": "fx-a1",
+      "accounts": [],
+      "active": []
+    }
+  },
+  "add_codex_work": {
+    "request": {
+      "type": "add_account",
+      "request_id": "fx-a2",
+      "agent": "codex",
+      "label": "Work"
+    },
+    "reply": {
+      "type": "accounts",
+      "request_id": "fx-a2",
+      "accounts": [
+        {
+          "id": "01M80T9Q0VFB9FYGMSDGHYJ45K",
+          "agent": "codex",
+          "label": "Work"
+        }
+      ],
+      "active": []
+    }
+  },
+  "add_claude_personal": {
+    "request": {
+      "type": "add_account",
+      "request_id": "fx-a3",
+      "agent": "claude",
+      "label": "Personal"
+    },
+    "reply": {
+      "type": "accounts",
+      "request_id": "fx-a3",
+      "accounts": [
+        {
+          "id": "01M80T9Q0VFB9FYGMSDGHYJ45K",
+          "agent": "codex",
+          "label": "Work"
+        },
+        {
+          "id": "01M80T9Q0VFB9FYGMSDGHYJ45M",
+          "agent": "claude",
+          "label": "Personal"
+        }
+      ],
+      "active": []
+    }
+  },
+  "activate_codex_work": {
+    "request": {
+      "type": "activate_account",
+      "request_id": "fx-a4",
+      "agent": "codex",
+      "account_id": "01M80T9Q0VFB9FYGMSDGHYJ45K"
+    },
+    "reply": {
+      "type": "accounts",
+      "request_id": "fx-a4",
+      "accounts": [
+        {
+          "id": "01M80T9Q0VFB9FYGMSDGHYJ45K",
+          "agent": "codex",
+          "label": "Work"
+        },
+        {
+          "id": "01M80T9Q0VFB9FYGMSDGHYJ45M",
+          "agent": "claude",
+          "label": "Personal"
+        }
+      ],
+      "active": [
+        {
+          "agent": "codex",
+          "account_id": "01M80T9Q0VFB9FYGMSDGHYJ45K"
+        }
+      ]
+    }
+  },
+  "add_codex_work_again": {
+    "request": {
+      "type": "add_account",
+      "request_id": "fx-a5",
+      "agent": "codex",
+      "label": "  Work "
+    },
+    "reply": {
+      "type": "accounts",
+      "request_id": "fx-a5",
+      "accounts": [
+        {
+          "id": "01M80T9Q0VFB9FYGMSDGHYJ45K",
+          "agent": "codex",
+          "label": "Work"
+        },
+        {
+          "id": "01M80T9Q0VFB9FYGMSDGHYJ45M",
+          "agent": "claude",
+          "label": "Personal"
+        }
+      ],
+      "active": [
+        {
+          "agent": "codex",
+          "account_id": "01M80T9Q0VFB9FYGMSDGHYJ45K"
+        }
+      ]
+    }
+  },
+  "refused_label_too_long": {
+    "request": {
+      "type": "add_account",
+      "request_id": "fx-a6",
+      "agent": "codex",
+      "label": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "reply": {
+      "type": "error",
+      "code": "bad_request",
+      "message": "an account's name is 1 to 64 characters"
+    }
+  },
+  "activate_codex_default": {
+    "request": {
+      "type": "activate_account",
+      "request_id": "fx-a7",
+      "agent": "codex",
+      "account_id": null
+    },
+    "reply": {
+      "type": "accounts",
+      "request_id": "fx-a7",
+      "accounts": [
+        {
+          "id": "01M80T9Q0VFB9FYGMSDGHYJ45K",
+          "agent": "codex",
+          "label": "Work"
+        },
+        {
+          "id": "01M80T9Q0VFB9FYGMSDGHYJ45M",
+          "agent": "claude",
+          "label": "Personal"
+        }
+      ],
+      "active": []
+    }
+  },
+  "list_after": {
+    "request": {
+      "type": "list_accounts",
+      "request_id": "fx-a8"
+    },
+    "reply": {
+      "type": "accounts",
+      "request_id": "fx-a8",
+      "accounts": [
+        {
+          "id": "01M80T9Q0VFB9FYGMSDGHYJ45K",
+          "agent": "codex",
+          "label": "Work"
+        },
+        {
+          "id": "01M80T9Q0VFB9FYGMSDGHYJ45M",
+          "agent": "claude",
+          "label": "Personal"
+        }
+      ],
+      "active": []
+    }
+  }
+}
