@@ -1464,9 +1464,9 @@ async fn claude_path(
     )
 }
 
-/// `candidates` as a run takes them; in a test, only the one it names (`configured`), one on its fenced `PATH`
-/// (`path_hits`) and one in a temporary folder (a test's own home): never the computer's install locations nor a
-/// person's own home, so no test runs an agent installed there, whatever `HOME` it was given.
+/// `candidates` as a run takes them; in a test, only the one it names (`configured`) and one in a temporary folder
+/// (its rig: its own home, or a folder of its own it put on `PATH`): never the computer's install locations, a
+/// person's own home, nor a system folder a login shell's `PATH` adds, so no test runs an agent installed there.
 fn not_installed_in_tests(
     candidates: Vec<PathBuf>,
     configured: Option<&str>,
@@ -1483,13 +1483,13 @@ fn not_installed_in_tests(
             .into_iter()
             .filter(|candidate| {
                 configured.is_some_and(|configured| candidate == Path::new(configured))
-                    || path_hits.contains(candidate)
                     || temporary.iter().any(|folder| candidate.starts_with(folder))
             })
             .collect()
     };
+    let _ = path_hits;
     #[cfg(not(test))]
-    let _ = (configured, path_hits);
+    let _ = configured;
     candidates
 }
 

@@ -6721,10 +6721,27 @@ mod tests {
     /// Default; another agent's id is refused and nothing changes.
     #[tokio::test]
     async fn accounts_are_kept_and_chosen_by_a_paired_device() {
-        // Every listing asks the agent, from the session's environment.
+        // Every listing asks the agent, from the session's environment: here a stand-in for each, signed out.
         let _env = crate::ProcessEnvRead::take();
         use protocol::agent::AgentKind;
-        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let agents = std::env::temp_dir().join(format!(
+            "ccw-agents.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        std::fs::create_dir_all(&agents).unwrap();
+        let stand_in = agents.join("signed-out");
+        std::fs::write(&stand_in, "#!/bin/sh\nexit 1\n").unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&stand_in)
+            .status()
+            .unwrap();
+        let (server, _) = live_server(protocol::config::Config {
+            codex_bin: Some(stand_in.display().to_string()),
+            claude_bin: Some(stand_in.display().to_string()),
+            ..protocol::config::Config::default()
+        })
+        .await;
         let frame =
             |message: ClientMessage| Message::Text(serde_json::to_string(&message).unwrap());
         let list = |id: &str| {
