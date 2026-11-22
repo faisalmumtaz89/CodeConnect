@@ -39,6 +39,8 @@ struct HostedSettingsButton: View {
     let room: CGFloat
 
     private var name: String { settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay }
+    /// The effort in use beside the model, by Kit's one rule (`RunSettings.effortName`).
+    private var effort: String? { model.shownSummary(for: key).flatMap(RunSettings.effortName) }
 
     var body: some View {
         HStack(spacing: 2) {
@@ -62,12 +64,16 @@ struct HostedSettingsButton: View {
     // MARK: The controls
 
     private var modelButton: some View {
-        control(.model, id: "session.composer.commands", label: name, help: "Model and effort") {
+        control(
+            .model, id: "session.composer.commands", label: effort.map { "\(name), \($0) effort" } ?? name,
+            help: "Model and effort"
+        ) {
             HStack(spacing: 5) {
                 AgentMark(agent: agent)
                 // The agent's own report of the model (an id) in code type; a menu row's label in the app's.
                 Text(name).font(settings.modelDisplayReported ? Theme.mono(11.5) : Theme.ui(12))
                     .foregroundStyle(Theme.text)
+                if let effort { Text("· \(effort)").foregroundStyle(Theme.text2) }
                 if settings.inFlight {
                     ProgressView().controlSize(.small).accessibilityHidden(true)
                 } else {
@@ -158,7 +164,7 @@ struct HostedSettingsButton: View {
             }
             if !settings.efforts.isEmpty {
                 divider
-                header("Effort")
+                header(settings.selectedEffort == nil ? "Effort · Default" : "Effort")
                 efforts
             }
         }
@@ -279,12 +285,15 @@ struct HostedSettingsButton: View {
 struct ModelFactLabel: View {
     let agent: AgentKind
     let fact: String?
+    /// The effort the agent named, if it named one (`RunSettings.effortName`).
+    let effort: String?
 
     var body: some View {
         HStack(spacing: 5) {
             AgentMark(agent: agent)
             // The model as the run reported it, in code type; "Model" while it has reported none.
             Text(fact ?? "Model").font(fact == nil ? Theme.ui(12) : Theme.mono(11.5)).foregroundStyle(Theme.text)
+            if let effort { Text("· \(effort)").foregroundStyle(Theme.text2) }
         }
         .font(Theme.ui(12))
         .padding(.horizontal, 6)

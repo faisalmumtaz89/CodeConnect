@@ -302,4 +302,18 @@ final class RunSettingsTests: XCTestCase {
         guard case .hostedLive(let s) = RunSettings.of(summary: claude) else { return XCTFail("hostedLive") }
         XCTAssertEqual(s.models.first { $0.value == "sonnet" }?.detail, sonnet.detail)
     }
+
+    /// **The effort in use, named beside the model** (decision 303): the effort the agent named, by its label;
+    /// "Default" while the chosen model offers efforts and none is named; nothing for a run whose menus are gone and
+    /// whose agent named none.
+    func testTheEffortInUseIsNamedAndUnnamedReadsDefault() throws {
+        let live = try summary("session_hosted_live")
+        XCTAssertEqual(RunSettings.effortName(summary: live), "High")
+        var unnamed = try XCTUnwrap(try wire()["session_hosted_live"]?.objectValue)
+        unnamed["effort"] = nil
+        let none = try JSONDecoder().decode(
+            SessionSummary.self, from: Data(JSONValue.object(unnamed).canonicalJSONString.utf8))
+        XCTAssertEqual(RunSettings.effortName(summary: none), "Default")
+        XCTAssertNil(RunSettings.effortName(summary: try summary("session_hosted_starting")))
+    }
 }

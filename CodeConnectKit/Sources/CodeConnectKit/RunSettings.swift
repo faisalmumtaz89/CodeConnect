@@ -17,6 +17,18 @@ public enum RunSettings: Sendable, Hashable {
     /// A live hosted Claude run offering its menus.
     case hostedLive(HostedSettings)
 
+    /// The effort a run is on, as the reply row names it beside the model: the effort the agent last named, by its
+    /// label; "Default" while the run's model offers efforts and the agent has named none (the menus name no
+    /// model's default effort); nil when the model offers none and none is named. An ended run, its menus gone,
+    /// names only what the agent named. A setting the agent has not named reads "Default", as the Default row does.
+    public static func effortName(summary: SessionSummary) -> String? {
+        if let fact = summary.effort { return EffortConfirmation.label(for: fact.value) }
+        guard let menus = summary.menus,
+            let model = menus.models.first(where: { $0.value == menus.selectedModel }), !model.efforts.isEmpty
+        else { return nil }
+        return "Default"
+    }
+
     /// The entry for a run, from its summary and the things only the client knows: the model the run
     /// has confirmed it is on (`AppModel.confirmedModel`), whether one of its setting calls is in flight
     /// (the menus are then disabled), and the last answer still worth showing. The selection follows the
