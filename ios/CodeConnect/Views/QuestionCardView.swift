@@ -22,7 +22,11 @@ struct QuestionCardView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    @State private var draft: QuestionDraft
+    /// The picks and words so far: the run's (`RunDrafts`), so they outlive this card, as on the Mac.
+    private var draft: QuestionDraft {
+        get { model.drafts(for: approval.sessionKey)?.answers[approval.id] ?? QuestionDraft(card: questions) }
+        nonmutating set { model.drafts(for: approval.sessionKey)?.answers[approval.id] = newValue }
+    }
     /// Which question is on screen; `questions.count` is the Review step.
     @State private var step = 0
     /// Which control is spinning. Whether an answer is really in flight lives
@@ -41,7 +45,6 @@ struct QuestionCardView: View {
         self.questions = questions
         self.onSettled = onSettled
         self.comeBackToThis = comeBackToThis
-        _draft = State(initialValue: QuestionDraft(card: questions))
     }
 
     // MARK: State

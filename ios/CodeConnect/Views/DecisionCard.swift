@@ -72,8 +72,14 @@ struct DecisionCardView: View {
     /// When this card was first laid out. A gate satisfied by the first frame
     /// was not satisfied by a scroll, and a haptic never fires on entrance.
     @State private var appearedAt = Date()
-    @State private var denyReason = ""
+    /// The reason a Deny carries, typed in the box: the run's (`RunDrafts`), so it outlives this card, as on the Mac.
+    private var denyReason: String {
+        get { model.drafts(for: approval.sessionKey)?.reasons[approval.id] ?? "" }
+        nonmutating set { model.drafts(for: approval.sessionKey)?.reasons[approval.id] = newValue }
+    }
     @State private var showDenyField = false
+    /// The reason box is open when asked for, and while it holds a kept reason.
+    private var denyFieldShown: Bool { showDenyField || !denyReason.isEmpty }
     /// Which control is spinning. Purely cosmetic — whether an answer is
     /// actually in flight lives on the model, keyed by request id, so dismissing
     /// and re-presenting this card cannot start a second one.
@@ -1266,7 +1272,7 @@ struct DecisionCardView: View {
                     unconfirmedNotice(sentAt)
                 }
 
-                if showDenyField {
+                if denyFieldShown {
                     denyReasonField
                 } else if !typeSize.isAccessibilitySize {
                     subordinateControls
@@ -1436,7 +1442,7 @@ struct DecisionCardView: View {
                     .accessibilityIdentifier("allow-for-session")
                 }
             }
-            if !showDenyField {
+            if !denyFieldShown {
                 CCButton(
                     "Deny with a reason", icon: "chat-text", variant: .ghost, size: .md,
                     fullWidth: true,
@@ -1555,7 +1561,7 @@ struct DecisionCardView: View {
             // to be usable by voice.
             CCField(
                 label: "Reason for denying",
-                text: $denyReason,
+                text: Binding(get: { denyReason }, set: { denyReason = $0 }),
                 placeholder: CardWords.denyPrompt(sessionAgent?.displayName ?? "the agent"),
                 axis: .vertical,
                 lineLimit: 1...4)
@@ -1565,6 +1571,7 @@ struct DecisionCardView: View {
                 verticalAlignment: .top
             ) {
                 CCButton("Cancel", variant: .ghost, size: .sm) {
+                    denyReason = ""
                     withAnimation(CC.motion.small) { showDenyField = false }
                 }
                 CCAdaptiveSpacer(minLength: CC.space.xs)

@@ -143,6 +143,9 @@ struct FleetView: View {
     /// Set when the start flow is reopened from the folder question's Back, so
     /// it comes back with the earlier answers in it; nil for a fresh "New".
     @State private var startSeed: StartSeed?
+    /// The start's first message, typed and not sent: held here, above the sheet, so closing the sheet keeps it. A
+    /// sent start takes it; a start handed back unsent gives it back to an empty box, as the Mac's `StartDraft` does.
+    @State private var startMessage = ""
     /// Every paired computer that can start a session.
     private var startContexts: [StartContext] { machines.startContexts }
 
@@ -322,6 +325,7 @@ struct FleetView: View {
                 requestID: requestID,
                 onLive: { path = [SessionRoute(key: $0, focusComposer: $1)] },
                 onChooseAgain: {
+                    restoreStartMessage(machines.models.lazy.compactMap { $0.starter.starts[requestID] }.first?.prompt)
                     path = []
                     Task {
                         try? await Task.sleep(for: .milliseconds(450))
@@ -413,7 +417,9 @@ struct FleetView: View {
     private func presentations(_ list: some View, _ screen: FleetScreen) -> some View {
         list
             .sheet(isPresented: $startOpen, onDismiss: openStarted) {
-                StartStepsSheet(contexts: startContexts, seed: startSeed, onStarted: started, onClose: { startOpen = false })
+                StartStepsSheet(
+                    contexts: startContexts, message: $startMessage, seed: startSeed, onStarted: started,
+                    onClose: { startOpen = false })
                 .ccConfirmationHost()
                 .ccTallSheet()
             }
@@ -977,6 +983,7 @@ struct FleetView: View {
     /// still holding its request; a link that dropped in between falls back to a
     /// fresh flow.
     private func openTrust(_ start: SessionStart, _ folderPath: String) {
+        restoreStartMessage(start.prompt)
         guard let context = startContexts.first(where: { $0.starter.starts[start.id] != nil }) else {
             path = []
             Task {
@@ -987,7 +994,7 @@ struct FleetView: View {
         }
         startSeed = StartSeed(
             context: context, project: start.project, place: start.place, agent: start.agent,
-            model: start.model, message: start.prompt ?? "", trustPath: folderPath)
+            model: start.model, trustPath: folderPath)
         path = []
         Task {
             try? await Task.sleep(for: .milliseconds(450))
@@ -1001,9 +1008,16 @@ struct FleetView: View {
         startOpen = false
     }
 
+    /// A start handed back unsent: its first message goes back into the box, unless something new is typed there.
+    private func restoreStartMessage(_ prompt: String?) {
+        if startMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { startMessage = prompt ?? "" }
+    }
+
     private func openStarted() {
         guard let id = startedRequest else { return }
         startedRequest = nil
+        // The sent start took its first message; cleared once the sheet is gone, so it never blanks on the way out.
+        startMessage = ""
         path = [SessionRoute(key: "start-\(id)", startRequestID: id)]
     }
 

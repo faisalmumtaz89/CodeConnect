@@ -439,6 +439,22 @@ final class CatchUpTests: XCTestCase {
 
     // MARK: G6. The truth decides
 
+    /// A run first named by a return's list is linkable at once, but has no drafts until the catch-up publishes it,
+    /// and has them from that publication on: the reply box, which writes into them, is drawn from then.
+    func testARunNewInTheReturnsListGetsItsDraftsAtTheRelease() async {
+        let (model, wire) = await caughtUp([Row(uid: a, lastSeq: 5)])
+
+        returnToForeground(model)
+        answer(model, [Row(uid: b, lastSeq: 2)])
+        XCTAssertEqual(model.resolveSessionKey(reference: b), b, "a link to it opens its screen")
+        XCTAssertNil(model.drafts(for: b), "no drafts while the catch-up holds it")
+
+        await subscribed(wire, b)
+        inject(model, b, 1...2)
+        await settle(model)
+        XCTAssertNotNil(model.drafts(for: b), "its drafts are there once the catch-up publishes it")
+    }
+
     /// A name in a link means the run the catch-up's own list names, so it
     /// waits for that list rather than resolving to the run that held the name
     /// before the return.
