@@ -8180,6 +8180,50 @@ mod tests {
             .transcript_path
     }
 
+    /// **A database from before accounts takes them on, and keeps them** (N4 G2). Built as the last release left it
+    /// (no `accounts`, no `account_selection`, no `run_hosts.account_id`) with a run in it, then opened by this
+    /// build: accounts are added and chosen, and survive two more opens; the run from before resolves to its
+    /// agent's Default; a run recorded on an account keeps it.
+    #[test]
+    fn a_database_from_before_accounts_takes_them_on_and_keeps_them() {
+        let (store, path) = temp_store();
+        let legacy = key("AA", "cc-1");
+        assert_eq!(store.begin_run(&session_row(&legacy), &legacy.uid, None, None).unwrap(), None);
+        drop(store);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DROP TABLE accounts; DROP TABLE account_selection; ALTER TABLE run_hosts DROP COLUMN account_id;",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.run_account(&legacy.uid).unwrap(), None, "a run from before is on its Default");
+        let work = store.add_account("codex", "Work").unwrap();
+        let home = store.add_account("claude", "Home").unwrap();
+        assert!(store.activate_account("codex", Some(&work.id)).unwrap());
+        assert!(!store.activate_account("claude", Some(&work.id)).unwrap(), "codex's account is not claude's");
+        assert!(store.activate_account("claude", Some(&home.id)).unwrap());
+        let on_work = key("BB", "cx-1");
+        assert_eq!(
+            store.begin_run(&codex_session_row(&on_work), &on_work.uid, None, Some(&work.id)).unwrap(),
+            None
+        );
+        drop(store);
+        for _ in 0..2 {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.accounts().unwrap(), vec![work.clone(), home.clone()]);
+            assert_eq!(store.active_account("codex").unwrap(), Some(work.clone()));
+            assert_eq!(store.active_account("claude").unwrap(), Some(home.clone()));
+            assert_eq!(store.run_account(&on_work.uid).unwrap(), Some(work.clone()));
+            assert_eq!(store.run_account(&legacy.uid).unwrap(), None);
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(store.activate_account("codex", None).unwrap());
+        assert_eq!(store.active_account("codex").unwrap(), None, "Default again");
+        assert_eq!(store.run_account(&on_work.uid).unwrap(), Some(work), "a run keeps the account it began on");
+    }
+
     /// On the way up to `6`, every run that had ended forgets its transcript, once,
     /// and a running one keeps its own. Past the transition the gate is shut: a
     /// run whose end a later start has still to read keeps its transcript.

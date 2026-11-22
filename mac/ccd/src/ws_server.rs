@@ -6667,4 +6667,74 @@ mod tests {
             serde_json::json!([["/srv/b", "not_trusted"]])
         );
     }
+
+    /// **Accounts are kept and chosen by a paired device only** (minor 47): advertised to it and not to the bootstrap
+    /// token, which is refused all three asks. An account is added for its agent, made active, and set back to
+    /// Default; another agent's id is refused and nothing changes.
+    #[tokio::test]
+    async fn accounts_are_kept_and_chosen_by_a_paired_device() {
+        use protocol::agent::AgentKind;
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let frame = |message: ClientMessage| Message::Text(serde_json::to_string(&message).unwrap());
+        let list = |id: &str| frame(ClientMessage::ListAccounts { request_id: id.into() });
+        let add = |id: &str, agent: AgentKind, label: &str| {
+            frame(ClientMessage::AddAccount { request_id: id.into(), agent, label: label.into() })
+        };
+        let activate = |id: &str, agent: AgentKind, account: Option<&str>| {
+            frame(ClientMessage::ActivateAccount {
+                request_id: id.into(),
+                agent,
+                account_id: account.map(str::to_string),
+            })
+        };
+
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(ack["capabilities"]["accounts"], false, "{ack}");
+        for refused in [list("b1"), add("b2", AgentKind::Codex, "Work"), activate("b3", AgentKind::Codex, None)] {
+            bootstrap.send(refused).await.unwrap();
+            let reply = next_json(&mut bootstrap).await.unwrap();
+            assert_eq!(reply["code"], "not_authorised", "{reply}");
+        }
+
+        let (mut phone, ack) = server.hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests")).await;
+        assert_eq!(ack["capabilities"]["accounts"], true, "{ack}");
+        async fn ask(
+            phone: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+            message: Message,
+            request_id: &str,
+        ) -> serde_json::Value {
+            phone.send(message).await.unwrap();
+            loop {
+                let reply = next_json(phone).await.expect("a reply");
+                if reply["type"] == "accounts" || reply["type"] == "error" {
+                    if reply["type"] == "accounts" {
+                        assert_eq!(reply["request_id"], request_id, "{reply}");
+                    }
+                    break reply;
+                }
+            }
+        }
+        let empty = ask(&mut phone, list("a1"), "a1").await;
+        assert_eq!(empty["accounts"], serde_json::json!([]), "{empty}");
+        assert_eq!(empty["active"], serde_json::json!([]), "{empty}");
+
+        let added = ask(&mut phone, add("a2", AgentKind::Codex, "Work"), "a2").await;
+        let work = added["accounts"][0]["id"].as_str().unwrap().to_string();
+        assert!(protocol::uid::is_well_formed(&work), "{added}");
+        assert_eq!(added["accounts"][0]["agent"], "codex");
+        assert_eq!(added["active"], serde_json::json!([]), "adding does not choose it: {added}");
+
+        let chosen = ask(&mut phone, activate("a3", AgentKind::Codex, Some(&work)), "a3").await;
+        assert_eq!(chosen["active"], serde_json::json!([{"agent": "codex", "account_id": work}]), "{chosen}");
+
+        // Codex's account is not Claude's.
+        let refused = ask(&mut phone, activate("a4", AgentKind::Claude, Some(&work)), "a4").await;
+        assert_eq!(refused["code"], "bad_request", "{refused}");
+        let unchanged = ask(&mut phone, list("a5"), "a5").await;
+        assert_eq!(unchanged["active"], chosen["active"], "{unchanged}");
+
+        let default = ask(&mut phone, activate("a6", AgentKind::Codex, None), "a6").await;
+        assert_eq!(default["active"], serde_json::json!([]), "{default}");
+        assert_eq!(default["accounts"].as_array().unwrap().len(), 1, "Default keeps the account: {default}");
+    }
 }

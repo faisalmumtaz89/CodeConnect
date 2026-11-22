@@ -4101,6 +4101,94 @@ mod tests {
         assert_eq!(rig.runs(), 6);
     }
 
+    /// **What one account offered is never another's** (N4 G4): an offer kept for Codex on account A is not B's, so a
+    /// listing on B at the same version asks B itself on its first reply; and the last check, made on A, does not
+    /// answer a listing made on B.
+    #[test]
+    fn what_one_account_offered_is_never_anothers() {
+        let root = std::env::temp_dir().join(format!("ccs-offers.{}", &protocol::uid::new().unwrap()[20..]));
+        let on = |label: &str| {
+            let account =
+                crate::store::Account { id: protocol::uid::new().unwrap(), agent: "codex".into(), label: label.into() };
+            crate::accounts::AccountEnv::for_account(&root, &account).unwrap().unwrap()
+        };
+        let (a, b) = (on("A"), on("B"));
+        let known = KnownAgents::default();
+        let offer = Offer { signed_in: Some(true), ..Default::default() };
+        known.keep(&AgentKind::Codex, Some(&a), "0.167.0", offer.clone());
+        assert_eq!(known.offered(&AgentKind::Codex, Some(&a), "0.167.0"), Some(offer));
+        assert_eq!(known.offered(&AgentKind::Codex, Some(&b), "0.167.0"), None, "B is asked itself");
+        assert_eq!(known.offered(&AgentKind::Codex, None, "0.167.0"), None, "and so is Default");
+
+        let made_on_a = selections(&[None, Some(a.clone())]);
+        known.set(made_on_a.clone(), Vec::new());
+        assert_eq!(known.get(&made_on_a), Some(Vec::new()));
+        assert_eq!(known.get(&selections(&[None, Some(b)])), None, "a check on A does not answer for B");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **An account's folder is what a launch sees, whatever the login shell exports** (N4 G3). The person's own
+    /// start-up file exports a conflicting `CODEX_HOME` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`: a launch on an account
+    /// sees the account's folder; a launch on Default sees the file's own value, untouched. The red half: the same
+    /// variable set in the environment handed to the shell, as a naive launch would, is overwritten by that file.
+    #[tokio::test]
+    async fn an_accounts_folder_wins_over_the_login_shells_own_export() {
+        let root = std::env::temp_dir().join(format!("ccs-account.{}", &protocol::uid::new().unwrap()[20..]));
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(".profile"),
+            "export CODEX_HOME=/conflict/codex\nexport CLAUDE_SECURESTORAGE_CONFIG_DIR=/conflict/claude\n",
+        )
+        .unwrap();
+        let env = environment(&[
+            ("HOME", home.to_str().unwrap()),
+            ("SHELL", "/bin/sh"),
+            ("PATH", "/usr/bin:/bin"),
+        ]);
+        let said = |environment: HashMap<OsString, OsString>, account: Option<crate::accounts::AccountEnv>| async move {
+            let mut command = login_shell_command(
+                &environment,
+                account.as_ref(),
+                &[
+                    OsStr::new("/bin/sh"),
+                    OsStr::new("-c"),
+                    OsStr::new("printf '%s %s\\n' \"$CODEX_HOME\" \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\""),
+                ],
+            );
+            let out = command.stdin(Stdio::null()).output().await.unwrap();
+            String::from_utf8(out.stdout).unwrap().lines().last().unwrap_or_default().to_string()
+        };
+        let account = |agent: &str| crate::store::Account {
+            id: protocol::uid::new().unwrap(),
+            agent: agent.into(),
+            label: "Work".into(),
+        };
+        let codex = crate::accounts::AccountEnv::for_account(&root, &account("codex")).unwrap().unwrap();
+        let claude = crate::accounts::AccountEnv::for_account(&root, &account("claude")).unwrap().unwrap();
+        let folder = |env: &crate::accounts::AccountEnv| {
+            env.argv()[1].to_str().unwrap().split_once('=').unwrap().1.to_string()
+        };
+
+        assert_eq!(said(env.clone(), None).await, "/conflict/codex /conflict/claude", "Default is the person's own");
+        assert_eq!(
+            said(env.clone(), Some(codex.clone())).await,
+            format!("{} /conflict/claude", folder(&codex)),
+            "Codex's account wins over the file, and nothing else moves"
+        );
+        assert_eq!(
+            said(env.clone(), Some(claude.clone())).await,
+            format!("/conflict/codex {}", folder(&claude)),
+            "Claude Code's account wins over the file"
+        );
+        // Red: set before the shell, the file's export wins and the start would leave its account.
+        let mut naive = env.clone();
+        naive.insert(OsString::from("CODEX_HOME"), OsString::from(folder(&codex)));
+        assert_eq!(said(naive, None).await, "/conflict/codex /conflict/claude");
+        assert_eq!(protocol::fsperm::mode_of(Path::new(&folder(&codex))).unwrap() & 0o777, 0o700, "its folder is private");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn environment(pairs: &[(&str, &str)]) -> HashMap<OsString, OsString> {
         pairs
             .iter()

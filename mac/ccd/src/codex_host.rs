@@ -8022,6 +8022,57 @@ mod tests {
         );
     }
 
+    /// **N4 G4: a run relaunched goes on the account it began on.** A Codex run starts on account A, B is made
+    /// active, ccd is opened again, and a message relaunches the run: codex is launched with A's home again and
+    /// resumes the same thread. The active account is never read for a relaunch.
+    #[tokio::test]
+    async fn a_relaunched_run_keeps_the_account_it_began_on() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let after = capture["answerAfter"]["result"].clone();
+        let thread = after["thread"]["id"].as_str().unwrap().to_string();
+        let first = after["thread"]["turns"][0]["id"].as_str().unwrap();
+        let a = rig.daemon.store.add_account("codex", "A").unwrap();
+        let b = rig.daemon.store.add_account("codex", "B").unwrap();
+        assert!(rig.daemon.store.activate_account("codex", Some(&a.id)).unwrap());
+        let on_a = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap().unwrap();
+        let home_of_a = on_a.argv()[1].to_str().unwrap().split_once('=').unwrap().1.to_string();
+
+        let codex = stand_in(&rig, "printf '%s\\n' \"${CODEX_HOME-unset}\" >> codex_home\nexec sleep 30");
+        let mut script = whole_start();
+        script.truncate(3);
+        script[2].1 = json!({"result": {"thread": {"id": thread}, "model": "gpt-test"}});
+        let run = Run { trust: Trust::Trusted, account: Some(&on_a), ..run(&rig, "req-on-a", &codex) };
+        let (result, ws) = tokio::join!(start(&rig.daemon, run), async {
+            let (_, mut ws) = play_app_server(&rig, script).await;
+            let first_turn = asked(&mut ws, "turn/start").await;
+            answer(&mut ws, &first_turn, json!({"turn": {"id": first}})).await;
+            ws
+        });
+        let uid = started_uid(&result);
+        row_once(&rig, &uid, Lifecycle::Live).await;
+        link_attached(&rig.daemon, &uid).await;
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(a.clone()), "the run records A");
+
+        assert!(rig.daemon.store.activate_account("codex", Some(&b.id)).unwrap());
+        app_server_ended(&rig, &uid, ws).await;
+        let daemon = relauncher(&rig);
+        let mut said = saying(&daemon, &uid, "say-again", "still on A?");
+        let (mut ws, resumed) = tokio::select! {
+            served = relaunch_served(&rig, 2, after.clone()) => served,
+            refused = &mut said => panic!("answered before codex was launched again: {refused:?}"),
+        };
+        let sent = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &sent, json!({"turn": {"id": "turn-on-a"}})).await;
+        said.await.unwrap();
+
+        let dir = crate::claude_host::run_dir(&rig.root, &uid);
+        let homes = std::fs::read_to_string(dir.join("codex_home")).unwrap();
+        assert_eq!(homes.lines().collect::<Vec<_>>(), [home_of_a.as_str(), home_of_a.as_str()], "{homes}");
+        assert_eq!(resumed["params"]["threadId"], thread, "the same thread, resumed");
+    }
+
     /// **X5-2 G2: a run ended by End run is not relaunched.** It reads `none`, and a message to
     /// it is refused with nothing launched.
     #[tokio::test]

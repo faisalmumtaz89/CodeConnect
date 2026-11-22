@@ -2661,6 +2661,7 @@ mod tests {
             machine_stats: true,
             stop_run: true,
             claude_interrupt: true,
+            accounts: true,
         }
     }
 
@@ -3007,6 +3008,80 @@ mod tests {
             }
             other => panic!("wrong message: {other:?}"),
         }
+    }
+
+    /// **The accounts wire, pinned as the apps will match it** (minor 47). Each frame encodes to exactly this JSON
+    /// and decodes back to it; Default is an explicit null; an older daemon's capabilities decode `accounts` false.
+    #[test]
+    fn the_accounts_wire_is_pinned() {
+        fn round_trip_client(message: ClientMessage, expected: serde_json::Value) {
+            assert_eq!(serde_json::to_value(&message).unwrap(), expected);
+            let decoded: ClientMessage = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        }
+        round_trip_client(
+            ClientMessage::ListAccounts { request_id: "a1".into() },
+            serde_json::json!({"type": "list_accounts", "request_id": "a1"}),
+        );
+        round_trip_client(
+            ClientMessage::AddAccount {
+                request_id: "a2".into(),
+                agent: crate::agent::AgentKind::Codex,
+                label: "Work".into(),
+            },
+            serde_json::json!({"type": "add_account", "request_id": "a2", "agent": "codex", "label": "Work"}),
+        );
+        round_trip_client(
+            ClientMessage::ActivateAccount {
+                request_id: "a3".into(),
+                agent: crate::agent::AgentKind::Claude,
+                account_id: Some("01K1ACCOUNT0000000000000000".into()),
+            },
+            serde_json::json!({"type": "activate_account", "request_id": "a3", "agent": "claude",
+                "account_id": "01K1ACCOUNT0000000000000000"}),
+        );
+        round_trip_client(
+            ClientMessage::ActivateAccount {
+                request_id: "a4".into(),
+                agent: crate::agent::AgentKind::Claude,
+                account_id: None,
+            },
+            serde_json::json!({"type": "activate_account", "request_id": "a4", "agent": "claude",
+                "account_id": null}),
+        );
+        // A Default asked for with the field left out reads the same.
+        let bare: ClientMessage = serde_json::from_value(
+            serde_json::json!({"type": "activate_account", "request_id": "a5", "agent": "codex"}),
+        )
+        .unwrap();
+        assert!(matches!(bare, ClientMessage::ActivateAccount { account_id: None, .. }));
+
+        let reply = ServerMessage::Accounts {
+            request_id: "a2".into(),
+            accounts: vec![AgentAccount {
+                id: "01K1ACCOUNT0000000000000000".into(),
+                agent: crate::agent::AgentKind::Codex,
+                label: "Work".into(),
+            }],
+            active: vec![ActiveAccount {
+                agent: crate::agent::AgentKind::Codex,
+                account_id: "01K1ACCOUNT0000000000000000".into(),
+            }],
+        };
+        let expected = serde_json::json!({"type": "accounts", "request_id": "a2",
+            "accounts": [{"id": "01K1ACCOUNT0000000000000000", "agent": "codex", "label": "Work"}],
+            "active": [{"agent": "codex", "account_id": "01K1ACCOUNT0000000000000000"}]});
+        assert_eq!(serde_json::to_value(&reply).unwrap(), expected);
+        let decoded: ServerMessage = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+
+        let older = serde_json::json!({
+            "can_approve_reliably": true, "fail_mode": "fail_open",
+            "answer_path": "hook_return", "hold_secs": 0, "send_text": true,
+            "capture": true, "push": false, "tls": true
+        });
+        let caps: Capabilities = serde_json::from_value(older).expect("decodes");
+        assert!(!caps.accounts, "a daemon that does not say keeps no accounts");
     }
 
     /// **The start-session wire, pinned as the phone matches it** (minor 28).

@@ -273,7 +273,10 @@ where
         | ClientMessage::StartSession { .. }
         | ClientMessage::ListFolderTrust { .. }
         | ClientMessage::SetFolderTrust { .. }
-        | ClientMessage::ForgetFolderTrust { .. } => {
+        | ClientMessage::ForgetFolderTrust { .. }
+        | ClientMessage::ListAccounts { .. }
+        | ClientMessage::AddAccount { .. }
+        | ClientMessage::ActivateAccount { .. } => {
             send(
                 sink,
                 &ServerMessage::Error {
@@ -539,6 +542,7 @@ fn capabilities() -> Capabilities {
         machine_stats: false,
         stop_run: false,
         claude_interrupt: false,
+        accounts: false,
     }
 }
 
