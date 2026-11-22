@@ -298,4 +298,54 @@ final class AccountsWireTests: XCTestCase {
         await waitUntil({ model.accountBook?.accounts.first?.signedIn == true }, "the pushed listing to be kept")
         XCTAssertEqual(model.accountBook?.accounts.first?.signingIn, false, "signing_in gone reads not signing in")
     }
+
+    // MARK: What each account's agent says of it (machine/accounts-306, minor 48)
+
+    /// `fixtures/accounts/accounts-facts-wire.json`: a listing ccd sent with each Codex account's facts, made-up values:
+    /// two accounts signed in as one address (each marked the same as another), and the Default's facts.
+    private func factsBook() throws -> AccountBook {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let name = "fixtures/accounts/accounts-facts-wire.json"
+        guard let data = try? Data(contentsOf: repoRoot.appendingPathComponent(name)) else {
+            throw XCTSkip("\(name) is not reachable from this bundle")
+        }
+        let frame = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: data).arrayValue?.first)
+        guard case .accounts(nil, let book) = try JSONDecoder().decode(ServerMessage.self, from: Data(frame.canonicalJSONString.utf8))
+        else { return try XCTSkip("not a pushed accounts listing") }
+        return book
+    }
+
+    /// Each account's email, plan and the windows its agent names are read as sent; so are the Default's.
+    func testEachAccountsFactsAreReadAsSent() throws {
+        let book = try factsBook()
+        let first = try XCTUnwrap(book.accounts(for: .codex).first)
+        let facts = try XCTUnwrap(first.facts)
+        XCTAssertEqual(facts.email, "same@example.test")
+        XCTAssertEqual(facts.plan, "plus")
+        XCTAssertEqual(facts.windows, [UsageWindow(usedPercent: 42, windowMinutes: 300, resetsAt: 1_800_000_000)])
+        XCTAssertEqual(facts.readAt, "2026-11-22T20:43:28.243Z")
+        XCTAssertTrue(first.sameAsAnother)
+        XCTAssertFalse(first.notSeparate)
+        XCTAssertEqual(book.defaultFacts(for: .codex)?.email, "default@example.test")
+        XCTAssertNil(book.defaultFacts(for: .claude), "Claude Code's Default has no facts yet")
+    }
+
+    /// The facts of the account a run is on: an added account by its id, the Default by none.
+    func testARunsAccountFactsAreFoundByItsId() throws {
+        let book = try factsBook()
+        let first = try XCTUnwrap(book.accounts(for: .codex).first)
+        XCTAssertEqual(book.facts(for: .codex, accountID: first.id)?.email, "same@example.test")
+        XCTAssertEqual(book.facts(for: .codex, accountID: nil)?.email, "default@example.test")
+        XCTAssertNil(book.facts(for: .codex, accountID: "01M8NOSUCHACCOUNT00000000"), "an account since removed")
+    }
+
+    /// An account without facts, an older listing's, reads none.
+    func testAListingWithoutFactsReadsNone() throws {
+        let account = try JSONDecoder().decode(
+            AgentAccount.self, from: Data(#"{"id": "\#(Self.pinnedAccountID)", "agent": "codex", "label": "Work"}"#.utf8))
+        XCTAssertNil(account.facts)
+        XCTAssertFalse(account.sameAsAnother)
+        XCTAssertEqual(try book("list_empty").defaults, [])
+    }
 }

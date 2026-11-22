@@ -2594,6 +2594,7 @@ extension ServerMessage: Decodable {
         case truncated
         case accounts
         case active
+        case defaults
     }
 
     public init(from decoder: Decoder) throws {
@@ -2690,7 +2691,8 @@ extension ServerMessage: Decodable {
                 requestID: try c.decodeIfPresent(String.self, forKey: .requestID),
                 book: AccountBook(
                     accounts: try c.decode([AgentAccount].self, forKey: .accounts),
-                    active: try c.decode([ActiveAccount].self, forKey: .active)))
+                    active: try c.decode([ActiveAccount].self, forKey: .active),
+                    defaults: try c.decodeIfPresent([DefaultAccount].self, forKey: .defaults) ?? []))
         case "accounts_refused":
             self = .accountsRefused(
                 requestID: try c.decode(String.self, forKey: .requestID),
