@@ -404,7 +404,7 @@ private struct AccountSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             if let model, model.keepsAccounts, model.linkHealth.notice == nil {
-                Text("For new runs on this Mac. A run keeps the account it started with.")
+                Text("Each agent uses the account marked here. Click another to move its sessions to it.")
                     .font(Theme.ui(13)).foregroundStyle(Theme.text2)
                 ForEach(StartAgent.allCases) { agent in AgentAccounts(model: model, agent: agent) }
                 if let problem = model.accountsProblem {
