@@ -250,9 +250,25 @@ private struct Composer: View {
 
     // MARK: The box
 
+    /// What the strip at the box's top says of this run; nil (no strip) until the computer reports it.
+    private var stripFacts: ReplyStripFacts? {
+        #if DEBUG
+            if let fixture = ReplyStripFacts.fixture { return fixture }
+        #endif
+        return nil
+    }
+
     private var box: some View {
         let agent = summary?.agent.displayName ?? "the agent"
         return VStack(alignment: .leading, spacing: 10) {
+            // The box's own top band, flush with its edges (out over its 12 pt inset), its outline drawn over it.
+            if let facts = stripFacts {
+                ReplyStrip(facts: facts)
+                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: 10, topTrailingRadius: 10))
+                    .overlay(UnevenRoundedRectangle(topLeadingRadius: 10, topTrailingRadius: 10).strokeBorder(Color.white.opacity(0.09)))
+                    .padding(.horizontal, -12)
+                    .padding(.top, -12)
+            }
             TextField(
                 "", text: $kept.reply, selection: $selection,
                 prompt: Text(SessionWords.replyPrompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
