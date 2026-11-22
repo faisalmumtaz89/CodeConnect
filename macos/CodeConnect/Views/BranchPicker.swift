@@ -17,6 +17,7 @@ struct BranchRow: View {
     let top: CGFloat
 
     @Environment(\.startHeight) private var startHeight
+    @Environment(\.startWidth) private var startWidth
     /// The row, label to last line, in the form's coordinates.
     @State private var frame: CGRect = .zero
     /// The button's bottom edge, in the row's coordinates.
@@ -53,7 +54,7 @@ struct BranchRow: View {
     /// The least a menu keeps from the form's edges.
     private static let margin: CGFloat = 8
 
-    /// The menu, as tall as its rows up to `BranchMenu.mostRows` and no wider than the row. It opens above the row,
+    /// The menu, as tall as its rows up to `BranchMenu.mostRows`, ending inside the pane. It opens above the row,
     /// clear of the label, when all of it fits between the label and `top`; else on the side of the button
     /// with more room, as many whole rows as fit there, the rest scrolled to. Cut short above, it hangs from `top`, so
     /// its edge never lands inside a line there.
@@ -68,7 +69,9 @@ struct BranchRow: View {
         let cut = shown < min(rows, BranchMenu.mostRows)
         return BranchMenu(
             git: git, folder: folder, running: context.runningFolders, place: newName == nil ? place : nil,
-            shownRows: shown, width: min(BranchMenu.width, frame.width)
+            // As wide as it may be from the row's leading edge to 8 pt inside the pane, not the row's own width:
+            // beside the model button the row is narrow, and its names would be cut that need not be.
+            shownRows: shown, width: min(BranchMenu.width, startWidth - Self.margin - frame.minX)
         ) { chosen in
             if let chosen {
                 place = chosen
