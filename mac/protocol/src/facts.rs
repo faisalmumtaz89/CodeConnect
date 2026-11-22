@@ -48,10 +48,9 @@ pub struct SessionFacts {
     pub model: Option<Fact>,
     pub permission_mode: Option<Fact>,
     pub effort: Option<Fact>,
-    /// The seq of the run's newest `session_end`, 0 before one. An effort is the ended
-    /// process's own: a relaunched claude starts at the person's default and its init
-    /// restates the model and the mode but not the effort, so an effort decided before
-    /// the end no longer holds.
+    /// The seq of the run's newest `session_end`, 0 before one. `effort` is the live
+    /// process's own: an effort decided before the end is not the next process's until that
+    /// process is given it (a relaunch gives it, as [`Self::ended_with`]) and says so.
     pub ended: u64,
     /// The effort the run's process held when its newest end came: what the ended run shows. None when that process
     /// named none. Kept only by an in-order fold, as the live path folds; an effort folded after its end is left out.
@@ -59,8 +58,11 @@ pub struct SessionFacts {
 }
 
 impl SessionFacts {
-    /// Fold one event in. A fact it decides replaces the one held only when its
-    /// event is newer, so events may be folded in any order.
+    /// Fold one event in. A fact it decides replaces the one held only when its event is
+    /// newer, so the model, the mode and the effort may be folded in any order. `ended_with`
+    /// is the one exception: it is taken at the end from the effort then held, so an end
+    /// folded before an earlier effort leaves it empty where the store's read-back names it.
+    /// The live path folds each run's events in the order they are filed, which never does that.
     pub fn observe(&mut self, event: &Event) {
         if let Some(fact) = model_fact(event) {
             if self.model.as_ref().is_none_or(|held| held.seq < fact.seq) {

@@ -84,11 +84,10 @@ final class RelaunchableRunTests: XCTestCase {
         let badge = FleetStatusRule.capability(summary: summary, capabilities: caps)
         XCTAssertTrue(badge.canAct, "the composer opens")
         XCTAssertNil(badge.bandNote, "the Observe only band note falls away")
-        // A self-stopped run carries no menus, so its sheet draws no effort or mode line — its effort
-        // reads unset, never the value it held before the stop.
+        // A self-stopped run carries no menus, so its sheet draws no effort or mode line.
         XCTAssertEqual(
             RunSettings.of(summary: summary), .hostedReadOnly(model: nil),
-            "the self-stopped run's effort reads unset, not the old value")
+            "the self-stopped run offers no menus")
     }
 
     /// **A run the next message relaunches offers no manual resume command.** A relaunchable ended
