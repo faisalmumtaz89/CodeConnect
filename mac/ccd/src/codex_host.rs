@@ -8469,6 +8469,143 @@ mod tests {
         assert!(why[0].starts_with("Couldn’t start on B: "), "{why:?}");
     }
 
+    /// **A run that has had a message is never silently given a new thread** (306; terminal's rehearsal): a run
+    /// moved to B whose next message's resume finds no rollout of its thread ("no rollout found", as when B's home
+    /// cannot see A's conversation files) is not started on a new thread: the message is refused, the run keeps its
+    /// thread, reads `failed` and has a line of its own saying why.
+    #[tokio::test]
+    async fn a_switched_run_whose_resume_finds_no_rollout_is_not_given_a_new_thread() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        rig.daemon = relauncher(&rig);
+        let (uid, mut ws) =
+            engine_run_on(&rig, "req-norollout", "thr-nr", "turn-1", "exec sleep 30").await;
+        // Codex's own record of the person's first message, as it sends one for every turn.
+        tell(
+            &mut ws,
+            &json!({"method": "item/completed", "params": {"threadId": "thr-nr", "turnId": "turn-1",
+                "item": {"type": "userMessage", "id": "um-1", "clientId": null,
+                    "content": [{"type": "text", "text": "hello", "text_elements": []}]}}}),
+        )
+        .await;
+        tell(
+            &mut ws,
+            &json!({"method": "turn/completed", "params": {"threadId": "thr-nr",
+                "turn": {"id": "turn-1", "status": "completed", "items": []}}}),
+        )
+        .await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !rig
+            .daemon
+            .db
+            .turn_running(uid.clone())
+            .await
+            .map(|running| !running)
+            .unwrap_or(false)
+        {
+            assert!(Instant::now() < deadline, "the first turn never completed");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        let b = rig.daemon.store.add_account("codex", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("codex", Some(&b.id))
+            .unwrap());
+        crate::switch::begin(&rig.daemon, &AgentKind::Codex).await;
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while alive(leader) {
+            assert!(Instant::now() < deadline, "its app-server was not ended");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        drop(ws);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while summary_of(&rig.daemon, &uid).await.switching
+            != Some(protocol::event::Switching::Moved)
+        {
+            assert!(Instant::now() < deadline, "never moved");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let said = saying(&rig.daemon, &uid, "say-nr", "go on");
+        let dir = run_folder(&rig).await;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while launches(&rig) < 2 {
+            assert!(Instant::now() < deadline, "codex was not launched again");
+            tokio::time::sleep(POLL).await;
+        }
+        let listener = UnixListener::bind(dir.join("as.sock")).unwrap();
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let init = asked(&mut ws, "initialize").await;
+        answer(&mut ws, &init, json!({"userAgent": "stand-in"})).await;
+        let skills = asked(&mut ws, "skills/list").await;
+        answer(&mut ws, &skills, json!({"data": []})).await;
+        let resume = asked(&mut ws, "thread/resume").await;
+        tell(
+            &mut ws,
+            &json!({"id": resume["id"], "error": {"code": -32600,
+                    "message": "no rollout found for thread id thr-nr"}}),
+        )
+        .await;
+        // Codex starts a thread when asked; ccd does not record it for a run that has had a message.
+        let started = asked(&mut ws, "thread/start").await;
+        answer(
+            &mut ws,
+            &started,
+            json!({"thread": {"id": "thr-fresh"}, "model": "gpt-test"}),
+        )
+        .await;
+        let said = said.await.unwrap();
+        assert!(
+            matches!(said, protocol::ws::ComposeResult::Rejected { .. }),
+            "{said:?}"
+        );
+        let row = rig
+            .daemon
+            .db
+            .get_session(uid.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.codex_thread_id.as_deref(),
+            Some("thr-nr"),
+            "the run keeps its thread"
+        );
+        let failed = serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(
+            (failed["lifecycle"].as_str(), failed["switching"].as_str()),
+            (Some("exited"), Some("failed")),
+            "{failed}"
+        );
+        let why: Vec<String> = rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.payload["notification_type"] == "switch_failed")
+            .map(|event| event.payload["message"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(why.len(), 1, "{why:?}");
+        assert!(why[0].contains("no rollout"), "{why:?}");
+        drop(ws);
+    }
+
     /// **A Codex run marked to switch while it has no link moves once its link attaches** (306 Slice E): the choice
     /// is made while ccd is down (marked, no link to ask); the restarted ccd reconnects the run, idle, and its new
     /// link ends the app-server's group to move it.
