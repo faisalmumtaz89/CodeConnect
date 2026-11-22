@@ -696,7 +696,7 @@ private struct RowMenuHost: ViewModifier {
     private func place(_ rect: CGRect, in bounds: CGRect) -> CGPoint {
         let point = rect.size == .zero
         let x = point ? rect.minX : rect.maxX - size.width
-        let gap = point ? 0 : Theme.panelGap
+        let gap = point ? 0 : Theme.rowMenuGap
         let below = rect.maxY + gap
         let above = rect.minY - gap - size.height
         let y = below + size.height <= bounds.maxY || above < bounds.minY ? below : above
