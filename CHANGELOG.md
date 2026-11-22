@@ -5,6 +5,10 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.6, with the iPhone app 1.1.23
 
+- A Claude Code run's model reads as its menu names it, such as "Sonnet" rather than claude-sonnet-5-5, on the Mac's
+  session header and model button and on the iPhone's model button, while the run is live and after it has ended; this
+  replaces the id 0.19.5 showed for an ended run. With an older CodeConnect on the computer, or an older app, the id
+  shows as before.
 - On the Mac, the conversation shows a ring in the focus colour while it has the keyboard, so after Tab it is clear
   where the arrow, Page, Home and End keys will scroll; the ring goes when the keyboard moves on or the window is not
   in front.
