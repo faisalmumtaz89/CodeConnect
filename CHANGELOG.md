@@ -3,6 +3,18 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.8, with the iPhone app 1.1.25
+
+- On the Mac, an agent is started in the main area of the window, whenever no run is open and with New Agent (⌘N), in
+  place of the Add sheet: the folder and the computer above a box for the first message, the model inside the box, and
+  Start beside it. A start still being sent can be withdrawn with Stop retrying; a folder's trust question, or a start
+  that failed, stays until it is answered; what was typed and chosen is kept when you leave the form and come back.
+  Add Computer… and Add iPhone… keep their sheets.
+- On the Mac, a table whose columns can't wrap to fit the pane scrolls sideways inside itself, with its scroll bar
+  shown, and the wheel over it still scrolls the conversation.
+- On the Mac, Settings › Accounts says what this Mac's row says while its CodeConnect service is down or connecting,
+  and lists the agents again once the service answers.
+
 ## CodeConnect 0.19.7, with the iPhone app 1.1.24
 
 - On the Mac, Settings is a page of the main window, opened from the gear at the foot of the left panel or with ⌘,,
