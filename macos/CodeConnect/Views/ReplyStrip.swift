@@ -179,8 +179,6 @@ struct ReplyStrip: View {
     static func tokens(_ count: Int) -> String {
         switch count {
         case 1_000_000...: String(format: "%.1fM", Double(count) / 1_000_000)
-        // Three figures before the k are enough: 584k, not 584.0k.
-        case 100_000...: "\(Int((Double(count) / 1_000).rounded()))k"
         case 1_000...: String(format: "%.1fk", Double(count) / 1_000)
         default: "\(count)"
         }
