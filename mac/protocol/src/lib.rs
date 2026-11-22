@@ -856,9 +856,10 @@ pub const PROTOCOL_MISMATCH: &str =
 ///   * `47` — **A run's menu names each model's default effort.**
 ///
 ///     No message changes shape. Each [`event::MenuModel`] of a Codex run's `menus` may carry
-///     `default_effort`, the effort Codex runs that model at when none is chosen (its `model/list`'s
-///     `defaultReasoningEffort`), so an app names and marks it while the run reports no effort. A Claude
-///     entry carries none: Claude Code's list names no default. A daemon below 47 sends none.
+///     `default_effort`, the effort that model runs at when none is chosen, so an app names and marks it
+///     while the run reports no effort: a Codex entry Codex's own (`model/list`'s `defaultReasoningEffort`);
+///     a Claude entry the default Claude Code's documentation names for the model it resolves to, and none
+///     for a model it does not name. A daemon below 47 sends none.
 pub const PROTOCOL_MINOR: u32 = 47;
 
 #[cfg(test)]
