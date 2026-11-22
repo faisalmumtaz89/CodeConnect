@@ -425,6 +425,7 @@ private struct Sidebar: View {
                 choose(highlighted)
                 return .handled
             }
+            SidebarFoot()
         }
         .background(Theme.sidebar)
         .removesComputer($removing)
@@ -465,6 +466,104 @@ private struct Sidebar: View {
         .focusable(false)
         .accessibilityIdentifier("sidebar.scope.\(target.rawValue.lowercased())")
         .accessibilityAddTraits(scope == target ? .isSelected : [])
+    }
+}
+
+/// The sidebar's foot, one line under a hairline level with the list's key-hint band's: this Mac's Tailscale as its own
+/// daemon says it (`peers`), read as the Add sheet reads it, a dot green once signed in and the whole sign-in, or in its
+/// place what is wrong in the words the computers' rows use; then the way into Settings. Nothing until the daemon has
+/// said, but Settings. Where this Mac's daemon answers is read every five seconds, as the Add sheet reads it, so its move
+/// from loopback onto Tailscale shows.
+private struct SidebarFoot: View {
+    @Environment(Machines.self) private var machines
+    @Environment(Setup.self) private var setup
+    @Environment(\.openSettings) private var openSettings
+    @State private var address: LocalDaemon.Address?
+
+    /// What this Mac's own daemon last said about its Tailscale.
+    private var directory: PeerDirectory? {
+        #if DEBUG
+            if let peers = RenderWindow.peers { return peers }
+        #endif
+        return setup.thisMac(at: address).flatMap { machines.model(for: $0)?.tailnet }
+    }
+
+    var body: some View {
+        let status = directory.map { TailscaleNote.Status($0, onLoopback: TailscaleNote.onLoopback(address)) }
+        VStack(spacing: 0) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+            HStack(spacing: 7) {
+                if let status {
+                    let signedIn = status.isSignedIn
+                    HStack(spacing: 7) {
+                        Group {
+                            if signedIn {
+                                Circle().fill(Theme.green)
+                            } else {
+                                Circle().strokeBorder(Theme.text3, lineWidth: 1.2)
+                            }
+                        }
+                        .frame(width: 7, height: 7)
+                        Text(status.footWords).font(Theme.ui(11.5)).foregroundStyle(signedIn ? Theme.text2 : Theme.text3)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(status.footWords)
+                    }
+                    // The dot's meaning in words.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(status.spokenFoot)
+                    .accessibilityIdentifier("sidebar.tailscale")
+                }
+                Spacer(minLength: 4)
+                Button { openSettings() } label: {
+                    Image(systemName: "gearshape").font(.system(size: 12.5)).foregroundStyle(Theme.text2)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.hover(radius: 6, id: "sidebar.settings"))
+                .help("Settings")
+                .accessibilityLabel("Settings")
+                .accessibilityIdentifier("sidebar.settings")
+            }
+            .padding(.leading, 18)
+            .padding(.trailing, 10)
+            .frame(height: 34)
+        }
+        .accessibilityElement(children: .contain)
+        .task {
+            guard let root = setup.installer?.root else { return }
+            while !Task.isCancelled {
+                // A read that gets no answer (the service restarting onto Tailscale) keeps what it last said: the foot
+                // changes only on an answer.
+                if let read = await Task.detached(operation: { LocalDaemon.address(root: root) }).value { address = read }
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+    }
+}
+
+extension TailscaleNote.Status {
+    fileprivate var isSignedIn: Bool {
+        if case .signedIn = self { return true }
+        return false
+    }
+
+    /// What VoiceOver reads for the dot and the words.
+    fileprivate var spokenFoot: String {
+        switch self {
+        case .signedIn(let login): login.map { "Tailscale connected, signed in as \($0)" } ?? "Tailscale connected"
+        default: "Tailscale: \(footWords)"
+        }
+    }
+
+    /// The foot's words: the whole sign-in once signed in; otherwise what is wrong, as a computer's row says it.
+    fileprivate var footWords: String {
+        switch self {
+        case .signedIn(let login): login ?? "Signed in to Tailscale"
+        case .notConnected, .notInstalled: LinkNotice.connectTailscale
+        case .moving: "Connecting"
+        case .tagged: "Not signed in as you"
+        }
     }
 }
 

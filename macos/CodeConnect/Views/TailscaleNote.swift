@@ -79,8 +79,10 @@ struct TailscaleNote: View {
 
     private var status: Status? { directory.map { Status($0, onLoopback: onLoopback) } }
 
+    private var onLoopback: Bool { Self.onLoopback(address) }
+
     /// Whether this Mac's daemon answers devices only at loopback, where no iPhone or other computer reaches it.
-    private var onLoopback: Bool {
+    static func onLoopback(_ address: LocalDaemon.Address?) -> Bool {
         #if DEBUG
             if RenderWindow.onLoopback { return true }
         #endif
