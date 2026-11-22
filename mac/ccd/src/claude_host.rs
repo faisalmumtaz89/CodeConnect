@@ -11779,6 +11779,9 @@ mod tests {
             "an end that named none relaunches at claude's default"
         );
         assert_eq!(effort(summary(&rig.daemon, &gone_by.uid).await), None);
+        stop(&played.dir);
+    }
+
     /// **N4 G4: a relaunched run goes on the account it began on.** A run starts on account A, B is made active, ccd
     /// is opened again, and a message relaunches the run: its host is launched with A's sign-in folder again and resumes
     /// claude's same session. The active account is never read for a relaunch.
