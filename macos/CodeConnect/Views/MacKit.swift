@@ -298,8 +298,14 @@ private struct ClosesPanel: ViewModifier {
         let window = NSApp.keyWindow
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]) {
             event in
-            // A scroll closes it: an open panel never moves with, or hides behind, what scrolls under it.
+            // A scroll elsewhere closes it: an open panel never moves with, or hides behind, what scrolls under it. A
+            // scroll over the panel scrolls the panel.
             if event.type == .scrollWheel {
+                if let view = event.window?.contentView {
+                    let point = view.convert(event.locationInWindow, from: nil)
+                    let top = CGPoint(x: point.x, y: view.isFlipped ? point.y : view.bounds.height - point.y)
+                    if frames.panel.contains(top) { return event }
+                }
                 close.wrappedValue = false
                 return event
             }

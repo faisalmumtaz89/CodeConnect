@@ -3,12 +3,13 @@ import SwiftUI
 
 /// Start an agent on one of the computers that can start one: a recent folder there, or any folder (on this Mac from
 /// the standard folder panel, elsewhere from `FolderBrowser`), where in its repository (`BranchRow`), the first
-/// message, and, under it, the model, whose menu holds Claude Code's and Codex's: choosing a model chooses the agent. What each choice offers and says is Kit's (`StartContext`), as on
-/// the iPhone; the Mac shows it as one form. The computer defaults to the one used last, the model to the Default of
-/// the agent last used in the folder, else of the first one there. Once sent, the form gives way to the start's
-/// progress, and the sheet closes when the run is in the list. The sent start is followed by its request on its own
-/// computer, so it stays while that computer is away; until it is answered or its retries are stopped, the sheet
-/// opens on it again.
+/// message, and in its box the model, whose menu holds Claude Code's and Codex's: choosing a model chooses the agent.
+/// What each choice offers and says is Kit's (`StartContext`), as on the iPhone; the Mac shows it as one form, in the
+/// window's main area while no run is open (`StartPane`). The computer defaults to the one used last, the model to the
+/// Default of the agent last used in the folder, else of the first one there. Once sent, the form gives way to the
+/// start's progress, and the run opens when it is in the list. The sent start is followed by its request on its own
+/// computer, so it stays while that computer is away; until it is answered or its retries are stopped, the form opens
+/// on it again.
 struct StartForm: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
@@ -45,10 +46,13 @@ struct StartForm: View {
     @Environment(\.sheetRoom) private var room
     /// The folder button's panel is open.
     @State private var folderOpen = false
+    /// The form's width, which the folder panel keeps within.
+    @State private var formWidth: CGFloat = 0
     /// The first message has the keyboard: as the form appears, and when New Agent asks for it.
     @FocusState private var messageFocused: Bool
     @Environment(\.startFocusRequest) private var focusRequest
-    @State private var message = ""
+    /// The first message, kept by the window while a run is open, so it is there when the form comes back.
+    @Binding var message: String
     @State private var requestID: String?
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
     /// this Mac. Nil without one, as in a test launch with no rig of its own.
@@ -58,11 +62,13 @@ struct StartForm: View {
     /// The folder list's rows, measured: the box is as tall as they are, up to its most.
     @State private var listHeight: CGFloat = 0
 
-    /// `resuming`: a start this Mac sent with no answer yet, which the sheet opens on instead of a fresh form.
+    /// `resuming`: a start this Mac sent with no answer yet, which the form opens on instead of a fresh one.
     init(
-        resuming: String?, whyNone: String, addComputer: @escaping () -> Void, started: @escaping (String) -> Void
+        resuming: String?, whyNone: String, message: Binding<String>, addComputer: @escaping () -> Void,
+        started: @escaping (String) -> Void
     ) {
         _requestID = State(initialValue: resuming)
+        _message = message
         self.whyNone = whyNone
         self.addComputer = addComputer
         self.started = started
@@ -259,8 +265,9 @@ struct StartForm: View {
             }
         }
         .frame(maxWidth: Self.column, alignment: .leading)
-        // What is typed first is the first message: as the form appears, and when New Agent asks again.
-        .onAppear { DispatchQueue.main.async { messageFocused = true } }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { formWidth = $0 }
+        // New Agent gives the first message the keyboard. Not as the form merely appears: a run closed from the list
+        // keeps the list's keys.
         .onChange(of: focusRequest) { messageFocused = true }
     }
 
@@ -295,7 +302,7 @@ struct StartForm: View {
     }
 
     /// Back to the form from a start that failed or asked about its folder, with its first message put back when the
-    /// form has none, as in a sheet opened on that start.
+    /// form has none, as in a form opened on that start.
     private func backToForm(from start: SessionStart) {
         if message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { message = start.prompt ?? "" }
         requestID = nil
@@ -362,10 +369,11 @@ struct StartForm: View {
         .onChange(of: folderOpen) { _, open in if !open { browsing = false } }
     }
 
+    /// As wide as the form's column, up to 520 pt: never past the window's edge.
     private func folderPanel(_ context: StartContext) -> some View {
         folderRows(context)
             .padding(8)
-            .frame(width: 520)
+            .frame(width: min(520, max(formWidth, 300)))
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
             .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
@@ -660,7 +668,7 @@ private struct StartProgress: View {
                     }
                 }
                 // While the computer hasn't answered, this Mac can stop sending the start, so one whose computer went
-                // away is not left resending with no way out, nor the one the sheet keeps opening on. It says only
+                // away is not left resending with no way out, nor the one the form keeps opening on. It says only
                 // what it did: the computer may already have started it.
                 if start.outcome == nil, !start.retryStopped {
                     VStack(alignment: .leading, spacing: 4) {
@@ -772,7 +780,7 @@ private struct StartProgress: View {
     }
 }
 
-/// A start the computer answered with the folder question: nothing ran. The question is the sheet's own page; an
+/// A start the computer answered with the folder question: nothing ran. The question is the form's own page; an
 /// answer sends the start again with it, and Back returns to the form.
 private struct FolderStep: View {
     let start: SessionStart
@@ -858,7 +866,7 @@ private struct ComputerName: View {
     }
 }
 
-/// The computer a start goes to: a button and its panel, the model button's kind, so one sheet has one kind of menu.
+/// The computer a start goes to: a button and its panel, the model button's kind, so one form has one kind of menu.
 /// The chosen computer carries the check; the lit row, by the pointer or the keys, is filled (`panelRow`).
 private struct ComputerButton: View {
     let contexts: [StartContext]

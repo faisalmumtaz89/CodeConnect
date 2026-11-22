@@ -15,6 +15,8 @@ struct MainWindow: View {
     @State private var adding: AddKind?
     /// Raised by New Agent: the start form's first message takes the keyboard.
     @State private var startFocus = 0
+    /// The start form's first message, kept while a run is open.
+    @State private var startMessage = ""
     /// The address Add a computer starts with, when a refused computer asked to pair again.
     @State private var repairing: String?
     /// The list, what it is narrowed to, and the run open beside it: the app's, so a closed window opens on them again.
@@ -107,7 +109,7 @@ struct MainWindow: View {
                         .environment(\.headerClearance, clearance(first: sidebarHidden && !showsList, last: true))
                 } else if showsStart {
                     if showsList { Rectangle().fill(Theme.hairline).frame(width: 1) }
-                    StartPane(addComputer: { adding = .computer }, started: started)
+                    StartPane(addComputer: { adding = .computer }, message: $startMessage, started: started)
                         .environment(\.startFocusRequest, startFocus)
                 }
             } else {
@@ -180,9 +182,14 @@ struct MainWindow: View {
         // host, which closes with every other panel.
         .environment(\.agentsShown, settings == nil)
         .focusedSceneValue(\.adding, $adding)
-        // New Agent is the start form in the main area: the open run closes, and the form takes the keyboard.
+        // New Agent is the start form in the main area: the open run closes, and the form takes the keyboard. Before
+        // any computer is added there is no form: New Agent adds a computer first.
         .onChange(of: adding, initial: true) { _, kind in
             guard kind == .agent else { return }
+            guard machines.showsFleet else {
+                adding = .computer
+                return
+            }
             adding = nil
             opened = nil
             startFocus += 1
@@ -264,6 +271,7 @@ struct MainWindow: View {
 
     /// The run just started is open, in the list of every active agent, unfiltered.
     private func started(_ run: String) {
+        startMessage = ""
         scope = .active
         filter = nil
         opened = run
@@ -300,13 +308,14 @@ extension MainWindow {
 }
 
 extension FocusedValues {
-    /// What the main window is adding: the File menu's New Agent, Add Computer and Add iPhone open its sheet.
+    /// What the main window is adding: the File menu's New Agent opens its start form; Add Computer and Add iPhone its
+    /// sheet.
     @Entry var adding: Binding<AddKind?>?
 }
 
 /// File > New Agent (⌘N), Add Computer (⇧⌘N) and Add iPhone, in place of New Window: the app has one window,
-/// and these open its sheet, opening the window first when it is closed or behind another. Unavailable while its
-/// sheet is open.
+/// and these open its start form or its sheet, opening the window first when it is closed or behind another.
+/// Unavailable while its sheet is open.
 struct AddCommands: Commands {
     @FocusedValue(\.adding) private var adding
     @Environment(\.openWindow) private var openWindow

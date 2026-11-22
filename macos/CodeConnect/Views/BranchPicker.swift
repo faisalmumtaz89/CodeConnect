@@ -13,11 +13,11 @@ struct BranchRow: View {
     /// A new worktree's name while one is being named, else nil.
     @Binding var newName: String?
     @Binding var open: Bool
-    /// The highest the menu may reach in the sheet: under the heading, so it never covers part of a line there.
+    /// The highest the menu may reach in the form's coordinates (`StartForm.space`).
     let top: CGFloat
 
     @Environment(\.startHeight) private var startHeight
-    /// The row, label to last line, in the sheet's coordinates.
+    /// The row, label to last line, in the form's coordinates.
     @State private var frame: CGRect = .zero
     /// The button's bottom edge, in the row's coordinates.
     @State private var buttonBottom: CGFloat = 0

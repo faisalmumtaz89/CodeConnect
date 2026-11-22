@@ -44,13 +44,13 @@
         /// `-CC_ADD_COMPUTER YES`: the window opens its Add-a-computer sheet at launch. A render waits
         /// for that sheet, and for the one `-CC_RENDER_PAIR` opens.
         static var opensAddComputer: Bool {
-            UserDefaults.standard.bool(forKey: "CC_ADD_COMPUTER") || opensOnIPhone || opensOnAgent || pairing != nil
+            UserDefaults.standard.bool(forKey: "CC_ADD_COMPUTER") || opensOnIPhone || pairing != nil
         }
 
         /// `-CC_ADD_IPHONE YES`: the same sheet, on its iPhone side.
         static var opensOnIPhone: Bool { UserDefaults.standard.bool(forKey: "CC_ADD_IPHONE") }
 
-        /// `-CC_ADD_AGENT YES`: the same sheet, on its Agent side.
+        /// `-CC_ADD_AGENT YES`: New Agent at launch: the start form, its first message given the keyboard.
         static var opensOnAgent: Bool { UserDefaults.standard.bool(forKey: "CC_ADD_AGENT") }
 
         /// `-CC_RESIZE_AFTER <seconds>`: that long after launch, the main window grows 40 pt wider, as a person

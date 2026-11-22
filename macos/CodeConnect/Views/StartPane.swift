@@ -7,6 +7,8 @@ import SwiftUI
 struct StartPane: View {
     @Environment(Machines.self) private var machines
     let addComputer: () -> Void
+    /// The first message, kept while a run is open.
+    @Binding var message: String
     /// The run just started is in the list, by its id.
     let started: (String) -> Void
     /// The form has been shown. It stays when its computer's link drops, which empties the computers that can start,
@@ -21,8 +23,8 @@ struct StartPane: View {
             Group {
                 if formShown || !machines.startContexts.isEmpty || machines.outstandingStart != nil {
                     StartForm(
-                        resuming: machines.outstandingStart?.requestID, whyNone: why, addComputer: addComputer,
-                        started: started
+                        resuming: machines.outstandingStart?.requestID, whyNone: why, message: $message,
+                        addComputer: addComputer, started: started
                     )
                     .onAppear { formShown = true }
                 } else {
@@ -38,11 +40,11 @@ struct StartPane: View {
         .background(Theme.window, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.hairline))
         .coordinateSpace(.named(StartForm.space))
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .padding(.horizontal, 10)
         .padding(.top, 44)
         .padding(.bottom, 10)
         .background(Theme.pane)
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .environment(\.startHeight, height)
         .environment(\.sheetRoom, height)
     }

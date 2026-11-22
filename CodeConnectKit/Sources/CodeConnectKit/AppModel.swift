@@ -888,7 +888,7 @@ public final class AppModel {
         }
 
         /// The fixture answer to `start_session`. `-CC_START_OUTCOME` names a
-        /// failure to end in, `trust` for the folder question, or `pending` to stay starting; otherwise the start
+        /// failure to end in, `trust` for the folder question (asked once: the answered resend starts), or `pending` to stay starting; otherwise the start
         /// succeeds and the new session arrives as a real one does: listed,
         /// then its first events.
         func answerFixtureStart(_ requestID: String) {
@@ -898,7 +898,7 @@ public final class AppModel {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(wanted == nil ? 1500 : 600))
                 guard let self else { return }
-                if wanted == "trust" {
+                if wanted == "trust", start.trust == nil {
                     self.starter.resolve(requestID, .needsTrust(path: start.project.path))
                     return
                 }
