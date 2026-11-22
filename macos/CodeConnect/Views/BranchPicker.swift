@@ -17,6 +17,7 @@ struct BranchRow: View {
     let top: CGFloat
 
     @Environment(\.startHeight) private var startHeight
+    @Environment(\.startWidth) private var startWidth
     /// The row, label to last line, in the form's coordinates.
     @State private var frame: CGRect = .zero
     /// The button's bottom edge, in the row's coordinates.
@@ -53,7 +54,7 @@ struct BranchRow: View {
     /// The least a menu keeps from the form's edges.
     private static let margin: CGFloat = 8
 
-    /// The menu, as tall as its rows up to `BranchMenu.mostRows` and no wider than the row. It opens above the row,
+    /// The menu, as tall as its rows up to `BranchMenu.mostRows`, ending inside the pane. It opens above the row,
     /// clear of the label, when all of it fits between the label and `top`; else on the side of the button
     /// with more room, as many whole rows as fit there, the rest scrolled to. Cut short above, it hangs from `top`, so
     /// its edge never lands inside a line there.
@@ -66,9 +67,12 @@ struct BranchRow: View {
         let opensAbove = BranchMenu.height(rows: rows) <= above || above > below
         let shown = BranchMenu.rows(fitting: opensAbove ? above : below, of: rows)
         let cut = shown < min(rows, BranchMenu.mostRows)
+        let placed = StartPanel.place(widest: BranchMenu.width, leading: frame.minX, pane: startWidth)
         return BranchMenu(
             git: git, folder: folder, running: context.runningFolders, place: newName == nil ? place : nil,
-            shownRows: shown, width: min(BranchMenu.width, frame.width)
+            // Inside the pane by the start form's one rule (`StartPanel`), not as narrow as its row: beside the model
+            // button the row is narrow, and its names would be cut that need not be.
+            shownRows: shown, width: placed.width
         ) { chosen in
             if let chosen {
                 place = chosen
@@ -80,6 +84,7 @@ struct BranchRow: View {
         }
         .openPanel()
         .offset(
+            x: placed.x - frame.minX,
             y: !opensAbove ? buttonBottom + gap : cut ? highest - frame.minY : -(BranchMenu.height(rows: shown) + gap))
     }
 
@@ -273,7 +278,9 @@ struct BranchMenu: View {
         -> some View
     {
         item(index: index, id: "start.branch.\(title)", name: title, checked: place == choice, choose: { choose(choice) }) {
-            Text(verbatim: title).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1).fixedSize()
+            // Cut in the middle when the menu is narrower than the name, where a branch's prefix and its end both show.
+            Text(verbatim: title).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1)
+                .truncationMode(.middle).layoutPriority(1)
             if let detail { ModelDetail(text: detail) }
         }
         .disabled(disabled)

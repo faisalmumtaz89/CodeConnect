@@ -10,6 +10,14 @@ struct ModelButton: View {
     @Binding var open: Bool
     let choose: (StartModelChoice) -> Void
 
+    @Environment(\.startWidth) private var startWidth
+    /// The button's top leading corner, in `StartForm.space`.
+    @State private var minX: CGFloat = 0
+    @State private var minY: CGFloat = 0
+    private var placed: (x: CGFloat, width: CGFloat) {
+        StartPanel.place(widest: 440, leading: minX - 3, pane: startWidth)
+    }
+
     private var checking: Bool { StartAgent.allCases.contains { context.models($0) == .checking } }
 
     var body: some View {
@@ -30,10 +38,15 @@ struct ModelButton: View {
         .disabled(checking)
         .accessibilityIdentifier("start.model")
         .accessibilityValue(open ? "open" : "closed")
-        // Above the button, clear of it by the panels' one gap, its leading edge on the composer box's: the button
-        // stands 3 pt in from that edge (the box's 10 pt inset, less the button's own 7).
+        // Above the button, clear of it by the panels' one gap, its leading edge on the composer box's (the button
+        // stands 3 pt in from that edge: the box's 10 pt inset, less the button's own 7), inside the pane by the start
+        // form's one rule (`StartPanel`).
+        .onGeometryChange(for: CGPoint.self) { $0.frame(in: .named(StartForm.space)).origin } action: {
+            minX = $0.x
+            minY = $0.y
+        }
         .overlay(alignment: .bottomLeading) {
-            if open { menu.openPanel().offset(x: -3, y: -(22 + Theme.panelGap)) }
+            if open { menu.openPanel().offset(x: placed.x - minX, y: -(22 + Theme.panelGap)) }
         }
         .closesPanel($open)
     }
@@ -72,8 +85,9 @@ struct ModelButton: View {
             }
             .padding(.vertical, 5)
         }
-        .frame(width: 440)
-        .frame(maxHeight: 360)
+        .frame(width: placed.width)
+        // Its top 8 pt inside the pane (before the button is measured, its tallest).
+        .frame(maxHeight: minY > 0 ? min(360, minY - Theme.panelGap - StartPanel.margin) : 360)
         .fixedSize(horizontal: false, vertical: true)
         .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
