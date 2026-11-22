@@ -35,6 +35,14 @@ public enum RunSettings: Sendable, Hashable {
         [fact, model.defaultEffort].compactMap { $0 }.first { model.efforts.contains($0) }
     }
 
+    /// The effort a run ended with, for the pane's header beside its model (decision 321): only for a run that takes no
+    /// reply, which has no reply row to name it; a live run, or one the next message relaunches, names its effort on its
+    /// reply row instead, so the header never says it twice. An ended run carries no menus, so this is the effort its
+    /// agent named, or nothing.
+    public static func headerEffort(summary: SessionSummary) -> String? {
+        summary.takesNoReply ? effortName(summary: summary) : nil
+    }
+
     /// The entry for a run, from its summary and the things only the client knows: the model the run
     /// has confirmed it is on (`AppModel.confirmedModel`), whether one of its setting calls is in flight
     /// (the menus are then disabled), and the last answer still worth showing. The selection follows the

@@ -501,4 +501,30 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertFalse(chosen.offers(try XCTUnwrap(chosen.selectedEffort)), "a chosen level is not offered again")
         XCTAssertEqual(chosen.efforts.filter(chosen.offers).count, chosen.efforts.count - 1)
     }
+
+    /// **Decision 321: the effort an ended run ended with, in the pane's header**, beside its model: only for a run that
+    /// takes no reply, which has no reply row to name it; a live run, or one the next message relaunches, names its
+    /// effort on its reply row, so the header doesn't say it twice. An ended run whose agent named none: nothing.
+    /// From the recorded live run (`session_hosted_live`, effort high), its lifecycle set to ended as the daemon ends
+    /// it (an ended run carries no menus).
+    func testAnEndedRunNamesItsEffortInTheHeaderAndNoOtherDoes() throws {
+        var ended = try XCTUnwrap(try wire()["session_hosted_live"]?.objectValue)
+        ended["lifecycle"] = .string("exited")
+        ended["menus"] = nil
+        let decode = { (object: [String: JSONValue]) in
+            try JSONDecoder().decode(SessionSummary.self, from: Data(JSONValue.object(object).canonicalJSONString.utf8))
+        }
+        XCTAssertEqual(RunSettings.headerEffort(summary: try decode(ended)), "High")
+        var relaunchable = ended
+        relaunchable["relaunchable"] = .bool(true)
+        XCTAssertNil(RunSettings.headerEffort(summary: try decode(relaunchable)), "its reply row names it")
+        XCTAssertNil(RunSettings.headerEffort(summary: try summary("session_hosted_live")), "its reply row names it")
+        var unnamed = ended
+        unnamed["effort"] = nil
+        XCTAssertNil(RunSettings.headerEffort(summary: try decode(unnamed)), "the model alone, as today")
+        // An ended run names only the effort it ended with, never a model's default it did not run at.
+        var unnamedWithMenus = unnamed
+        unnamedWithMenus["menus"] = try XCTUnwrap(try wire()["session_hosted_live"]?["menus"])
+        XCTAssertNil(RunSettings.headerEffort(summary: try decode(unnamedWithMenus)), "no default claimed")
+    }
 }
