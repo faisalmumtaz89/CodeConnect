@@ -92,8 +92,9 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
         } => {
             let environment = phone_environment();
             let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
-            crate::accounts::remove(
+            crate::accounts::remove_with(
                 &daemon.store,
+                &daemon.sign_ins,
                 &environment,
                 codex.as_deref(),
                 request_id,

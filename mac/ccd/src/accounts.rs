@@ -258,7 +258,14 @@ fn listing(store: &crate::store::Store, request_id: String) -> protocol::ws::Ser
 /// The sign-in a computer is running, by its number, and how to end it. One at a time: the agent's callback is one port.
 #[derive(Default)]
 pub(crate) struct SignIns {
-    going: std::sync::Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>>,
+    /// The one going: its number, its account, and how to end it (told back once its login's group is gone).
+    going: std::sync::Mutex<
+        Option<(
+            u64,
+            String,
+            tokio::sync::oneshot::Sender<tokio::sync::oneshot::Sender<()>>,
+        )>,
+    >,
     count: std::sync::atomic::AtomicU64,
 }
 
@@ -344,12 +351,18 @@ pub(crate) async fn sign_in(
         }
         Err(err) => return unavailable(request_id, "make the account's home", err.into()),
     };
-    let (end, ended) = tokio::sync::oneshot::channel();
+    let (end, ended) = tokio::sync::oneshot::channel::<tokio::sync::oneshot::Sender<()>>();
     let mine = sign_ins
         .count
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some((_, earlier)) = sign_ins.going.lock().unwrap().replace((mine, end)) {
-        let _ = earlier.send(());
+    if let Some((_, _, earlier)) =
+        sign_ins
+            .going
+            .lock()
+            .unwrap()
+            .replace((mine, account.id.clone(), end))
+    {
+        let _ = earlier.send(tokio::sync::oneshot::channel().0);
     }
     let mut login = crate::start_session::login_shell_command(
         environment,
@@ -380,9 +393,13 @@ pub(crate) async fn sign_in(
                 .and_then(|pid| i32::try_from(pid).ok())
                 .and_then(|pid| Some((pid, protocol::proc_identity::read_birth_identity(pid)?)))
                 .zip(protocol::proc_identity::boot_identity());
+            let mut told = None;
             let outcome = tokio::select! {
                 _ = child.wait() => None,
-                _ = ended => None,
+                ending = ended => {
+                    told = ending.ok();
+                    None
+                }
                 _ = tokio::time::sleep(wait) => Some(refused_as(
                     request_id.clone(),
                     "sign_in_timed_out",
@@ -406,6 +423,9 @@ pub(crate) async fn sign_in(
                     let _ = child.wait().await;
                 }
             }
+            if let Some(told) = told {
+                let _ = told.send(());
+            }
             outcome
         }
         Err(err) => Some(unavailable(
@@ -416,7 +436,7 @@ pub(crate) async fn sign_in(
     };
     {
         let mut going = sign_ins.going.lock().unwrap();
-        if going.as_ref().is_some_and(|(number, _)| *number == mine) {
+        if going.as_ref().is_some_and(|(number, _, _)| *number == mine) {
             *going = None;
         }
     }
@@ -427,6 +447,25 @@ pub(crate) async fn sign_in(
     with_signed_in(environment, Some(codex), listing).await
 }
 
+impl SignIns {
+    /// Ends the sign-in going for `account_id`, if one is, and waits until its login's group is gone.
+    async fn end_for(&self, account_id: &str) {
+        let going = {
+            let mut going = self.going.lock().unwrap();
+            match going.as_ref() {
+                Some((_, account, _)) if account == account_id => going.take(),
+                _ => None,
+            }
+        };
+        if let Some((_, _, end)) = going {
+            let (told, gone) = tokio::sync::oneshot::channel();
+            if end.send(told).is_ok() {
+                let _ = gone.await;
+            }
+        }
+    }
+}
+
 /// How long an agent's logout may take before the removal is refused.
 const LOGOUT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -434,8 +473,9 @@ const LOGOUT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// gone, the row (and any choice of it). The home stays, its links and nothing of the account's: a thread started
 /// on the account is recorded through it and still resumes from another account (measured on codex 0.170.0,
 /// 2026-11-22). Refused, with nothing removed, when the credential is still there after the logout.
-pub(crate) async fn remove(
+pub(crate) async fn remove_with(
     store: &crate::store::Store,
+    sign_ins: &SignIns,
     environment: &HashMap<OsString, OsString>,
     codex: Option<&Path>,
     request_id: String,
@@ -459,6 +499,19 @@ pub(crate) async fn remove(
             "a Claude Code account can't be removed from here yet".into(),
         );
     }
+    match store.account_in_use(&account.id) {
+        Ok(false) => {}
+        Ok(true) => {
+            return refused_as(
+                request_id,
+                "accounts_in_use",
+                "Sessions are running on this account. Choose another account first.".into(),
+            )
+        }
+        Err(err) => return unavailable(request_id, "read the account's sessions", err),
+    }
+    // A sign-in held for it is ended first, so no credential lands in its home after it is gone.
+    sign_ins.end_for(&account.id).await;
     let Some(codex) = codex else {
         return refused(request_id, "Codex isn't installed on this computer".into());
     };
@@ -843,8 +896,9 @@ mod tests {
 
         std::fs::write(root.join("keep"), "").unwrap();
         let kept = serde_json::to_value(
-            super::remove(
+            super::remove_with(
                 &store,
+                &super::SignIns::default(),
                 &environment,
                 Some(&codex),
                 "r1".into(),
@@ -866,8 +920,9 @@ mod tests {
         std::fs::remove_file(root.join("keep")).unwrap();
 
         let gone = serde_json::to_value(
-            super::remove(
+            super::remove_with(
                 &store,
+                &super::SignIns::default(),
                 &environment,
                 Some(&codex),
                 "r2".into(),
@@ -912,6 +967,81 @@ mod tests {
             "a thread recorded through it still resolves"
         );
         let _ = std::fs::remove_dir_all(&folder);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Removing an account ends its sign-in first** (306 Slice D, minor 1): a sign-in held for A, then A removed: by
+    /// the time the removal answers, the login and the child it started are gone, so no credential can land in the
+    /// kept home later.
+    #[tokio::test]
+    async fn removing_an_account_ends_its_sign_in_first() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-remove2.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let codex = stand_in_codex(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.clone().into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-remove2");
+        let _db = store.temp_db();
+        let a = store.add_account("codex", "A").unwrap();
+        let sign_ins = super::SignIns::default();
+        std::fs::write(root.join("hang"), "").unwrap();
+        let read = |name: &str| -> Option<i32> {
+            std::fs::read_to_string(root.join(name))
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+        };
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+        let (_, removed) = tokio::join!(
+            super::sign_in(
+                &store,
+                &sign_ins,
+                &environment,
+                Some(&codex),
+                "s1".into(),
+                a.id.clone(),
+                std::time::Duration::from_secs(20)
+            ),
+            async {
+                while read("kid").is_none() {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                let removed = super::remove_with(
+                    &store,
+                    &sign_ins,
+                    &environment,
+                    Some(&codex),
+                    "r1".into(),
+                    a.id.clone(),
+                )
+                .await;
+                assert!(
+                    !alive(read("pid").unwrap()),
+                    "the login is gone when the removal answers"
+                );
+                assert!(!alive(read("kid").unwrap()), "and the login it started");
+                removed
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&removed).unwrap()["accounts"],
+            serde_json::json!([])
+        );
+        let _ = std::fs::remove_dir_all(
+            protocol::root_dir()
+                .join("accounts")
+                .join("codex")
+                .join(&a.id),
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

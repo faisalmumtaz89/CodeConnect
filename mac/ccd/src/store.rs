@@ -3010,6 +3010,20 @@ impl Store {
         Ok(removed)
     }
 
+    /// Whether a run still going (starting, live or stopping) records the account `id`.
+    pub fn account_in_use(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .read()
+            .query_row(
+                "SELECT 1 FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
+                  WHERE h.account_id = ?1 AND s.lifecycle IN ('starting', 'live', 'stopping') LIMIT 1",
+                params![id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn run_account(&self, session_uid: &str) -> Result<Option<Account>> {
         Ok(self
             .read()
@@ -8149,6 +8163,55 @@ mod tests {
     // ------------------------------------------- agent-scoped session storage
 
     /// A Codex run.
+    /// **An account a live run is on is not removed** (306 Slice D, minor 2): with a live Codex run recorded on A,
+    /// removing A is refused with the sentence a person reads, and nothing is removed; once the run has exited, the
+    /// account is no longer in use.
+    #[tokio::test]
+    async fn an_account_a_live_run_is_on_is_not_removed() {
+        let (store, _path) = temp_store();
+        let a = store.add_account("codex", "A").unwrap();
+        let run = key("CC", "cx-9");
+        assert_eq!(
+            store
+                .begin_run(&codex_session_row(&run), &run.uid, None, Some(&a.id))
+                .unwrap(),
+            None
+        );
+        store.set_lifecycle(&run.uid, Lifecycle::Live).unwrap();
+        assert!(store.account_in_use(&a.id).unwrap());
+        let refused = serde_json::to_value(
+            crate::accounts::remove_with(
+                &store,
+                &crate::accounts::SignIns::default(),
+                &std::collections::HashMap::new(),
+                None,
+                "r1".into(),
+                a.id.clone(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                refused["type"].as_str(),
+                refused["code"].as_str(),
+                refused["message"].as_str()
+            ),
+            (
+                Some("accounts_refused"),
+                Some("accounts_in_use"),
+                Some("Sessions are running on this account. Choose another account first.")
+            ),
+            "{refused}"
+        );
+        assert_eq!(store.accounts().unwrap().len(), 1, "nothing removed");
+        store.set_lifecycle(&run.uid, Lifecycle::Exited).unwrap();
+        assert!(
+            !store.account_in_use(&a.id).unwrap(),
+            "an exited run uses it no longer"
+        );
+    }
+
     fn codex_session_row(session: &SessionKey) -> SessionRow {
         let mut row = session_row(session);
         row.agent = AgentKind::Codex;
