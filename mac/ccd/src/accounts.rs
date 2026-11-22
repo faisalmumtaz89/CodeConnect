@@ -355,8 +355,24 @@ pub(crate) async fn sign_in(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
+    // In a group of its own, so ending it ends what it started: a launcher (Codex's npm one) runs the login as its
+    // child and passes on only some signals.
+    // SAFETY: `setsid` is async-signal-safe and touches nothing of the parent's.
+    unsafe {
+        login.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let outcome = match login.spawn() {
         Ok(mut child) => {
+            let leader = child
+                .id()
+                .and_then(|pid| i32::try_from(pid).ok())
+                .and_then(|pid| Some((pid, protocol::proc_identity::read_birth_identity(pid)?)))
+                .zip(protocol::proc_identity::boot_identity());
             let outcome = tokio::select! {
                 _ = child.wait() => None,
                 _ = ended => None,
@@ -366,7 +382,23 @@ pub(crate) async fn sign_in(
                     "the sign-in wasn't finished in the browser within ten minutes".into(),
                 )),
             };
-            let _ = child.kill().await;
+            // Its group ended as a run host's is: SIGTERM, then SIGKILL after the grace (`stop_group`), the login
+            // reaped meanwhile so the group empties as soon as it ends.
+            match leader {
+                Some(((pid, birth), boot)) => {
+                    let _ = tokio::join!(
+                        crate::claude_host::stop_group(
+                            protocol::proc_identity::ProcessIdentity { pid, birth },
+                            boot,
+                        ),
+                        child.wait()
+                    );
+                }
+                None => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
+            }
             outcome
         }
         Err(err) => Some(unavailable(
@@ -496,14 +528,15 @@ mod tests {
     use std::ffi::OsString;
     use std::path::Path;
 
-    /// A stand-in codex in `dir`: `login` writes `auth.json` into its `CODEX_HOME` (or, while `dir/hang` exists,
-    /// writes its pid to `dir/pid` and waits); `login status` succeeds once that home has one.
+    /// A stand-in codex in `dir`: `login` writes `auth.json` into its `CODEX_HOME`, or, while `dir/hang` exists, waits
+    /// as the npm launcher does: its native login a child (pid in `dir/kid`), passed SIGTERM and nothing else (its own
+    /// pid in `dir/pid`); `login status` succeeds once that home has one.
     fn stand_in_codex(dir: &Path) -> std::path::PathBuf {
         let path = dir.join("codex");
         std::fs::write(
             &path,
             "#!/bin/sh\nhere=$(dirname \"$0\")\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then [ -f \"$CODEX_HOME/auth.json\" ]; exit $?; fi\n\
-             if [ \"$1\" = login ]; then if [ -e \"$here/hang\" ]; then echo $$ > \"$here/pid\"; exec sleep 30; fi; echo '{}' > \"$CODEX_HOME/auth.json\"; fi\n\
+             if [ \"$1\" = login ]; then if [ -e \"$here/hang\" ]; then sleep 30 & kid=$!; echo $kid > \"$here/kid\"; echo $$ > \"$here/pid\"; trap 'kill -TERM $kid; exit 0' TERM; wait; fi; echo '{}' > \"$CODEX_HOME/auth.json\"; fi\n\
              if [ \"$1\" = logout ]; then echo \"$CODEX_HOME\" >> \"$here/logouts\"; [ -e \"$here/keep\" ] || rm -f \"$CODEX_HOME/auth.json\"; fi\n",
         )
         .unwrap();
@@ -682,7 +715,18 @@ mod tests {
             (Some("accounts_refused"), Some("sign_in_timed_out")),
             "{late}"
         );
+        let kid = || {
+            std::fs::read_to_string(root.join("kid"))
+                .unwrap()
+                .trim()
+                .parse::<i32>()
+                .unwrap()
+        };
         assert!(gone(pid().await).await, "the timed-out login is ended");
+        assert!(
+            gone(kid()).await,
+            "and the login it started, as a launcher's child"
+        );
         std::fs::remove_file(root.join("pid")).unwrap();
 
         let (first, second) = tokio::join!(
@@ -697,6 +741,7 @@ mod tests {
             ),
             async {
                 let first_pid = pid().await;
+                let first_kid = kid();
                 std::fs::remove_file(root.join("hang")).unwrap();
                 let second = super::sign_in(
                     &store,
@@ -712,6 +757,7 @@ mod tests {
                     gone(first_pid).await,
                     "the first login is ended by the second sign-in"
                 );
+                assert!(gone(first_kid).await, "and the login it started");
                 second
             }
         );
