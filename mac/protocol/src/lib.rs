@@ -871,7 +871,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     Choosing one moves the agent's running sessions to it: each is ended when idle, its end typed
 ///     [`event::SWITCHED_TO`], and its next message starts it on the account active then; it reads live meanwhile,
 ///     [`event::SessionSummary::switching`] saying where its move stands, and a start that did not go through files
-///     [`event::notice::SWITCH_FAILED`]. Each run CodeConnect started names the account its process runs on
+///     [`event::notice::SWITCH_FAILED`]; one on a plan without its model runs on the plan's default, filing
+///     [`event::notice::MODEL_UNAVAILABLE`], its menu then the plan's. Each run CodeConnect started names the account its process runs on
 ///     ([`event::SessionSummary::account`]; Default is `id` null). A listing carries what each Codex account and the
 ///     Default say of themselves ([`ws::AccountFacts`]: email, plan, usage windows, read on demand and held in the
 ///     computer's memory only), and marks two signed in as one email. An account whose Codex sign-in is kept outside its home reads

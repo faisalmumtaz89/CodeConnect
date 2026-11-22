@@ -13,7 +13,9 @@ account moves each running session to it between turns: once a session is idle i
 is ended, and your next message to it starts it again on the same thread with the new sign-in.
 A message queued in Codex itself (`codex queue`) is not kept across that, and a command or
 helper an agent left running in the background is stopped when its session moves. A moved
-session's settings can be changed once your next message has started it.
+session's settings can be changed once your next message has started it. When the new account's
+plan doesn't offer the model the session was on, it carries on with that plan's default model, one
+line in the conversation says so, and its model menu offers that plan's models.
 
 For each Codex account, and the Default, the Accounts page shows the email and plan it is signed
 in as and its usage as Codex reports it, read from Codex when you open the page (at most once a

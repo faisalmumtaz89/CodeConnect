@@ -116,6 +116,10 @@ pub mod notice {
     /// A run moving to another account could not start there (`{message}`, and the account typed as on the
     /// switch's end, [`super::SWITCHED_TO`], minor 48): it is ended and relaunchable ([`super::Switching::Failed`]).
     pub const SWITCH_FAILED: &str = "switch_failed";
+    /// A run moved to another account whose plan does not offer its model runs on the plan's default instead
+    /// (`{from_model, from_label, to_model, to_label, account: {id, label}}`, and `message` in words, minor 48):
+    /// decision 316.
+    pub const MODEL_UNAVAILABLE: &str = "model_unavailable";
 }
 
 /// Item kinds, following the thread -> turn -> item model.

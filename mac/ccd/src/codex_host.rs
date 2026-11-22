@@ -2365,20 +2365,56 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
 /// The model a thread on `model` resumes on with the app-server `client` (its account's plan): none when the plan
 /// offers `model`, so Codex keeps it; else the plan's default, since a thread resumed on a model its account's plan
 /// does not offer fails its next turn (`modelNotFound`, measured 2026-11-22 on codex 0.170.0 across two plans).
-async fn offered_or_default(client: &Client, model: &str) -> Result<Option<String>, String> {
+async fn offered_or_default(
+    client: &Client,
+    model: &str,
+) -> Result<(Option<String>, Vec<Value>), String> {
     let listed = client
         .call("model/list", json!({}))
         .await
         .map_err(|err| format!("Codex did not list its models: {err}"))?;
-    let models = listed["data"].as_array().cloned().unwrap_or_default();
+    // The plan's models as a start's check keeps them, for the run's menu.
+    let models: Vec<Value> = listed["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry["hidden"] != true)
+        .cloned()
+        .collect();
     if models.iter().any(|entry| entry["model"] == model) {
-        return Ok(None);
+        return Ok((None, models));
     }
-    Ok(models
+    let default = models
         .iter()
         .find(|entry| entry["isDefault"] == true)
         .and_then(|entry| entry["model"].as_str())
-        .map(str::to_string))
+        .map(str::to_string);
+    Ok((default, models))
+}
+
+/// The line a run moved to a plan without its model reads, typed: the model it was on, the one it runs on now (each
+/// by id and by the name its menu gave it) and the account.
+fn model_unavailable(
+    uid: &str,
+    from: (&str, &str),
+    to: (&str, &str),
+    account: Option<&crate::store::Account>,
+) -> PendingEvent {
+    let label = account.map_or("Default", |account| account.label.as_str());
+    PendingEvent::new(
+        &SessionKey::new(uid, uid),
+        EventKind::Notification,
+        json!({
+            "notification_type": protocol::event::notice::MODEL_UNAVAILABLE,
+            "from_model": from.0,
+            "from_label": from.1,
+            "to_model": to.0,
+            "to_label": to.1,
+            "account": {"id": account.map(|account| account.id.clone()), "label": label},
+            "message": format!("Now on {}: {} isn’t in {label}’s plan.", to.1, from.1),
+        }),
+        Source::Daemon,
+    )
 }
 
 /// [`relaunch`]'s steps from its warrant to its resume: the old app-server's group without a
@@ -2466,14 +2502,71 @@ async fn launch_again(
         .map(|account| account.id);
     let other_account = recorded != account.map(|account| account.id().to_string());
     let client = bring_up(daemon, uid, &launch, &folders, log, deadline, launched).await?;
-    let model = match (other_account, model) {
-        (true, Some(model)) => offered_or_default(&client, &model).await?,
+    // On another account the run's menu becomes its plan's, and a model the plan lacks gives way to its default.
+    let mut changed_model = None;
+    let resumed_on = match (other_account, &model) {
+        (true, Some(model)) => {
+            let (default, listed) = offered_or_default(&client, model).await?;
+            let was = daemon
+                .db
+                .hosted_models(uid.clone())
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if !listed.is_empty() {
+                if let Err(err) = daemon
+                    .db
+                    .keep_hosted_models(uid.clone(), json!({ "models": listed }))
+                    .await
+                {
+                    crate::log_error!("{uid}: could not keep its new plan's models: {err:#}");
+                }
+            }
+            let name = |models: &[Value], id: &str| {
+                models
+                    .iter()
+                    .find(|entry| entry["model"] == id)
+                    .and_then(|entry| entry["displayName"].as_str())
+                    .unwrap_or(id)
+                    .to_string()
+            };
+            if let Some(default) = &default {
+                changed_model = Some((
+                    (model.clone(), name(&was, model)),
+                    (default.clone(), name(&listed, default)),
+                ));
+            }
+            default
+        }
         _ => None,
     };
     // The run's effort needs nothing here: Codex's own resume restores the thread's effort (seen on 0.170.0 on
     // 2026-11-22).
     let (adapter, owed, cards) =
-        resume_thread(daemon, &client, run, &codeconnect, kept, model).await?;
+        resume_thread(daemon, &client, run, &codeconnect, kept, resumed_on).await?;
+    if let Some(((from, from_name), (to, to_name))) = changed_model {
+        let uid = &run.host.session_uid;
+        let account = account.and_then(|account| {
+            daemon
+                .store
+                .accounts()
+                .ok()?
+                .into_iter()
+                .find(|row| row.id == account.id())
+        });
+        file(
+            daemon,
+            uid,
+            vec![model_unavailable(
+                uid,
+                (&from, &from_name),
+                (&to, &to_name),
+                account.as_ref(),
+            )],
+        )
+        .await;
+    }
     Ok((client, adapter, owed, cards))
 }
 
@@ -8755,6 +8848,44 @@ mod tests {
         let sent = asked(&mut ws, "turn/start").await;
         answer(&mut ws, &sent, json!({"turn": {"id": "turn-2"}})).await;
         said.await.unwrap();
+        // One typed line says so (decision 316), and the menu is B's plan's.
+        let lines: Vec<serde_json::Value> = rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.payload["notification_type"] == "model_unavailable")
+            .map(|event| event.payload)
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(
+            (
+                &lines[0]["from_model"],
+                &lines[0]["to_model"],
+                &lines[0]["account"]
+            ),
+            (
+                &json!("gpt-6.1-sol"),
+                &json!("gpt-6-luna"),
+                &json!({"id": b.id, "label": "B"})
+            ),
+            "{lines:?}"
+        );
+        let menu: Vec<String> = summary_of(&rig.daemon, &uid)
+            .await
+            .menus
+            .expect("a live run's menus")
+            .models
+            .into_iter()
+            .map(|model| model.value)
+            .collect();
+        assert_eq!(
+            menu,
+            ["gpt-6-luna", "gpt-5.6-terra"],
+            "the new plan's models"
+        );
         drop(ws);
         end_run(&rig, &uid).await;
     }
