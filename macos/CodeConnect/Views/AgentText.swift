@@ -133,27 +133,27 @@ private struct ListBlock: View {
 
 /// A table across the pane: a bold header, a rule under it and a quiet one under every row, each cell at its row's
 /// first line. A column whose cells are all short is set at its own width and the long ones share the rest; a table
-/// that cannot fit the pane that way shares the width among all its columns, every cell wrapping. It never scrolls
-/// sideways: a sideways scroll view on the Mac takes the mouse wheel's vertical turns, and the conversation under the
-/// pointer stops scrolling. Words wrap at their boundaries; a word longer than its column breaks by character.
+/// that cannot fit the pane that way pans sideways inside itself, each long cell capped (Kit's `WidthCap`), with its
+/// scroll bar shown. The wheel's vertical turns over it scroll the conversation (`PanningTable`).
 private struct TableBlock: View {
     let table: MarkdownTable
 
     static let size: CGFloat = 12.5
     /// A column whose longest cell is this many characters or fewer is set at its own width.
     static let short = 24
-    /// The least a long column needs before every column shares the width instead: about 25 characters a line.
+    /// The least a long column needs before the table pans instead: about 25 characters a line.
     static let longMinimum: CGFloat = 160
+    /// The widest a long cell grows in a table that pans.
+    static let cellCap: CGFloat = 360
     static let padding: CGFloat = 12
-    /// The gutter when every column shares the width, so the words keep the room.
-    static let sharedPadding: CGFloat = 8
 
     var body: some View {
-        // Both choices fit the pane: the first when its short columns can keep their own widths, else the second.
+        // The first that fits: short columns at their own widths, the long ones sharing the pane; else the table at
+        // its own width, panning.
         ViewThatFits(in: .horizontal) {
             grid(sized: true)
                 .frame(minWidth: needed, idealWidth: needed, maxWidth: .infinity, alignment: .leading)
-            grid(sized: false)
+            PanningTable(content: grid(sized: false).fixedSize())
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(AgentProse.tableSummary(table))
@@ -169,7 +169,7 @@ private struct TableBlock: View {
         Set(table.headers.indices.filter { column($0).allSatisfy { plain($0).count <= Self.short } })
     }
 
-    /// The width the table needs with its short columns at their own widths: short columns at their widest cell, long ones at their
+    /// The width the table needs to fit without panning: short columns at their widest cell, long ones at their
     /// minimum, and the padding between.
     private var needed: CGFloat {
         let short = shortColumns
@@ -227,18 +227,19 @@ private struct TableBlock: View {
             .foregroundStyle(Theme.text)
             .lineSpacing(3.5)
             .multilineTextAlignment(Self.textAlignment(table.alignments[column]))
-        let gutter = sized ? Self.padding : Self.sharedPadding
         Group {
-            if sized && short.contains(column) {
+            if short.contains(column) {
                 text.fixedSize(horizontal: true, vertical: false)
-            } else {
+            } else if sized {
                 text.fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: Alignment(horizontal: Self.alignment(table.alignments[column]), vertical: .top))
+            } else {
+                WidthCap(cap: Self.cellCap) { text.fixedSize(horizontal: false, vertical: true) }
             }
         }
         .padding(.vertical, 7)
-        .padding(.leading, column == 0 ? 0 : gutter)
-        .padding(.trailing, gutter)
+        .padding(.leading, column == 0 ? 0 : Self.padding)
+        .padding(.trailing, Self.padding)
     }
 
     static func alignment(_ alignment: MarkdownTable.Alignment) -> HorizontalAlignment {
@@ -254,6 +255,51 @@ private struct TableBlock: View {
         case .leading: .leading
         case .center: .center
         case .trailing: .trailing
+        }
+    }
+}
+
+/// A table too wide for the pane, panning inside an AppKit scroll view with its horizontal scroll bar always shown.
+/// Its height is the table's own (the hosting view's fitting height at the table's width) plus the bar's, so the
+/// conversation measures the row from the grid, never from the scroll view's frame.
+private struct PanningTable<Content: View>: NSViewRepresentable {
+    let content: Content
+
+    func makeNSView(context: Context) -> WheelPassingScrollView {
+        let scroll = WheelPassingScrollView()
+        scroll.hasHorizontalScroller = true
+        scroll.hasVerticalScroller = false
+        scroll.scrollerStyle = .legacy
+        scroll.autohidesScrollers = false
+        scroll.verticalScrollElasticity = .none
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.documentView = NSHostingView(rootView: content)
+        return scroll
+    }
+
+    func updateNSView(_ scroll: WheelPassingScrollView, context: Context) {
+        guard let host = scroll.documentView as? NSHostingView<Content> else { return }
+        host.rootView = content
+        host.setFrameSize(host.fittingSize)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView scroll: WheelPassingScrollView, context: Context) -> CGSize? {
+        guard let host = scroll.documentView as? NSHostingView<Content> else { return nil }
+        let table = host.fittingSize
+        let bar = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+        return CGSize(width: min(proposal.width ?? table.width, table.width), height: table.height + bar)
+    }
+}
+
+/// A scroll view that pans sideways and hands a wheel's mostly-vertical turns to the views around it, so the
+/// conversation under the pointer keeps scrolling.
+final class WheelPassingScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        if abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX) {
+            nextResponder?.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
         }
     }
 }
