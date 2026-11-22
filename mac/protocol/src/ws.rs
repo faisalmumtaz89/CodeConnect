@@ -407,9 +407,11 @@ pub enum ClientMessage {
         agent: crate::agent::AgentKind,
         label: String,
     },
-    /// **Makes `account_id` the account `agent`'s next starts use**, or its Default (the agent as it is on the
-    /// computer) for none. An id that is not one of `agent`'s accounts is refused. A run already going keeps the
-    /// account it started on. Answered with one [`ServerMessage::Accounts`].
+    /// **Makes `account_id` the account `agent`'s starts use**, or its Default (the agent as it is on the computer)
+    /// for none. An id that is not one of `agent`'s accounts is refused. Each of `agent`'s sessions running then moves
+    /// to it once it is idle (its turn over, no card waiting, no message unread by the agent): it reads live and
+    /// [`crate::event::SessionSummary::switching`] until it is going again, on the same session, on the new account.
+    /// Answered with one [`ServerMessage::Accounts`].
     ActivateAccount {
         request_id: String,
         agent: crate::agent::AgentKind,

@@ -5604,6 +5604,7 @@ mod tests {
             git_branch: None,
             diff_stat: None,
             relaunchable: false,
+            switching: false,
         };
         serde_json::json!({
             "hello_ack_capabilities": ack["capabilities"],
@@ -5669,6 +5670,7 @@ mod tests {
                     .map(|(_, added, removed)| protocol::event::DiffStat { added, removed }),
 
                 relaunchable: false,
+                switching: false,
             }
         };
         serde_json::json!({

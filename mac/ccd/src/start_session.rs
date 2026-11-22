@@ -52,6 +52,10 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
     let environment = phone_environment();
     let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
     let changes = !matches!(message, ClientMessage::ListAccounts { .. });
+    let chosen = match &message {
+        ClientMessage::ActivateAccount { agent, .. } => Some(agent.clone()),
+        _ => None,
+    };
     let reply = match message {
         ClientMessage::SignInAccount {
             request_id,
@@ -100,6 +104,11 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
         }
     };
     let reply = daemon.sign_ins.marked(reply);
+    // A choice made moves the agent's live runs to it (306 Slice E).
+    if let (Some(agent), ServerMessage::Accounts { .. }) = (chosen, &reply) {
+        let daemon = Arc::clone(daemon);
+        tokio::spawn(async move { crate::switch::begin(&daemon, &agent).await });
+    }
     if let (
         true,
         ServerMessage::Accounts {

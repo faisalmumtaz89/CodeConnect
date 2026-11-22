@@ -8,7 +8,10 @@ Codex. The daemon runs Codex's own app server for the session, through your logi
 A Codex session on Codex's **Default** account runs as **you**. It uses your own `CODEX_HOME`
 — `~/.codex` unless you set that variable — which is where your Codex sign-in lives. A session
 on another Codex account you added in CodeConnect uses that account's own sign-in instead, with
-the rest of your Codex home (its settings, trust, skills and sessions) shared.
+the rest of your Codex home (its settings, trust, skills and sessions) shared. Choosing another
+account moves each running session to it between turns: its app server is started again on the
+same thread with the new sign-in. A message queued in Codex itself (`codex queue`) is not kept
+across that restart.
 
 So: **turns your phone starts are your turns.** Saying something from the phone spends the
 same account allowance as a turn you start in Codex yourself. There is no CodeConnect

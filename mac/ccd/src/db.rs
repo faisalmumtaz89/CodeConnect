@@ -297,8 +297,9 @@ impl Db {
     pub async fn begin_relaunch(
         &self,
         session_uid: String,
+        account: Option<String>,
     ) -> Result<Option<crate::store::LiveCodexRun>> {
-        self.run(move |store| store.begin_relaunch(&session_uid))
+        self.run(move |store| store.begin_relaunch(&session_uid, account.as_deref()))
             .await
     }
 
@@ -320,8 +321,13 @@ impl Db {
             .await
     }
 
-    pub async fn begin_claude_relaunch(&self, session_uid: String, start: String) -> Result<bool> {
-        self.run(move |store| store.begin_claude_relaunch(&session_uid, &start))
+    pub async fn begin_claude_relaunch(
+        &self,
+        session_uid: String,
+        start: String,
+        account: Option<String>,
+    ) -> Result<bool> {
+        self.run(move |store| store.begin_claude_relaunch(&session_uid, &start, account.as_deref()))
             .await
     }
 
@@ -821,6 +827,23 @@ impl Db {
 
     pub async fn send_request_ids(&self, session_uid: String) -> Result<Vec<String>> {
         self.run(move |store| store.send_request_ids(&session_uid))
+            .await
+    }
+
+    pub async fn switching_runs(&self) -> Result<Vec<String>> {
+        self.run(move |store| store.switching_runs()).await
+    }
+
+    pub async fn switching(&self, session_uid: String) -> Result<bool> {
+        self.run(move |store| store.switching(&session_uid)).await
+    }
+
+    pub async fn mark_switching(&self, agent: String) -> Result<Vec<String>> {
+        self.run(move |store| store.mark_switching(&agent)).await
+    }
+
+    pub async fn clear_switching(&self, session_uid: String) -> Result<()> {
+        self.run(move |store| store.clear_switching(&session_uid))
             .await
     }
 

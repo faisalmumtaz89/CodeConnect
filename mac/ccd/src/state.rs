@@ -2646,7 +2646,7 @@ impl Daemon {
             claimed_hash,
             reply,
         };
-        if crate::codex_host::relaunch(self, &session.uid, ask).await {
+        if crate::codex_host::relaunch(self, &session.uid, Some(ask)).await {
             return Daemon::compose_result(
                 self.engine_report(&session.uid, request_id, told).await,
             );
@@ -3463,6 +3463,8 @@ impl Daemon {
                 relaunchable.insert(row.session_uid.clone());
             }
         }
+        // A run moving to another account reads live throughout (306 Slice E, S1).
+        let switching: HashSet<String> = self.db.switching_runs().await?.into_iter().collect();
         let inner = self.inner.lock().await;
         let mut model_ids: HashMap<String, String> = HashMap::new();
         let mut model_labels: HashMap<String, String> = HashMap::new();
@@ -3511,6 +3513,11 @@ impl Daemon {
                 fact.value = id.clone();
             }
             session.model_label = model_labels.remove(&session.session_uid);
+            if switching.contains(&session.session_uid) {
+                session.lifecycle = Lifecycle::Live;
+                session.relaunchable = false;
+                session.switching = true;
+            }
         }
         Ok(sessions)
     }
@@ -3540,6 +3547,16 @@ impl Daemon {
         if let Err(err) = self.ingest(pending).await {
             crate::log_error!("{session_uid}: could not record its link {link}: {err:#}");
         }
+    }
+
+    /// Whether a card of the run `session_uid` waits on an answer.
+    pub(crate) async fn has_pending_card(&self, session_uid: &str) -> bool {
+        self.inner
+            .lock()
+            .await
+            .pending
+            .keys()
+            .any(|(uid, _)| uid == session_uid)
     }
 
     /// Send the run `session_uid`'s agent host `command` through its link. Whether a Claude
@@ -3573,6 +3590,18 @@ impl Daemon {
                 commands.send(crate::codex_host::LinkCommand::Stop).is_ok()
             }
             None => false,
+        }
+    }
+
+    /// The Codex run `session_uid`'s link asked whether it may switch account now
+    /// ([`crate::codex_host::LinkCommand::SwitchIfIdle`]). Whether a link took it.
+    pub(crate) async fn switch_through_link(&self, session_uid: &str) -> bool {
+        let inner = self.inner.lock().await;
+        match inner.host_links.get(session_uid) {
+            Some(HostLink::Codex(_, commands)) => commands
+                .send(crate::codex_host::LinkCommand::SwitchIfIdle)
+                .is_ok(),
+            _ => false,
         }
     }
 
@@ -4617,6 +4646,7 @@ impl Daemon {
                 git_branch: tree.and_then(|tree| tree.branch.clone()),
                 diff_stat: tree.and_then(|tree| tree.diff_stat),
                 relaunchable: relaunchable.contains(&row.session_uid),
+                switching: false,
             });
         }
         out

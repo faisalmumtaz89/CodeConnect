@@ -36,6 +36,7 @@ mod secret;
 mod start_session;
 mod state;
 mod store;
+mod switch;
 mod tls;
 mod ws_server;
 

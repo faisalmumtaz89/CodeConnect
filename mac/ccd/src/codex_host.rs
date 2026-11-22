@@ -643,6 +643,9 @@ pub(crate) enum LinkCommand {
     Compose(ComposeAsk),
     /// End run's graceful step ([`stop_gracefully`]).
     Stop,
+    /// A switch of account asks whether the run may move now: only the link knows whether a turn runs, as Codex
+    /// files no start of one ([`crate::switch::at_idle`]).
+    SwitchIfIdle,
     /// An app's settings change, its outcome told on `reply` ([`change_settings`]).
     Settings {
         setting: crate::claude_host::Setting,
@@ -816,6 +819,13 @@ async fn link(
                     daemon.push_turn_complete(&session, end).await;
                 }
                 heard(&daemon, &uid, &mut sends, &frame).await;
+                // A turn's end is where a run marked to switch account may move.
+                if ended.is_some() && running.is_none() {
+                    tokio::spawn({
+                        let (daemon, uid) = (Arc::clone(&daemon), uid.clone());
+                        async move { crate::switch::at_idle(&daemon, &uid).await }
+                    });
+                }
                 let Some(due) =
                     owed.take_if(|owed| ended.as_deref() == Some(owed.turn.as_str()))
                 else {
@@ -890,6 +900,14 @@ async fn link(
                 LinkCommand::Stop => {
                     record_tools(host.as_ref(), &mut tools);
                     stop_gracefully(&daemon, &uid, &client, &mut running).await;
+                }
+                LinkCommand::SwitchIfIdle => {
+                    if running.is_none() {
+                        tokio::spawn({
+                            let (daemon, uid) = (Arc::clone(&daemon), uid.clone());
+                            async move { crate::switch::at_idle(&daemon, &uid).await }
+                        });
+                    }
                 }
                 LinkCommand::Settings { setting, reply } => {
                     let current = adapter.settings().cloned();
@@ -2217,11 +2235,22 @@ async fn new_thread(
 /// the link runs the ladder on what was launched, puts the run back to `exited`
 /// ([`crate::store::Store::undo_relaunch`]), also when the watch found the new app-server gone
 /// first and failed the run for it, and drops `ask` with nothing claimed or sent.
-pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -> bool {
+pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: Option<ComposeAsk>) -> bool {
     let Some((root, launcher)) = daemon.relaunch_from.get() else {
         return false;
     };
-    let mut run = match daemon.db.begin_relaunch(uid.to_string()).await {
+    // The account Codex's starts use now (306 Slice E): a run relaunched, by a message or by a switch, goes on the
+    // active one, and records it. Every account's home shares the person's threads (Slice A).
+    let account = match crate::accounts::AccountEnv::active(&daemon.store, root, &AgentKind::Codex)
+    {
+        Ok(account) => account,
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its account to relaunch it: {err:#}");
+            return false;
+        }
+    };
+    let recorded = account.as_ref().map(|account| account.id().to_string());
+    let mut run = match daemon.db.begin_relaunch(uid.to_string(), recorded).await {
         Ok(Some(run)) => run,
         Ok(None) => return false,
         Err(err) => {
@@ -2232,7 +2261,15 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
     let mut launched = None;
     let relaunched = tokio::time::timeout(
         crate::start_session::START_TIMEOUT,
-        launch_again(daemon, root, launcher, &mut run, &ask, &mut launched),
+        launch_again(
+            daemon,
+            root,
+            launcher,
+            &mut run,
+            ask.as_ref(),
+            account.as_ref(),
+            &mut launched,
+        ),
     )
     .await
     .unwrap_or_else(|_| {
@@ -2276,7 +2313,7 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
                 adapter,
                 owed,
                 cards,
-                Some(ask),
+                ask,
             ));
         }
         Err(why) => {
@@ -2297,6 +2334,22 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
     true
 }
 
+/// The run `uid`, ended by its switch (306 Slice E), started again at once with no message on Codex's active
+/// account; its mark dropped either way, so a relaunch that does not go through reads as the end it is.
+pub(crate) fn relaunch_switched(
+    daemon: Arc<Daemon>,
+    uid: String,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        if !relaunch(&daemon, &uid, None).await {
+            crate::log_error!("{uid}: its switch's relaunch did not go through");
+        }
+        if let Err(err) = daemon.db.clear_switching(uid.clone()).await {
+            crate::log_error!("{uid}: could not clear its switch: {err:#}");
+        }
+    })
+}
+
 /// [`relaunch`]'s steps from its warrant to its resume: the old app-server's group without a
 /// member, `as.pid` and `as.sock` removed, the codex and environment a start reads and
 /// `launcher` as the `codeconnect`, the launch into the run's folder in `root` recorded in
@@ -2313,7 +2366,8 @@ async fn launch_again(
     root: &Path,
     launcher: &Result<PathBuf, String>,
     run: &mut LiveCodexRun,
-    ask: &ComposeAsk,
+    ask: Option<&ComposeAsk>,
+    account: Option<&crate::accounts::AccountEnv>,
     launched: &mut Option<(ProcessIdentity, Option<BootIdentity>)>,
 ) -> Result<(Client, CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
     let uid = &run.host.session_uid;
@@ -2344,18 +2398,11 @@ async fn launch_again(
         .append(true)
         .open(dir.join("host.log"))
         .map_err(|err| format!("could not open its host.log: {err}"))?;
-    // The account the run started on, as it recorded it, never the one active now: its thread lives in that home.
-    let account = match daemon.store.run_account(uid) {
-        Ok(Some(account)) => crate::accounts::AccountEnv::for_account(root, &account)
-            .map_err(|err| format!("could not find its account's folder: {err}"))?,
-        Ok(None) => None,
-        Err(err) => return Err(format!("could not read its account: {err:#}")),
-    };
     let launch = Run {
         root,
-        request_id: &ask.request_id,
+        request_id: ask.map_or("", |ask| ask.request_id.as_str()),
         cwd: &run.cwd,
-        prompt: &ask.text,
+        prompt: ask.map_or("", |ask| ask.text.as_str()),
         model: None,
         // The run keeps the models its start kept.
         models: &[],
@@ -2363,7 +2410,7 @@ async fn launch_again(
         codeconnect: &codeconnect,
         git_bin,
         environment: &environment,
-        account: account.as_ref(),
+        account,
         trust: run.trust,
     };
     let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
@@ -8030,11 +8077,11 @@ mod tests {
         );
     }
 
-    /// **N4 G4: a run relaunched goes on the account it began on.** A Codex run starts on account A, B is made
-    /// active, ccd is opened again, and a message relaunches the run: codex is launched with A's home again and
-    /// resumes the same thread. The active account is never read for a relaunch.
+    /// **A run relaunched goes on the active account** (306 Slice E). A Codex run starts on account A, B is made
+    /// active, ccd is opened again, and a message relaunches the run: codex is launched with B's home, resumes the
+    /// same thread (every account's home shares the person's threads), and the run records B.
     #[tokio::test]
-    async fn a_relaunched_run_keeps_the_account_it_began_on() {
+    async fn a_relaunched_run_goes_on_the_active_account() {
         let _env = crate::ProcessEnvRead::take();
         let rig = rig();
         let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
@@ -8052,6 +8099,18 @@ mod tests {
             .unwrap()
             .unwrap();
         let home_of_a = on_a
+            .argv()
+            .last()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .to_string();
+        let home_of_b = crate::accounts::AccountEnv::for_account(&rig.root, &b)
+            .unwrap()
+            .unwrap()
             .argv()
             .last()
             .unwrap()
@@ -8096,26 +8155,192 @@ mod tests {
             .unwrap());
         app_server_ended(&rig, &uid, ws).await;
         let daemon = relauncher(&rig);
-        let mut said = saying(&daemon, &uid, "say-again", "still on A?");
+        let mut said = saying(&daemon, &uid, "say-again", "on B now?");
         let (mut ws, resumed) = tokio::select! {
             served = relaunch_served(&rig, 2, after.clone()) => served,
             refused = &mut said => panic!("answered before codex was launched again: {refused:?}"),
         };
         let sent = asked(&mut ws, "turn/start").await;
-        answer(&mut ws, &sent, json!({"turn": {"id": "turn-on-a"}})).await;
+        answer(&mut ws, &sent, json!({"turn": {"id": "turn-on-b"}})).await;
         said.await.unwrap();
 
         let dir = crate::claude_host::run_dir(&rig.root, &uid);
         let homes = std::fs::read_to_string(dir.join("codex_home")).unwrap();
         assert_eq!(
             homes.lines().collect::<Vec<_>>(),
-            [home_of_a.as_str(), home_of_a.as_str()],
+            [home_of_a.as_str(), home_of_b.as_str()],
             "{homes}"
+        );
+        assert_eq!(
+            daemon.store.run_account(&uid).unwrap(),
+            Some(b),
+            "the run records B"
         );
         assert_eq!(
             resumed["params"]["threadId"], thread,
             "the same thread, resumed"
         );
+    }
+
+    /// **A switch moves a live Codex run to the chosen account at its turn's end, reading live throughout** (306
+    /// Slice E, S1, S6): a run on A is mid-turn when B is chosen, so nothing is stopped until its turn completes;
+    /// then its app-server's group is ended, its end filed as "Switched to B" while the run still reads live and
+    /// switching, and codex is launched again at once on B's home with no message, resuming the same thread; live,
+    /// the run is no longer switching and records B.
+    #[tokio::test]
+    async fn a_switch_moves_a_live_codex_run_at_its_turns_end() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        rig.daemon = relauncher(&rig);
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let after = capture["answerAfter"]["result"].clone();
+        let thread = after["thread"]["id"].as_str().unwrap().to_string();
+        let first = after["thread"]["turns"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let a = rig.daemon.store.add_account("codex", "A").unwrap();
+        let b = rig.daemon.store.add_account("codex", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("codex", Some(&a.id))
+            .unwrap());
+        let home = |account: &crate::store::Account| {
+            crate::accounts::AccountEnv::for_account(&rig.root, account)
+                .unwrap()
+                .unwrap()
+                .argv()
+                .last()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .split_once('=')
+                .unwrap()
+                .1
+                .to_string()
+        };
+        let on_a = crate::accounts::AccountEnv::for_account(&rig.root, &a)
+            .unwrap()
+            .unwrap();
+        let codex = stand_in(
+            &rig,
+            "printf '%s\\n' \"${CODEX_HOME-unset}\" >> codex_home\nexec sleep 30",
+        );
+        let mut script = whole_start();
+        script.truncate(3);
+        script[2].1 = json!({"result": {"thread": {"id": thread}, "model": "gpt-test"}});
+        let run = Run {
+            trust: Trust::Trusted,
+            account: Some(&on_a),
+            ..run(&rig, "req-on-a", &codex)
+        };
+        let (result, mut ws) = tokio::join!(start(&rig.daemon, run), async {
+            let (_, mut ws) = play_app_server(&rig, script).await;
+            let first_turn = asked(&mut ws, "turn/start").await;
+            answer(&mut ws, &first_turn, json!({"turn": {"id": first}})).await;
+            tell(
+                &mut ws,
+                &json!({"method": "turn/started", "params": {"threadId": thread, "turn": {"id": first}}}),
+            )
+            .await;
+            ws
+        });
+        let uid = started_uid(&result);
+        row_once(&rig, &uid, Lifecycle::Live).await;
+        link_attached(&rig.daemon, &uid).await;
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("codex", Some(&b.id))
+            .unwrap());
+        crate::switch::begin(&rig.daemon, &AgentKind::Codex).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(alive(leader), "nothing is stopped mid-turn");
+        let marked = serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(
+            (marked["lifecycle"].as_str(), marked["switching"].as_bool()),
+            (Some("live"), Some(true)),
+            "{marked}"
+        );
+
+        tell(
+            &mut ws,
+            &json!({"method": "turn/completed", "params": {"threadId": thread,
+                "turn": {"id": first, "status": "completed", "items": []}}}),
+        )
+        .await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while alive(leader) {
+            assert!(
+                Instant::now() < deadline,
+                "its app-server was not ended once its turn completed"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        // Its connection closes as it ends.
+        drop(ws);
+        let (_ws, resumed) = relaunch_served(&rig, 2, after.clone()).await;
+        assert_eq!(
+            resumed["params"]["threadId"], thread,
+            "the same thread, resumed"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let settled = loop {
+            let now = serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap();
+            assert_eq!(now["lifecycle"], "live", "never read ended: {now}");
+            if now.get("switching").is_none() {
+                break now;
+            }
+            assert!(Instant::now() < deadline, "still switching: {now}");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        assert_eq!(settled["lifecycle"], "live", "{settled}");
+        assert_eq!(
+            rig.daemon.store.run_account(&uid).unwrap(),
+            Some(b.clone()),
+            "the run records B"
+        );
+        let dir = crate::claude_host::run_dir(&rig.root, &uid);
+        let homes = std::fs::read_to_string(dir.join("codex_home")).unwrap();
+        assert_eq!(
+            homes.lines().collect::<Vec<_>>(),
+            [home(&a), home(&b)],
+            "{homes}"
+        );
+        let ends: Vec<_> = rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::SessionEnd)
+            .map(|event| event.payload["reason"].clone())
+            .collect();
+        assert_eq!(ends, [json!("Switched to B")]);
+        let relaunched = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        // SAFETY: kill(2) of the group the relaunched stand-in leads.
+        unsafe { libc::kill(-relaunched, libc::SIGKILL) };
     }
 
     /// **X5-2 G2: a run ended by End run is not relaunched.** It reads `none`, and a message to
@@ -8279,7 +8504,7 @@ mod tests {
         let daemon = relauncher(&rig);
         assert!(daemon
             .db
-            .begin_relaunch(uid.clone())
+            .begin_relaunch(uid.clone(), None)
             .await
             .unwrap()
             .is_some());
@@ -8287,7 +8512,10 @@ mod tests {
             said_now(&daemon, &uid, "say-second").await,
             engine_no_connection()
         );
-        assert_eq!(daemon.db.begin_relaunch(uid.clone()).await.unwrap(), None);
+        assert_eq!(
+            daemon.db.begin_relaunch(uid.clone(), None).await.unwrap(),
+            None
+        );
         assert_eq!(launches(&rig), 1);
     }
 
@@ -8304,13 +8532,17 @@ mod tests {
             db.delete_exited_session(uid.clone()).await.unwrap(),
             DeleteOutcome::Deleted { .. }
         ));
-        assert_eq!(db.begin_relaunch(uid).await.unwrap(), None);
+        assert_eq!(db.begin_relaunch(uid, None).await.unwrap(), None);
 
         let swapped_first = rig();
         let (uid, ws) = engine_run(&swapped_first, "req-del-2", "thr-del-2", "turn-1").await;
         app_server_ended(&swapped_first, &uid, ws).await;
         let db = &swapped_first.daemon.db;
-        assert!(db.begin_relaunch(uid.clone()).await.unwrap().is_some());
+        assert!(db
+            .begin_relaunch(uid.clone(), None)
+            .await
+            .unwrap()
+            .is_some());
         assert_eq!(
             db.delete_exited_session(uid).await.unwrap(),
             DeleteOutcome::NotExited {
@@ -8330,7 +8562,7 @@ mod tests {
         assert!(rig
             .daemon
             .db
-            .begin_relaunch(uid.clone())
+            .begin_relaunch(uid.clone(), None)
             .await
             .unwrap()
             .is_some());
@@ -8501,7 +8733,12 @@ mod tests {
         };
 
         // The watch reads the run while it is starting, then the relaunch puts it back.
-        let old = db.begin_relaunch(uid.clone()).await.unwrap().unwrap().host;
+        let old = db
+            .begin_relaunch(uid.clone(), None)
+            .await
+            .unwrap()
+            .unwrap()
+            .host;
         let noted = rig.root.join("term");
         let dying = group_without_its_leader(&rig.root);
         db.record_host(uid.clone(), dying, boot).await.unwrap();
@@ -8529,7 +8766,12 @@ mod tests {
         );
 
         // The watch fails the run first, for the relaunch's own app-server, then the put-back.
-        let old = db.begin_relaunch(uid.clone()).await.unwrap().unwrap().host;
+        let old = db
+            .begin_relaunch(uid.clone(), None)
+            .await
+            .unwrap()
+            .unwrap()
+            .host;
         let dead = host_gone_with_its_group();
         db.record_host(uid.clone(), dead, boot).await.unwrap();
         crate::claude_host::end_if_host_gone(&rig.daemon, &uid).await;

@@ -519,6 +519,10 @@ pub struct SessionSummary {
     /// Omitted when false, and from an older daemon, whose ended runs stay ended.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub relaunchable: bool,
+    /// The run is moving to its agent's active account (minor 47): it reads live throughout, its process ended
+    /// between turns and started again on the new account. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub switching: bool,
 }
 
 /// How much a working tree has changed, in lines. See [`SessionSummary::diff_stat`].
@@ -747,6 +751,7 @@ mod tests {
             git_branch: None,
             diff_stat: None,
             relaunchable: false,
+            switching: false,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);

@@ -646,7 +646,8 @@ fn live_codex_run_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveCodexRun
 
 /// The hosted Codex run `session_uid` when the person's next message relaunches it (P3 R4): it
 /// is `exited`, the last end it filed reads "Stopped: its process ended"
-/// ([`crate::claude_host::PROCESS_ENDED`]), so its app-server ended without ccd stopping it, and
+/// ([`crate::claude_host::PROCESS_ENDED`]), so its app-server ended without ccd stopping it, or "Switched to …"
+/// ([`crate::switch::SWITCHED`]), so ccd stopped it to move it to another account, and
 /// it has a recorded app-server and a thread. A run ended by End run ("Stopped") or a start that
 /// failed is not one. No column says how a run ended; its end's `reason` does.
 fn relaunchable_in(conn: &Connection, session_uid: &str) -> Result<Option<LiveCodexRun>> {
@@ -659,15 +660,17 @@ fn relaunchable_in(conn: &Connection, session_uid: &str) -> Result<Option<LiveCo
                    FROM run_hosts AS h JOIN {table} AS s USING(session_uid)
                   WHERE h.session_uid = ?1 AND s.lifecycle = ?2 AND h.host_pid IS NOT NULL
                     AND s.codex_thread_id IS NOT NULL
-                    AND (SELECT json_extract(payload, '$.reason') FROM events
-                          WHERE session_uid = ?1 AND kind = ?3
-                          ORDER BY seq DESC LIMIT 1) = ?4"
+                    AND EXISTS (SELECT 1 FROM (SELECT json_extract(payload, '$.reason') AS reason FROM events
+                                                WHERE session_uid = ?1 AND kind = ?3
+                                                ORDER BY seq DESC LIMIT 1)
+                                 WHERE reason = ?4 OR reason GLOB ?5)"
             ),
             params![
                 session_uid,
                 lifecycle_str(Lifecycle::Exited),
                 EventKind::SessionEnd.as_str(),
-                crate::claude_host::PROCESS_ENDED
+                crate::claude_host::PROCESS_ENDED,
+                format!("{}*", crate::switch::SWITCHED)
             ],
             live_codex_run_from,
         )
@@ -687,7 +690,8 @@ pub struct ClaudeRelaunch {
 
 /// The hosted Claude run `session_uid` when the person's next message relaunches it (decision
 /// 210): it is `exited`, the last end it filed reads "Stopped: its process ended"
-/// ([`crate::claude_host::PROCESS_ENDED`]), so its claude ended without ccd stopping it, and
+/// ([`crate::claude_host::PROCESS_ENDED`]), so its claude ended without ccd stopping it, or "Switched to …"
+/// ([`crate::switch::SWITCHED`]), so ccd stopped it to move it to another account, and
 /// claude named its session, which `--resume` needs. A recorded host is not required: one an
 /// earlier relaunch never recorded left no claude. A run ended by End run ("Stopped") or a start
 /// that failed is not one.
@@ -700,15 +704,17 @@ fn claude_relaunchable_in(conn: &Connection, session_uid: &str) -> Result<Option
                    FROM run_hosts AS h JOIN {table} AS s USING(session_uid)
                   WHERE h.session_uid = ?1 AND s.lifecycle = ?2 AND h.start IS NOT NULL
                     AND s.claude_session_id IS NOT NULL
-                    AND (SELECT json_extract(payload, '$.reason') FROM events
-                          WHERE session_uid = ?1 AND kind = ?3
-                          ORDER BY seq DESC LIMIT 1) = ?4"
+                    AND EXISTS (SELECT 1 FROM (SELECT json_extract(payload, '$.reason') AS reason FROM events
+                                                WHERE session_uid = ?1 AND kind = ?3
+                                                ORDER BY seq DESC LIMIT 1)
+                                 WHERE reason = ?4 OR reason GLOB ?5)"
             ),
             params![
                 session_uid,
                 lifecycle_str(Lifecycle::Exited),
                 EventKind::SessionEnd.as_str(),
-                crate::claude_host::PROCESS_ENDED
+                crate::claude_host::PROCESS_ENDED,
+                format!("{}*", crate::switch::SWITCHED)
             ],
             |row| {
                 Ok(ClaudeRelaunch {
@@ -2647,7 +2653,12 @@ impl Store {
     /// cursor goes back to 0, since a new host numbers its messages from 1; and its start line
     /// becomes `start`, which a restarted ccd sends again. Whether it moved: `false`, with nothing
     /// written, when it is no longer one to relaunch (a second message met it `starting`).
-    pub fn begin_claude_relaunch(&self, session_uid: &str, start: &str) -> Result<bool> {
+    pub fn begin_claude_relaunch(
+        &self,
+        session_uid: &str,
+        start: &str,
+        account: Option<&str>,
+    ) -> Result<bool> {
         let (table, _) = session_tables_for(&AgentKind::Claude);
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2668,9 +2679,9 @@ impl Store {
         )?;
         tx.execute(
             "UPDATE run_hosts SET host_pid = NULL, host_start_sec = NULL, host_start_usec = NULL,
-                                  boot_sec = NULL, boot_usec = NULL, cursor = 0, start = ?2
+                                  boot_sec = NULL, boot_usec = NULL, cursor = 0, start = ?2, account_id = ?3
               WHERE session_uid = ?1",
-            params![session_uid, start],
+            params![session_uid, start, account],
         )?;
         tx.commit()?;
         Ok(true)
@@ -2682,7 +2693,11 @@ impl Store {
     /// before its launch, so a second message meets `starting` and the watch never reads the old
     /// app-server as the relaunch's. The run as it was, its old app-server for the warrant; `None`,
     /// with nothing written, when it is not one to relaunch.
-    pub fn begin_relaunch(&self, session_uid: &str) -> Result<Option<LiveCodexRun>> {
+    pub fn begin_relaunch(
+        &self,
+        session_uid: &str,
+        account: Option<&str>,
+    ) -> Result<Option<LiveCodexRun>> {
         let (table, _) = session_tables_for(&AgentKind::Codex);
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2703,9 +2718,9 @@ impl Store {
         )?;
         tx.execute(
             "UPDATE run_hosts SET host_pid = NULL, host_start_sec = NULL, host_start_usec = NULL,
-                                  boot_sec = NULL, boot_usec = NULL
+                                  boot_sec = NULL, boot_usec = NULL, account_id = ?2
               WHERE session_uid = ?1",
-            params![session_uid],
+            params![session_uid, account],
         )?;
         tx.commit()?;
         Ok(Some(run))
@@ -2952,8 +2967,8 @@ impl Store {
             .optional()?)
     }
 
-    /// Makes `id` the account `agent`'s next starts use, or its Default for `None`. False, and nothing changed, for
-    /// an id that is not one of `agent`'s accounts. A run already going keeps the account it started on.
+    /// Makes `id` the account `agent`'s starts use, or its Default for `None`. False, and nothing changed, for an id
+    /// that is not one of `agent`'s accounts. The runs going are moved to it by [`crate::switch`], not here.
     pub fn activate_account(&self, agent: &str, id: Option<&str>) -> Result<bool> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -3008,6 +3023,57 @@ impl Store {
         tx.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(removed)
+    }
+
+    /// Marks every live run of `agent` as switching to its agent's active account; the uids marked.
+    pub fn mark_switching(&self, agent: &str) -> Result<Vec<String>> {
+        let conn = self.write();
+        let mut stmt = conn.prepare(
+            "SELECT h.session_uid FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
+              WHERE s.agent = ?1 AND s.lifecycle = 'live'",
+        )?;
+        let uids = stmt
+            .query_map(params![agent], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for uid in &uids {
+            conn.execute(
+                "UPDATE run_hosts SET switching = 1 WHERE session_uid = ?1",
+                params![uid],
+            )?;
+        }
+        Ok(uids)
+    }
+
+    /// Whether the run `session_uid` is marked switching.
+    pub fn switching(&self, session_uid: &str) -> Result<bool> {
+        Ok(self
+            .read()
+            .query_row(
+                "SELECT 1 FROM run_hosts WHERE session_uid = ?1 AND switching = 1",
+                params![session_uid],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Every run marked switching.
+    pub fn switching_runs(&self) -> Result<Vec<String>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare("SELECT session_uid FROM run_hosts WHERE switching = 1")?;
+        let uids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(uids)
+    }
+
+    /// The run `session_uid` is on its account now: its switching mark goes.
+    pub fn clear_switching(&self, session_uid: &str) -> Result<()> {
+        self.write().execute(
+            "UPDATE run_hosts SET switching = NULL WHERE session_uid = ?1",
+            params![session_uid],
+        )?;
+        Ok(())
     }
 
     /// Whether a run still going (starting, live or stopping) records the account `id`.
@@ -6213,7 +6279,8 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             commands        TEXT,
             commands_at     TEXT,
             screen_only     TEXT,
-            account_id      TEXT
+            account_id      TEXT,
+            switching       INTEGER
         );
 
         -- An agent's accounts on this computer: each a folder of ccd's own,
@@ -6435,6 +6502,7 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     ("mutation_ledger", "question_decision", "TEXT"),
     // The account a run started on (minor 47); null is its agent's Default, and every run recorded before accounts.
     ("run_hosts", "account_id", "TEXT"),
+    ("run_hosts", "switching", "INTEGER"),
 ];
 
 /// Repair push tuples a rollback or a pre-tuple build could have left incoherent.
@@ -8361,7 +8429,7 @@ mod tests {
         assert_eq!(
             store.run_account(&on_work.uid).unwrap(),
             Some(work),
-            "a run keeps the account it began on"
+            "a choice alone changes no run's account"
         );
     }
 
