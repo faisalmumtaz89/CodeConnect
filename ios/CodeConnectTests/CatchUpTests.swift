@@ -455,6 +455,23 @@ final class CatchUpTests: XCTestCase {
         XCTAssertNotNil(model.drafts(for: b), "its drafts are there once the catch-up publishes it")
     }
 
+    /// The session screen's "catching up" state, told apart from "not on your computer's list": a run the catch-up's
+    /// list names resolves to itself while nothing of it is shown, and a run no list names does not resolve.
+    func testARunTheCatchUpHoldsIsNamedButNotYetShown() async {
+        let (model, wire) = await caughtUp([Row(uid: a, lastSeq: 5)])
+
+        returnToForeground(model)
+        answer(model, [Row(uid: b, lastSeq: 2)])
+        XCTAssertEqual(model.resolveSessionKey(reference: b), b, "the computer's list names it")
+        XCTAssertNil(model.shown(for: b), "nothing of it is shown yet: catching up")
+        XCTAssertNil(model.resolveSessionKey(reference: c), "a run no list names: not on the list")
+
+        await subscribed(wire, b)
+        inject(model, b, 1...2)
+        await settle(model)
+        XCTAssertNotNil(model.shown(for: b), "the release shows it")
+    }
+
     /// A name in a link means the run the catch-up's own list names, so it
     /// waits for that list rather than resolving to the run that held the name
     /// before the return.

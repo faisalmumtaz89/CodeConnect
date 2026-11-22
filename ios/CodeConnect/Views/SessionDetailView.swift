@@ -1012,6 +1012,9 @@ struct SessionDetailView: View {
                     composerFocused: $composerFocused
                 )
                 .onAppear { openWantedApproval() }
+            } else if model.resolveSessionKey(reference: key) == key {
+                // The computer's list names the run; a catch-up still holds it off the screen.
+                catchingUp
             } else {
                 notInTheList
             }
@@ -1358,6 +1361,18 @@ struct SessionDetailView: View {
     /// tmux name — and the model resolves a name the way the daemon does.
     private func addresses(_ reference: String) -> Bool {
         (model.resolveSessionKey(reference: reference) ?? reference) == key
+    }
+
+    private var catchingUp: some View {
+        VStack {
+            CCEmptyState(
+                glyph: "clock",
+                title: SessionWords.catchingUp(with: model.machineName),
+                message: SessionWords.catchingUpMessage)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(.top, CC.space.xxl)
+        .background(CC.color.bg)
     }
 
     private var notInTheList: some View {
