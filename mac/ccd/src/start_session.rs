@@ -1426,9 +1426,24 @@ async fn claude_path(
     let path_hits = login_path_hits(environment, &home, "claude").await;
     let launcher = crate::state::codex_launcher().ok();
     protocol::claude_bin::first_runnable(
-        protocol::claude_bin::candidates(claude_bin, &home, path_hits),
+        not_installed_in_tests(protocol::claude_bin::candidates(
+            claude_bin, &home, path_hits,
+        )),
         launcher.as_deref(),
     )
+}
+
+/// `candidates` as a run takes them; in a test, without the computer's own install locations, so no test ever runs
+/// an agent installed on the computer: only one it names, one on its fenced `PATH`, or one in its own home.
+fn not_installed_in_tests(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
+    #[cfg(test)]
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| {
+            !candidate.starts_with("/opt/homebrew") && !candidate.starts_with("/usr/local")
+        })
+        .collect();
+    candidates
 }
 
 /// Where the codex a start runs is, from [`protocol::codex_bin`]'s list with the login
@@ -1442,7 +1457,7 @@ pub(crate) async fn codex_path(
     let path_hits = login_path_hits(environment, &home, "codex").await;
     let launcher = crate::state::codex_launcher().ok();
     protocol::claude_bin::first_runnable(
-        protocol::codex_bin::candidates(codex_bin, &home, path_hits),
+        not_installed_in_tests(protocol::codex_bin::candidates(codex_bin, &home, path_hits)),
         launcher.as_deref(),
     )
 }
@@ -5023,23 +5038,30 @@ esac"#;
         );
     }
 
-    /// A codex in one of the list's system locations, which no rig can take away.
-    fn system_codex() -> Option<PathBuf> {
-        let home = Path::new("/nonexistent-home");
-        protocol::codex_bin::candidates(None, home, Vec::new())
-            .into_iter()
-            .filter(|candidate| !candidate.starts_with(home))
-            .find(|candidate| candidate.exists())
+    /// **No test can reach an agent installed on the computer**: the places a test looks for codex or claude are the
+    /// one it names, its fenced `PATH` and its own home, never the computer's install locations (Homebrew's,
+    /// `/usr/local`), which exist on a developer's Mac and are not the rig's to hide.
+    #[test]
+    fn no_test_looks_in_the_computers_install_locations() {
+        let home = Path::new("/rig-home");
+        for candidates in [
+            not_installed_in_tests(protocol::codex_bin::candidates(None, home, Vec::new())),
+            not_installed_in_tests(protocol::claude_bin::candidates(None, home, Vec::new())),
+        ] {
+            assert!(!candidates.is_empty());
+            assert!(
+                candidates
+                    .iter()
+                    .all(|candidate| candidate.starts_with(home)),
+                "{candidates:?}"
+            );
+        }
     }
 
     /// **A codex that cannot be found is not available**, with the sentence that says
     /// so: none on the login shell's `PATH` and none in the install locations.
     #[tokio::test]
     async fn a_codex_that_is_not_there_is_missing() {
-        if let Some(codex) = system_codex() {
-            eprintln!("skipped: {} is a codex no rig can hide", codex.display());
-            return;
-        }
         let rig = Rig::new("no-codex", ANSWERING);
         let listed = codex_listed(&rig, &KnownAgents::default()).await;
         assert_eq!(
@@ -5223,25 +5245,11 @@ esac"#;
         assert_eq!(codex_path(&rig.env, None).await, Some(on_path));
     }
 
-    /// A claude in one of the list's system locations, which no rig can take away:
-    /// a test that needs claude missing would find it, and run it.
-    fn system_claude() -> Option<PathBuf> {
-        let home = Path::new("/nonexistent-home");
-        protocol::claude_bin::candidates(None, home, Vec::new())
-            .into_iter()
-            .filter(|candidate| !candidate.starts_with(home))
-            .find(|candidate| candidate.exists())
-    }
-
     /// **A claude that cannot be found is not available, and its start is
     /// `agent_missing`, with nothing launched**: none on the login shell's PATH and
     /// none in the install locations.
     #[tokio::test]
     async fn a_claude_that_is_not_there_is_missing() {
-        if let Some(claude) = system_claude() {
-            eprintln!("skipped: {} is a claude no rig can hide", claude.display());
-            return;
-        }
         let rig = recording("no-claude");
         std::fs::remove_file(&rig.claude).unwrap();
         let listed = agent_availability(

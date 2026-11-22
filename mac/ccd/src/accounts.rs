@@ -412,6 +412,13 @@ pub(crate) async fn read_facts(
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
+            // An answer is its result; a refusal or a null is no facts.
+            if !value["result"].is_object() {
+                if matches!(value["id"].as_u64(), Some(2 | 3)) {
+                    return None;
+                }
+                continue;
+            }
             match value["id"].as_u64() {
                 Some(2) => said_account = Some(value["result"].clone()),
                 Some(3) => said_limits = Some(value["result"].clone()),
@@ -1075,7 +1082,7 @@ mod tests {
             (Some(true), Some(true)),
             "{told}"
         );
-        crate::switch::window::keep(&[told.clone()], "accounts-facts-wire.json");
+        crate::switch::window::keep(std::slice::from_ref(&told), "accounts-facts-wire.json");
         // Held in memory only: not a byte of it in the store.
         drop(store);
         for file in [db.path().to_path_buf(), db.path().with_extension("db-wal")] {
