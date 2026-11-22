@@ -236,7 +236,7 @@ pub(crate) fn unavailable(
 #[cfg(test)]
 mod tests {
     /// **The accounts wire the apps read is what ccd answers** (`fixtures/accounts/minor-47-wire.json`, recorded from a
-    /// ccd at 35433a6f by one paired device). Each request, in the recorded order, is answered by this build on a store
+    /// ccd at 05faeaa3 by one paired device). Each request, in the recorded order, is answered by this build on a store
     /// of its own; the reply's bytes are the recorded reply's, the ids aside: ccd makes new ones, so each is read as the
     /// recorded id it stands for, in the order the replies first name them.
     #[test]
