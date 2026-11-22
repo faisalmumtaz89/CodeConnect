@@ -1033,8 +1033,11 @@ struct SessionDetailView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 // A run that takes no reply has no reply box, as on the Mac:
-                // one quiet line in its place says it has ended.
+                // one quiet line in its place says it has ended. Over it, the
+                // settings line, read only (an ended run has no menus), names
+                // the model it ran on, which the Mac names in its pane heading.
                 if summary?.takesNoReply == true {
+                    HostedSettingsBar(model: model, key: key, onOpen: { showHostedSettingsSheet = true })
                     EndedLine()
                 } else {
                     if let palette = paletteContent {
