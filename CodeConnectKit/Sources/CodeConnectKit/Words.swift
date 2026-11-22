@@ -110,6 +110,12 @@ public enum SessionWords {
         "Cut short by \(HostDevice.current.computer("your computer")). This is not the whole output."
     }
     public static let nothingLiveYet = "Nothing live has arrived for this run yet."
+    /// In a run's place while a catch-up holds it: the computer's list names the run and its conversation has not
+    /// arrived yet.
+    public static func catchingUp(with computer: String?) -> String {
+        "Catching up with \(computer ?? "your computer")…"
+    }
+    public static let catchingUpMessage = "This run’s conversation appears here once it has arrived."
     /// In the reply box's place on a run that takes no reply (`SessionSummary.takesNoReply`).
     public static let runEnded = "This run has ended. Its conversation stays here to read."
     /// A conversation with nothing in it: "yet" only while the run can still record something, not on one that has
