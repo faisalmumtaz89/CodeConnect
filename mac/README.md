@@ -117,10 +117,10 @@ attached again, or, on a Codex run, once Codex asks for it again.
 
 ## Build identity
 
-A version number moves at releases and at capability bumps (every
-`PROTOCOL_MINOR` change moves it — see RELEASING.md), but never on ordinary
-commits — so between those moments it cannot answer "am I running current
-code?", and two different builds happily share one number. Every shipped binary therefore also embeds the git commit
+A version number moves once per release, when the commit after it opens the
+next version (RELEASING.md, step 8), and never on other commits: a
+`PROTOCOL_MINOR` change leaves it standing. So between releases it cannot
+answer "am I running current code?", and two different builds happily share one number. Every shipped binary therefore also embeds the git commit
 it was built from, and whether that tree was clean when it was built:
 
 ```
