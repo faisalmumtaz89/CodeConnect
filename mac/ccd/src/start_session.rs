@@ -73,10 +73,11 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
         | ClientMessage::AddAccount { .. }
         | ClientMessage::ActivateAccount { .. } => {
             let store = daemon.store.clone();
+            let request_id = crate::accounts::request_id(&message);
             tokio::task::spawn_blocking(move || crate::accounts::answer(&store, message))
                 .await
                 .unwrap_or_else(|err| {
-                    crate::accounts::unavailable("answer", anyhow::anyhow!("{err}"))
+                    crate::accounts::unavailable(request_id, "answer", anyhow::anyhow!("{err}"))
                 })
         }
         ClientMessage::GetProjectGit { path } => project_git(daemon, path).await,

@@ -632,6 +632,15 @@ pub enum ServerMessage {
         accounts: Vec<AgentAccount>,
         active: Vec<ActiveAccount>,
     },
+    /// A refused [`ClientMessage::ListAccounts`], [`ClientMessage::AddAccount`] or [`ClientMessage::ActivateAccount`],
+    /// naming the request, as a refused start or folder names its own: nothing changed. `code` is `bad_request` (an
+    /// agent with no accounts, an id not the agent's, a name outside 1 to 64 characters) or `accounts_unavailable`
+    /// (the computer could not read or keep its accounts); `message` says which, in words.
+    AccountsRefused {
+        request_id: String,
+        code: String,
+        message: String,
+    },
     /// The answer to [`ClientMessage::GetProjectGit`]; `git` is absent when
     /// `path` is not in a git repository.
     ProjectGit {
@@ -3082,6 +3091,18 @@ mod tests {
             "accounts": [{"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work"}],
             "active": [{"agent": "codex", "account_id": "01M80QGTWR9RCHBSJWR169GXCN"}]});
         assert_eq!(serde_json::to_value(&reply).unwrap(), expected);
+        let decoded: ServerMessage = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+
+        // A refusal names the request it answers.
+        let refused = ServerMessage::AccountsRefused {
+            request_id: "a6".into(),
+            code: "bad_request".into(),
+            message: "an account's name is 1 to 64 characters".into(),
+        };
+        let expected = serde_json::json!({"type": "accounts_refused", "request_id": "a6",
+            "code": "bad_request", "message": "an account's name is 1 to 64 characters"});
+        assert_eq!(serde_json::to_value(&refused).unwrap(), expected);
         let decoded: ServerMessage = serde_json::from_value(expected.clone()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
 

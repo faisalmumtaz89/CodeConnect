@@ -120,54 +120,72 @@ impl AccountEnv {
 }
 
 /// A device's ask about accounts, answered with every account and each agent's active one once the ask's change is
-/// made. An unknown agent, or an id that is not one of the agent's, is refused and nothing changes.
+/// made. An unknown agent, or an id that is not one of the agent's, is refused and nothing changes; a refusal names the
+/// request it answers (`AccountsRefused`).
 pub(crate) fn answer(
     store: &crate::store::Store,
     message: protocol::ws::ClientMessage,
 ) -> protocol::ws::ServerMessage {
     use protocol::ws::ClientMessage;
-    let request_id = match message {
-        ClientMessage::ListAccounts { request_id } => request_id,
-        ClientMessage::AddAccount {
-            request_id,
-            agent,
-            label,
-        } => {
+    let request_id = request_id(&message);
+    match message {
+        ClientMessage::ListAccounts { .. } => {}
+        ClientMessage::AddAccount { agent, label, .. } => {
             if variable(agent.as_str()).is_none() {
-                return refused(format!("{} has no accounts here", agent.as_str()));
+                return refused(
+                    request_id,
+                    format!("{} has no accounts here", agent.as_str()),
+                );
             }
             let label = label.trim();
             if label.is_empty() || label.chars().count() > LABEL_MAX {
-                return refused(format!("an account's name is 1 to {LABEL_MAX} characters"));
+                return refused(
+                    request_id,
+                    format!("an account's name is 1 to {LABEL_MAX} characters"),
+                );
             }
             if let Err(err) = store.add_account(agent.as_str(), label) {
-                return unavailable("keep the account", err);
+                return unavailable(request_id, "keep the account", err);
             }
-            request_id
         }
         ClientMessage::ActivateAccount { agent, .. } if variable(agent.as_str()).is_none() => {
-            return refused(format!("{} has no accounts here", agent.as_str()));
+            return refused(
+                request_id,
+                format!("{} has no accounts here", agent.as_str()),
+            );
         }
         ClientMessage::ActivateAccount {
-            request_id,
-            agent,
-            account_id,
+            agent, account_id, ..
         } => match store.activate_account(agent.as_str(), account_id.as_deref()) {
-            Ok(true) => request_id,
+            Ok(true) => {}
             Ok(false) => {
-                return refused(format!("that is not one of {}'s accounts", agent.as_str()))
+                return refused(
+                    request_id,
+                    format!("that is not one of {}'s accounts", agent.as_str()),
+                )
             }
-            Err(err) => return unavailable("choose the account", err),
+            Err(err) => return unavailable(request_id, "choose the account", err),
         },
         _ => unreachable!("only the account frames are answered here"),
-    };
+    }
     listing(store, request_id)
+}
+
+/// The request an accounts ask names.
+pub(crate) fn request_id(message: &protocol::ws::ClientMessage) -> String {
+    use protocol::ws::ClientMessage;
+    match message {
+        ClientMessage::ListAccounts { request_id }
+        | ClientMessage::AddAccount { request_id, .. }
+        | ClientMessage::ActivateAccount { request_id, .. } => request_id.clone(),
+        _ => unreachable!("only the account frames are answered here"),
+    }
 }
 
 fn listing(store: &crate::store::Store, request_id: String) -> protocol::ws::ServerMessage {
     let accounts = match store.accounts() {
         Ok(accounts) => accounts,
-        Err(err) => return unavailable("read the accounts", err),
+        Err(err) => return unavailable(request_id, "read the accounts", err),
     };
     let mut active = Vec::new();
     for agent in [AgentKind::Claude, AgentKind::Codex] {
@@ -177,7 +195,7 @@ fn listing(store: &crate::store::Store, request_id: String) -> protocol::ws::Ser
                 account_id: account.id,
             }),
             Ok(None) => {}
-            Err(err) => return unavailable("read the accounts", err),
+            Err(err) => return unavailable(request_id, "read the accounts", err),
         }
     }
     protocol::ws::ServerMessage::Accounts {
@@ -194,16 +212,22 @@ fn listing(store: &crate::store::Store, request_id: String) -> protocol::ws::Ser
     }
 }
 
-fn refused(message: String) -> protocol::ws::ServerMessage {
-    protocol::ws::ServerMessage::Error {
+fn refused(request_id: String, message: String) -> protocol::ws::ServerMessage {
+    protocol::ws::ServerMessage::AccountsRefused {
+        request_id,
         code: "bad_request".into(),
         message,
     }
 }
 
-pub(crate) fn unavailable(what: &str, err: anyhow::Error) -> protocol::ws::ServerMessage {
+pub(crate) fn unavailable(
+    request_id: String,
+    what: &str,
+    err: anyhow::Error,
+) -> protocol::ws::ServerMessage {
     crate::log_error!("could not {what}: {err:#}");
-    protocol::ws::ServerMessage::Error {
+    protocol::ws::ServerMessage::AccountsRefused {
+        request_id,
         code: "accounts_unavailable".into(),
         message: format!("could not {what}: {err}"),
     }

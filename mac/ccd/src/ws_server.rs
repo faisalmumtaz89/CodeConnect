@@ -6733,10 +6733,12 @@ mod tests {
             phone.send(message).await.unwrap();
             loop {
                 let reply = next_json(phone).await.expect("a reply");
-                if reply["type"] == "accounts" || reply["type"] == "error" {
-                    if reply["type"] == "accounts" {
-                        assert_eq!(reply["request_id"], request_id, "{reply}");
-                    }
+                // Every answer to an accounts request names it, a refusal (`accounts_refused`) too.
+                if reply["type"] == "accounts"
+                    || reply["type"] == "accounts_refused"
+                    || reply["type"] == "error"
+                {
+                    assert_eq!(reply["request_id"], request_id, "{reply}");
                     break reply;
                 }
             }
@@ -6774,7 +6776,11 @@ mod tests {
             "a4",
         )
         .await;
-        assert_eq!(refused["code"], "bad_request", "{refused}");
+        assert_eq!(
+            (refused["type"].as_str(), refused["code"].as_str()),
+            (Some("accounts_refused"), Some("bad_request")),
+            "{refused}"
+        );
         let unchanged = ask(&mut phone, list("a5"), "a5").await;
         assert_eq!(unchanged["active"], chosen["active"], "{unchanged}");
 
@@ -6783,12 +6789,20 @@ mod tests {
         assert_eq!(again["accounts"], added["accounts"], "{again}");
         for label in ["   ", &"x".repeat(65)] {
             let refused = ask(&mut phone, add("a8", AgentKind::Codex, label), "a8").await;
-            assert_eq!(refused["code"], "bad_request", "{refused}");
+            assert_eq!(
+                (refused["type"].as_str(), refused["code"].as_str()),
+                (Some("accounts_refused"), Some("bad_request")),
+                "{refused}"
+            );
         }
         // An agent with no accounts here is refused, Default included.
         let other = AgentKind::from_str_lossy("gemini");
         let refused = ask(&mut phone, activate("a9", other, None), "a9").await;
-        assert_eq!(refused["code"], "bad_request", "{refused}");
+        assert_eq!(
+            (refused["type"].as_str(), refused["code"].as_str()),
+            (Some("accounts_refused"), Some("bad_request")),
+            "{refused}"
+        );
 
         let default = ask(&mut phone, activate("a6", AgentKind::Codex, None), "a6").await;
         assert_eq!(default["active"], serde_json::json!([]), "{default}");
