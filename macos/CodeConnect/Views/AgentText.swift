@@ -293,10 +293,23 @@ private struct PanningTable<Content: View>: NSViewRepresentable {
 }
 
 /// A scroll view that pans sideways and hands a wheel's mostly-vertical turns to the views around it, so the
-/// conversation under the pointer keeps scrolling.
+/// conversation under the pointer keeps scrolling. A trackpad gesture's direction is decided once, on its first event
+/// that moves, and the gesture and its momentum all go that way, so neither scroll view sees half a gesture; a wheel
+/// click, which has no phase, is judged on its own.
 final class WheelPassingScrollView: NSScrollView {
+    /// Whether the gesture under way goes to the conversation; nil until its first event that moves.
+    private var passesGesture: Bool?
+
     override func scrollWheel(with event: NSEvent) {
-        if abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX) {
+        let dx = abs(event.scrollingDeltaX)
+        let dy = abs(event.scrollingDeltaY)
+        let phased = event.phase != [] || event.momentumPhase != []
+        if event.phase == .mayBegin || event.phase == .began { passesGesture = nil }
+        if phased, passesGesture == nil, dx > 0 || dy > 0 {
+            passesGesture = dy > dx
+        }
+        let passes = phased ? passesGesture ?? (dy > dx) : dy > dx
+        if passes {
             nextResponder?.scrollWheel(with: event)
         } else {
             super.scrollWheel(with: event)
