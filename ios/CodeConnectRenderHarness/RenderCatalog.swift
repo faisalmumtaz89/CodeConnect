@@ -1598,11 +1598,11 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "codex-stop-offered-typed",
-            purpose: "a running turn with a message typed: the circle is Send, so the message can still go",
+            purpose: "a running turn with a message typed while a card waits: the draft cannot go yet, so the circle stays Stop",
             arguments: ["-CC_CODEX", "stop-offered", "-CC_DEEPLINK", "codeconnect://session/\(codexSessionKey)"],
             reach: { app, driver in
                 try driver.typeIntoComposer(app, "Also run the linter.")
-                try driver.require(app.buttons["Send"], "the circle's Send face")
+                try driver.require(app.buttons["stop-\(codexSessionKey)"], "the circle's Stop face")
             }),
         RenderScenario(
             name: "codex-stop-aborted-session",

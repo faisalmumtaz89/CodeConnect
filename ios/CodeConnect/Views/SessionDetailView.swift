@@ -2171,10 +2171,11 @@ private struct SessionComposeBar: View {
         // one is "this cancels what you started".
         if dictation.isRecording || dictation.isStarting { return .stop }
         if sending { return .sending }
-        if !text.isEmpty { return .send }
-        // While a turn runs the empty field's circle stops it, by Kit's one rule (`stopUnavailable`); a typed
-        // message is still sent, since the field's Return is a new line.
-        return model.stopUnavailable(for: key) == nil ? .stopTurn : .dictate
+        // While a turn runs the circle stops it, by Kit's one rule (`stopUnavailable`), unless a typed message can be
+        // sent now, since the field's Return is a new line; a message that must wait (the note says why) keeps Stop.
+        let canStop = model.stopUnavailable(for: key) == nil
+        if !text.isEmpty, !canStop || model.sendBlockedReason(for: key, draft: text) == nil { return .send }
+        return canStop ? .stopTurn : .dictate
     }
 
     /// Why the circle cannot act: Stop's own (on its way, or a moment after a turn changes, as Kit rules), else the
