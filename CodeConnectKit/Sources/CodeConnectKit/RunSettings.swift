@@ -75,20 +75,23 @@ public enum RunSettings: Sendable, Hashable {
                 lastOutcome: lastOutcome))
     }
 
-    /// The model a run is on, as a line names it, from structured fields only: the label of the run's menu entry
-    /// whose `value` is that model (a Codex run's), so the line and the settings button spell one model alike; else
-    /// the model id of the entry the daemon says is chosen (its `resolvedModel`), which is the id a Claude run's init
-    /// reports, and after a change the id of the entry the app set: never the text of claude's receipt, whose one job
-    /// is to confirm the change. A chosen entry the agent gives no id for reads by its label, as a menu names it: its
-    /// value can be an alias ("default", "sonnet"), which is no model's id. With no chosen entry, the model as the
+    /// The model a run is on, as a line names it, from structured fields only, and as the menu names it, so every
+    /// line and the settings button spell one model alike: the label of the entry whose `value` is that model (a
+    /// Codex run's), else of the entry that runs it (its `resolvedModel`, the id a Claude run reports). The Default
+    /// entry is never the one: its label names no model, so a run on the default model reads by the entry of the
+    /// model it runs. Claude's receipt of a change is no id: it reads by the entry the daemon says is chosen, by the
+    /// model that entry runs, and by its own label when the agent gives it no id. A model no entry names reads as the
     /// agent reported it.
     public static func modelName(confirmed: String, menus: RunMenus?) -> RunModelName {
-        if let row = menus?.models.first(where: { $0.value == confirmed }) {
-            return RunModelName(text: row.shown.label, reported: false)
+        let models = menus?.models ?? []
+        func entry(running id: String) -> MenuModel? {
+            models.first { $0.value == id } ?? models.first { $0.value != "default" && $0.resolvedModel == id }
         }
-        if let chosen = menus?.models.first(where: { $0.value == menus?.selectedModel }) {
+        if let row = entry(running: confirmed) { return RunModelName(text: row.shown.label, reported: false) }
+        if let chosen = models.first(where: { $0.value == menus?.selectedModel }) {
             guard let id = chosen.resolvedModel else { return RunModelName(text: chosen.shown.label, reported: false) }
-            return RunModelName(text: id, reported: true)
+            return entry(running: id).map { RunModelName(text: $0.shown.label, reported: false) }
+                ?? RunModelName(text: id, reported: true)
         }
         return RunModelName(text: confirmed, reported: true)
     }

@@ -195,25 +195,25 @@ final class RunSettingsTests: XCTestCase {
             RunModelName(text: "GPT-6.1-Sol", reported: false))
     }
 
-    /// A Claude run's model fact is claude's full id, which no menu entry carries: it reads as the id,
-    /// exactly as reported, while the button names the setting.
-    func testARunsModelMatchingNoEntryReadsAsReported() throws {
+    /// A Claude run's model fact is claude's full id, which no entry's value is: it reads by the label of the entry
+    /// that runs it (its `resolved_model`), as the menu names it, so the header and the button say one model.
+    func testAClaudeRunsModelReadsByTheEntryThatRunsIt() throws {
         let run = try summary("session_hosted_live_init")
         XCTAssertNotNil(run.menus)
         XCTAssertEqual(
             RunSettings.modelName(confirmed: "claude-sonnet-5-5", menus: run.menus),
-            RunModelName(text: "claude-sonnet-5-5", reported: true))
+            RunModelName(text: "Sonnet", reported: false))
     }
 
     /// Just after a change on a live run, the Mac's model fact and claude's receipt of it are one event: either
-    /// reading names the chosen entry's id.
-    func testALiveRunsChangedModelReadsAsTheIdFromEitherReading() throws {
+    /// reading names the chosen entry by its label.
+    func testALiveRunsChangedModelReadsByItsEntryFromEitherReading() throws {
         let run = try summary("session_hosted_live")
         XCTAssertEqual(run.menus?.selectedModel, "sonnet")
         for confirmed in ["claude-sonnet-5-5", "sonnet (claude-sonnet-5-5)"] {
             XCTAssertEqual(
                 RunSettings.modelName(confirmed: confirmed, menus: run.menus),
-                RunModelName(text: "claude-sonnet-5-5", reported: true), confirmed)
+                RunModelName(text: "Sonnet", reported: false), confirmed)
         }
     }
 
@@ -236,19 +236,51 @@ final class RunSettingsTests: XCTestCase {
     }
 
     /// After an app's model change a Claude run's fact is claude's receipt, which no entry carries: the run's
-    /// model reads as the id of the entry the daemon says is chosen (minor 45's `resolved_model`, from Claude
-    /// Code 2.1.319's own list), never as the receipt's text.
-    func testARunsModelAfterAChangeReadsAsTheChosenEntrysID() throws {
+    /// model reads by the entry the daemon says is chosen, by the model it runs (minor 45's `resolved_model`, from
+    /// Claude Code 2.1.319's own list), never as the receipt's text.
+    func testARunsModelAfterAChangeReadsByTheChosenEntry() throws {
         let run = try summary("session_hosted_live")
         XCTAssertEqual(run.model?.value, "claude-sonnet-5-5")
         XCTAssertEqual(run.menus?.selectedModel, "sonnet")
         XCTAssertEqual(
             RunSettings.modelName(confirmed: "sonnet (claude-sonnet-5-5)", menus: run.menus),
-            RunModelName(text: "claude-sonnet-5-5", reported: true))
+            RunModelName(text: "Sonnet", reported: false))
         guard case .hostedLive(let s) = RunSettings.of(
             summary: run, confirmed: "sonnet (claude-sonnet-5-5)") else { return XCTFail("hostedLive") }
-        XCTAssertEqual(s.modelDisplay, "claude-sonnet-5-5")
-        XCTAssertTrue(s.modelDisplayReported)
+        XCTAssertEqual(s.modelDisplay, "Sonnet")
+        XCTAssertFalse(s.modelDisplayReported)
+    }
+
+    /// The Default entry names no model, so a run on the default model reads by the entry of the model it runs
+    /// ("Opus"), whether the fact is the id or claude's receipt; with no other entry for that model it reads as the
+    /// id, as reported.
+    func testARunOnTheDefaultModelReadsByTheEntryOfTheModelItRuns() throws {
+        var frame = try XCTUnwrap(try wire()["session_hosted_live"]?.objectValue)
+        var menus = try XCTUnwrap(frame["menus"]?.objectValue)
+        menus["selected_model"] = .string("default")
+        frame["menus"] = .object(menus)
+        func decoded() throws -> SessionSummary {
+            try JSONDecoder().decode(SessionSummary.self, from: Data(JSONValue.object(frame).canonicalJSONString.utf8))
+        }
+        XCTAssertEqual(try decoded().menus?.models.first?.resolvedModel, "claude-opus-5-5")
+        for confirmed in ["claude-opus-5-5", "default (claude-opus-5-5)"] {
+            XCTAssertEqual(
+                RunSettings.modelName(confirmed: confirmed, menus: try decoded().menus),
+                RunModelName(text: "claude-opus-5-5", reported: true), confirmed)
+        }
+        menus["models"] = .array(
+            try XCTUnwrap(menus["models"]?.arrayValue) + [
+                .object([
+                    "value": .string("opus"), "label": .string("Opus"), "efforts": .array([]),
+                    "resolved_model": .string("claude-opus-5-5"),
+                ])
+            ])
+        frame["menus"] = .object(menus)
+        for confirmed in ["claude-opus-5-5", "default (claude-opus-5-5)"] {
+            XCTAssertEqual(
+                RunSettings.modelName(confirmed: confirmed, menus: try decoded().menus),
+                RunModelName(text: "Opus", reported: false), confirmed)
+        }
     }
 
     /// A chosen entry the agent gives no model id for (a Claude Code that lists no `resolvedModel`) reads by its
