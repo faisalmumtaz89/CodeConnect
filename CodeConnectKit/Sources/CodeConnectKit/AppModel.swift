@@ -3545,7 +3545,9 @@ public final class AppModel {
     private func menuLabel(key: String, setting: SettingKind, value: String) -> String {
         let menus = summary(for: key)?.menus
         switch setting {
-        case .model: return menus?.models.first { $0.value == value }?.label ?? value
+        case .model:
+            return menus?.models.first { $0.value == value }
+                .map { RunSettings.modelName(label: $0.label, detail: $0.detail) } ?? value
         case .mode: return menus?.modes.first { $0.value == value }?.label ?? value
         case .effort: return EffortConfirmation.label(for: value)
         }

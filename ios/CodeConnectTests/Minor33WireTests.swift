@@ -118,8 +118,10 @@ final class Minor33WireTests: XCTestCase {
         let claude = context.modelChoices.filter { $0.agent == .claude }
         XCTAssertEqual(context.title(claude[0]), "Claude Code · Default")
         XCTAssertEqual(StartContext.starts(claude[0]), "Starts Claude Code with its default model.")
-        XCTAssertEqual(context.title(claude[1]), "Claude Code · Opus")
-        XCTAssertEqual(StartContext.starts(claude[1]), "Starts Claude Code with Opus.")
+        XCTAssertEqual(context.title(claude[1]), "Claude Code · Opus 5.5")
+        XCTAssertEqual(StartContext.starts(claude[1]), "Starts Claude Code with Opus 5.5.")
+        XCTAssertEqual(claude[1].name, "Opus 5.5")
+        XCTAssertEqual(claude[1].label, "Opus", "the menu's row keeps the agent's label")
         let codexDefault = try XCTUnwrap(context.modelChoices.first { $0.agent == .codex })
         XCTAssertEqual(context.title(codexDefault), "Codex · Default")
         XCTAssertEqual(StartContext.starts(codexDefault), "Starts Codex with its default model.")

@@ -66,10 +66,10 @@ public enum RunSettings: Sendable, Hashable {
         let selectedEffort = summary.effort
             .flatMap { fact in efforts.first { $0.value == fact.value } }
         // The one string drawn for the run's model — the button, the header: the model the run is on once
-        // it has said so, by `modelName`; before that the selected entry's label, and the fact as sent only when
+        // it has said so, by `modelName`; before that the selected entry's name, and the fact as sent only when
         // the daemon named no selection. "Default" is a row of the menu, never the run's model.
         let modelDisplay = confirmed.map { modelName(confirmed: $0, menus: menus) }
-            ?? selectedModel.map { RunModelName(text: $0.label, reported: false) }
+            ?? selectedModel.map { RunModelName(text: modelName(label: $0.label, detail: $0.detail), reported: false) }
             ?? RunModelName(text: summary.model?.value ?? "", reported: summary.model != nil)
 
         return .hostedLive(
@@ -82,11 +82,12 @@ public enum RunSettings: Sendable, Hashable {
     }
 
     /// The model a run is on, as a line names it, from structured fields only, and as the menu names it, so every
-    /// line and the settings button spell one model alike: the label of the entry whose `value` is that model (a
-    /// Codex run's), else of the entry that runs it (its `resolvedModel`, the id a Claude run reports). The Default
+    /// line and the settings button spell one model alike: the name (`modelName(label:detail:)`) of the entry whose
+    /// `value` is that model (a Codex run's), else of the entry that runs it (its `resolvedModel`, the id a Claude run
+    /// reports). The Default
     /// entry is never the one: its label names no model, so a run on the default model reads by the entry of the
     /// model it runs. Claude's receipt of a change is no id: it reads by the entry the daemon says is chosen, by the
-    /// model that entry runs, and by its own label when the agent gives it no id. A run sent no menus (not live)
+    /// model that entry runs, and by its own name when the agent gives it no id. A run sent no menus (not live)
     /// reads by the label the daemon names its model by (`label`, minor 46). A model no entry names reads as the
     /// agent reported it.
     public static func modelName(confirmed: String, menus: RunMenus?, label: String? = nil) -> RunModelName {
@@ -94,14 +95,27 @@ public enum RunSettings: Sendable, Hashable {
         func entry(running id: String) -> MenuModel? {
             models.first { $0.value == id } ?? models.first { $0.value != "default" && $0.resolvedModel == id }
         }
-        if let row = entry(running: confirmed) { return RunModelName(text: row.shown.label, reported: false) }
+        func named(_ row: MenuModel) -> RunModelName {
+            RunModelName(text: modelName(label: row.shown.label, detail: row.detail), reported: false)
+        }
+        if let row = entry(running: confirmed) { return named(row) }
         if let chosen = models.first(where: { $0.value == menus?.selectedModel }) {
-            guard let id = chosen.resolvedModel else { return RunModelName(text: chosen.shown.label, reported: false) }
-            return entry(running: id).map { RunModelName(text: $0.shown.label, reported: false) }
-                ?? RunModelName(text: id, reported: true)
+            guard let id = chosen.resolvedModel else { return named(chosen) }
+            return entry(running: id).map(named) ?? RunModelName(text: id, reported: true)
         }
         if menus == nil, let label { return RunModelName(text: label, reported: false) }
         return RunModelName(text: confirmed, reported: true)
+    }
+
+    /// **The one rule a model is named by**, wherever an app names one (ccd names an ended run's model by the same
+    /// rule): the part of its entry's description before the first " · " (the whole description when it has none),
+    /// when that part begins with the entry's label; otherwise the entry's label. Claude Code's "Sonnet" reads by
+    /// its description's "Sonnet 5.5"; a label its description does not repeat ("Qwen3.8-27B", a Codex model's) stays
+    /// as it is, and so does Default, whose description names the model it runs. The menu's own rows show the label
+    /// and the description as the agent wrote them.
+    public static func modelName(label: String, detail: String?) -> String {
+        guard let first = detail?.components(separatedBy: " · ").first, first.hasPrefix(label) else { return label }
+        return first
     }
 }
 
@@ -127,7 +141,7 @@ public struct HostedSettings: Sendable, Hashable {
     public let efforts: [EffortChoice]
     public let selectedEffort: EffortChoice?
     /// The model string for a single-line surface (the button, the header): the model the run has
-    /// confirmed, by `RunSettings.modelName`; before it has, the selected row's label, or the fact as sent
+    /// confirmed, by `RunSettings.modelName`; before it has, the selected row's name, or the fact as sent
     /// when nothing matched.
     public let modelDisplay: String
     /// `modelDisplay` is the agent's own report of the model, not a row's label: drawn in code type.

@@ -48,7 +48,7 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(s.selectedMode?.value, "plan")
         XCTAssertEqual(s.selectedEffort?.value, "high")
         // Display names, from the one place each already lives.
-        XCTAssertEqual(s.modelDisplay, "Sonnet")
+        XCTAssertEqual(s.modelDisplay, "Sonnet 5.5")
         XCTAssertEqual(s.selectedEffort?.label, "High")
         // The selected model's efforts are labelled: raw "xhigh"/"max" read as "Extra high"/"Maximum".
         XCTAssertEqual(
@@ -114,7 +114,7 @@ final class RunSettingsTests: XCTestCase {
             return XCTFail("a live hosted run with menus is hostedLive")
         }
         XCTAssertEqual(s.selectedModel?.value, "sonnet", "selection follows selected_model, not the fact")
-        XCTAssertEqual(s.modelDisplay, "Sonnet")
+        XCTAssertEqual(s.modelDisplay, "Sonnet 5.5")
         XCTAssertEqual(s.selectedEffort?.value, "high")
         XCTAssertEqual(s.selectedMode?.value, "plan")
     }
@@ -132,17 +132,17 @@ final class RunSettingsTests: XCTestCase {
     }
 
     /// **An ended run names its model as its menu did (minor 46)**, from the daemon's own `minor-46-wire.json`:
-    /// a run on the default model reads "Opus" while live, by its menu, and once it has ended, by the daemon's
+    /// a run on the default model reads "Opus 5.5" while live, by its menu, and once it has ended, by the daemon's
     /// `model_label`, both in the header and in the reply box's read-only label. Must-fail: a build that draws
     /// an ended run's fact as reported reads `claude-opus-5-5`.
     func testAnEndedRunReadsByTheLabelTheDaemonNamesItsModelBy() throws {
         let live = try summary("session_hosted_live", in: "minor-46-wire")
         let ended = try summary("session_hosted_ended", in: "minor-46-wire")
-        let opus = RunModelName(text: "Opus", reported: false)
+        let opus = RunModelName(text: "Opus 5.5", reported: false)
         XCTAssertEqual(RunSettings.modelName(confirmed: "claude-opus-5-5", menus: live.menus), opus)
         XCTAssertNil(ended.menus)
         XCTAssertEqual(ended.model?.value, "claude-opus-5-5")
-        XCTAssertEqual(ended.modelLabel, "Opus")
+        XCTAssertEqual(ended.modelLabel, "Opus 5.5")
         XCTAssertEqual(
             RunSettings.modelName(confirmed: "claude-opus-5-5", menus: ended.menus, label: ended.modelLabel), opus)
         XCTAssertEqual(RunSettings.of(summary: ended), .hostedReadOnly(model: opus))
@@ -191,7 +191,7 @@ final class RunSettingsTests: XCTestCase {
         else { return XCTFail("a live hosted Claude run is hostedLive") }
         XCTAssertEqual(plan.standingMode?.value, "plan")
         XCTAssertEqual(plan.standingMode?.confirm, false, "Plan is not a confirm mode")
-        XCTAssertEqual(plan.modelDisplay, "Sonnet")
+        XCTAssertEqual(plan.modelDisplay, "Sonnet 5.5")
 
         // A confirm mode: named, confirm-marked — the view draws it red.
         guard case .hostedLive(let full) = RunSettings.of(
@@ -219,7 +219,7 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertNotNil(run.menus)
         XCTAssertEqual(
             RunSettings.modelName(confirmed: "claude-sonnet-5-5", menus: run.menus),
-            RunModelName(text: "Sonnet", reported: false))
+            RunModelName(text: "Sonnet 5.5", reported: false))
     }
 
     /// Just after a change on a live run, the Mac's model fact and claude's receipt of it are one event: either
@@ -230,7 +230,7 @@ final class RunSettingsTests: XCTestCase {
         for confirmed in ["claude-sonnet-5-5", "sonnet (claude-sonnet-5-5)"] {
             XCTAssertEqual(
                 RunSettings.modelName(confirmed: confirmed, menus: run.menus),
-                RunModelName(text: "Sonnet", reported: false), confirmed)
+                RunModelName(text: "Sonnet 5.5", reported: false), confirmed)
         }
     }
 
@@ -261,10 +261,10 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(run.menus?.selectedModel, "sonnet")
         XCTAssertEqual(
             RunSettings.modelName(confirmed: "sonnet (claude-sonnet-5-5)", menus: run.menus),
-            RunModelName(text: "Sonnet", reported: false))
+            RunModelName(text: "Sonnet 5.5", reported: false))
         guard case .hostedLive(let s) = RunSettings.of(
             summary: run, confirmed: "sonnet (claude-sonnet-5-5)") else { return XCTFail("hostedLive") }
-        XCTAssertEqual(s.modelDisplay, "Sonnet")
+        XCTAssertEqual(s.modelDisplay, "Sonnet 5.5")
         XCTAssertFalse(s.modelDisplayReported)
     }
 
@@ -337,6 +337,36 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(
             RunSettings.modelName(confirmed: "stub-model", menus: run.menus),
             RunModelName(text: "stub-model", reported: false))
+    }
+
+    /// **A model is named in full, never by its family alone**: by the first part of its entry's description, up to
+    /// " · ", when that part begins with the entry's label; otherwise by the label. The entries are Claude Code's own,
+    /// a local model's, a Command Code model's and a Codex model's; Default names no model.
+    func testAModelIsNamedByItsDescriptionsFirstPartWhenItBeginsWithItsLabel() {
+        let cases: [(label: String, detail: String?, named: String)] = [
+            ("Sonnet", "Sonnet 5.5 · Efficient for routine tasks", "Sonnet 5.5"),
+            ("Opus", "Opus 5.5 · Best for everyday, complex tasks", "Opus 5.5"),
+            ("Fable", "Fable 5.2 · Most capable for your hardest work", "Fable 5.2"),
+            ("Haiku", "Haiku 5.5 · Fastest for quick answers", "Haiku 5.5"),
+            ("Haiku", "Haiku 5.5", "Haiku 5.5"),
+            ("Qwen3.8-27B", "Local model on the box", "Qwen3.8-27B"),
+            ("GLM-5.3 · Command Code", "Command Code API, 1M context", "GLM-5.3 · Command Code"),
+            ("GPT-6.1-Sol", "Latest workhorse model for coding and everyday work.", "GPT-6.1-Sol"),
+            ("Sonnet", nil, "Sonnet"),
+            ("Sonnet", "", "Sonnet"),
+        ]
+        for (label, detail, named) in cases {
+            let menus = RunMenus(
+                models: [MenuModel(value: "m", label: label, efforts: [], detail: detail)], modes: [], selectedModel: "m")
+            XCTAssertEqual(
+                RunSettings.modelName(confirmed: "m", menus: menus), RunModelName(text: named, reported: false),
+                "\(label) / \(detail ?? "nil")")
+        }
+        let defaultEntry = MenuModel(
+            value: "default", label: "Default (recommended)", efforts: [],
+            detail: "Opus 5.5 · Best for everyday, complex tasks")
+        XCTAssertEqual(defaultEntry.shown.label, "Default")
+        XCTAssertEqual(RunSettings.modelName(label: defaultEntry.shown.label, detail: defaultEntry.detail), "Default")
     }
 
     /// Each menu row carries the agent's own description, exactly as the daemon sent it from the agent:
