@@ -273,6 +273,9 @@ private struct ClosesPanel: ViewModifier {
     @State private var light = PanelLight()
     @State private var monitor: Any?
     @State private var resizing: NSObjectProtocol?
+    /// The window's asks: while one is up (a name asked for from inside a panel), the clicks and keys are the ask's,
+    /// and the panel waits behind it.
+    @Environment(ConfirmationQueue.self) private var asks: ConfirmationQueue?
 
     func body(content: Content) -> some View {
         content
@@ -293,13 +296,21 @@ private struct ClosesPanel: ViewModifier {
         let frames = frames
         let close = $open
         let light = light
+        let asks = asks
         light.opened()
         // The window the panel opened in, which had the keyboard: keys typed in another window are that window's.
         let window = NSApp.keyWindow
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]) {
             event in
-            // A scroll closes it: an open panel never moves with, or hides behind, what scrolls under it.
+            if MainActor.assumeIsolated({ asks?.isAsking == true }) { return event }
+            // A scroll elsewhere closes it: an open panel never moves with, or hides behind, what scrolls under it. A
+            // scroll over the panel scrolls the panel.
             if event.type == .scrollWheel {
+                if let view = event.window?.contentView {
+                    let point = view.convert(event.locationInWindow, from: nil)
+                    let top = CGPoint(x: point.x, y: view.isFlipped ? point.y : view.bounds.height - point.y)
+                    if frames.panel.contains(top) { return event }
+                }
                 close.wrappedValue = false
                 return event
             }
@@ -327,10 +338,18 @@ private struct ClosesPanel: ViewModifier {
             }
             return event
         }
-        // A resize closes it too: a panel never outlives the geometry it was placed from.
+        // A resize of a window of the app's own closes it too: a panel never outlives the geometry it was placed from.
+        // Not the system's helper windows, which a text field that takes the keyboard shows and sizes (its input
+        // and suggestion bubbles): those can't become main.
         resizing = NotificationCenter.default.addObserver(
             forName: NSWindow.didResizeNotification, object: nil, queue: .main
-        ) { _ in MainActor.assumeIsolated { close.wrappedValue = false } }
+        ) { note in
+            let resized = (note.object as? NSWindow).map(ObjectIdentifier.init)
+            MainActor.assumeIsolated {
+                guard NSApp.windows.first(where: { ObjectIdentifier($0) == resized })?.canBecomeMain == true else { return }
+                close.wrappedValue = false
+            }
+        }
     }
 
     private func stop() {
@@ -786,4 +805,15 @@ struct CopyButton: View {
             copied = false
         }
     }
+}
+
+/// The keyboard given by code to a field that holds words: the caret goes at the end of them, a turn later, once AppKit's
+/// select-all for a field made first responder by code is done, so the next key adds to the words and never replaces
+/// them. Not where the caret was: a vertical field's selection binding does not report the caret, so where it was
+/// cannot be known.
+@MainActor
+func giveKeyboard(_ focused: FocusState<Bool>.Binding, caret selection: Binding<TextSelection?>, endOf text: String) {
+    focused.wrappedValue = true
+    let end = text.endIndex
+    DispatchQueue.main.async { selection.wrappedValue = TextSelection(insertionPoint: end) }
 }

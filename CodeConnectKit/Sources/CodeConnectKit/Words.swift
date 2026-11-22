@@ -253,6 +253,8 @@ public enum StartWords {
     public static let from = "From"
     public static let changes = "Changes"
     public static let changesStay = "Uncommitted changes stay where they are"
+    /// Start waits for the first message: no start goes without one (decision 169).
+    public static let writeTheFirstMessage = "Write the first message."
     public static let nameTheWorktree = "Name the worktree."
     public static let nameBreaksTheRule = "The name breaks the rule above."
 

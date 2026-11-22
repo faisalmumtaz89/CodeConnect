@@ -19,6 +19,8 @@ struct CodeConnectApp: App {
     @State private var filter: FleetFilter?
     @State private var opened: String?
     @State private var pendingAdd: AddKind?
+    /// The window's start of an agent: what is chosen and typed, and the start sent.
+    @State private var startDraft = StartDraft()
     @State private var started = false
 
     /// `machines` is made here, after a test launch has chosen its keychain and its data folder,
@@ -46,7 +48,9 @@ struct CodeConnectApp: App {
     var body: some Scene {
         // The app's one window: no New Window, and no window tabs.
         Window("CodeConnect", id: "main") {
-            RootView(scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd, settings: $settings)
+            RootView(
+                scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd, settings: $settings,
+                startDraft: startDraft)
                 .environment(machines)
                 .environment(setup)
                 .preferredColorScheme(.dark)
@@ -110,9 +114,12 @@ struct RootView: View {
     @Binding var opened: String?
     @Binding var pendingAdd: AddKind?
     @Binding var settings: SettingsSection?
+    let startDraft: StartDraft
 
     var body: some View {
-        MainWindow(scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd, settings: $settings)
+        MainWindow(
+            scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd, settings: $settings,
+            startDraft: startDraft)
             .confirmationHost()
             .frame(minWidth: 960, minHeight: 520)
             // A cold launch's splash, over the window from its first frame: until it is over, no control under it

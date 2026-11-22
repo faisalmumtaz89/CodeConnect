@@ -888,7 +888,7 @@ public final class AppModel {
         }
 
         /// The fixture answer to `start_session`. `-CC_START_OUTCOME` names a
-        /// failure to end in, or `pending` to stay starting; otherwise the start
+        /// failure to end in, `trust` for the folder question (asked once: the answered resend starts), or `pending` to stay starting; otherwise the start
         /// succeeds and the new session arrives as a real one does: listed,
         /// then its first events.
         func answerFixtureStart(_ requestID: String) {
@@ -898,6 +898,10 @@ public final class AppModel {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(wanted == nil ? 1500 : 600))
                 guard let self else { return }
+                if wanted == "trust", start.trust == nil {
+                    self.starter.resolve(requestID, .needsTrust(path: start.project.path))
+                    return
+                }
                 if let wanted, let reason = StartFailure(rawValue: wanted) {
                     self.starter.resolve(
                         requestID, .failed(reason, detail: Fixtures.startFailureDetail(reason, start)))
@@ -1288,6 +1292,18 @@ public final class AppModel {
         #endif
         sendStart(requestID)
         return requestID
+    }
+
+    /// A start stopped retrying, sent again under its own id (`SessionStarter.resume`).
+    public func resumeStart(_ requestID: String) {
+        starter.resume(requestID)
+        #if DEBUG
+            if fixturesActive {
+                answerFixtureStart(requestID)
+                return
+            }
+        #endif
+        sendStart(requestID)
     }
 
     /// One send of one start. A send that fails, or a link that drops before

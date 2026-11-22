@@ -1,16 +1,20 @@
 import CodeConnectKit
 import SwiftUI
 
-/// The main window: the sidebar's agents, computers and projects, and the fleet's runs beside it, or Settings in their
-/// place; before any computer is paired, what to do first in the list's place. Agents and computers are added the
-/// same way: the + on their sidebar section, one sheet, and File > New Agent (⌘N) and Add Computer (⇧⌘N); an iPhone
-/// from File > Add iPhone.
+/// The main window: the sidebar's agents, computers and projects, the fleet's runs beside it, and the run open beside
+/// them, or with none open the start form (`StartPane`); or Settings in the place of the list and the main area
+/// together; before any computer is paired, what to do first in the list's place. An agent is started from the start
+/// form: the + on the sidebar's Agents and File > New Agent (⌘N) leave Settings, close the open run and give the form the
+/// keyboard. A computer is added from a sheet: the + on Computers and File > Add Computer (⇧⌘N); an iPhone from File >
+/// Add iPhone.
 struct MainWindow: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
     /// The one "…" menu a row of the list or the sidebar opens, drawn over the whole window.
     @State private var rowMenu = RowMenu()
     @State private var adding: AddKind?
+    /// The window's start of an agent, the app's, so a closed window opens on the same start.
+    let startDraft: StartDraft
     /// The address Add a computer starts with, when a refused computer asked to pair again.
     @State private var repairing: String?
     /// The list, what it is narrowed to, and the run open beside it: the app's, so a closed window opens on them again.
@@ -43,9 +47,10 @@ struct MainWindow: View {
 
     init(
         scope: Binding<FleetScope>, filter: Binding<FleetFilter?>, opened: Binding<String?>, pendingAdd: Binding<AddKind?>,
-        settings: Binding<SettingsSection?>
+        settings: Binding<SettingsSection?>, startDraft: StartDraft
     ) {
         _settings = settings
+        self.startDraft = startDraft
         _scope = scope
         _filter = filter
         _opened = opened
@@ -74,17 +79,20 @@ struct MainWindow: View {
                 let showsRun = model != nil && !runHidden
                 // The list hides only beside a run that shows: the window is never left empty.
                 let showsList = !listHidden || !showsRun
+                // With no run open, the start form is beside the list.
+                let showsStart = open == nil
                 if showsList {
                     FleetList(
                         scope: $scope, grouping: $grouping, filter: $filter, opened: $opened, pairAgain: pairAgain
                     ) { adding = .agent }
                         // Kept when the person changes it, never at launch.
                         .onChange(of: grouping) { _, kind in kind.keep(in: .standard) }
-                        // Beside an open run the list gives way first: the pane keeps room for a card's answers in
-                        // one row (450), and the list takes what is left, between what its rows still read at (290)
-                        // and 580.
-                        .frame(width: showsRun ? min(580, max(290, width - (sidebarHidden ? 0 : 218) - 450)) : nil)
-                        .environment(\.headerClearance, clearance(first: sidebarHidden, last: !showsRun))
+                        // Beside an open run, or the start form, the list gives way first: the pane keeps room for a
+                        // card's answers in one row (450), and the list takes what is left, between what its rows still
+                        // read at (290) and 580.
+                        .frame(
+                            width: showsRun || showsStart ? min(580, max(290, width - (sidebarHidden ? 0 : 218) - 450)) : nil)
+                        .environment(\.headerClearance, clearance(first: sidebarHidden, last: !showsRun && !showsStart))
                         // The arrows open a run; Return then puts the cursor in its reply box.
                         .onKeyPress(.return) {
                             guard opened != nil else { return .ignored }
@@ -98,6 +106,9 @@ struct MainWindow: View {
                         .id(open.id)
                         .environment(\.replyFocusRequest, replyFocus)
                         .environment(\.headerClearance, clearance(first: sidebarHidden && !showsList, last: true))
+                } else if showsStart {
+                    if showsList { Rectangle().fill(Theme.hairline).frame(width: 1) }
+                    StartPane(draft: startDraft, addComputer: { adding = .computer }, started: started)
                 }
             } else {
                 EmptyFleet(adding: $adding)
@@ -169,6 +180,19 @@ struct MainWindow: View {
         // host, which closes with every other panel.
         .environment(\.agentsShown, settings == nil)
         .focusedSceneValue(\.adding, $adding)
+        // New Agent is the start form in the main area: Settings and the open run close, and the form takes the
+        // keyboard. Before any computer is added there is no form: New Agent adds a computer first.
+        .onChange(of: adding, initial: true) { _, kind in
+            guard kind == .agent else { return }
+            guard machines.showsFleet else {
+                adding = .computer
+                return
+            }
+            adding = nil
+            settings = nil
+            opened = nil
+            startDraft.requestKeyboard()
+        }
         .onChange(of: pendingAdd != nil, initial: true) {
             guard let pendingAdd else { return }
             adding = pendingAdd
@@ -181,6 +205,14 @@ struct MainWindow: View {
             chosen = nil
             // A run opened shows, even with its pane hidden; with none open, the list shows again.
             if opened != nil { runHidden = false } else { listHidden = false }
+            // The start's own run, opened from the list as it launches: the start is done, so New Agent shows a fresh
+            // form rather than the start's progress opening it again.
+            if let opened, let id = startDraft.sent?.requestID,
+                case .started(let uid, _)? = machines.models.lazy.compactMap({ $0.starter.starts[id] }).first?.outcome,
+                uid == opened
+            {
+                startDraft.didOpen()
+            }
         }
         // A computer removed, here or from Settings: the list lets go of its narrowing to it and of its run, which
         // has left the list with it.
@@ -215,6 +247,14 @@ struct MainWindow: View {
                 settings = .general
             }
             .task {
+                guard RenderWindow.resizeAfter > 0 else { return }
+                try? await Task.sleep(for: .seconds(RenderWindow.resizeAfter))
+                guard let window = NSApp.windows.first(where: \.canBecomeMain) else { return }
+                var frame = window.frame
+                frame.size.width += 40
+                window.setFrame(frame, display: true)
+            }
+            .task {
                 // A test launch's fleet is in place a moment after the window is.
                 try? await Task.sleep(for: .seconds(1))
                 let active = FleetScope.active.rows(machines.fleet)
@@ -226,12 +266,7 @@ struct MainWindow: View {
             }
         #endif
         .sheet(item: $adding, onDismiss: { repairing = nil }) { kind in
-            AddSheet(kind: kind, address: $repairing) { run in
-                // The run just started is open, in the list of every active agent, unfiltered.
-                scope = .active
-                filter = nil
-                opened = run
-            }
+            AddSheet(kind: kind, address: $repairing)
             // A sheet stands in the middle of the window: clear of the 52-point header above it, so as far from the
             // bottom edge.
             .environment(\.sheetRoom, height - 2 * 52)
@@ -239,6 +274,14 @@ struct MainWindow: View {
                     .renderLook()
                 #endif
         }
+    }
+
+    /// The run just started is open, in the list of every active agent, unfiltered.
+    private func started(_ run: String) {
+        startDraft.didOpen()
+        scope = .active
+        filter = nil
+        opened = run
     }
 
     /// A run's tab. It is another than the conversation only while that run is the one it was chosen on, so a run
@@ -272,13 +315,14 @@ extension MainWindow {
 }
 
 extension FocusedValues {
-    /// What the main window is adding: the File menu's New Agent, Add Computer and Add iPhone open its sheet.
+    /// What the main window is adding: the File menu's New Agent opens its start form; Add Computer and Add iPhone its
+    /// sheet.
     @Entry var adding: Binding<AddKind?>?
 }
 
 /// File > New Agent (⌘N), Add Computer (⇧⌘N) and Add iPhone, in place of New Window: the app has one window,
-/// and these open its sheet, opening the window first when it is closed or behind another. Unavailable while its
-/// sheet is open.
+/// and these open its start form or its sheet, opening the window first when it is closed or behind another.
+/// Unavailable while its sheet is open.
 struct AddCommands: Commands {
     @FocusedValue(\.adding) private var adding
     @Environment(\.openWindow) private var openWindow
