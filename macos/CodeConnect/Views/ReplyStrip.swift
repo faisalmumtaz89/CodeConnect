@@ -10,15 +10,17 @@ struct ReplyStripFacts: Equatable {
         var share: Double { size > 0 ? Double(used) / Double(size) : 0 }
     }
 
-    /// One usage window, as the agent names it: its length, the share used.
+    /// One usage window, as the agent names it: its length, the share used, and its own name where it gives one (a
+    /// window for one model, say).
     struct Window: Equatable {
         let minutes: Int
         let share: Double
+        var name: String? = nil
     }
 
     /// nil: not reported yet.
     var context: Context?
-    /// nil: the agent reports no windows (Claude Code today), and the Limits group is left out.
+    /// nil: not reported yet.
     var windows: [Window]?
     /// The email of the account the run's process runs on; nil while unknown.
     var email: String?
@@ -106,17 +108,20 @@ struct ReplyStrip: View {
         })
     }
 
-    /// "Limits used": the figures are the share used in every layout, with a meter or without. Absent while the agent
-    /// reports no windows: a group that would never fill isn't drawn.
+    /// "Limits used": the figures are the share used in every layout, with a meter or without. Each window the agent
+    /// names, however many; "Not reported yet" until it has named one.
     private func limitsGroup(_ layout: Layout) -> AnyView? {
-        guard let windows = facts.windows, !windows.isEmpty else { return nil }
-        return AnyView(group("Limits used") {
-            ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
-                HStack(spacing: 6) {
-                    figure(Self.caption(minutes: window.minutes), Theme.text3)
-                    if layout == .full || layout == .short { Matrix(share: window.share, columns: layout == .full ? 14 : 8) }
-                    figure(Self.percent(window.share), Self.tone(window.share, else: Theme.text))
+        AnyView(group("Limits used") {
+            if let windows = facts.windows, !windows.isEmpty {
+                ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
+                    HStack(spacing: 6) {
+                        figure(Self.caption(window), Theme.text3)
+                        if layout == .full || layout == .short { Matrix(share: window.share, columns: layout == .full ? 14 : 8) }
+                        figure(Self.percent(window.share), Self.tone(window.share, else: Theme.text))
+                    }
                 }
+            } else {
+                notReported(layout)
             }
         })
     }
@@ -161,7 +166,11 @@ struct ReplyStrip: View {
 
     // MARK: Words
 
-    /// A window's caption from its own length, as the agent names it: "5-hour", "Week", else hours or days.
+    /// A window's caption: the name the service gives it, else its own length ("5-hour", "Week", else hours or days).
+    static func caption(_ window: ReplyStripFacts.Window) -> String {
+        window.name ?? caption(minutes: window.minutes)
+    }
+
     static func caption(minutes: Int) -> String {
         switch minutes {
         case 300: "5-hour"
