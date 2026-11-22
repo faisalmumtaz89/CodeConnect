@@ -208,6 +208,9 @@ struct StartForm: View {
         #endif
         // Another computer browses from its own home.
         .onChange(of: context?.id) { browsing = false }
+        // The computer picker is drawn only while there is more than one computer: when one goes away, it is closed,
+        // not left open unseen with Start waiting on it.
+        .onChange(of: contexts.count) { _, count in if count < 2 { computerMenuOpen = false } }
         // New Agent: the first message takes the keyboard, a turn after the form draws, and no panel stays open. Taken
         // once, whether the form was there before the request or comes with it.
         .onAppear { takeKeyboard() }
