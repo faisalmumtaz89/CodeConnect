@@ -177,6 +177,7 @@ struct HostedSettingsButton: View {
             options: settings.efforts, chosen: settings.selectedEffort, fill: Theme.window.opacity(0.6),
             firstPanelRow: settings.models.count,
             id: { "session.composer.effort.\($0.value)" },
+            offers: settings.offers,
             choose: { effort in choose { _ = await model.setEffort(for: key, effortValue: effort.value) } }
         ) { effort, chosen in
             Text(effort.label).font(Theme.ui(11.5)).lineLimit(1)

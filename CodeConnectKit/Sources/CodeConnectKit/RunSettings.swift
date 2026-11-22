@@ -150,6 +150,13 @@ public struct HostedSettings: Sendable, Hashable {
     /// `selectedEffort` is the chosen model's own default, not one the run was set to (decision 318): the agent named
     /// no effort, or one this model does not offer. The panel then names it as the default; the lines name its level.
     public let effortIsDefault: Bool
+
+    /// Whether choosing this effort sends it (decision 318): any effort but the one the run was set to. The model's
+    /// default, marked while none is chosen, can be chosen, so the level becomes the person's own and stays when the
+    /// model changes.
+    public func offers(_ effort: EffortChoice) -> Bool {
+        effort != selectedEffort || effortIsDefault
+    }
     /// The model string for a single-line surface (the button, the header): the model the run has
     /// confirmed, by `RunSettings.modelName`; before it has, the selected row's name, or the fact as sent
     /// when nothing matched.

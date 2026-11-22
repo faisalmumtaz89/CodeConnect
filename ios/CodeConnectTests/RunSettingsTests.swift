@@ -483,4 +483,22 @@ final class RunSettingsTests: XCTestCase {
         else { return XCTFail("a live Claude run") }
         XCTAssertFalse(fable.effortIsDefault)
     }
+
+    /// **The marked default can be chosen** (decision 318): choosing it sends that level as the person's own; a level
+    /// the run was set to is not offered again; every other level is.
+    func testTheMarkedDefaultIsOfferedAsAChoiceAndAChosenLevelIsNot() throws {
+        guard case .hostedLive(let unset) = RunSettings.of(
+            summary: try summary("session_codex_live", in: "codex-settings-wire", effort: nil))
+        else { return XCTFail("a live Codex run") }
+        let low = try XCTUnwrap(unset.selectedEffort)
+        XCTAssertTrue(unset.effortIsDefault)
+        XCTAssertTrue(unset.offers(low), "the marked default is offered as a choice")
+        XCTAssertTrue(unset.efforts.allSatisfy(unset.offers), "every level is offered while none is chosen")
+
+        guard case .hostedLive(let chosen) = RunSettings.of(
+            summary: try summary("session_codex_live", in: "codex-settings-wire", effort: "low"))
+        else { return XCTFail("a live Codex run") }
+        XCTAssertFalse(chosen.offers(try XCTUnwrap(chosen.selectedEffort)), "a chosen level is not offered again")
+        XCTAssertEqual(chosen.efforts.filter(chosen.offers).count, chosen.efforts.count - 1)
+    }
 }

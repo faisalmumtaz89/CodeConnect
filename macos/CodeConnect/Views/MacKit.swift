@@ -165,6 +165,9 @@ struct SegmentedTrack<Option: Equatable, Segment: View>: View {
     /// chosen one never lit, and the panel's light stands for the pointer's lightening.
     var firstPanelRow: Int? = nil
     let id: (Option) -> String
+    /// Whether clicking an option chooses it: any but the chosen one, unless the caller offers that too (an effort
+    /// marked as the model's default, which choosing makes the person's own).
+    var offers: ((Option) -> Bool)? = nil
     let choose: (Option) -> Void
     @ViewBuilder let segment: (Option, Bool) -> Segment
 
@@ -172,8 +175,9 @@ struct SegmentedTrack<Option: Equatable, Segment: View>: View {
         HStack(spacing: trackInset) {
             ForEach(Array(options.enumerated()), id: \.offset) { offset, option in
                 let isChosen = option == chosen
+                let offered = offers?(option) ?? !isChosen
                 Button {
-                    if !isChosen { choose(option) }
+                    if offered { choose(option) }
                 } label: {
                     // As wide as its chosen look whatever is chosen, so choosing moves no segment's label.
                     ZStack {
@@ -187,7 +191,7 @@ struct SegmentedTrack<Option: Equatable, Segment: View>: View {
                 .accessibilityAddTraits(isChosen ? .isSelected : [])
                 .modifier(
                     SegmentLight(
-                        panelRow: firstPanelRow.map { $0 + offset }, id: id(option), chosen: isChosen,
+                        panelRow: firstPanelRow.map { $0 + offset }, id: id(option), chosen: isChosen, offered: offered,
                         choose: { choose(option) }))
             }
         }
@@ -203,11 +207,12 @@ private struct SegmentLight: ViewModifier {
     let panelRow: Int?
     let id: String
     let chosen: Bool
+    let offered: Bool
     let choose: () -> Void
 
     func body(content: Content) -> some View {
         if let panelRow {
-            content.buttonStyle(.panelRow).panelRow(panelRow, id: id, choosable: !chosen, lifts: true, choose: choose)
+            content.buttonStyle(.panelRow).panelRow(panelRow, id: id, choosable: offered, lifts: true, choose: choose)
         } else {
             content.buttonStyle(.hover(radius: trackRadius - trackInset, over: true, lift: Theme.segmentLift, id: id))
         }
