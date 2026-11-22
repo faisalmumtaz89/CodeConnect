@@ -514,11 +514,7 @@ private struct Composer: View {
     /// of the words: never the select-all AppKit gives a field handed the keyboard by code, which the next key would
     /// replace. Not where the caret was: this field's selection binding does not report the caret, so where it was
     /// cannot be known. The caret goes in a turn after the keyboard, once that select-all is done.
-    private func takeKeyboardBack() {
-        fieldFocused = true
-        let end = kept.reply.endIndex
-        DispatchQueue.main.async { selection = TextSelection(insertionPoint: end) }
-    }
+    private func takeKeyboardBack() { giveKeyboard($fieldFocused, caret: $selection, endOf: kept.reply) }
 
     /// A choice in a hosted run's list answers the `/model` or `/effort` that opened it: those words leave the box, as a
     /// landed command's do.

@@ -36,6 +36,8 @@ struct StartForm: View {
     @State private var formWidth: CGFloat = 0
     /// The first message has the keyboard: as the form appears, and when New Agent asks for it.
     @FocusState private var messageFocused: Bool
+    /// The first message's caret, which the form sets when New Agent gives it the keyboard (`giveKeyboard`).
+    @State private var messageSelection: TextSelection?
     /// An ask is up (New Folder's name): Start's keys are its, not Start's.
     @Environment(ConfirmationQueue.self) private var asks
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
@@ -290,7 +292,7 @@ struct StartForm: View {
         computerMenuOpen = false
         menuOpen = false
         branchMenuOpen = false
-        DispatchQueue.main.async { messageFocused = true }
+        DispatchQueue.main.async { giveKeyboard($messageFocused, caret: $messageSelection, endOf: draft.message) }
     }
 
     /// The form's own coordinates, top-left origin, in which a menu inside it finds the room it has.
@@ -587,7 +589,10 @@ struct StartForm: View {
     /// menus open upward, over what is above the box.
     private func composer(_ context: StartContext) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            TextField("", text: $draft.message, prompt: Text("First message").foregroundStyle(Theme.text3), axis: .vertical)
+            TextField(
+                "", text: $draft.message, selection: $messageSelection,
+                prompt: Text("First message").foregroundStyle(Theme.text3), axis: .vertical
+            )
                 .accessibilityLabel("First message")
                 .accessibilityIdentifier("start.message")
                 .textFieldStyle(.plain)

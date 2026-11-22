@@ -806,3 +806,14 @@ struct CopyButton: View {
         }
     }
 }
+
+/// The keyboard given by code to a field that holds words: the caret goes at the end of them, a turn later, once AppKit's
+/// select-all for a field made first responder by code is done, so the next key adds to the words and never replaces
+/// them. Not where the caret was: a vertical field's selection binding does not report the caret, so where it was
+/// cannot be known.
+@MainActor
+func giveKeyboard(_ focused: FocusState<Bool>.Binding, caret selection: Binding<TextSelection?>, endOf text: String) {
+    focused.wrappedValue = true
+    let end = text.endIndex
+    DispatchQueue.main.async { selection.wrappedValue = TextSelection(insertionPoint: end) }
+}
