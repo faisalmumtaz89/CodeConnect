@@ -7,7 +7,7 @@ import XCTest
 ///
 /// `fixtures/accounts/minor-47-wire.json` is what a ccd built at the engine's slice answered one paired device, read
 /// from the source file: an empty list, an account added for each agent, Codex's made active, the same label again
-/// (the account already made, no twin), a name too long (refused, naming no request), and Default chosen again.
+/// (the account already made, no twin), a name too long (refused, naming its request), and Default chosen again.
 @MainActor
 final class AccountsWireTests: XCTestCase {
 
@@ -66,6 +66,14 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertTrue(done(), "timed out waiting for \(what)")
     }
 
+    /// The fixture's refusal, in its own code and words, naming `requestID`.
+    private func refusal(naming requestID: String) throws -> ServerMessage {
+        guard case .accountsRefused(_, let code, let message) = try reply("refused_label_too_long") else {
+            throw XCTSkip("refused_label_too_long is not a refusal")
+        }
+        return .accountsRefused(requestID: requestID, code: code, message: message)
+    }
+
     private func requestID(_ message: ClientMessage?) -> String? {
         switch message {
         case .listAccounts(let id)?, .addAccount(let id, _, _)?, .activateAccount(let id, _, _)?: id
@@ -97,9 +105,10 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertNil(try book("activate_codex_default").activeID(for: .codex), "Default again")
         XCTAssertEqual(try book("list_after").accounts, both.accounts, "Default keeps the accounts")
 
-        guard case .error(let code, let message) = try reply("refused_label_too_long") else {
+        guard case .accountsRefused(let requestID, let code, let message) = try reply("refused_label_too_long") else {
             return XCTFail("the long name is refused")
         }
+        XCTAssertEqual(requestID, try step("refused_label_too_long").request.objectValue?["request_id"]?.stringValue)
         XCTAssertEqual(code, "bad_request")
         XCTAssertEqual(message, "an account's name is 1 to 64 characters")
     }
@@ -167,9 +176,9 @@ final class AccountsWireTests: XCTestCase {
         await first
     }
 
-    /// The computer's refusal names no request: it is the answer to the one in flight, in the computer's own words,
-    /// and the book stays as it was.
-    func testARefusalAnswersTheRequestInFlight() async throws {
+    /// A refusal answers the request it names, in the computer's own words, and the book stays as it was; one naming
+    /// another request leaves this one waiting.
+    func testARefusalAnswersTheRequestItNames() async throws {
         let (model, sent) = try model()
         let before = try book("activate_codex_work")
         async let loaded: Void = model.loadAccounts()
@@ -179,7 +188,11 @@ final class AccountsWireTests: XCTestCase {
 
         async let added = model.addAccount(agent: .codex, label: String(repeating: "x", count: 65))
         await waitUntil({ sent.sent.count == 2 }, "the add to be sent")
-        model.connection.injectForTesting(try reply("refused_label_too_long"))
+        model.connection.injectForTesting(try refusal(naming: "ac-another"))
+        for _ in 0..<200 { await Task.yield() }
+        XCTAssertTrue(model.accountsBusy, "still waiting for its own answer")
+        XCTAssertNil(model.accountsProblem)
+        model.connection.injectForTesting(try refusal(naming: try XCTUnwrap(requestID(sent.sent.last))))
         let wasAdded = await added
         XCTAssertFalse(wasAdded)
         XCTAssertEqual(model.accountsProblem, "an account's name is 1 to 64 characters")
@@ -193,7 +206,7 @@ final class AccountsWireTests: XCTestCase {
         let (model, sent) = try model()
         async let added = model.addAccount(agent: .codex, label: String(repeating: "x", count: 65))
         await waitUntil({ sent.sent.count == 1 }, "the add to be sent")
-        model.connection.injectForTesting(try reply("refused_label_too_long"))
+        model.connection.injectForTesting(try refusal(naming: try XCTUnwrap(requestID(sent.sent.last))))
         _ = await added
         XCTAssertEqual(model.accountsProblem, "an account's name is 1 to 64 characters")
 

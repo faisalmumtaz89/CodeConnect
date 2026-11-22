@@ -1193,7 +1193,7 @@ public final class AppModel {
     /// What the computer said when it refused, or could not answer, the last accounts request; cleared as the next
     /// one starts.
     public private(set) var accountsProblem: String?
-    /// An accounts request is in flight: one at a time, since a refusal names no request.
+    /// An accounts request is in flight; one at a time.
     public private(set) var accountsBusy = false
 
     /// This computer keeps accounts per agent: it advertises `accounts`. A computer that does not shows none.
@@ -2283,9 +2283,9 @@ public final class AppModel {
         case .testPushResult:
             // Same shape: the sheet's own request awaits the reply by id.
             break
-        case .folderTrust, .accounts:
+        case .folderTrust, .accounts, .accountsRefused:
             // The same again: `listFolderTrust`, `setFolderTrust` and
-            // `forgetFolderTrust`, and the three accounts requests, each await
+            // `forgetFolderTrust`, and the three accounts requests (answered or refused), each await
             // their reply by id.
             break
         case .projects(let projects, let agents):

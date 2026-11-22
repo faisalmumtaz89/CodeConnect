@@ -1133,7 +1133,7 @@ public final class DaemonConnection {
         try await accountsRequest { .activateAccount(requestID: $0, agent: agent.rawValue, accountID: accountID) }
     }
 
-    /// One accounts request at a time: a refusal names no request, so it can only be the answer to the one in flight.
+    /// One accounts request at a time: a change is never sent while another is still unanswered.
     private func accountsRequest(_ message: (String) -> ClientMessage) async throws -> AccountBook {
         if accountsWaiters.values.contains(where: { $0.contains { $0.continuation != nil } }) {
             throw ConnectionError.transport("A request for this is already in flight")
@@ -1507,6 +1507,11 @@ public final class DaemonConnection {
             deliver(store: \.folderTrustWaiters, key: requestID, value: folders)
         case .accounts(let requestID, let book):
             deliver(store: \.accountsWaiters, key: requestID, value: book)
+        case .accountsRefused(let requestID, _, let message):
+            guard let waiter = accountsWaiters[requestID]?.first(where: { $0.continuation != nil }) else { break }
+            abandon(
+                store: \.accountsWaiters, key: requestID, ticket: waiter.ticket, with: AccountsRefusal(message: message),
+                keepTombstone: false)
         case .diff(let diff):
             deliver(store: \.diffWaiters, key: diff.sessionID, value: diff)
         // **The echoed session is checked, not ignored.** Correlation is by
@@ -1532,16 +1537,6 @@ public final class DaemonConnection {
             else { break }
             deliver(store: \.settingWaiters, key: requestID, value: result)
         case .error(let code, let message):
-            // An accounts refusal names no request: it answers the one accounts request in flight (at most one).
-            if code == "bad_request" || code == "accounts_unavailable",
-                let (key, waiter) = accountsWaiters.lazy.compactMap({ key, queue in
-                    queue.first { $0.continuation != nil }.map { (key, $0) }
-                }).first
-            {
-                abandon(
-                    store: \.accountsWaiters, key: key, ticket: waiter.ticket, with: AccountsRefusal(message: message),
-                    keepTombstone: false)
-            }
             lastErrorMessage = "\(message) (\(code))"
             lastErrorAt = Date()
             // The one place a string arrives having been written by the daemon.

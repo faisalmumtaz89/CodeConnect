@@ -43,8 +43,7 @@ public struct AccountBook: Hashable, Sendable {
     }
 }
 
-/// A change to the accounts the computer refused, in its own words (`error` `bad_request` or `accounts_unavailable`).
-/// The refusal names no request, so it is taken as the answer to the one accounts request in flight.
+/// An accounts request the computer refused, in its own words (`accounts_refused`, naming the request).
 public struct AccountsRefusal: LocalizedError, Sendable, Equatable {
     public let message: String
     public var errorDescription: String? { message }

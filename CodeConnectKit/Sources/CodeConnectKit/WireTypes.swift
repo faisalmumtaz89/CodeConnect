@@ -2031,13 +2031,14 @@ public enum ClientMessage: Sendable {
     /// Forget one folder's answer, so the next start there asks again; answered
     /// `folderTrust`.
     case forgetFolderTrust(requestID: String, path: String)
-    /// Each agent's accounts on the computer and the one its starts use, answered `accounts`. Minor 47, sent only
-    /// when `Capabilities.keepsAccounts`.
+    /// Each agent's accounts on the computer and the one its starts use, answered `accounts` or `accounts_refused`.
+    /// Minor 47, sent only when `Capabilities.keepsAccounts`.
     case listAccounts(requestID: String)
     /// Adds an account for `agent` named `label` (1 to 64 characters); it is not made the one its starts use.
-    /// Answered `accounts`.
+    /// Answered `accounts` or `accounts_refused`.
     case addAccount(requestID: String, agent: String, label: String)
-    /// Makes `accountID` the account `agent`'s next starts use, or its Default for nil. Answered `accounts`.
+    /// Makes `accountID` the account `agent`'s next starts use, or its Default for nil. Answered `accounts` or
+    /// `accounts_refused`.
     case activateAccount(requestID: String, agent: String, accountID: String?)
     /// One folder's repository: its checkouts and free branches. Minor 29,
     /// sent only when `Capabilities.startsInWorktrees`.
@@ -2524,6 +2525,9 @@ public enum ServerMessage: Sendable {
     /// The answer to `list_accounts`, `add_account` and `activate_account`: every account and the one each agent's
     /// starts use, once the request's change is made.
     case accounts(requestID: String, book: AccountBook)
+    /// A refused `list_accounts`, `add_account` or `activate_account`, naming the request: nothing changed. `code` is
+    /// `bad_request` or `accounts_unavailable`; `message` says why, in the computer's words.
+    case accountsRefused(requestID: String, code: String, message: String)
     /// The answer to `get_project_git`: nil when the folder is not a repository.
     case projectGit(path: String, git: StartGit?)
     /// The answer to `list_folder`.
@@ -2673,6 +2677,11 @@ extension ServerMessage: Decodable {
                 book: AccountBook(
                     accounts: try c.decode([AgentAccount].self, forKey: .accounts),
                     active: try c.decode([ActiveAccount].self, forKey: .active)))
+        case "accounts_refused":
+            self = .accountsRefused(
+                requestID: try c.decode(String.self, forKey: .requestID),
+                code: try c.decode(String.self, forKey: .code),
+                message: try c.decode(String.self, forKey: .message))
         case "project_git":
             self = .projectGit(
                 path: try c.decode(String.self, forKey: .path),
