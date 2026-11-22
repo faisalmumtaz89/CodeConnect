@@ -44,7 +44,8 @@ public struct AgentList: Equatable {
         /// a task, which draws its box.
         public var glyph: String? {
             switch marker {
-            case .bullet: ["•", "◦", "▪"][min(depth, 2)]
+            // U+25AA has an emoji form, drawn as a shaded square larger than the text: U+FE0E asks for the text glyph.
+            case .bullet: ["•", "◦", "▪\u{FE0E}"][min(depth, 2)]
             case .ordered(let number): number
             case .task: nil
             }
