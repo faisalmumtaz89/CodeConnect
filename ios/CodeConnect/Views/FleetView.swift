@@ -1005,7 +1005,6 @@ struct FleetView: View {
     /// A flow sent a start: close it, and open the new session as it goes.
     private func started(_ requestID: String) {
         startedRequest = requestID
-        startMessage = ""
         startOpen = false
     }
 
@@ -1017,6 +1016,8 @@ struct FleetView: View {
     private func openStarted() {
         guard let id = startedRequest else { return }
         startedRequest = nil
+        // The sent start took its first message; cleared once the sheet is gone, so it never blanks on the way out.
+        startMessage = ""
         path = [SessionRoute(key: "start-\(id)", startRequestID: id)]
     }
 

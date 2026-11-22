@@ -30,6 +30,10 @@ final class DraftsKeptUITests: XCTestCase {
         let app = launch(["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1"])
         let reply = app.textViews.firstMatch.waitForExistence(timeout: 25) ? app.textViews.firstMatch : app.textFields.firstMatch
         XCTAssertTrue(reply.exists, "the reply box")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "listed-run"
+        shot.lifetime = .keepAlways
+        add(shot)
         reply.tap()
         reply.typeText("kept reply")
 
@@ -128,5 +132,18 @@ final class DraftsKeptUITests: XCTestCase {
         app.buttons["Close"].firstMatch.tap()
         toReady(app)
         XCTAssertEqual(value(field(app, "start-message")), "kept first message")
+    }
+
+    /// The reply box writes into the run's drafts, so it is drawn while the screen lists the run, as on the Mac: a
+    /// screen for a run the phone does not list (here a link to a run that is not there) has none.
+    func testAScreenForARunThePhoneDoesNotListHasNoReplyBox() {
+        let app = launch(["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/no-such-run"])
+        let empty = app.staticTexts.matching(NSPredicate(format: "label == 'Nothing recorded yet'")).firstMatch
+        XCTAssertTrue(empty.waitForExistence(timeout: 25), "the screen for a run that is not listed")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "unlisted-run"
+        shot.lifetime = .keepAlways
+        add(shot)
+        XCTAssertFalse(app.textViews.firstMatch.exists || app.textFields.firstMatch.exists, "no reply box")
     }
 }
