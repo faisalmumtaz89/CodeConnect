@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.12, with the iPhone app 1.1.29
+
+- On the Mac, the start form's model and branch menus stay inside the form at small window sizes, the model menu
+  scrolls where it used to run past the top of the window, and the model button names its model whole.
+- On the iPhone, a reply you have typed, a reason for a Deny, a question's answers and a start's first message are
+  kept when you leave the screen and come back.
+- On the iPhone, a conversation the computer does not list no longer offers a reply box.
+
 ## CodeConnect 0.19.11, with the iPhone app 1.1.28
 
 - On the Mac and the iPhone, a model is named in full wherever it is named, "Sonnet 5.5" rather than "Sonnet": on
