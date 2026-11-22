@@ -2078,7 +2078,8 @@ async fn resume(
         .newest_codex_settings(uid.clone())
         .await
         .map_err(|err| format!("could not read its settings: {err:#}"))?;
-    let (adapter, owed, cards) = resume_thread(daemon, &client, run, codeconnect, kept).await?;
+    let (adapter, owed, cards) =
+        resume_thread(daemon, &client, run, codeconnect, kept, None).await?;
     Ok((client, adapter, owed, cards))
 }
 
@@ -2095,6 +2096,7 @@ async fn resume_thread(
     run: &mut LiveCodexRun,
     codeconnect: &Path,
     kept: Option<Value>,
+    model: Option<String>,
 ) -> Result<(CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
     let uid = &run.host.session_uid.clone();
     let folders = folders(&run.cwd, daemon.config.git_bin.as_deref()).await?;
@@ -2105,7 +2107,8 @@ async fn resume_thread(
         )
         .await
         .map_err(|err| format!("Codex did not list the folder's skills: {err}"))?;
-    let mut params = thread_params(&run.cwd, None);
+    // `model` given, the thread is resumed on it; otherwise Codex keeps the thread's own.
+    let mut params = thread_params(&run.cwd, model.as_deref());
     if let Some(kept) = &kept {
         keep_settings(&mut params, kept);
     }
@@ -2359,6 +2362,25 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
     true
 }
 
+/// The model a thread on `model` resumes on with the app-server `client` (its account's plan): none when the plan
+/// offers `model`, so Codex keeps it; else the plan's default, since a thread resumed on a model its account's plan
+/// does not offer fails its next turn (`modelNotFound`, measured 2026-11-22 on codex 0.170.0 across two plans).
+async fn offered_or_default(client: &Client, model: &str) -> Result<Option<String>, String> {
+    let listed = client
+        .call("model/list", json!({}))
+        .await
+        .map_err(|err| format!("Codex did not list its models: {err}"))?;
+    let models = listed["data"].as_array().cloned().unwrap_or_default();
+    if models.iter().any(|entry| entry["model"] == model) {
+        return Ok(None);
+    }
+    Ok(models
+        .iter()
+        .find(|entry| entry["isDefault"] == true)
+        .and_then(|entry| entry["model"].as_str())
+        .map(str::to_string))
+}
+
 /// [`relaunch`]'s steps from its warrant to its resume: the old app-server's group without a
 /// member, `as.pid` and `as.sock` removed, the codex and environment a start reads and
 /// `launcher` as the `codeconnect`, the launch into the run's folder in `root` recorded in
@@ -2425,16 +2447,33 @@ async fn launch_again(
     let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
     // A run moved by a switch of account keeps its mode (decision 308).
     let switched = crate::switch::switched(daemon, uid).await;
-    let kept = daemon
+    let newest = daemon
         .db
         .newest_codex_settings(uid.clone())
         .await
-        .map_err(|err| format!("could not read its settings: {err:#}"))?
-        .and_then(|kept| narrower_than_default(kept, switched));
+        .map_err(|err| format!("could not read its settings: {err:#}"))?;
+    let model = newest
+        .as_ref()
+        .and_then(|newest| newest["model"].as_str())
+        .map(str::to_string);
+    let kept = newest.and_then(|kept| narrower_than_default(kept, switched));
+    // Started on another account than the run last ran on, whose plan may not offer the thread's model.
+    let recorded = daemon
+        .store
+        .run_account(uid)
+        .ok()
+        .flatten()
+        .map(|account| account.id);
+    let other_account = recorded != account.map(|account| account.id().to_string());
     let client = bring_up(daemon, uid, &launch, &folders, log, deadline, launched).await?;
+    let model = match (other_account, model) {
+        (true, Some(model)) => offered_or_default(&client, &model).await?,
+        _ => None,
+    };
     // The run's effort needs nothing here: Codex's own resume restores the thread's effort (seen on 0.170.0 on
     // 2026-11-22).
-    let (adapter, owed, cards) = resume_thread(daemon, &client, run, &codeconnect, kept).await?;
+    let (adapter, owed, cards) =
+        resume_thread(daemon, &client, run, &codeconnect, kept, model).await?;
     Ok((client, adapter, owed, cards))
 }
 
@@ -4082,6 +4121,23 @@ mod tests {
                 let frame = next_frame(ws).await.expect("ccd hung up");
                 if frame["method"] == method && frame.get("id").is_some() {
                     return frame;
+                }
+                // A relaunch onto another account asks the new plan's models; a stand-in's plan offers every model
+                // these tests run on.
+                if frame["method"] == "model/list" && frame.get("id").is_some() {
+                    let offered: Vec<_> = [
+                        "gpt-test",
+                        "gpt-6.1-sol",
+                        "gpt-6-astra",
+                        "gpt-6-sol",
+                        "gpt-6-luna",
+                        "gpt-6.2-sol",
+                    ]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, model)| json!({"model": model, "isDefault": i == 0}))
+                    .collect();
+                    answer(ws, &frame, json!({"data": offered})).await;
                 }
             }
         })
@@ -8617,6 +8673,90 @@ mod tests {
             "in the person's words"
         );
         drop(ws);
+    }
+
+    /// **A run moved to an account whose plan lacks its model resumes on that plan's default** (306; terminal's real
+    /// pass, codex 0.170.0: the thread's model kept on the other plan failed its next turn `modelNotFound`): the
+    /// relaunch asks the new app-server's models and, the thread's not among them, resumes on the plan's default.
+    #[tokio::test]
+    async fn a_run_moved_to_a_plan_without_its_model_resumes_on_its_default() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        rig.daemon = relauncher(&rig);
+        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
+        // A's plan runs it on gpt-6.1-sol, as Codex reports.
+        tell(
+            &mut ws,
+            &settings_report(
+                "gpt-6.1-sol",
+                "high",
+                "on-request",
+                "workspaceWrite",
+                "default",
+            ),
+        )
+        .await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while rig
+            .daemon
+            .db
+            .newest_codex_settings(uid.clone())
+            .await
+            .unwrap()
+            .map(|kept| kept["model"].clone())
+            != Some(json!("gpt-6.1-sol"))
+        {
+            assert!(Instant::now() < deadline, "its model was never filed");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let b = rig.daemon.store.add_account("codex", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("codex", Some(&b.id))
+            .unwrap());
+        app_server_ended(&rig, &uid, ws).await;
+        let said = saying(&rig.daemon, &uid, "say-plan", "go on");
+        let dir = run_folder(&rig).await;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while launches(&rig) < 2 {
+            assert!(Instant::now() < deadline, "codex was not launched again");
+            tokio::time::sleep(POLL).await;
+        }
+        let listener = UnixListener::bind(dir.join("as.sock")).unwrap();
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let init = asked(&mut ws, "initialize").await;
+        answer(&mut ws, &init, json!({"userAgent": "stand-in"})).await;
+        // B's plan: neither the thread's model nor anything like it.
+        let listed = asked(&mut ws, "model/list").await;
+        answer(
+            &mut ws,
+            &listed,
+            json!({"data": [{"model": "gpt-6-luna", "isDefault": true}, {"model": "gpt-5.6-terra", "isDefault": false}]}),
+        )
+        .await;
+        let skills = asked(&mut ws, "skills/list").await;
+        answer(&mut ws, &skills, json!({"data": []})).await;
+        let resume = asked(&mut ws, "thread/resume").await;
+        assert_eq!(
+            resume["params"]["model"], "gpt-6-luna",
+            "resumed on the plan's default: {resume}"
+        );
+        answer(
+            &mut ws,
+            &resume,
+            json!({"thread": {"id": "thr-x6"}, "model": "gpt-6-luna"}),
+        )
+        .await;
+        let sent = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &sent, json!({"turn": {"id": "turn-2"}})).await;
+        said.await.unwrap();
+        drop(ws);
+        end_run(&rig, &uid).await;
     }
 
     /// **A Codex run marked to switch while it has no link moves once its link attaches** (306 Slice E): the choice
