@@ -49,17 +49,19 @@ test("a trusted folder's options reach claude: no mode when none is named, the S
   const mcp = argv[argv.indexOf('--mcp-config') + 1]!;
   expect(JSON.parse(mcp)).toStrictEqual({ mcpServers: { codeconnect: { type: 'stdio', ...start.options.mail } } });
   expect(argv.filter((arg) => arg.startsWith('--setting-sources') || arg === '--strict-mcp-config')).toStrictEqual([]);
-  expect(argv.filter((arg) => arg.startsWith('--resume') || arg.startsWith('--model'))).toStrictEqual([]);
+  expect(argv.filter((arg) => arg.startsWith('--resume') || arg.startsWith('--model') || arg.startsWith('--effort'))).toStrictEqual([]);
   noUnexpected(stub());
 }, 10_000);
 
-test("a folder not trusted reads only the person's settings and only CodeConnect's MCP server; resume and model reach claude", async () => {
+test("a folder not trusted reads only the person's settings and only CodeConnect's MCP server; resume, model and effort reach claude", async () => {
   const { start, stub } = await run(untrustedStart);
   const argv = argvOf(stub());
   expect(argv).toContain('--setting-sources=user');
   expect(argv).toContain('--strict-mcp-config');
   expect(argv).toContain(`--resume=${start.options.resume}`);
   expect(argv).toContain(`--model=${start.options.model}`);
+  // A relaunch's effort, the one the run ended with, is claude's from its creation.
+  expect(argv).toContain(`--effort=${start.options.effort}`);
   expect(argv).toContain(`--permission-mode=${start.options.permission_mode}`);
   expect(argv.filter((arg) => arg.startsWith('--permission-mode'))).toHaveLength(1);
   expect(argv).toContain('--allow-dangerously-skip-permissions');

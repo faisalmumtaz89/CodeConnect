@@ -374,6 +374,7 @@ async fn attach(
             resend: None,
             replayed: true,
             resumed: resumes(Some(start)),
+            effort: start_effort(Some(start)),
         },
         Some(begun),
         lines,
@@ -447,6 +448,7 @@ pub(crate) async fn attach_run(
         Some(ToHost::Start { uuid, prompt, .. }) => (uuid.clone(), prompt.clone()),
         _ => (String::new(), String::new()),
     };
+    let effort = start_effort(start.as_ref());
     let resend = match linked.lifecycle {
         Lifecycle::Starting => start,
         Lifecycle::Stopping => match protocol::uid::uuid_v4() {
@@ -472,6 +474,7 @@ pub(crate) async fn attach_run(
             // The run's last turn is carried, so no start is stamped here: a ccd restart in
             // the seconds of a relaunch files its resumed start with no source (a written miss).
             resumed: false,
+            effort,
         },
         None,
         BufReader::new(read).lines(),
@@ -517,6 +520,7 @@ fn start_options(uid: &str, run: &Run<'_>) -> StartOptions {
             .model
             .filter(|model| *model != "default")
             .map(str::to_string),
+        effort: None,
         worktree: run.worktree.map(str::to_string),
         mail: McpCommand {
             command: run.codeconnect.to_string_lossy().into_owned(),
@@ -716,6 +720,16 @@ struct Linked {
     replayed: bool,
     /// Whether the run's start resumes claude's session: a relaunch's.
     resumed: bool,
+    /// The effort the start gives claude (a relaunch's), filed as the run's once claude has taken the start.
+    effort: Option<String>,
+}
+
+/// The effort `start` gives claude, if it names one.
+fn start_effort(start: Option<&ToHost>) -> Option<String> {
+    match start {
+        Some(ToHost::Start { options, .. }) => options.effort.clone(),
+        _ => None,
+    }
 }
 
 /// Whether `start` resumes claude's session, as a relaunch's does.
@@ -779,6 +793,7 @@ async fn link(
         mut resend,
         replayed,
         resumed,
+        effort: start_effort_named,
     } = linked;
     let mut turns = Turns {
         init: turn,
@@ -872,17 +887,23 @@ async fn link(
                 };
                 // The person's first words, filed as the run goes live: none for a run
                 // that starts waiting for them.
-                let words = if start_prompt.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![person_row(
+                let mut words = Vec::new();
+                // The effort the start gave claude is the run's once claude has taken the start, as an app's is.
+                if let Some(effort) = start_effort_named
+                    .as_deref()
+                    .filter(|_| status == OutcomeStatus::Done)
+                {
+                    words.push(effort_notice(&uid, effort, &format!("start:{start_uuid}")));
+                }
+                if !start_prompt.is_empty() {
+                    words.push(person_row(
                         &uid,
                         &start_uuid,
                         &start_prompt,
                         relaunched.as_deref(),
                         None,
-                    )]
-                };
+                    ));
+                }
                 match daemon
                     .commit_start_outcome(&uid, host, seq, lifecycle, initialize, words, relaunched)
                     .await
@@ -1577,17 +1598,7 @@ async fn apply_setting_outcome(
     };
     let taken = matches!(status, OutcomeStatus::Done);
     let notices = match pending.effort.as_deref().filter(|_| taken) {
-        Some(effort) => vec![PendingEvent::new(
-            &SessionKey::new(uid, uid),
-            EventKind::Notification,
-            serde_json::json!({
-                "notification_type": protocol::event::notice::MODEL_SET,
-                "effort": effort,
-                "message": format!("Effort set to {effort}"),
-            }),
-            Source::Daemon,
-        )
-        .with_source_event_id(format!("setting:{uuid}"))],
+        Some(effort) => vec![effort_notice(uid, effort, &format!("setting:{uuid}"))],
         None => Vec::new(),
     };
     match daemon
@@ -1604,6 +1615,21 @@ async fn apply_setting_outcome(
     }
     let _ = pending.tell.send((taken, detail));
     Ok(true)
+}
+
+/// The run's effort, filed once claude has taken it (`id`: the command that set it, never filed twice).
+fn effort_notice(uid: &str, effort: &str, id: &str) -> PendingEvent {
+    PendingEvent::new(
+        &SessionKey::new(uid, uid),
+        EventKind::Notification,
+        serde_json::json!({
+            "notification_type": protocol::event::notice::MODEL_SET,
+            "effort": effort,
+            "message": format!("Effort set to {effort}"),
+        }),
+        Source::Daemon,
+    )
+    .with_source_event_id(id.to_string())
 }
 
 /// The commands an app opens a screen of its own for that this ccd refuses on a hosted
@@ -1902,8 +1928,12 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
             kept.model.clone()
         }
     };
-    let mode = match daemon.db.session_facts(uid.to_string()).await {
-        Ok(facts) => relaunch_mode(facts.permission_mode.map(|fact| fact.value)),
+    // The run goes on with the settings it ended with: its model, its mode (but Bypass) and its effort.
+    let (mode, effort) = match daemon.db.session_facts(uid.to_string()).await {
+        Ok(facts) => (
+            relaunch_mode(facts.permission_mode.map(|fact| fact.value)),
+            facts.ended_with.map(|fact| fact.value),
+        ),
         Err(err) => {
             crate::log_error!("{uid}: could not read its mode to relaunch it: {err:#}");
             let reason = "This session could not start again (its mode could not be read); \
@@ -1928,6 +1958,7 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
     let mut options = start_options(uid, &run);
     options.resume = Some(ended.claude_session_id.clone());
     options.permission_mode = mode;
+    options.effort = effort;
     let start = ToHost::Start {
         uuid: uuid.clone(),
         options,
@@ -11509,14 +11540,13 @@ mod tests {
         stop(&played.dir);
     }
 
-    /// **An ended run names the effort its process ended with; a relaunched process never inherits it** (decision
-    /// 210, narrowed). A run ends at High: while it is ended its summary says High. A message relaunches it and the
-    /// new process names no effort: live again, the summary names none (Default), and when that process ends
-    /// without naming one, the ended run names none either: High is never carried across the relaunch.
+    /// **A relaunch goes on at the effort the run ended with.** A run ends at High: ended, its summary says High; a
+    /// message relaunches it with `effort: high` in the start, and once claude has taken the start the live run says
+    /// High; when that process ends it is still High, after a restart too. A run that ended naming no effort is
+    /// relaunched with none (claude's default), and says none.
     #[tokio::test]
-    async fn an_ended_run_names_the_effort_it_ended_with_and_a_relaunch_never_inherits_it() {
+    async fn a_relaunch_goes_on_at_the_effort_the_run_ended_with() {
         let _env = crate::ProcessEnvRead::take();
-        let rig = relaunch_rig();
         let effort =
             |summary: protocol::event::SessionSummary| summary.effort.map(|fact| fact.value);
         let ended = |rig: &Rig, uid: String| {
@@ -11532,6 +11562,46 @@ mod tests {
                 panic!("the run did not end");
             }
         };
+        // Ends the live run `played` on its host's `exited` at `seq`; the host's pid.
+        async fn exit(played: &mut Played, seq: u64) -> i32 {
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "exited", "seq": seq, "code": 1}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+            let pid = pid_in(&played.dir, "stub.pid");
+            stop(&played.dir);
+            gone(pid).await;
+            pid
+        }
+        // Relaunches the run by a message; the start's effort, and the new host's side once claude has taken it.
+        async fn relaunch(
+            rig: &Rig,
+            uid: &str,
+            request: &str,
+            dir: &Path,
+            old: i32,
+        ) -> (Option<String>, Played) {
+            let (_, relaunched) =
+                tokio::join!(send_as_app(&rig.daemon, uid, request, "carry on"), async {
+                    let mut played = play_relaunched(dir, old).await;
+                    let ToHost::Start { uuid, options, .. } = played.start.clone() else {
+                        panic!("not a start: {:?}", played.start);
+                    };
+                    say(
+                        &mut played.write,
+                        serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
+                    )
+                    .await;
+                    assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                    (options.effort, played)
+                });
+            relaunched
+        }
+
+        let rig = relaunch_rig();
         let mut played = live_run_on(&rig, &rig.root.join("stub-host")).await;
         let uid = played.uid.clone();
         sdk(&mut played.write, 3, init_in(&rig.root)).await;
@@ -11540,23 +11610,30 @@ mod tests {
             rig.daemon.set_setting(&uid, set_model(None, Some("high"))),
             host_answers_setting(&mut played, 4, "done", None)
         );
-        assert_eq!(
-            effort(summary(&rig.daemon, &uid).await).as_deref(),
-            Some("high")
-        );
-        say(
-            &mut played.write,
-            serde_json::json!({"type": "exited", "seq": 5, "code": 1}),
-        )
-        .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
-        let old = pid_in(&played.dir, "stub.pid");
-        stop(&played.dir);
-        gone(old).await;
+        let old = exit(&mut played, 5).await;
         assert_eq!(
             effort(ended(&rig, uid.clone()).await).as_deref(),
             Some("high"),
             "ended at High"
+        );
+        let (started_at, mut played) =
+            relaunch(&rig, &uid, "r-again", &played.dir.clone(), old).await;
+        assert_eq!(
+            started_at.as_deref(),
+            Some("high"),
+            "the relaunch's start gives claude High"
+        );
+        assert_eq!(summary(&rig.daemon, &uid).await.lifecycle, Lifecycle::Live);
+        assert_eq!(
+            effort(summary(&rig.daemon, &uid).await).as_deref(),
+            Some("high"),
+            "live again at High"
+        );
+        exit(&mut played, 3).await;
+        assert_eq!(
+            effort(ended(&rig, uid.clone()).await).as_deref(),
+            Some("high"),
+            "and ended at High"
         );
         let restarted = daemon_on(&rig.root);
         restarted.recover().await;
@@ -11566,49 +11643,21 @@ mod tests {
             "read back after a restart"
         );
 
-        let dir = played.dir.clone();
-        let (_, mut played) = tokio::join!(
-            send_as_app(&rig.daemon, &uid, "r-again", "carry on"),
-            async {
-                let mut played = play_relaunched(&dir, old).await;
-                let uuid = played.start_uuid();
-                say(
-                    &mut played.write,
-                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
-                                   "status": "done", "initialize": initialize_answer()}),
-                )
-                .await;
-                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
-                played
-            }
-        );
-        assert_eq!(summary(&rig.daemon, &uid).await.lifecycle, Lifecycle::Live);
+        let rig = relaunch_rig();
+        let gone_by = ended_on_its_own(&rig).await;
         assert_eq!(
-            effort(summary(&rig.daemon, &uid).await),
+            effort(ended(&rig, gone_by.uid.clone()).await),
             None,
-            "the relaunched process is at its default"
+            "it named no effort"
         );
-        say(
-            &mut played.write,
-            serde_json::json!({"type": "exited", "seq": 3, "code": 1}),
-        )
-        .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
-        let again = pid_in(&played.dir, "stub.pid");
+        let old = pid_in(&gone_by.dir, "stub.pid");
+        let (started_at, played) = relaunch(&rig, &gone_by.uid, "r-plain", &gone_by.dir, old).await;
+        assert_eq!(
+            started_at, None,
+            "an end that named none relaunches at claude's default"
+        );
+        assert_eq!(effort(summary(&rig.daemon, &gone_by.uid).await), None);
         stop(&played.dir);
-        gone(again).await;
-        assert_eq!(
-            effort(ended(&rig, uid.clone()).await),
-            None,
-            "it ended naming none: never the old High"
-        );
-        let restarted = daemon_on(&rig.root);
-        restarted.recover().await;
-        assert_eq!(
-            effort(summary(&restarted, &uid).await),
-            None,
-            "nor after a restart"
-        );
     }
 
     /// **A relaunch names the mode the run was in, but Bypass permissions** (decision 253): a

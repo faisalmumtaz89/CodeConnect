@@ -30,6 +30,8 @@ export interface StartOptions {
   /** The Claude session to continue. */
   resume?: string;
   model?: string;
+  /** The effort claude starts at (`--effort`): a relaunch's, the effort the run ended with. */
+  effort?: string;
   /** A new worktree for claude to make and start in, as `claude --worktree <name>`. */
   worktree?: string;
   mail: McpCommand;
