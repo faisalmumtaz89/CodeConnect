@@ -675,6 +675,7 @@ impl Run {
             permission_mode: facts.permission_mode,
             effort: None,
             menus: None,
+            model_label: None,
             git_branch: None,
             diff_stat: None,
             relaunchable: false,

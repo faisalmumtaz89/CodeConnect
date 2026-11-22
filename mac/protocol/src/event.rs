@@ -495,6 +495,12 @@ pub struct SessionSummary {
     /// effort and mode controls only where it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menus: Option<RunMenus>,
+    /// The name the apps give `model` on a Claude run CodeConnect started that is sent no
+    /// `menus` (minor 46: it is not live), by the rule they name a live run's model by: the label
+    /// of its start's entry whose value the model is, else of the entry, the default one aside,
+    /// that runs it. Omitted for any other run and for a model no entry names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_label: Option<String>,
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
     /// last ended, when the run registered, or when the daemon started. Absent
     /// outside a repository, on a detached head, before the first read, and from
@@ -597,6 +603,29 @@ pub struct MenuMode {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// **An ended run's model label (minor 46)**, as the daemon emits it: carried and kept on
+    /// a round trip, and left out of the wire when there is none.
+    #[test]
+    fn an_ended_runs_model_label_round_trips_and_is_omitted_when_absent() {
+        let wire: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/claude/minor-46-wire.json"))
+                .unwrap();
+        let ended: SessionSummary =
+            serde_json::from_value(wire["session_hosted_ended"].clone()).unwrap();
+        assert_eq!(ended.model_label.as_deref(), Some("Opus"));
+        assert_eq!(
+            serde_json::to_value(&ended).unwrap(),
+            wire["session_hosted_ended"]
+        );
+        let live: SessionSummary =
+            serde_json::from_value(wire["session_hosted_live"].clone()).unwrap();
+        assert_eq!(live.model_label, None);
+        assert_eq!(
+            serde_json::to_value(&live).unwrap().get("model_label"),
+            None
+        );
+    }
 
     #[test]
     fn unknown_kind_round_trips() {
@@ -709,6 +738,7 @@ mod tests {
             permission_mode: None,
             effort: None,
             menus: None,
+            model_label: None,
             git_branch: None,
             diff_stat: None,
             relaunchable: false,

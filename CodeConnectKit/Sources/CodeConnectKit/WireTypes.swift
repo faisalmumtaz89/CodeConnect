@@ -610,6 +610,10 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// below minor 39. The one field that decides whether the model/effort/mode
     /// controls are drawn at all.
     public let menus: RunMenus?
+    /// The menu's name for the run's model (minor 46), sent for a Claude run CodeConnect started that is sent
+    /// no `menus` (it is not live): the label of the entry the run's model is, by the rule `RunSettings.modelName`
+    /// names a live run's by. `nil` for any other run, for a model no entry runs, and from an older daemon.
+    public let modelLabel: String?
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
     /// last ended. `nil` outside a repository, on a detached head, before the
     /// first read, and from an older daemon.
@@ -641,6 +645,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case permissionMode = "permission_mode"
         case effort
         case menus
+        case modelLabel = "model_label"
         case gitBranch = "git_branch"
         case diffStat = "diff_stat"
     }
@@ -668,6 +673,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         permissionMode = try c.decodeIfPresent(SessionFact.self, forKey: .permissionMode)
         effort = try c.decodeIfPresent(SessionFact.self, forKey: .effort)
         menus = try c.decodeIfPresent(RunMenus.self, forKey: .menus)
+        modelLabel = try c.decodeIfPresent(String.self, forKey: .modelLabel)
         gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
         diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
     }

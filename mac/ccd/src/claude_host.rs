@@ -1312,6 +1312,24 @@ pub(crate) fn entry_model_id(models: &[serde_json::Value], value: &str) -> Optio
     )
 }
 
+/// The name the apps give the model `id` on a run whose start answered `models`, by the rule
+/// they name a live run's model by: the label of the entry whose value `id` is, else of the
+/// entry, the default one aside, whose `resolvedModel` it is; the default entry's own label is
+/// "Default", as the apps show it. None when no entry names it.
+pub(crate) fn entry_label(models: &[serde_json::Value], id: &str) -> Option<String> {
+    let models = menus(models).models;
+    let entry = models.iter().find(|model| model.value == id).or_else(|| {
+        models
+            .iter()
+            .find(|model| model.value != "default" && model.resolved_model.as_deref() == Some(id))
+    })?;
+    Some(if entry.value == "default" {
+        "Default".to_string()
+    } else {
+        entry.label.clone()
+    })
+}
+
 /// Which `value` of `models` (the start's answer, as [`menus`] reads it) claude's model fact
 /// `fact` names, `receipt` being the run's newest receipt of a model change: the fact is a
 /// value; else its text before " (" is one (claude's receipt, `sonnet (claude-sonnet-5-5)`); else
@@ -9514,6 +9532,111 @@ mod tests {
             wire + "\n",
         )
         .unwrap();
+    }
+
+    /// **The name the apps give a model**, against claude's recorded start answer: the entry
+    /// whose value it is, else the entry, the default one aside, that runs it (`default` and
+    /// `opus` both run `claude-opus-5-5`: "Opus"); no entry, none.
+    #[test]
+    fn the_name_the_apps_give_a_model() {
+        let answer = recorded_start_answer();
+        let models = answer["models"].as_array().unwrap();
+        assert_eq!(
+            entry_label(models, "claude-opus-5-5").as_deref(),
+            Some("Opus")
+        );
+        assert_eq!(
+            entry_label(models, "claude-sonnet-5-5").as_deref(),
+            Some("Sonnet")
+        );
+        assert_eq!(entry_label(models, "opus").as_deref(), Some("Opus"));
+        assert_eq!(entry_label(models, "default").as_deref(), Some("Default"));
+        assert_eq!(entry_label(models, "claude-opus-6"), None);
+    }
+
+    /// **An ended run names its model as its menu did (minor 46).** While the run is live its
+    /// summary carries `menus` and no `model_label`; once it has ended it carries no `menus`,
+    /// and `model_label` names its model by the entry the apps named it by while it was live.
+    #[tokio::test]
+    async fn the_minor_46_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-46-wire.json");
+        let derived = derived_minor_46_wire().await;
+        assert_eq!(derived["session_hosted_live"].get("model_label"), None);
+        assert!(derived["session_hosted_live"].get("menus").is_some());
+        assert_eq!(derived["session_hosted_ended"].get("menus"), None);
+        assert_eq!(derived["session_hosted_ended"]["model_label"], "Opus");
+        assert_eq!(
+            derived["session_hosted_ended"]["model"]["value"],
+            "claude-opus-5-5"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(FIXTURE).unwrap(),
+            derived,
+            "the committed minor 46 wire fixture no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_46_wire_fixture, then copy it over the copy under ios/"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-46-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_46_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_46_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-46-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// A run on a stand-in host whose start answered claude's recorded list, on the default
+    /// model (its init's `claude-opus-5-5`): its summary live, then once its host is gone and
+    /// it has ended.
+    async fn derived_minor_46_wire() -> serde_json::Value {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let fixed = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .execute(
+                "UPDATE run_hosts SET initialize = ?1 WHERE session_uid = ?2",
+                (recorded_start_answer().to_string(), &uid),
+            )
+            .unwrap();
+        sdk(
+            &mut played.write,
+            3,
+            serde_json::json!({"type": "system", "subtype": "init",
+                "uuid": "9d1f0000-0000-4000-8000-000000000461",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001", "model": "claude-opus-5-5"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let live = pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
+        let dir = played.dir.clone();
+        drop(played);
+        until_detached(&rig.daemon, &uid).await;
+        let host = pid_in(&dir, "stub.pid");
+        stop(&dir);
+        for _ in 0..100 {
+            // SAFETY: kill(2) with signal 0 only asks whether the pid is in use.
+            if unsafe { libc::kill(host, 0) } != 0 {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        rig.daemon.watch_hosted_runs().await;
+        until_ended(&rig, &uid, "exited", None).await;
+        let ended = pinned_summary(&summary(&rig.daemon, &uid).await, &uid, fixed, &rig.root);
+        serde_json::json!({
+            "session_hosted_live": live,
+            "session_hosted_ended": ended,
+        })
     }
 
     /// **Decisions 215 and 214: the mode that asks nothing, as the apps are sent it (minor

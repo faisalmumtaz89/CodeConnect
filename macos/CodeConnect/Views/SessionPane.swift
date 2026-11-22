@@ -159,7 +159,8 @@ private struct Heading: View {
     private var agentLine: Text {
         let agent = Text(row.summary.agent.productName)
         guard let confirmed = model.confirmedModel(for: row.id) else { return agent }
-        let name = RunSettings.modelName(confirmed: confirmed.name, menus: row.summary.menus)
+        let name = RunSettings.modelName(
+            confirmed: confirmed.name, menus: row.summary.menus, label: row.summary.modelLabel)
         return Text("\(agent) · \(name.reported ? Text(name.text).font(Theme.mono(11.5)) : Text(name.text))")
     }
 }
