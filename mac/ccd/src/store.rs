@@ -1772,6 +1772,22 @@ impl Store {
                 params![session_uid, EventKind::SessionEnd.as_str()],
                 |row| row.get::<_, i64>(0),
             )? as u64,
+            // The effort the newest end's process held: decided before that end and after the end before it.
+            ended_with: newest_decided(
+                &conn,
+                session_uid,
+                "kind IN (?2, ?3, ?4)
+                 AND seq < (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1 AND kind = ?5)
+                 AND seq > (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1 AND kind = ?5
+                              AND seq < (SELECT MAX(seq) FROM events WHERE session_uid = ?1 AND kind = ?5))",
+                &[
+                    EventKind::Notification.as_str(),
+                    EventKind::UserMessage.as_str(),
+                    protocol::facts::CODEX_SETTINGS,
+                    EventKind::SessionEnd.as_str(),
+                ],
+                protocol::facts::effort_fact,
+            )?,
         })
     }
 
@@ -9887,6 +9903,40 @@ mod tests {
                 .map(|fact| fact.value),
             Some("low".to_string())
         );
+    }
+
+    /// **The effort a run's process ended with is read back as it was folded live**: the effort before the newest
+    /// end and after the end before it; none when that process named none.
+    #[test]
+    fn the_effort_a_run_ended_with_is_read_back_from_its_own_process() {
+        let (store, _path) = temp_store();
+        let session = key("AA", "cc-1");
+        begin(&store, &session);
+        let effort = |level: &str| {
+            let mut notice = pending(&session, EventKind::Notification, None);
+            notice.payload = serde_json::json!({"notification_type": "model_set", "effort": level});
+            notice
+        };
+        let end = || {
+            let mut end = pending(&session, EventKind::SessionEnd, None);
+            end.payload =
+                serde_json::json!({"exit_code": 1, "reason": "Stopped: its process ended"});
+            end
+        };
+        let mut live = protocol::facts::SessionFacts::default();
+        for event in [effort("high"), end()] {
+            live.observe(&store.append_event(&event).unwrap().unwrap());
+        }
+        let read = store.session_facts(&session.uid).unwrap();
+        assert_eq!(
+            read.ended_with.map(|fact| fact.value).as_deref(),
+            Some("high")
+        );
+        assert_eq!(store.session_facts(&session.uid).unwrap(), live);
+        live.observe(&store.append_event(&end()).unwrap().unwrap());
+        let read = store.session_facts(&session.uid).unwrap();
+        assert_eq!(read.ended_with, None, "the second process named none");
+        assert_eq!(read, live);
     }
 
     /// **A Codex run's settings are read back after a restart as they were folded live**: its

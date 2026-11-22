@@ -48,16 +48,21 @@ pub struct SessionFacts {
     pub model: Option<Fact>,
     pub permission_mode: Option<Fact>,
     pub effort: Option<Fact>,
-    /// The seq of the run's newest `session_end`, 0 before one. An effort is the ended
-    /// process's own: a relaunched claude starts at the person's default and its init
-    /// restates the model and the mode but not the effort, so an effort decided before
-    /// the end no longer holds.
+    /// The seq of the run's newest `session_end`, 0 before one. `effort` is the live
+    /// process's own: an effort decided before the end is not the next process's until that
+    /// process is given it (a relaunch gives it, as [`Self::ended_with`]) and says so.
     pub ended: u64,
+    /// The effort the run's process held when its newest end came: what the ended run shows. None when that process
+    /// named none. Kept only by an in-order fold, as the live path folds; an effort folded after its end is left out.
+    pub ended_with: Option<Fact>,
 }
 
 impl SessionFacts {
-    /// Fold one event in. A fact it decides replaces the one held only when its
-    /// event is newer, so events may be folded in any order.
+    /// Fold one event in. A fact it decides replaces the one held only when its event is
+    /// newer, so the model, the mode and the effort may be folded in any order. `ended_with`
+    /// is the one exception: it is taken at the end from the effort then held, so an end
+    /// folded before an earlier effort leaves it empty where the store's read-back names it.
+    /// The live path folds each run's events in the order they are filed, which never does that.
     pub fn observe(&mut self, event: &Event) {
         if let Some(fact) = model_fact(event) {
             if self.model.as_ref().is_none_or(|held| held.seq < fact.seq) {
@@ -75,12 +80,13 @@ impl SessionFacts {
         }
         if event.kind == EventKind::SessionEnd && event.seq > self.ended {
             self.ended = event.seq;
+            self.ended_with = None;
             if self
                 .effort
                 .as_ref()
                 .is_some_and(|held| held.seq < self.ended)
             {
-                self.effort = None;
+                self.ended_with = self.effort.take();
             }
         }
         if let Some(fact) = effort_fact(event) {
@@ -629,6 +635,49 @@ mod tests {
                 value: "low".into(),
                 seq: 8
             })
+        );
+    }
+
+    /// **The effort a run's process ended with is kept for the ended run** (decision 210, narrowed): High at the end
+    /// is `ended_with`; a relaunched process that names none ends with none, never the earlier High. Folded in order,
+    /// as the live path folds; an effort folded after its end is left out (Default), the safe side.
+    #[test]
+    fn the_effort_a_process_ended_with_is_kept_and_never_carried_on() {
+        let effort = |seq, level: &str| {
+            event(
+                seq,
+                EventKind::Notification,
+                Source::Daemon,
+                json!({"notification_type": "model_set", "effort": level}),
+            )
+        };
+        let end = |seq| {
+            event(
+                seq,
+                EventKind::SessionEnd,
+                Source::Daemon,
+                json!({"exit_code": 1}),
+            )
+        };
+        let mut facts = SessionFacts::default();
+        facts.observe(&effort(3, "high"));
+        facts.observe(&end(5));
+        assert_eq!(
+            facts.ended_with,
+            Some(Fact {
+                value: "high".into(),
+                seq: 3
+            })
+        );
+        assert_eq!(facts.effort, None);
+        facts.observe(&end(9));
+        assert_eq!(facts.ended_with, None, "the relaunched process named none");
+        let mut late = SessionFacts::default();
+        late.observe(&end(5));
+        late.observe(&effort(3, "high"));
+        assert_eq!(
+            late.ended_with, None,
+            "an effort folded after its end is left out"
         );
     }
 

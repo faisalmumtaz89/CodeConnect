@@ -665,6 +665,8 @@ enum Fixtures {
             // `-CC_ENDED_MODEL <value>`: the model fact of the first ended run and of the relaunchable one, whose
             // reply box shows it, as a daemon sends it: with `-CC_ENDED_RECEIPT`, read from that receipt, so at its
             // seq. `-CC_ENDED_MODEL_LABEL <label>`: the name a daemon of minor 46 gives that model (`model_label`).
+            // `-CC_ENDED_EFFORT <value>`, with `-CC_ENDED_MODEL`: the effort the run's process ended with, as ccd names it
+            // for an ended run.
             var model = ""
             #if DEBUG
                 if offset == 0 || !relaunchable.isEmpty,
@@ -674,6 +676,9 @@ enum Fixtures {
                     model = #""model":{"value":"\#(value)","seq":\#(seq)},"#
                     if let label = UserDefaults.standard.string(forKey: "CC_ENDED_MODEL_LABEL") {
                         model += #""model_label":"\#(label)","#
+                    }
+                    if let effort = UserDefaults.standard.string(forKey: "CC_ENDED_EFFORT") {
+                        model += #""effort":{"value":"\#(effort)","seq":4},"#
                     }
                 }
             #endif

@@ -116,6 +116,10 @@ pub struct StartOptions {
     pub resume: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The effort claude starts at (`--effort`): a relaunch's, the effort the run ended with. Absent, claude's own
+    /// default. A host that predates it ignores it, and claude starts at its default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// A new worktree for claude to make and start in, as `claude --worktree <name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
@@ -353,6 +357,7 @@ mod tests {
                     trust: Trust::Trusted,
                     resume: None,
                     model: None,
+                    effort: None,
                     worktree: Some("feature-x".into()),
                     mail: mail(),
                 },
@@ -367,6 +372,7 @@ mod tests {
                     trust: Trust::NotTrusted,
                     resume: Some("5f0c1e2a-0000-4000-8000-000000000001".into()),
                     model: Some("opus".into()),
+                    effort: Some("high".into()),
                     worktree: None,
                     mail: mail(),
                 },

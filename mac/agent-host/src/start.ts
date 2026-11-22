@@ -33,6 +33,7 @@ export function queryOptions(options: StartOptions) {
     allowDangerouslySkipPermissions: true,
     ...(options.resume === undefined ? {} : { resume: options.resume }),
     ...(options.model === undefined ? {} : { model: options.model }),
+    ...(options.effort === undefined ? {} : { effort: options.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max' }),
     // Without it the initialize request carries an empty system prompt.
     systemPrompt: { type: 'preset', preset: 'claude_code' } as const,
     mcpServers: { codeconnect: { type: 'stdio', command: options.mail.command, args: options.mail.args } as const },

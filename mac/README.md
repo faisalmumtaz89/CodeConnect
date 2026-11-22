@@ -864,8 +864,10 @@ took and did not report before it ended is not kept. Its first init says
 the run is `live` and the message `sent`; claude's refusal leaves the run `exited` and still
 relaunchable, with claude's reason; a launch that fails first puts it back `exited`, nothing
 sent. With no answer within 15 s, inside the apps' 20 s wait, the message reads
-indeterminate and the relaunch goes on. The effort chosen for the old process is not carried
-over: the run's effort reads unset from its end until one is set again. A ccd restart in the
+indeterminate and the relaunch goes on. The effort the old process ended with is carried over:
+while ended the run reads that effort, and the relaunched claude starts at it (`--effort`), which
+ccd files as the run's effort once claude has taken the start; a run that ended naming none starts
+at claude's default and reads none. A Codex run's effort is restored by Codex's own resume. A ccd restart in the
 seconds of a relaunch files the resumed start with no `source`.
 For such a run the Model and Effort screens are refused, as a sheet's typed confirmation or
 typed alone (`/model`, `/effort`) ("/model’s screen isn’t available in this session;

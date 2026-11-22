@@ -2123,7 +2123,10 @@ async fn resume_thread(
 /// leaves to the thread) and the resume's thread `config`. It is recorded as the run's only
 /// while the run has had no message, so nothing is lost; its settings filed, and the run put
 /// back in Plan when `kept` was in Plan, as a resume puts it back. Any other run's thread with
-/// no rollout stays an error, as every other failed resume is.
+/// no rollout stays an error, as every other failed resume is. The effort the run ended with is
+/// not given (an accepted miss): `thread/start` has no effort in any recording here, so a run set
+/// to an effort, whose app-server ended before its first message, starts its new thread at Codex's
+/// default, which the run then reads.
 async fn new_thread(
     daemon: &Arc<Daemon>,
     client: &Client,
@@ -2356,6 +2359,8 @@ async fn launch_again(
         .map_err(|err| format!("could not read its settings: {err:#}"))?
         .and_then(narrower_than_default);
     let client = bring_up(daemon, uid, &launch, &folders, log, deadline, launched).await?;
+    // The run's effort needs nothing here: Codex's own resume restores the thread's effort (seen on 0.170.0 on
+    // 2026-11-22).
     let (adapter, owed, cards) = resume_thread(daemon, &client, run, &codeconnect, kept).await?;
     Ok((client, adapter, owed, cards))
 }
