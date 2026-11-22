@@ -620,6 +620,9 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// the old one until its next message starts it on the new one. `nil` for a run CodeConnect did not start, for an
     /// account since removed, and from an older daemon: not known, never Default.
     public let account: RunAccount?
+    /// A move to another account under way (minor 48): its agent's active account changed and this run has not yet
+    /// started on it. `nil` when none is pending, from an older daemon, and for a value this build does not know.
+    public let switching: RunSwitching?
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
     /// last ended. `nil` outside a repository, on a detached head, before the
     /// first read, and from an older daemon.
@@ -653,6 +656,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case menus
         case modelLabel = "model_label"
         case account
+        case switching
         case gitBranch = "git_branch"
         case diffStat = "diff_stat"
     }
@@ -682,6 +686,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         menus = try c.decodeIfPresent(RunMenus.self, forKey: .menus)
         modelLabel = try c.decodeIfPresent(String.self, forKey: .modelLabel)
         account = try c.decodeIfPresent(RunAccount.self, forKey: .account)
+        switching = try c.decodeIfPresent(String.self, forKey: .switching).flatMap(RunSwitching.init(rawValue:))
         gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
         diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
     }
@@ -790,6 +795,16 @@ public struct RunMenus: Codable, Sendable, Hashable {
         case models, modes
         case selectedModel = "selected_model"
     }
+}
+
+/// Where a run's move to another account stands (`SessionSummary.switching`, minor 48).
+public enum RunSwitching: String, Codable, Sendable, Hashable {
+    /// A turn, a card or a message the agent has not read is still going; it moves once idle.
+    case waiting
+    /// Its process ended at an idle point; its next message starts it on the new account.
+    case moved
+    /// Its start on the new account was refused: it reads as the relaunchable end it is, its own line says why.
+    case failed
 }
 
 /// An account a run runs on, as the daemon names it (`SessionSummary.account`, minor 48).
