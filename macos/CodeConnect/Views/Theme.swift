@@ -12,6 +12,8 @@ enum Theme {
     static let raised = Color(themeHex: 0x1C1C1F)
     static let sheet = Color(themeHex: 0x19191C)
     static let code = Color(themeHex: 0x0E0E10)
+    /// Inline `code`'s ground inside prose: enough to mark the span on the pane, not a box.
+    static let codeGround = Color.white.opacity(0.075)
     static let hairline = Color.white.opacity(0.07)
     /// A list box's corners: a box of rows, as a text field's.
     static let boxRadius: CGFloat = 7

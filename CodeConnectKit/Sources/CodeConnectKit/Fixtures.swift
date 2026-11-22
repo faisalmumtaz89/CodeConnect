@@ -316,6 +316,26 @@ enum Fixtures {
         if variant == .wideTool, let event = decode(wideToolJSON(now: now)) {
             messages.append(event)
         }
+        #if DEBUG
+            // `-CC_FIXTURE_PROSE <name>`: `fx-2` holds one finished turn whose reply is `ProseFixture`'s of that name.
+            if let name = UserDefaults.standard.string(forKey: "CC_FIXTURE_PROSE") {
+                let stamp = rfc3339(now.addingTimeInterval(-30))
+                for (seq, kind, payload) in [
+                    (1, "user_message", "{\"message\":{\"content\":\(quoted(ProseFixture.prompt))}}"),
+                    (2, "agent_message",
+                     "{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\(quoted(ProseFixture.reply(name)))}]}}"),
+                    (3, "turn_complete", "{\"hook_event_name\":\"Stop\"}"),
+                ] {
+                    let source = kind == "turn_complete" ? "hook" : "transcript"
+                    if let event = decode(
+                        "{\"type\":\"event\",\"event\":{\"seq\":\(seq),\"session_id\":\"fx-2\",\"ts\":\"\(stamp)\","
+                            + "\"kind\":\"\(kind)\",\"source\":\"\(source)\",\"payload\":\(payload)}}")
+                    {
+                        messages.append(event)
+                    }
+                }
+            }
+        #endif
         if let card = variant.heldCard, let event = decode(approvalEventJSON(card, seq: 25, now: now)) {
             messages.append(event)
         }

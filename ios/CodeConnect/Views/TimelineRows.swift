@@ -251,6 +251,8 @@ struct AgentMessageRow: View {
                         CCMonoBlock(code, lineLimit: 12)
                     case .table(let table):
                         AgentTableView(table: table)
+                    case .list(let list):
+                        AgentListView(list: list)
                     case .heading(let heading):
                         // One style for all six levels; the marker's job was
                         // hierarchy in a document, and here it is a title over
