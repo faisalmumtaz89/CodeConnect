@@ -586,7 +586,7 @@ struct StartForm: View {
 
     // MARK: First message and model
 
-    /// The first message, and inside the box's foot the model and where in the repository, beside Start (⌘↩): its
+    /// The first message, and inside the box's foot the model and where in the repository, beside Start (↩): its
     /// menus open upward, over what is above the box.
     private func composer(_ context: StartContext) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -600,6 +600,9 @@ struct StartForm: View {
                 .font(Theme.ui(13.5))
                 .lineLimit(short ? 1...6 : 3...8)
                 .focused($messageFocused)
+                // A chat box, as the reply box is: Return starts (`start` keeps the one rule, `startable`), ⇧ or ⌥ Return
+                // adds a line. Without it Return fell to the field's own end of editing, which selected all its text.
+                .sendsOnReturn(start)
                 .padding(.horizontal, 4)
             HStack(alignment: .bottom, spacing: 2) {
                 ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }
@@ -623,7 +626,8 @@ struct StartForm: View {
         }
     }
 
-    /// Start: filled once it can be pressed; ⌘↩, as a form's action is (decision 289). One rule for both, `startable`:
+    /// Start: filled once it can be pressed; Return in the first message starts too, and ⌘↩ (the owner's word, 2026-11-22,
+    /// over decision 289 for this form). One rule for all three, `startable`:
     /// while an ask or a panel of the form is up, its keys are that ask's or panel's.
     private var startButton: some View {
         Button(action: start) {
@@ -636,7 +640,7 @@ struct StartForm: View {
         .buttonStyle(.hover(radius: 12, over: true, id: "start.start"))
         .keyboardShortcut(startable ? KeyboardShortcut(.return, modifiers: .command) : nil)
         .disabled(!startable)
-        .help(blocked ?? "Start (⌘↩)")
+        .help(blocked ?? "Start (↩)")
         .accessibilityLabel("Start")
         .accessibilityIdentifier("start.start")
     }
