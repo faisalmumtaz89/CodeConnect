@@ -148,7 +148,8 @@ struct StartForm: View {
                     .frame(maxWidth: Self.column)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                form
+                // Room under the note as the folder chip's frame has above its words, so what is drawn is centred.
+                form.padding(.bottom, 5)
             }
         }
         .task(id: contexts.map(\.id)) { contexts.forEach { $0.load() } }
@@ -719,16 +720,11 @@ private struct StartProgress: View {
                     }
                 }
             }
+            // No Close while it is being sent, and no bar: the start stays on screen until it is answered or withdrawn
+            // (Stop retrying), so it is never forgotten while it may still run. Equal room above and below what is
+            // drawn, so the page stands at the area's middle.
             .padding(.horizontal, 18)
-            .padding(.top, 18)
-            Spacer(minLength: 18)
-            // No Close while it is being sent: the start stays on screen until it is answered or withdrawn (Stop
-            // retrying), so it is never forgotten while it may still run.
-            SheetBar(
-                action: nil, actionID: "", blocked: true, perform: {}, cancel: nil, cancelID: "start.close"
-            ) {
-                EmptyView()
-            }
+            .padding(.vertical, 18)
         }
     }
 
@@ -805,8 +801,8 @@ private struct StartProgress: View {
                 }
             }
             .padding(.horizontal, 18)
-            .padding(.top, 18)
-            Spacer(minLength: 18)
+            .padding(.top, 9)  // as much room above as the bar keeps under its buttons
+            Color.clear.frame(height: 18)
             SheetBar(
                 action: words.action, actionID: "start.failed.again", blocked: false, perform: again, cancel: close,
                 cancelID: "start.close", cancelTitle: "Close"
@@ -850,10 +846,10 @@ private struct FolderStep: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 18)
-            .padding(.top, 18)
+            .padding(.top, 9)  // as much room above as the bar keeps under its buttons
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("folder.question")
-            Spacer(minLength: 18)
+            Color.clear.frame(height: 18)
             SheetBar(
                 action: nil, actionID: "", blocked: true, perform: {}, cancel: back, cancelID: "start.folder.back",
                 cancelTitle: "Back"

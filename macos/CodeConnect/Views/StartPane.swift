@@ -18,8 +18,8 @@ struct StartPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // The form stands a little above the middle, where the eye lands; a short window gives it the room.
-            Spacer(minLength: 16).frame(maxHeight: height * 0.22)
+            // The form, and each page of a sent start, stands at the middle of the area: equal room above and below.
+            Spacer(minLength: 16)
             Group {
                 if formShown || !machines.startContexts.isEmpty || machines.outstandingStart != nil {
                     StartForm(started: started, addComputer: addComputer, whyNone: why, draft: draft)
