@@ -106,8 +106,8 @@ pub(crate) async fn switched(daemon: &Daemon, uid: &str) -> bool {
     )
 }
 
-/// End run on the run `uid`, ended by its switch and not started again: its move is off, and its end is filed as
-/// an ordinary one (its process has ended), so it reads as the relaunchable end it is.
+/// End run on the run `uid`, ended by its switch and not started again: its move is off, and the end End run files
+/// on any run is filed, so it reads ended and takes no message, as any run End run ended.
 pub(crate) async fn ended(daemon: &Arc<Daemon>, uid: &str) {
     set(daemon, uid, None).await;
     let Ok(id) = protocol::uid::uuid_v4() else {
@@ -116,7 +116,7 @@ pub(crate) async fn ended(daemon: &Arc<Daemon>, uid: &str) {
     let end = protocol::event::PendingEvent::new(
         &protocol::event::SessionKey::new(uid, uid),
         protocol::event::EventKind::SessionEnd,
-        serde_json::json!({"exit_code": null, "reason": crate::claude_host::PROCESS_ENDED}),
+        crate::claude_host::stopped_end(),
         protocol::event::Source::Daemon,
     )
     .with_source_event_id(format!("switch-end:{id}"));

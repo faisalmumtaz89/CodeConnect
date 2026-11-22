@@ -78,7 +78,7 @@ const STOP_GRACE: Duration = Duration::from_secs(10);
 
 /// The end of a run that was `stopping`, however it ended. It carries no exit code: the
 /// person asked for the stop, so claude's code (1 when it was mid-turn) says nothing.
-fn stopped_end() -> serde_json::Value {
+pub(crate) fn stopped_end() -> serde_json::Value {
     serde_json::json!({ "exit_code": null, "reason": "Stopped" })
 }
 
@@ -1265,7 +1265,7 @@ pub(crate) async fn stop_run(daemon: &Arc<Daemon>, uid: &str) -> StopRunResult {
     match lifecycle {
         Lifecycle::Live => {}
         Lifecycle::Stopping => return StopRunResult::Stopping,
-        // A run a switch ended reads live until its next message: End run makes it the ordinary end it is, filed.
+        // A run a switch ended reads live until its next message: End run ends it as it ends any run, filed.
         Lifecycle::Exited | Lifecycle::Failed => {
             if crate::switch::switched(daemon, uid).await {
                 crate::switch::ended(daemon, uid).await;
@@ -12318,13 +12318,14 @@ mod tests {
         stop(&again.dir);
     }
 
-    /// **End run on a moved run ends it** (306 Slice E): a run moved to B reads live until its next message; End run
-    /// then clears its move, so it reads as the relaunchable end it is.
+    /// **End run on a moved run ends it, as End run ends any run** (306 Slice E): a run moved to B reads live until
+    /// its next message; End run files the end End run files ("Stopped"), so it reads ended and takes no reply, and a
+    /// message to it is refused as to any run ended by End run.
     #[tokio::test]
     async fn end_run_on_a_moved_run_ends_it() {
         let _env = crate::ProcessEnvRead::take();
         let mut rig = relaunch_rig();
-        let (uid, dir, old, _b) = moved_to_b(&mut rig).await;
+        let (uid, _dir, _old, _b) = moved_to_b(&mut rig).await;
         let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
         assert_eq!(
             stop_run(&rig.daemon, &uid).await,
@@ -12335,48 +12336,23 @@ mod tests {
             (
                 ended["lifecycle"].as_str(),
                 ended.get("switching"),
-                ended["relaunchable"].as_bool()
+                ended["relaunchable"].as_bool().unwrap_or(false)
             ),
-            (Some("exited"), None, Some(true)),
+            (Some("exited"), None, false),
             "{ended}"
         );
-        // Its next message relaunches it, as for any ended run.
-        let (sent, relaunched) = tokio::join!(
-            send_as_app(&rig.daemon, &uid, "r-after-end", "again"),
-            async {
-                let mut relaunched = play_relaunched(&dir, old).await;
-                let ToHost::Start { uuid, .. } = relaunched.start.clone() else {
-                    panic!("not a start: {:?}", relaunched.start);
-                };
-                say(
-                    &mut relaunched.write,
-                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
-                               "status": "done", "initialize": initialize_answer()}),
-                )
-                .await;
-                assert_eq!(
-                    next(&mut relaunched.lines).await,
-                    Some(ToHost::Ack { seq: 2 })
-                );
-                relaunched
-            }
-        );
-        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        let sent = send_as_app(&rig.daemon, &uid, "r-after-end", "again").await;
+        assert!(matches!(sent, SendTextResult::Refused { .. }), "{sent:?}");
         tokio::time::sleep(Duration::from_millis(200)).await;
         window_over.send(()).unwrap();
         let frames = window.await.unwrap();
         let ends: Vec<_> = frames
             .iter()
             .filter(|frame| frame["type"] == "event" && frame["event"]["kind"] == "session_end")
-            .map(|frame| frame["event"]["payload"]["reason"].clone())
+            .map(|frame| frame["event"]["payload"].clone())
             .collect();
-        assert_eq!(
-            ends,
-            [serde_json::json!(PROCESS_ENDED)],
-            "End files an ordinary end"
-        );
-        crate::switch::window::keep(&frames, "switch-then-end-then-message-claude-wire.json");
-        stop(&relaunched.dir);
+        assert_eq!(ends, [stopped_end()], "End files the end End run files");
+        crate::switch::window::keep(&frames, "switch-then-end-claude-wire.json");
     }
 
     /// **A moved run offers no settings, and a change sent anyway is refused in words** (306 Slice E): its summary

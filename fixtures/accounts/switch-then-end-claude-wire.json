@@ -1,0 +1,46 @@
+[
+  {
+    "event": {
+      "kind": "session_end",
+      "payload": {
+        "exit_code": null,
+        "reason": "Stopped"
+      },
+      "seq": 7,
+      "session_id": "01M82ADZJFERJ23455Y2DJW9FB",
+      "session_uid": "01M82ADZJFERJ23455Y2DJW9FB",
+      "source": "daemon",
+      "source_event_id": "switch-end:976ce773-e95a-4356-9002-03c3e361d398",
+      "ts": "2026-11-22T19:06:22.896Z"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-22T19:06:22.671Z",
+        "cwd": "/tmp/cch2.10P9QCRDCA",
+        "last_seq": 7,
+        "lifecycle": "exited",
+        "link": "detached",
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 3,
+          "value": "default"
+        },
+        "project_label": "cch2.10P9QCRDCA",
+        "session_id": "01M82ADZJFERJ23455Y2DJW9FB",
+        "session_uid": "01M82ADZJFERJ23455Y2DJW9FB",
+        "updated_at": "2026-11-22T19:06:22.842Z"
+      }
+    ],
+    "type": "sessions"
+  }
+]
