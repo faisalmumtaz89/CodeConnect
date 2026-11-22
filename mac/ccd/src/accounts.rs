@@ -277,20 +277,27 @@ pub(crate) async fn with_signed_in(
         return reply;
     };
     let root = protocol::root_dir();
-    for account in accounts
+    // Every account asked at once: each ask is a login shell and the agent's own start.
+    let asked = accounts
         .iter_mut()
         .filter(|account| account.agent == AgentKind::Codex)
-    {
-        let row = Account {
-            id: account.id.clone(),
-            agent: "codex".into(),
-            label: account.label.clone(),
-        };
-        if let Ok(Some(home)) = AccountEnv::for_account(&root, &row) {
-            account.signed_in =
-                Some(crate::start_session::codex_signed_in(environment, Some(&home), codex).await);
-        }
-    }
+        .map(|account| {
+            let row = Account {
+                id: account.id.clone(),
+                agent: "codex".into(),
+                label: account.label.clone(),
+            };
+            let root = &root;
+            async move {
+                if let Ok(Some(home)) = AccountEnv::for_account(root, &row) {
+                    account.signed_in = Some(
+                        crate::start_session::codex_signed_in(environment, Some(&home), codex)
+                            .await,
+                    );
+                }
+            }
+        });
+    futures_util::future::join_all(asked).await;
     reply
 }
 
