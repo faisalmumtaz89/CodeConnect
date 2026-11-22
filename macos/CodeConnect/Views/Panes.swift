@@ -12,6 +12,10 @@ enum Panes {
 extension FocusedValues {
     /// A run is open in the main window: only then do the list and the run hide.
     @Entry var runIsOpen: Bool?
+    /// Settings is over the panes: none of them hides or shows from the View menu meanwhile.
+    @Entry var settingsShown: Bool?
+    /// An ask or a sheet (Add, Set Up) covers the main window.
+    @Entry var windowCovered: Bool?
 }
 
 /// One pane's toggle at the window's top edge, as a Mac toolbar's pane toggles are drawn: the icon alone, the hover
@@ -46,21 +50,25 @@ struct PaneCommands: Commands {
     @AppStorage(Panes.listHidden) private var listHidden = false
     @AppStorage(Panes.runHidden) private var runHidden = false
     @FocusedValue(\.runIsOpen) private var runIsOpen
+    @FocusedValue(\.settingsShown) private var settingsShown
 
     var body: some Commands {
         CommandGroup(replacing: .sidebar) {
-            Button(sidebarHidden ? "Show Sidebar" : "Hide Sidebar") { sidebarHidden.toggle() }
-                .keyboardShortcut("s", modifiers: [.control, .command])
-            Button(listHidden ? "Show List" : "Hide List") {
-                listHidden.toggle()
-                if listHidden { runHidden = false }
+            Group {
+                Button(sidebarHidden ? "Show Sidebar" : "Hide Sidebar") { sidebarHidden.toggle() }
+                    .keyboardShortcut("s", modifiers: [.control, .command])
+                Button(listHidden ? "Show List" : "Hide List") {
+                    listHidden.toggle()
+                    if listHidden { runHidden = false }
+                }
+                .disabled(runIsOpen != true)
+                Button(runHidden ? "Show Run" : "Hide Run") {
+                    runHidden.toggle()
+                    if runHidden { listHidden = false }
+                }
+                .disabled(runIsOpen != true)
             }
-            .disabled(runIsOpen != true)
-            Button(runHidden ? "Show Run" : "Hide Run") {
-                runHidden.toggle()
-                if runHidden { listHidden = false }
-            }
-            .disabled(runIsOpen != true)
+            .disabled(settingsShown == true)
         }
     }
 }

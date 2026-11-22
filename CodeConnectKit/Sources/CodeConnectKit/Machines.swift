@@ -196,6 +196,13 @@ public final class Machines {
         models.first { $0.machineID == machineID }
     }
 
+    /// The computer whose daemon has said it is `daemonID` (`hello_ack.machine_id`), whatever address it was paired
+    /// by and whether or not its link is up: a model's own `machineID` is its pairing's, never its daemon's.
+    public func model(daemonID: String) -> AppModel? {
+        guard let id = pairing.machines.first(where: { $0.daemonID == daemonID })?.id else { return nil }
+        return model(for: id)
+    }
+
     /// What the daemon a session is on can do.
     public func profile(forSession key: String) -> DaemonProfile {
         (model(forSession: key) ?? linkModel).daemonProfile

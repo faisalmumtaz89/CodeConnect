@@ -19,6 +19,7 @@ struct SessionPane: View {
     /// keys, as the window's own Esc stands down for the Add sheet.
     @FocusedValue(\.adding) private var adding
     @Environment(Setup.self) private var setup
+    @Environment(\.agentsShown) private var agentsShown
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -62,8 +63,10 @@ struct SessionPane: View {
         .background(Theme.window)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session.pane")
-        .onAppear { model.markReviewed(row.id) }
-        .onDisappear { model.markReviewed(row.id) }
+        // Seen only while on screen: under Settings nothing is marked, and coming back from it is seeing the run.
+        .onAppear { if agentsShown { model.markReviewed(row.id) } }
+        .onDisappear { if agentsShown { model.markReviewed(row.id) } }
+        .onChange(of: agentsShown) { _, shown in if shown { model.markReviewed(row.id) } }
     }
 }
 

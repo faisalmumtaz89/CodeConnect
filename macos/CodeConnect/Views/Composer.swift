@@ -87,6 +87,7 @@ private struct Composer: View {
     /// The field's caret, which the box sets when the app gives it the keyboard back (`takeKeyboardBack`).
     @State private var selection: TextSelection?
     @Environment(\.replyFocusRequest) private var replyFocusRequest
+    @Environment(\.agentsShown) private var agentsShown
     /// The Compact command typed last, and where it stands.
     @State private var running: Running?
     @State private var quiet: Task<Void, Never>?
@@ -183,6 +184,8 @@ private struct Composer: View {
         }
         // Return in the run list asks for the reply box.
         .onChange(of: replyFocusRequest) { takeKeyboardBack() }
+        // Back from Settings, the box has the keyboard again.
+        .onChange(of: agentsShown) { _, shown in if shown { takeKeyboardBack() } }
         // Esc closes the open settings panel, then leaves the field, before the window's Esc closes the run. Published
         // to the whole window, not only along the focus: a panel opened by a click leaves nothing in the box focused.
         .focusedSceneValue(\.composerHoldsEscape, panel != nil || fieldFocused)

@@ -10,7 +10,8 @@ struct CodeConnectApp: App {
     @State private var setup: Setup
     /// Sparkle's updater, with the app's own update sheet: started with the app.
     @State private var updates: Updates?
-    @State private var settingsTab = SettingsTab.devices
+    /// Settings, in the main window in the sidebar's place, and its section: kept while the window is closed.
+    @State private var settings: SettingsSection?
     /// Help › CodeConnect Support.
     private static let support = URL(string: "https://codeconnect.sh/support")!
     /// Where the main window was, kept while it is closed: it opens again on the same list and run.
@@ -26,7 +27,7 @@ struct CodeConnectApp: App {
     init() {
         #if DEBUG
             RenderWindow.isolateTestLaunch()
-            _settingsTab = State(initialValue: RenderWindow.settingsTab)
+            _settings = State(initialValue: RenderWindow.settingsSection)
             _scope = State(initialValue: RenderWindow.fleetScope)
             _opened = State(initialValue: RenderWindow.opened)
         #endif
@@ -45,11 +46,12 @@ struct CodeConnectApp: App {
     var body: some Scene {
         // The app's one window: no New Window, and no window tabs.
         Window("CodeConnect", id: "main") {
-            RootView(scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd)
+            RootView(scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd, settings: $settings)
                 .environment(machines)
                 .environment(setup)
                 .preferredColorScheme(.dark)
                 .tint(CC.color.accent)
+                .environment(\.updates, updates)
                 // Once a launch, not once a window: the window opened again keeps the computers as they are.
                 .task {
                     guard !started else { return }
@@ -62,6 +64,7 @@ struct CodeConnectApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             AddCommands(pending: $pendingAdd)
+            SettingsCommands(settings: $settings)
             PaneCommands()
             // View › Refresh: every computer asked for its runs again, as the iPhone's pull to refresh asks.
             CommandGroup(after: .sidebar) {
@@ -80,34 +83,7 @@ struct CodeConnectApp: App {
                 Button("CodeConnect Support") { NSWorkspace.shared.open(Self.support) }
             }
         }
-        // CodeConnect > Settings… (⌘,): this computer's devices, and the folders' answers to the folder question.
-        Settings {
-            SettingsWindow(tab: $settingsTab)
-            .confirmationHost()
-            .environment(machines)
-            .environment(setup)
-            .preferredColorScheme(.dark)
-            .tint(CC.color.accent)
-            #if DEBUG
-                .renderLook()
-            #endif
-        }
     }
-}
-
-/// The Settings window's panes.
-enum SettingsTab: String, CaseIterable {
-    case devices, folders
-
-    var title: String {
-        switch self {
-        case .devices: DeviceGroup.tabTitle
-        case .folders: FolderWords.paneTitle
-        }
-    }
-
-    /// What a driver finds the tab by.
-    var id: String { "settings.tab.\(rawValue)" }
 }
 
 /// Dark only, as the iPhone app is: pinned for the whole app, so menus, alerts and sheets the
@@ -129,16 +105,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct RootView: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
-    #if DEBUG
-        @Environment(\.openSettings) private var openSettings
-    #endif
     @Binding var scope: FleetScope
     @Binding var filter: FleetFilter?
     @Binding var opened: String?
     @Binding var pendingAdd: AddKind?
+    @Binding var settings: SettingsSection?
 
     var body: some View {
-        MainWindow(scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd)
+        MainWindow(scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd, settings: $settings)
             .confirmationHost()
             .frame(minWidth: 960, minHeight: 520)
             // A cold launch's splash, over the window from its first frame: until it is over, no control under it
@@ -152,18 +126,18 @@ struct RootView: View {
             }
             #if DEBUG
                 .renderLook()
-                // A render of Settings photographs that window, never this one.
+                // A render of Devices or Folders is photographed by that pane once its list is in.
                 .background(
                     RenderWindow(
                         // A recording of the splash photographs its own frames and quits.
-                        ready: RenderWindow.launchRecord == nil && !RenderWindow.opensSettings
+                        ready: RenderWindow.launchRecord == nil
+                            && settings != .devices && settings != .folders
                             && (!RenderWindow.waitsForComputer || machines.pairingError != nil || connected)
                             && (!Setup.runsThisLaunch || setup.settled)
                             // A render of an update step photographs the update's own window.
                             && RenderWindow.updateStep == nil,
                         showsSheet: (RenderWindow.pairing == nil ? RenderWindow.opensAddComputer : !connected)
                             || setup.shown))
-                .task { if RenderWindow.opensSettings { openSettings() } }
             #endif
     }
 

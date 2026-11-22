@@ -20,7 +20,7 @@ struct FoldersPane: View {
         let contexts = machines.models
             .filter { $0.machineID != nil && ($0.connection.capabilities?.startsSessions ?? true) }
             .map(StartContext.init(model:))
-        SettingsScroll {
+        Group {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(FolderWords.paneTitle).font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
