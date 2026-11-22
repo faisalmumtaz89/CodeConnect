@@ -930,7 +930,6 @@ struct SessionDetailView: View {
 
     @Environment(AppModel.self) private var model
     @Environment(Machines.self) private var machines
-    @State private var composeText = ""
     @State private var openApproval: ApprovalItem?
     /// The note over the composer. **Never set inside `withAnimation`.** It
     /// changes the compose bar's height, and the bar is the timeline's bottom
@@ -945,8 +944,17 @@ struct SessionDetailView: View {
     /// same identity, so the computer says it was already typed (and the box clears)
     /// or types it the one time it never arrived. Only while the box holds exactly
     /// that text, within a minute of the send, and never for an ask-again's own
-    /// answer. Editing, another send, or leaving the session drops it.
-    @State private var unansweredSend: UnansweredSend?
+    /// answer. Editing or another send drops it. The run's (`RunDrafts.unanswered`), as the reply is.
+    private var unansweredSend: UnansweredSend? {
+        get { model.drafts(for: key)?.unanswered }
+        nonmutating set { model.drafts(for: key)?.unanswered = newValue }
+    }
+    /// What is typed in the reply box and not sent: the run's (`RunDrafts.reply`), so it outlives this screen, as on
+    /// the Mac.
+    private var composeText: String {
+        get { model.drafts(for: key)?.reply ?? "" }
+        nonmutating set { model.drafts(for: key)?.reply = newValue }
+    }
     @State private var askingAgain = false
     @State private var showHostedSettingsSheet = false
     @State private var showCompactSheet = false
@@ -1030,16 +1038,20 @@ struct SessionDetailView: View {
                         CommandPalette(content: palette, onAction: route)
                     }
                     HostedSettingsBar(model: model, key: key, onOpen: { showHostedSettingsSheet = true })
-                    SessionComposeBar(
-                        key: key,
-                        text: $composeText,
-                        result: composeResult,
-                        sending: sending,
-                        runLabel: label.spoken,
-                        summary: summary,
-                        onWhy: { showLinkDetail = true },
-                        onSend: send,
-                        focused: $composerFocused)
+                    // The box writes into the run's drafts, so it is drawn while the screen lists the run, as on
+                    // the Mac.
+                    if let drafts = model.drafts(for: key) {
+                        SessionComposeBar(
+                            key: key,
+                            text: Bindable(drafts).reply,
+                            result: composeResult,
+                            sending: sending,
+                            runLabel: label.spoken,
+                            summary: summary,
+                            onWhy: { showLinkDetail = true },
+                            onSend: send,
+                            focused: $composerFocused)
+                    }
                 }
             }
             // One ground under the whole block — the settings line and the reply box together — so the

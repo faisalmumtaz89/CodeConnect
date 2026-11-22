@@ -8,7 +8,7 @@ import SwiftUI
 /// form rebuilt from the earlier answers — so the typed first message and the
 /// computer, folder, agent and place are all still there, and the question's
 /// Back is a plain sheet pop to that form. Built from the `SessionStart` the
-/// `needsTrust` outcome stands on.
+/// `needsTrust` outcome stands on; the message is the fleet's (`message`).
 struct StartSeed {
     let context: StartContext
     let project: StartProject
@@ -16,7 +16,6 @@ struct StartSeed {
     let agent: StartAgent
     /// The model the start named, nil for the agent's Default.
     let model: String?
-    let message: String
     /// The folder the question is about.
     let trustPath: String
 }
@@ -47,7 +46,9 @@ struct StartStepsSheet: View {
     /// one is chosen, which is the agent's Default (`pick`).
     @State private var modelValue: String?
     @State private var place = StartPlace.folder
-    @State private var message = ""
+    /// The first message, held by the fleet above this sheet, so closing the sheet keeps it, as the Mac's
+    /// `StartDraft.message` does.
+    @Binding var message: String
     @State private var worktreeName = ""
     @State private var showsHidden = false
     @State private var namingFolder = false
@@ -68,10 +69,11 @@ struct StartStepsSheet: View {
     @State private var trustPath: String?
 
     init(
-        contexts: [StartContext], seed: StartSeed? = nil,
+        contexts: [StartContext], message: Binding<String>, seed: StartSeed? = nil,
         onStarted: @escaping (String) -> Void, onClose: @escaping () -> Void
     ) {
         self.contexts = contexts
+        _message = message
         self.onStarted = onStarted
         self.onClose = onClose
         guard let seed else { return }
@@ -86,7 +88,6 @@ struct StartStepsSheet: View {
         _agent = State(initialValue: seed.agent)
         _modelValue = State(initialValue: seed.model)
         _place = State(initialValue: seed.place)
-        _message = State(initialValue: seed.message)
         _trustPath = State(initialValue: seed.trustPath)
         let isRepo = seed.context.git(seed.project.path).map { $0 != nil } ?? seed.context.branchAhead(seed.project)
         let steps: [Screen] = [.computer, .folder, .agent] + (isRepo ? [.branch] : []) + [.start, .trust]
