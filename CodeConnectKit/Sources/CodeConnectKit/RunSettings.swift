@@ -37,10 +37,11 @@ public enum RunSettings: Sendable, Hashable {
 
     /// The effort a run ended with, for the pane's header beside its model (decision 321): only for a run that takes no
     /// reply, which has no reply row to name it; a live run, or one the next message relaunches, names its effort on its
-    /// reply row instead, so the header never says it twice. An ended run carries no menus, so this is the effort its
-    /// agent named, or nothing.
+    /// reply row instead, so the header never says it twice. Only the effort its agent named: never a model's default
+    /// it did not run at.
     public static func headerEffort(summary: SessionSummary) -> String? {
-        summary.takesNoReply ? effortName(summary: summary) : nil
+        guard summary.takesNoReply, let fact = summary.effort else { return nil }
+        return EffortConfirmation.label(for: fact.value)
     }
 
     /// The entry for a run, from its summary and the things only the client knows: the model the run
