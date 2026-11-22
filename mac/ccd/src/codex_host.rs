@@ -107,6 +107,8 @@ pub(crate) struct Run<'a> {
     /// The start's environment, the one its codex check read: codex gets it as it is,
     /// with only `CODECONNECT_SESSION_UID` added.
     pub environment: &'a HashMap<OsString, OsString>,
+    /// The account the run starts on, which it records; None is Codex's Default.
+    pub account: Option<&'a crate::accounts::AccountEnv>,
     /// The person's folder answer, as the start resolved it: the trust list's level.
     pub trust: Trust,
 }
@@ -167,7 +169,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     let trust = serde_json::to_string(&run.trust).expect("a folder answer is always JSON");
     match daemon
         .db
-        .begin_run(row, run.request_id.to_string(), Some(trust))
+        .begin_run(row, run.request_id.to_string(), Some(trust), run.account.map(|a| a.id().to_string()))
         .await
     {
         Ok(Some(existing)) => return crate::claude_host::answer_for(existing),
@@ -2337,6 +2339,13 @@ async fn launch_again(
         .append(true)
         .open(dir.join("host.log"))
         .map_err(|err| format!("could not open its host.log: {err}"))?;
+    // The account the run started on, as it recorded it, never the one active now: its thread lives in that home.
+    let account = match daemon.store.run_account(uid) {
+        Ok(Some(account)) => crate::accounts::AccountEnv::for_account(root, &account)
+            .map_err(|err| format!("could not find its account's folder: {err}"))?,
+        Ok(None) => None,
+        Err(err) => return Err(format!("could not read its account: {err:#}")),
+    };
     let launch = Run {
         root,
         request_id: &ask.request_id,
@@ -2349,6 +2358,7 @@ async fn launch_again(
         codeconnect: &codeconnect,
         git_bin,
         environment: &environment,
+        account: account.as_ref(),
         trust: run.trust,
     };
     let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
@@ -2845,6 +2855,7 @@ async fn bring_up(
     let projects = format!("projects={}", launch_projects(folders, run.trust));
     let mut child = crate::start_session::spawn_detached(
         run.environment,
+        run.account,
         &[
             OsStr::new("/bin/sh"),
             OsStr::new("-c"),
@@ -3103,6 +3114,7 @@ mod tests {
             codeconnect: Path::new(CODECONNECT),
             git_bin: None,
             environment: &rig.environment,
+            account: None,
             trust: Trust::NotTrusted,
         }
     }
@@ -3939,7 +3951,7 @@ mod tests {
         let begun = rig
             .daemon
             .db
-            .begin_run(row, "req-unrecorded".into(), None)
+            .begin_run(row, "req-unrecorded".into(), None, None)
             .await
             .unwrap();
         assert_eq!(begun, None);
@@ -7209,7 +7221,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
         };
-        assert_eq!(daemon.store.begin_run(&row, &sender, None).unwrap(), None);
+        assert_eq!(daemon.store.begin_run(&row, &sender, None, None).unwrap(), None);
         daemon
             .send_agent_message_on(
                 Some(&tailnet),

@@ -673,6 +673,9 @@ where
                         | ClientMessage::ListFolderTrust { .. }
                         | ClientMessage::SetFolderTrust { .. }
                         | ClientMessage::ForgetFolderTrust { .. }
+                        | ClientMessage::ListAccounts { .. }
+                        | ClientMessage::AddAccount { .. }
+                        | ClientMessage::ActivateAccount { .. }
                 ) {
                     if device_id.is_none() {
                         send(&mut sink, &ServerMessage::Error {
@@ -996,6 +999,9 @@ where
         | ClientMessage::ListFolderTrust { .. }
         | ClientMessage::SetFolderTrust { .. }
         | ClientMessage::ForgetFolderTrust { .. }
+        | ClientMessage::ListAccounts { .. }
+        | ClientMessage::AddAccount { .. }
+        | ClientMessage::ActivateAccount { .. }
         | ClientMessage::GetMachineStats => {}
         ClientMessage::RegisterPush {
             token,
@@ -2079,6 +2085,8 @@ pub(crate) fn capabilities(
         // Stop reaches a Claude run CodeConnect started through its agent host; any other
         // Claude session is refused by the agent branch inside.
         claude_interrupt: true,
+        // Each agent's accounts: kept and chosen by a paired device, as starting is.
+        accounts: paired,
     }
 }
 
@@ -2215,7 +2223,7 @@ mod tests {
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
         };
-        assert_eq!(daemon.store.begin_run(&row, uid, None).unwrap(), None);
+        assert_eq!(daemon.store.begin_run(&row, uid, None, None).unwrap(), None);
     }
 
     /// A daemon with a private store holding exactly one paired device.
@@ -2607,7 +2615,7 @@ mod tests {
             agent: protocol::agent::AgentKind::Codex,
             codex_thread_id: None,
         };
-        assert_eq!(daemon.store.begin_run(&row, uid, None).unwrap(), None);
+        assert_eq!(daemon.store.begin_run(&row, uid, None, None).unwrap(), None);
         daemon.mail_run_live(uid).await;
     }
 
@@ -4163,7 +4171,7 @@ mod tests {
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
         };
-        assert_eq!(daemon.store.begin_run(&row, &uid, None).unwrap(), None);
+        assert_eq!(daemon.store.begin_run(&row, &uid, None, None).unwrap(), None);
         let pendings: Vec<PendingEvent> = (0..events)
             .map(|n| PendingEvent {
                 session_uid: uid.clone(),
@@ -5164,7 +5172,7 @@ mod tests {
                 agent: protocol::agent::AgentKind::Claude,
                 codex_thread_id: None,
             };
-            assert_eq!(server.store.begin_run(&row, &uid, None).unwrap(), None);
+            assert_eq!(server.store.begin_run(&row, &uid, None, None).unwrap(), None);
         }
         let list = Message::Text(r#"{"type":"list_projects"}"#.into());
 
@@ -5329,7 +5337,7 @@ mod tests {
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
         };
-        assert_eq!(store.begin_run(&row, &row.session_uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &row.session_uid, None, None).unwrap(), None);
     }
 
     /// **The start-session wire a minor-28 daemon sent, still in what this build
@@ -5859,7 +5867,7 @@ mod tests {
             assert_eq!(
                 server
                     .store
-                    .begin_run(&row, &row.session_uid, None)
+                    .begin_run(&row, &row.session_uid, None, None)
                     .unwrap(),
                 None
             );
@@ -6013,12 +6021,12 @@ mod tests {
             assert_eq!(
                 server
                     .store
-                    .begin_run(&row, &row.session_uid, None)
+                    .begin_run(&row, &row.session_uid, None, None)
                     .unwrap(),
                 None
             );
         }
-        server.daemon.agents.set(vec![
+        server.daemon.agents.set(vec![None, None], vec![
             AgentAvailability {
                 agent: AgentKind::Claude,
                 available: true,

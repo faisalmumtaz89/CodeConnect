@@ -88,7 +88,7 @@ fn through_login_shell(
     let args = queue_args(as_sock, thread_id, nudge);
     let mut argv: Vec<&OsStr> = vec![codex.as_os_str()];
     argv.extend(args.iter().map(OsString::as_os_str));
-    crate::start_session::login_shell_command(environment, &argv)
+    crate::start_session::login_shell_command(environment, None, &argv)
 }
 
 /// The arguments of `codex queue` that put `nudge` on `thread_id` through `as_sock`.

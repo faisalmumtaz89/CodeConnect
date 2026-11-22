@@ -395,6 +395,27 @@ pub enum ClientMessage {
         request_id: String,
         path: String,
     },
+    /// **Each agent's accounts on this computer, and the one its starts use** (minor 47, `accounts`),
+    /// answered with one [`ServerMessage::Accounts`] carrying the same `request_id`. Paired devices only.
+    ListAccounts {
+        request_id: String,
+    },
+    /// **Adds an account for `agent`**, labelled `label`, with an id the computer makes; it is not made the active
+    /// one. Answered with one [`ServerMessage::Accounts`].
+    AddAccount {
+        request_id: String,
+        agent: crate::agent::AgentKind,
+        label: String,
+    },
+    /// **Makes `account_id` the account `agent`'s next starts use**, or its Default (the agent as it is on the
+    /// computer) for none. An id that is not one of `agent`'s accounts is refused. A run already going keeps the
+    /// account it started on. Answered with one [`ServerMessage::Accounts`].
+    ActivateAccount {
+        request_id: String,
+        agent: crate::agent::AgentKind,
+        #[serde(default)]
+        account_id: Option<String>,
+    },
     /// **The git worktrees and branches of one folder** (minor 29,
     /// `start_worktree`), answered with one [`ServerMessage::ProjectGit`]. Read
     /// only: nothing is fetched, written or run. `path` is absolute.
@@ -602,6 +623,14 @@ pub enum ServerMessage {
     FolderTrust {
         request_id: String,
         folders: Vec<FolderAnswer>,
+    },
+    /// The answer to [`ClientMessage::ListAccounts`], [`ClientMessage::AddAccount`] and
+    /// [`ClientMessage::ActivateAccount`]: every account, oldest first, and the one each agent's starts use, once the
+    /// request's change is made. An agent missing from `active` uses its Default.
+    Accounts {
+        request_id: String,
+        accounts: Vec<AgentAccount>,
+        active: Vec<ActiveAccount>,
     },
     /// The answer to [`ClientMessage::GetProjectGit`]; `git` is absent when
     /// `path` is not in a git repository.
@@ -848,6 +877,22 @@ pub enum StartSessionResult {
     /// Nothing ran: this computer keeps no answer to "trust this folder?" for
     /// `path`, the folder's real path, and the start gave none.
     NeedsTrust { path: String },
+}
+
+/// One of an agent's accounts on a computer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAccount {
+    /// The computer's own id for it.
+    pub id: String,
+    pub agent: crate::agent::AgentKind,
+    pub label: String,
+}
+
+/// The account an agent's starts use now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveAccount {
+    pub agent: crate::agent::AgentKind,
+    pub account_id: String,
 }
 
 /// One folder's answer to "trust this folder?", kept by the computer.
@@ -1138,6 +1183,12 @@ pub struct Capabilities {
     /// [`Self::codex_interrupt`]'s twin for the other engine.
     #[serde(default)]
     pub claude_interrupt: bool,
+    /// **This daemon keeps several accounts per agent** ([`ClientMessage::ListAccounts`],
+    /// [`ClientMessage::AddAccount`], [`ClientMessage::ActivateAccount`], minor 47), to paired devices only. Absent
+    /// decodes `false`: an older daemon answers them with `bad_request`, so a client asks only when this is
+    /// advertised.
+    #[serde(default)]
+    pub accounts: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -2074,9 +2125,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 47,
             "a menu entry naming its model's default effort (`default_effort`) is minor 47"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 48,
+            "several accounts per agent (`list_accounts`, `accounts`) are minor 48"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 47);
+        assert_eq!(crate::PROTOCOL_MINOR, 48);
     }
 
     /// **The tags, pinned on this side too.**

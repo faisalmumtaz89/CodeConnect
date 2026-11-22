@@ -860,7 +860,14 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     while the run reports no effort: a Codex entry Codex's own (`model/list`'s `defaultReasoningEffort`);
 ///     a Claude entry the default Claude Code's documentation names for the model it resolves to, and none
 ///     for a model it does not name. A daemon below 47 sends none.
-pub const PROTOCOL_MINOR: u32 = 47;
+///   * `48` — **Several accounts per agent.**
+///
+///     [`ws::ClientMessage::ListAccounts`], [`ws::ClientMessage::AddAccount`] and
+///     [`ws::ClientMessage::ActivateAccount`], each answered with one [`ws::ServerMessage::Accounts`], to paired
+///     devices only, behind [`ws::Capabilities::accounts`]. An account is a folder of the computer's own that a start
+///     on it is given; an agent's Default is the agent as it is. A daemon below 48 answers them `bad_request` and
+///     advertises no `accounts`.
+pub const PROTOCOL_MINOR: u32 = 48;
 
 #[cfg(test)]
 mod ledger_tests {

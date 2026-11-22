@@ -7115,7 +7115,7 @@ mod tests {
             codex_thread_id: None,
         };
         let request = format!("seed-{uid}");
-        assert_eq!(daemon.store.begin_run(&row, &request, None).unwrap(), None);
+        assert_eq!(daemon.store.begin_run(&row, &request, None, None).unwrap(), None);
     }
 
     /// A live Codex run's hosted row, with no host attached and no events.
@@ -7134,7 +7134,7 @@ mod tests {
             codex_thread_id: None,
         };
         let request = format!("seed-{uid}");
-        assert_eq!(daemon.store.begin_run(&row, &request, None).unwrap(), None);
+        assert_eq!(daemon.store.begin_run(&row, &request, None, None).unwrap(), None);
     }
 
     fn lifecycle_of(daemon: &Arc<Daemon>, uid: &str) -> Lifecycle {
@@ -7716,7 +7716,7 @@ mod tests {
             codex_thread_id: None,
         };
         let request = format!("start-{uid}");
-        assert_eq!(daemon.store.begin_run(&row, &request, None).unwrap(), None);
+        assert_eq!(daemon.store.begin_run(&row, &request, None, None).unwrap(), None);
         daemon.store.record_host(uid, &HOST, None).unwrap();
     }
 

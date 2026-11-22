@@ -1897,6 +1897,7 @@ impl Store {
         row: &SessionRow,
         request_id: &str,
         start: Option<&str>,
+        account: Option<&str>,
     ) -> Result<Option<HostedRun>> {
         let (table, _) = session_tables_for(&row.agent);
         let mut conn = self.write();
@@ -1934,8 +1935,8 @@ impl Store {
             ],
         )?;
         tx.execute(
-            "INSERT INTO run_hosts(session_uid, request_id, start) VALUES (?1, ?2, ?3)",
-            params![row.session_uid, request_id, start],
+            "INSERT INTO run_hosts(session_uid, request_id, start, account_id) VALUES (?1, ?2, ?3, ?4)",
+            params![row.session_uid, request_id, start, account],
         )?;
         tx.execute(
             &format!("{RECORD_PROJECTS} VALUES (?1, ?2, ?3) {RECORD_PROJECTS_NEWEST}"),
@@ -2892,6 +2893,92 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// A new account for `agent` (`claude` or `codex`), labelled `label`, with an id of ccd's own making: the only
+    /// name its folder is given. Not yet the active one.
+    pub fn add_account(&self, agent: &str, label: &str) -> Result<Account> {
+        let account = Account {
+            id: protocol::uid::new()?,
+            agent: agent.to_owned(),
+            label: label.to_owned(),
+        };
+        self.write().execute(
+            "INSERT INTO accounts(id, agent, label, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![account.id, account.agent, account.label, protocol::time::now_rfc3339()],
+        )?;
+        Ok(account)
+    }
+
+    /// Every account, both agents, oldest first.
+    pub fn accounts(&self) -> Result<Vec<Account>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare("SELECT id, agent, label FROM accounts ORDER BY created_at, id")?;
+        let rows = stmt
+            .query_map([], account_from)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The account `agent`'s starts use now; `None` is its Default, the agent as it is on this computer.
+    pub fn active_account(&self, agent: &str) -> Result<Option<Account>> {
+        Ok(self
+            .read()
+            .query_row(
+                "SELECT a.id, a.agent, a.label
+                   FROM account_selection AS s JOIN accounts AS a ON a.id = s.account_id
+                  WHERE s.agent = ?1 AND a.agent = ?1",
+                params![agent],
+                account_from,
+            )
+            .optional()?)
+    }
+
+    /// Makes `id` the account `agent`'s next starts use, or its Default for `None`. False, and nothing changed, for
+    /// an id that is not one of `agent`'s accounts. A run already going keeps the account it started on.
+    pub fn activate_account(&self, agent: &str, id: Option<&str>) -> Result<bool> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        match id {
+            Some(id) => {
+                let known = tx
+                    .query_row(
+                        "SELECT 1 FROM accounts WHERE id = ?1 AND agent = ?2",
+                        params![id, agent],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if !known {
+                    return Ok(false);
+                }
+                tx.execute(
+                    "INSERT INTO account_selection(agent, account_id) VALUES (?1, ?2)
+                     ON CONFLICT(agent) DO UPDATE SET account_id = excluded.account_id",
+                    params![agent, id],
+                )?;
+            }
+            None => {
+                tx.execute("DELETE FROM account_selection WHERE agent = ?1", params![agent])?;
+            }
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// The account a run started on, as `begin_run` recorded it; `None` for its Default, and for every run recorded
+    /// before accounts.
+    pub fn run_account(&self, session_uid: &str) -> Result<Option<Account>> {
+        Ok(self
+            .read()
+            .query_row(
+                "SELECT a.id, a.agent, a.label
+                   FROM run_hosts AS h JOIN accounts AS a ON a.id = h.account_id
+                  WHERE h.session_uid = ?1",
+                params![session_uid],
+                account_from,
+            )
+            .optional()?)
     }
 
     /// The whole fleet, both agents, oldest first.
@@ -6069,7 +6156,24 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             start           TEXT,
             commands        TEXT,
             commands_at     TEXT,
-            screen_only     TEXT
+            screen_only     TEXT,
+            account_id      TEXT
+        );
+
+        -- An agent's accounts on this computer: each a folder of ccd's own,
+        -- `<root>/accounts/<agent>/<id>/`, which a start on it is given (Claude
+        -- Code's sign-in store, Codex's whole home). An agent's Default, its
+        -- own setup as it is, has no row. `account_selection` holds the one
+        -- account each agent's starts use now; no row is its Default.
+        CREATE TABLE IF NOT EXISTS accounts(
+            id         TEXT PRIMARY KEY,
+            agent      TEXT NOT NULL,
+            label      TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS account_selection(
+            agent      TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL
         );
 
         -- Every folder a session has started in, with its newest start: the
@@ -6211,6 +6315,23 @@ fn move_codex_pending_approvals(tx: &Connection) -> Result<usize> {
 /// The most folders [`Store::projects`] returns.
 const MAX_PROJECTS: u32 = 200;
 
+/// One of an agent's accounts on this computer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub id: String,
+    /// `claude` or `codex`.
+    pub agent: String,
+    pub label: String,
+}
+
+fn account_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
+    Ok(Account {
+        id: row.get(0)?,
+        agent: row.get(1)?,
+        label: row.get(2)?,
+    })
+}
+
 /// `folder_trust.trusted` as the answer it stands for.
 fn trust_from(trusted: bool) -> Trust {
     if trusted {
@@ -6256,6 +6377,8 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     ),
     // A Codex question card's answer, kept whole (X7b).
     ("mutation_ledger", "question_decision", "TEXT"),
+    // The account a run started on (minor 47); null is its agent's Default, and every run recorded before accounts.
+    ("run_hosts", "account_id", "TEXT"),
 ];
 
 /// Repair push tuples a rollback or a pre-tuple build could have left incoherent.
@@ -7751,7 +7874,7 @@ mod tests {
     fn begin(store: &Store, session: &SessionKey) {
         assert_eq!(
             store
-                .begin_run(&session_row(session), &session.uid, None)
+                .begin_run(&session_row(session), &session.uid, None, None)
                 .unwrap(),
             None
         );
@@ -7779,7 +7902,7 @@ mod tests {
             row.created_at = at.into();
             row.agent = agent;
             row.lifecycle = lifecycle;
-            assert_eq!(store.begin_run(&row, &session.uid, None).unwrap(), None);
+            assert_eq!(store.begin_run(&row, &session.uid, None, None).unwrap(), None);
             session.uid
         };
         let old = file(
@@ -7866,7 +7989,7 @@ mod tests {
     fn seed_run(store: &Store, session: &SessionKey, lifecycle: Lifecycle, events: u32) {
         let mut row = session_row(session);
         row.lifecycle = lifecycle;
-        assert_eq!(store.begin_run(&row, &session.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &session.uid, None, None).unwrap(), None);
         for i in 0..events {
             store
                 .append_event(&pending(
@@ -8010,7 +8133,7 @@ mod tests {
         // Begun as a start begins it, its thread recorded while it starts.
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Starting;
-        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &codex.uid, None, None).unwrap(), None);
         assert!(store.record_hosted_thread(&codex.uid, "th_ABC123").unwrap());
 
         assert_eq!(
@@ -8046,7 +8169,7 @@ mod tests {
         let mut row = session_row(session);
         row.lifecycle = lifecycle;
         row.transcript_path = Some(format!("/tmp/{}.jsonl", session.uid));
-        assert_eq!(store.begin_run(&row, &session.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &session.uid, None, None).unwrap(), None);
     }
 
     fn transcript_of(store: &Store, session: &SessionKey) -> Option<String> {
@@ -8099,7 +8222,7 @@ mod tests {
         let codex = key("CX", "cx-1");
         assert_eq!(
             store
-                .begin_run(&codex_session_row(&codex), &codex.uid, None)
+                .begin_run(&codex_session_row(&codex), &codex.uid, None, None)
                 .unwrap(),
             None
         );
@@ -8119,10 +8242,10 @@ mod tests {
         let doomed = key("CY", "cx-2");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &codex.uid, None, None).unwrap(), None);
         let mut second = codex_session_row(&doomed);
         second.lifecycle = Lifecycle::Live;
-        assert_eq!(store.begin_run(&second, &doomed.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&second, &doomed.uid, None, None).unwrap(), None);
         store
             .append_event(&pending(&codex, EventKind::ToolCall, Some("one")))
             .unwrap();
@@ -8238,7 +8361,7 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &codex.uid, None, None).unwrap(), None);
         store.record_host(&codex.uid, &HOST, None).unwrap();
         let now = protocol::time::now_rfc3339();
 
@@ -8387,7 +8510,7 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &codex.uid, None, None).unwrap(), None);
 
         // Everything a Codex run reaches in the store as things stand: facts,
         // and the generalized mutation ledger built for it.
@@ -8438,7 +8561,7 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &codex.uid, None, None).unwrap(), None);
         store.record_host(&codex.uid, &HOST, None).unwrap();
 
         let shared = store.commit_host_card(
@@ -8519,7 +8642,7 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &codex.uid, None, None).unwrap(), None);
 
         assert_eq!(
             insert_codex_card(
@@ -8652,7 +8775,7 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &codex.uid, None, None).unwrap(), None);
 
         store
             .commit_host_card(
@@ -8696,7 +8819,7 @@ mod tests {
         let codex = key("CX", "cx-1");
         let mut row = codex_session_row(&codex);
         row.lifecycle = Lifecycle::Live;
-        assert_eq!(store.begin_run(&row, &codex.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &codex.uid, None, None).unwrap(), None);
         store
             .append_event(&pending(&codex, EventKind::ToolCall, Some("one")))
             .unwrap();
@@ -9794,12 +9917,12 @@ mod tests {
         let mut row = session_row(&old);
         row.created_at = "2026-07-01T00:00:00.000Z".into();
         row.lifecycle = Lifecycle::Live;
-        assert_eq!(store.begin_run(&row, &old.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &old.uid, None, None).unwrap(), None);
 
         let mut row = session_row(&new);
         row.created_at = "2026-07-02T00:00:00.000Z".into();
         row.lifecycle = Lifecycle::Exited;
-        assert_eq!(store.begin_run(&row, &new.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &new.uid, None, None).unwrap(), None);
 
         assert_eq!(
             store.find_session("cc-1").unwrap().unwrap().session_uid,
@@ -10220,7 +10343,7 @@ mod tests {
         row.lifecycle = Lifecycle::Starting;
         assert_eq!(
             store
-                .begin_run(&row, request_id, Some(r#"{"type":"start"}"#))
+                .begin_run(&row, request_id, Some(r#"{"type":"start"}"#), None)
                 .unwrap(),
             None
         );
@@ -10233,7 +10356,7 @@ mod tests {
         let mut row = session_row(&session);
         row.lifecycle = Lifecycle::Starting;
         row.agent = AgentKind::Codex;
-        assert_eq!(store.begin_run(&row, request_id, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, request_id, None, None).unwrap(), None);
         session
     }
 
@@ -10274,7 +10397,7 @@ mod tests {
         let mut second = session_row(&key("BB", "run-BB"));
         second.lifecycle = Lifecycle::Starting;
         let existing = store
-            .begin_run(&second, "req-1", Some(r#"{"type":"start"}"#))
+            .begin_run(&second, "req-1", Some(r#"{"type":"start"}"#), None)
             .unwrap()
             .expect("the first run");
         assert_eq!(existing.session_uid, first.uid);

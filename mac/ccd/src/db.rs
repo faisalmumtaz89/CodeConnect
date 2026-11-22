@@ -227,8 +227,9 @@ impl Db {
         row: SessionRow,
         request_id: String,
         start: Option<String>,
+        account: Option<String>,
     ) -> Result<Option<crate::store::HostedRun>> {
-        self.run(move |store| store.begin_run(&row, &request_id, start.as_deref()))
+        self.run(move |store| store.begin_run(&row, &request_id, start.as_deref(), account.as_deref()))
             .await
     }
 
@@ -1090,7 +1091,7 @@ mod tests {
             codex_thread_id: None,
         };
         let store = db.blocking();
-        assert_eq!(store.begin_run(&row, &key.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &key.uid, None, None).unwrap(), None);
         store.record_host(&key.uid, &HOST, None).unwrap();
         key
     }

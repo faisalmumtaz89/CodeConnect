@@ -115,6 +115,8 @@ pub(crate) struct Run<'a> {
     /// The start's environment, the one its claude check read: the host and claude
     /// get it as it is, with only `CODECONNECT_SESSION_UID` added.
     pub environment: &'a HashMap<OsString, OsString>,
+    /// The account the run starts on, which it records; None is Claude Code's Default.
+    pub account: Option<&'a crate::accounts::AccountEnv>,
 }
 
 /// The run's folder: `<root>/runs/<uid>/`.
@@ -188,7 +190,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     };
     match daemon
         .db
-        .begin_run(row, run.request_id.to_string(), Some(line))
+        .begin_run(row, run.request_id.to_string(), Some(line), run.account.map(|a| a.id().to_string()))
         .await
     {
         Ok(Some(existing)) => return answer_for(existing),
@@ -269,6 +271,7 @@ async fn bring_up(
     let since = log.metadata().map(|meta| meta.len()).unwrap_or(0);
     let mut child = crate::start_session::spawn_detached(
         run.environment,
+        run.account,
         &[run.host_bin.as_os_str(), dir.as_os_str()],
         Path::new(run.cwd),
         uid,
@@ -1912,9 +1915,25 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         }
     }
     let environment = crate::start_session::phone_environment();
+    // The account the run started on, as it recorded it, never the one active now: a relaunch goes on as it began.
+    let account = match daemon.store.run_account(uid) {
+        Ok(Some(account)) => match crate::accounts::AccountEnv::for_account(root, &account) {
+            Ok(account) => account,
+            Err(err) => {
+                crate::log_error!("{uid}: could not find its account's folder to relaunch it: {err:#}");
+                return refuse_relaunch(daemon, uid, request_id, not_running).await;
+            }
+        },
+        Ok(None) => None,
+        Err(err) => {
+            crate::log_error!("{uid}: could not read its account to relaunch it: {err:#}");
+            return refuse_relaunch(daemon, uid, request_id, not_running).await;
+        }
+    };
     let checked = async {
         let ready = crate::start_session::claude_preflight(
             &environment,
+            account.as_ref(),
             daemon.config.claude_bin.as_deref(),
         )
         .await
@@ -1982,6 +2001,7 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         host_bin: &host_bin,
         codeconnect: &codeconnect,
         environment: &environment,
+        account: account.as_ref(),
     };
     let uuid = send_uuid(uid, request_id);
     let mut options = start_options(uid, &run);
@@ -2886,6 +2906,7 @@ mod tests {
             host_bin,
             codeconnect: Path::new("/nonexistent/codeconnect"),
             environment: &rig.environment,
+            account: None,
         }
     }
 
@@ -4038,7 +4059,7 @@ mod tests {
         assert_eq!(
             rig.daemon
                 .db
-                .begin_run(row, "req-1".into(), Some(line))
+                .begin_run(row, "req-1".into(), Some(line), None)
                 .await
                 .unwrap(),
             None
@@ -5072,7 +5093,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
         };
-        assert_eq!(daemon.store.begin_run(&row, &sender, None).unwrap(), None);
+        assert_eq!(daemon.store.begin_run(&row, &sender, None, None).unwrap(), None);
         daemon
             .send_agent_message_on(
                 Some(&tailnet),
@@ -10708,6 +10729,7 @@ mod tests {
                 host_bin: &host,
                 codeconnect: &codeconnect,
                 environment: &environment,
+                account: None,
             },
         )
         .await;
@@ -10803,6 +10825,7 @@ mod tests {
                     host_bin: &host,
                     codeconnect: &codeconnect,
                     environment: &environment,
+                    account: None,
                 },
             )
             .await;
@@ -11042,6 +11065,7 @@ mod tests {
                 host_bin: &host,
                 codeconnect: &codeconnect,
                 environment: &rig.environment,
+                account: None,
             },
         )
         .await;
@@ -11217,6 +11241,7 @@ mod tests {
                 host_bin: &host,
                 codeconnect: &codeconnect,
                 environment: &rig.environment,
+                account: None,
             },
         )
         .await;
