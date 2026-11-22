@@ -158,13 +158,16 @@ private struct Heading: View {
 
     /// The agent, and the model it says it runs when it has said: by the label of the run's menu entry for that
     /// model when there is one, so the line and the settings list spell it alike, else as the agent reported it, in
-    /// code type (Kit's `modelName`).
+    /// code type (Kit's `modelName`). A run that takes no reply names, after the model, the effort it ended with (Kit's
+    /// `headerEffort`); any other run names its effort on its reply row.
     private var agentLine: Text {
         let agent = Text(row.summary.agent.productName)
         guard let confirmed = model.confirmedModel(for: row.id) else { return agent }
         let name = RunSettings.modelName(
             confirmed: confirmed.name, menus: row.summary.menus, label: row.summary.modelLabel)
-        return Text("\(agent) · \(name.reported ? Text(name.text).font(Theme.mono(11.5)) : Text(name.text))")
+        let line = Text("\(agent) · \(name.reported ? Text(name.text).font(Theme.mono(11.5)) : Text(name.text))")
+        guard let effort = RunSettings.headerEffort(summary: row.summary) else { return line }
+        return Text("\(line) · \(effort)")
     }
 }
 
