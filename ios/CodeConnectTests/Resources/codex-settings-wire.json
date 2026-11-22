@@ -61,6 +61,7 @@
     "menus": {
       "models": [
         {
+          "default_effort": "low",
           "detail": "Latest workhorse model for coding and everyday work.",
           "efforts": [
             "low",
@@ -74,6 +75,7 @@
           "value": "gpt-6.1-sol"
         },
         {
+          "default_effort": "low",
           "detail": "Frontier intelligence for the most demanding work.",
           "efforts": [
             "low",
@@ -87,6 +89,7 @@
           "value": "gpt-6-astra"
         },
         {
+          "default_effort": "medium",
           "detail": "Previous generation workhorse model.",
           "efforts": [
             "low",
@@ -100,6 +103,7 @@
           "value": "gpt-6-sol"
         },
         {
+          "default_effort": "medium",
           "detail": "Fast and affordable model for easier tasks.",
           "efforts": [
             "low",
@@ -112,6 +116,7 @@
           "value": "gpt-6-luna"
         },
         {
+          "default_effort": "low",
           "detail": "Older generation workhorse model.",
           "efforts": [
             "low",
@@ -125,6 +130,7 @@
           "value": "gpt-5.6-sol"
         },
         {
+          "default_effort": "low",
           "detail": "GPT-6.1 Terra Codex model.",
           "efforts": [
             "low",
@@ -138,6 +144,7 @@
           "value": "gpt-6.1-terra"
         },
         {
+          "default_effort": "medium",
           "detail": "Older balanced model for straightforward work.",
           "efforts": [
             "low",
@@ -151,6 +158,7 @@
           "value": "gpt-5.6-terra"
         },
         {
+          "default_effort": "medium",
           "detail": "Older fast and efficient model.",
           "efforts": [
             "low",
@@ -163,6 +171,7 @@
           "value": "gpt-5.6-luna"
         },
         {
+          "default_effort": "medium",
           "detail": "Legacy coding model.",
           "efforts": [
             "low",
@@ -221,6 +230,7 @@
     "menus": {
       "models": [
         {
+          "default_effort": "low",
           "detail": "Latest workhorse model for coding and everyday work.",
           "efforts": [
             "low",
@@ -234,6 +244,7 @@
           "value": "gpt-6.1-sol"
         },
         {
+          "default_effort": "low",
           "detail": "Frontier intelligence for the most demanding work.",
           "efforts": [
             "low",
@@ -247,6 +258,7 @@
           "value": "gpt-6-astra"
         },
         {
+          "default_effort": "medium",
           "detail": "Previous generation workhorse model.",
           "efforts": [
             "low",
@@ -260,6 +272,7 @@
           "value": "gpt-6-sol"
         },
         {
+          "default_effort": "medium",
           "detail": "Fast and affordable model for easier tasks.",
           "efforts": [
             "low",
@@ -272,6 +285,7 @@
           "value": "gpt-6-luna"
         },
         {
+          "default_effort": "low",
           "detail": "Older generation workhorse model.",
           "efforts": [
             "low",
@@ -285,6 +299,7 @@
           "value": "gpt-5.6-sol"
         },
         {
+          "default_effort": "low",
           "detail": "GPT-6.1 Terra Codex model.",
           "efforts": [
             "low",
@@ -298,6 +313,7 @@
           "value": "gpt-6.1-terra"
         },
         {
+          "default_effort": "medium",
           "detail": "Older balanced model for straightforward work.",
           "efforts": [
             "low",
@@ -311,6 +327,7 @@
           "value": "gpt-5.6-terra"
         },
         {
+          "default_effort": "medium",
           "detail": "Older fast and efficient model.",
           "efforts": [
             "low",
@@ -323,6 +340,7 @@
           "value": "gpt-5.6-luna"
         },
         {
+          "default_effort": "medium",
           "detail": "Legacy coding model.",
           "efforts": [
             "low",
@@ -386,6 +404,7 @@
           "value": "stub-model"
         },
         {
+          "default_effort": "low",
           "detail": "Latest workhorse model for coding and everyday work.",
           "efforts": [
             "low",
@@ -399,6 +418,7 @@
           "value": "gpt-6.1-sol"
         },
         {
+          "default_effort": "low",
           "detail": "Frontier intelligence for the most demanding work.",
           "efforts": [
             "low",
@@ -412,6 +432,7 @@
           "value": "gpt-6-astra"
         },
         {
+          "default_effort": "medium",
           "detail": "Previous generation workhorse model.",
           "efforts": [
             "low",
@@ -425,6 +446,7 @@
           "value": "gpt-6-sol"
         },
         {
+          "default_effort": "medium",
           "detail": "Fast and affordable model for easier tasks.",
           "efforts": [
             "low",
@@ -437,6 +459,7 @@
           "value": "gpt-6-luna"
         },
         {
+          "default_effort": "low",
           "detail": "Older generation workhorse model.",
           "efforts": [
             "low",
@@ -450,6 +473,7 @@
           "value": "gpt-5.6-sol"
         },
         {
+          "default_effort": "low",
           "detail": "GPT-6.1 Terra Codex model.",
           "efforts": [
             "low",
@@ -463,6 +487,7 @@
           "value": "gpt-6.1-terra"
         },
         {
+          "default_effort": "medium",
           "detail": "Older balanced model for straightforward work.",
           "efforts": [
             "low",
@@ -476,6 +501,7 @@
           "value": "gpt-5.6-terra"
         },
         {
+          "default_effort": "medium",
           "detail": "Older fast and efficient model.",
           "efforts": [
             "low",
@@ -488,6 +514,7 @@
           "value": "gpt-5.6-luna"
         },
         {
+          "default_effort": "medium",
           "detail": "Legacy coding model.",
           "efforts": [
             "low",

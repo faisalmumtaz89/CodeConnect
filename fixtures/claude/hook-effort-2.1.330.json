@@ -1,0 +1,88 @@
+{
+ "claude": "2.1.330",
+ "sdk": "@anthropic-ai/claude-agent-sdk 0.3.322",
+ "signed_out": true,
+ "input": "streaming (async iterable), first message yielded at 8 s",
+ "runs": {
+  "no_effort_option": [
+   {
+    "ms": 8007,
+    "event": "first_message_yielded"
+   },
+   {
+    "ms": 8042,
+    "event": "hook:UserPromptSubmit",
+    "before_first_message": false,
+    "keys": [
+     "cwd",
+     "hook_event_name",
+     "permission_mode",
+     "prompt",
+     "prompt_id",
+     "session_id",
+     "transcript_path"
+    ],
+    "effort_present": false,
+    "effort_level": null
+   },
+   {
+    "ms": 8050,
+    "event": "init",
+    "effort_present": false,
+    "effort": null,
+    "model": "claude-opus-5-5",
+    "apiKeySource": "none"
+   },
+   {
+    "ms": 8072,
+    "event": "result",
+    "subtype": "success",
+    "is_error": true
+   },
+   {
+    "ms": 8590,
+    "event": "end"
+   }
+  ],
+  "effort_option_low": [
+   {
+    "ms": 8005,
+    "event": "first_message_yielded"
+   },
+   {
+    "ms": 8030,
+    "event": "hook:UserPromptSubmit",
+    "before_first_message": false,
+    "keys": [
+     "cwd",
+     "hook_event_name",
+     "permission_mode",
+     "prompt",
+     "prompt_id",
+     "session_id",
+     "transcript_path"
+    ],
+    "effort_present": false,
+    "effort_level": null
+   },
+   {
+    "ms": 8045,
+    "event": "init",
+    "effort_present": false,
+    "effort": null,
+    "model": "claude-opus-5-5",
+    "apiKeySource": "none"
+   },
+   {
+    "ms": 8067,
+    "event": "result",
+    "subtype": "success",
+    "is_error": true
+   },
+   {
+    "ms": 8591,
+    "event": "end"
+   }
+  ]
+ }
+}

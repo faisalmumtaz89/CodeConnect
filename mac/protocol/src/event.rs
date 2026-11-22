@@ -586,6 +586,11 @@ pub struct MenuModel {
     /// by a structured field rather than a sentence. Absent when the agent gives none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model: Option<String>,
+    /// The effort this entry runs at when none is chosen (minor 47), so an app names and marks it while the run
+    /// reports no effort: Codex's own `defaultReasoningEffort`; for Claude, the default Claude Code's documentation
+    /// names for the model the entry resolves to. Absent when neither names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
 }
 
 /// One permission mode of a run's menu. `confirm` (minor 40) marks the mode that asks nothing
