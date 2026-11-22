@@ -259,10 +259,14 @@ final class PanelFrames {
 
 extension EnvironmentValues {
     @Entry var panelFrames: PanelFrames?
+    /// The agents (the sidebar, the list, a run) are on screen: false while Settings covers them, kept as they were.
+    @Entry var agentsShown = true
 }
 
 private struct ClosesPanel: ViewModifier {
     @Binding var open: Bool
+    /// A panel closes when Settings covers the agents it opened over.
+    @Environment(\.agentsShown) private var agentsShown
     /// The view it modifies is the control; else the panel says where its control is (the window's row menu).
     let measuresControl: Bool
     @State private var frames = PanelFrames()
@@ -281,6 +285,7 @@ private struct ClosesPanel: ViewModifier {
                 stop()
                 if isOpen { start() }
             }
+            .onChange(of: agentsShown) { _, shown in if !shown { open = false } }
             .onDisappear(perform: stop)
     }
 

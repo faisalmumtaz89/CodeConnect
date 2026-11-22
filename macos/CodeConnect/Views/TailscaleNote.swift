@@ -110,7 +110,7 @@ struct TailscaleNote: View {
             }
             .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
-            if let action = action(status) {
+            if let action = Self.action(status) {
                 ActionButton(title: action.title, key: nil, prominent: false, id: "tailscale.action") {
                     NSWorkspace.shared.open(action.url)
                 }
@@ -122,7 +122,7 @@ struct TailscaleNote: View {
     }
 
     /// The one thing to do: get Tailscale, or open its app when this Mac has it (`TailscaleApp`).
-    private func action(_ status: Status) -> (title: String, url: URL)? {
+    static func action(_ status: Status) -> (title: String, url: URL)? {
         switch status {
         case .notInstalled: ("Get Tailscale", Self.download)
         case .notConnected: TailscaleApp.url.map { (LinkNotice.openTailscale, $0) }

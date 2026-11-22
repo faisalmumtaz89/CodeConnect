@@ -52,7 +52,7 @@ struct DevicesPane: View {
     private var knowsThisDevice: Bool { thisDevice != nil || setup.thisMac(at: address) == nil }
 
     var body: some View {
-        SettingsScroll {
+        Group {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(DeviceGroup.title).font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)

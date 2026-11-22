@@ -1,12 +1,13 @@
 import CodeConnectKit
 import SwiftUI
 
-/// The main window: the sidebar's agents, computers and projects, and the fleet's runs beside it;
-/// before any computer is paired, what to do first in the list's place. Agents and computers are
-/// added the same way: the + on their sidebar section, one sheet, and File > New Agent (⌘N) and
-/// Add Computer (⇧⌘N); an iPhone from File > Add iPhone.
+/// The main window: the sidebar's agents, computers and projects, and the fleet's runs beside it, or Settings in their
+/// place; before any computer is paired, what to do first in the list's place. Agents and computers are added the
+/// same way: the + on their sidebar section, one sheet, and File > New Agent (⌘N) and Add Computer (⇧⌘N); an iPhone
+/// from File > Add iPhone.
 struct MainWindow: View {
     @Environment(Machines.self) private var machines
+    @Environment(Setup.self) private var setup
     /// The one "…" menu a row of the list or the sidebar opens, drawn over the whole window.
     @State private var rowMenu = RowMenu()
     @State private var adding: AddKind?
@@ -22,6 +23,8 @@ struct MainWindow: View {
     @Binding var opened: String?
     /// What the File menu asked to add while the window was closed: the window opens its sheet on it.
     @Binding var pendingAdd: AddKind?
+    /// Settings, in the sidebar's place and the panes', and its section; nil, and the window shows the agents.
+    @Binding var settings: SettingsSection?
     /// The tab chosen other than the conversation, with the run it was chosen on. Any other run shows its
     /// conversation, and each run opens on it.
     @State private var chosen: (run: String, tab: SessionTab)?
@@ -38,7 +41,11 @@ struct MainWindow: View {
     @AppStorage(Panes.listHidden) private var listHidden = false
     @AppStorage(Panes.runHidden) private var runHidden = false
 
-    init(scope: Binding<FleetScope>, filter: Binding<FleetFilter?>, opened: Binding<String?>, pendingAdd: Binding<AddKind?>) {
+    init(
+        scope: Binding<FleetScope>, filter: Binding<FleetFilter?>, opened: Binding<String?>, pendingAdd: Binding<AddKind?>,
+        settings: Binding<SettingsSection?>
+    ) {
+        _settings = settings
         _scope = scope
         _filter = filter
         _opened = opened
@@ -54,8 +61,11 @@ struct MainWindow: View {
     var body: some View {
         HStack(spacing: 0) {
             if !sidebarHidden {
-                Sidebar(adding: $adding, scope: $scope, filter: $filter, opened: $opened, pairAgain: pairAgain)
-                    .frame(width: 216)
+                Sidebar(
+                    adding: $adding, scope: $scope, filter: $filter, opened: $opened, pairAgain: pairAgain,
+                    openSettings: { settings = .general }
+                )
+                .frame(width: 216)
                 Rectangle().fill(Theme.hairline).frame(width: 1)
             }
             if machines.showsFleet {
@@ -70,8 +80,9 @@ struct MainWindow: View {
                     ) { adding = .agent }
                         // Kept when the person changes it, never at launch.
                         .onChange(of: grouping) { _, kind in kind.keep(in: .standard) }
-                        // Beside an open run the list gives way first: the pane keeps room for a card's answers in one
-                        // row (450), and the list takes what is left, between what its rows still read at (290) and 580.
+                        // Beside an open run the list gives way first: the pane keeps room for a card's answers in
+                        // one row (450), and the list takes what is left, between what its rows still read at (290)
+                        // and 580.
                         .frame(width: showsRun ? min(580, max(290, width - (sidebarHidden ? 0 : 218) - 450)) : nil)
                         .environment(\.headerClearance, clearance(first: sidebarHidden, last: !showsRun))
                         // The arrows open a run; Return then puts the cursor in its reply box.
@@ -92,33 +103,56 @@ struct MainWindow: View {
                 EmptyFleet(adding: $adding)
             }
         }
+        // Settings is drawn over the agents, which stay as they were left (a draft, where a conversation was read, what
+        // was open), hidden and out of reach, for the back row and Esc to return to.
+        .opacity(settings == nil ? 1 : 0)
+        .disabled(settings != nil)
+        .accessibilityHidden(settings != nil)
+        .overlay {
+            if let section = settings {
+                HStack(spacing: 0) {
+                    SettingsList(section: Binding(get: { section }, set: { settings = $0 })) { settings = nil }
+                        .frame(width: 216)
+                    Rectangle().fill(Theme.hairline).frame(width: 1)
+                    SettingsPage(section: section) { adding = .computer }
+                }
+                .background(Theme.window)
+            }
+        }
         // The panes' toggles at the window's top edge: the sidebar's and the list's beside the window's buttons, the
         // run's at the right. The list and the run hide only while a run is open.
         .overlay(alignment: .topLeading) {
-            HStack(spacing: 2) {
-                PaneToggle(symbol: "sidebar.left", shown: !sidebarHidden, title: sidebarHidden ? "Show Sidebar" : "Hide Sidebar",
-                    id: "pane.toggle.sidebar") { sidebarHidden.toggle() }
-                PaneToggle(symbol: "list.bullet", shown: !listHidden || !runIsOpen,
-                    title: listHidden ? "Show List" : "Hide List", id: "pane.toggle.list") {
-                    listHidden.toggle()
-                    if listHidden { runHidden = false }
+            if settings == nil {
+                HStack(spacing: 2) {
+                    PaneToggle(symbol: "sidebar.left", shown: !sidebarHidden, title: sidebarHidden ? "Show Sidebar" : "Hide Sidebar",
+                        id: "pane.toggle.sidebar") { sidebarHidden.toggle() }
+                    PaneToggle(symbol: "list.bullet", shown: !listHidden || !runIsOpen,
+                        title: listHidden ? "Show List" : "Hide List", id: "pane.toggle.list") {
+                        listHidden.toggle()
+                        if listHidden { runHidden = false }
+                    }
+                    .disabled(!runIsOpen)
                 }
-                .disabled(!runIsOpen)
+                .padding(.leading, 84)
+                .padding(.top, 13)
             }
-            .padding(.leading, 84)
-            .padding(.top, 13)
         }
         .overlay(alignment: .topTrailing) {
-            PaneToggle(symbol: "sidebar.right", shown: runIsOpen && !runHidden,
-                title: runHidden ? "Show Run" : "Hide Run", id: "pane.toggle.run") {
-                runHidden.toggle()
-                if runHidden { listHidden = false }
+            if settings == nil {
+                PaneToggle(symbol: "sidebar.right", shown: runIsOpen && !runHidden,
+                    title: runHidden ? "Show Run" : "Hide Run", id: "pane.toggle.run") {
+                    runHidden.toggle()
+                    if runHidden { listHidden = false }
+                }
+                .disabled(!runIsOpen)
+                .padding(.trailing, 12)
+                .padding(.top, 13)
             }
-            .disabled(!runIsOpen)
-            .padding(.trailing, 12)
-            .padding(.top, 13)
         }
         .focusedSceneValue(\.runIsOpen, runIsOpen)
+        .focusedSceneValue(\.settingsShown, settings != nil)
+        // While an ask or a sheet covers the window, Settings… waits for it.
+        .focusedSceneValue(\.windowCovered, asks.isAsking || adding != nil || setup.shown)
         .background(Theme.window)
         .ignoresSafeArea()
         .onGeometryChange(for: CGSize.self) {
@@ -131,6 +165,9 @@ struct MainWindow: View {
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .background(WindowChrome())
         .rowMenuHost(rowMenu)
+        // Whether the agents are on screen, for what they do only while seen (`agentsShown`): outside the row menu's
+        // host, which closes with every other panel.
+        .environment(\.agentsShown, settings == nil)
         .focusedSceneValue(\.adding, $adding)
         .onChange(of: pendingAdd != nil, initial: true) {
             guard let pendingAdd else { return }
@@ -140,6 +177,7 @@ struct MainWindow: View {
         // Until every computer has caught up, or been waited out, the list says it is connecting.
         .task { await machines.waitOutLaunch() }
         .onChange(of: opened) {
+            if opened != nil { settings = nil }
             chosen = nil
             // A run opened shows, even with its pane hidden; with none open, the list shows again.
             if opened != nil { runHidden = false } else { listHidden = false }
@@ -155,7 +193,14 @@ struct MainWindow: View {
         // Esc closes the open run; a sheet's own Esc is its Cancel, and an ask's its safe answer. Not while the composer
         // is using it: Esc closes its list, or leaves its field, first.
         .background {
-            if opened != nil, adding == nil, composerHoldsEscape != true, !asks.isAsking {
+            // Esc in Settings goes back to the agents, unless an ask or a sheet holds it.
+            if settings != nil, adding == nil, !asks.isAsking {
+                Button("Back") { settings = nil }
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("settings.close")
+                    .opacity(0)
+                    .allowsHitTesting(false)
+            } else if opened != nil, adding == nil, composerHoldsEscape != true, !asks.isAsking {
                 Button("Close") { opened = nil }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("session.close")
@@ -164,6 +209,11 @@ struct MainWindow: View {
             }
         }
         #if DEBUG
+            .task {
+                guard let after = RenderWindow.settingsAfter else { return }
+                try? await Task.sleep(for: .seconds(after))
+                settings = .general
+            }
             .task {
                 // A test launch's fleet is in place a moment after the window is.
                 try? await Task.sleep(for: .seconds(1))
@@ -273,6 +323,7 @@ private struct Sidebar: View {
     @Binding var filter: FleetFilter?
     @Binding var opened: String?
     let pairAgain: (String) -> Void
+    let openSettings: () -> Void
     /// The computer row under the pointer, by the computer's id.
     @State private var hovered: String?
     /// The window's one row menu, which a computer's "…" or a right-click on its row opens.
@@ -425,7 +476,7 @@ private struct Sidebar: View {
                 choose(highlighted)
                 return .handled
             }
-            SidebarFoot()
+            SidebarFoot(openSettings: openSettings)
         }
         .background(Theme.sidebar)
         .removesComputer($removing)
@@ -477,7 +528,7 @@ private struct Sidebar: View {
 private struct SidebarFoot: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
-    @Environment(\.openSettings) private var openSettings
+    let openSettings: () -> Void
     @State private var address: LocalDaemon.Address?
 
     /// What this Mac's own daemon last said about its Tailscale.

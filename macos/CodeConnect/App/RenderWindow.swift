@@ -107,15 +107,20 @@
         /// moment later, as a click does.
         static var opensComputerMenu: Bool { UserDefaults.standard.bool(forKey: "CC_COMPUTER_MENU") }
 
-        /// `-CC_SETTINGS YES`: the Settings window opens at launch, and it is the window photographed, once its pane
-        /// has its list: Devices, or the pane `-CC_SETTINGS_TAB devices|folders` names.
-        static var opensSettings: Bool {
-            UserDefaults.standard.bool(forKey: "CC_SETTINGS") || devices != nil || folders != nil
-                || UserDefaults.standard.string(forKey: "CC_SETTINGS_TAB") != nil
+        /// `-CC_SETTINGS YES`: the window opens on Settings, photographed once its section has what it shows: Devices,
+        /// or the section `-CC_SETTINGS_TAB general|computers|devices|folders|accounts` names.
+        /// `-CC_SETTINGS_AFTER <seconds>`: the window turns to Settings that long after launch, over whatever opened
+        /// meanwhile (a row's menu by `-CC_COMPUTER_MENU`).
+        static var settingsAfter: Double? {
+            UserDefaults.standard.object(forKey: "CC_SETTINGS_AFTER") == nil
+                ? nil : UserDefaults.standard.double(forKey: "CC_SETTINGS_AFTER")
         }
-        static var settingsTab: SettingsTab {
-            UserDefaults.standard.string(forKey: "CC_SETTINGS_TAB").flatMap(SettingsTab.init(rawValue:))
-                ?? (folders != nil ? .folders : .devices)
+
+        static var settingsSection: SettingsSection? {
+            let named = UserDefaults.standard.string(forKey: "CC_SETTINGS_TAB").flatMap(SettingsSection.init(rawValue:))
+            guard UserDefaults.standard.bool(forKey: "CC_SETTINGS") || devices != nil || folders != nil || named != nil
+            else { return nil }
+            return named ?? (folders != nil ? .folders : .devices)
         }
 
         /// `-CC_FOLDERS <folders>`: the `folder_trust` frame's `folders` every computer is taken to answer, read from

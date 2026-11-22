@@ -58,6 +58,17 @@ final class MachinesTests: XCTestCase {
         XCTAssertFalse(machines.models[0].connection === machines.models[1].connection)
     }
 
+    /// A computer is found by the id its daemon gave (`hello_ack.machine_id`), as the Mac finds its own: its model's
+    /// own id is the pairing's, which no daemon id ever matches.
+    func testAPairedComputerIsFoundByItsDaemonsID() throws {
+        let machines = twoMachines()
+        let laptopID = try XCTUnwrap(machines.models[1].machineID)
+        machines.pairing.noteMachine(name: "Laptop", os: "macos", daemonID: "daemon-laptop", id: laptopID)
+        XCTAssertEqual(machines.model(daemonID: "daemon-laptop")?.machineID, laptopID)
+        XCTAssertNil(machines.model(for: "daemon-laptop"), "a model's own id is its pairing's")
+        XCTAssertNil(machines.model(daemonID: "daemon-unknown"))
+    }
+
     /// Two machines' `cc-1` are two rows, each naming its own machine, and each
     /// resolves to the model it came from.
     func testTheFleetHoldsEveryMachinesSessionsEachOnItsOwnMachine() throws {

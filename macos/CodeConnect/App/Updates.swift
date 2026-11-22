@@ -6,7 +6,7 @@ import SwiftUI
 /// Sparkle's updater with the app's own window: Sparkle checks the feed, verifies, downloads and installs as it always
 /// does, and asks this user driver to show each step; each is drawn in the app's own look (`UpdateSheet`) in a window
 /// of its own, never in Sparkle's standard windows. A window of its own, as Sparkle's are, so a step shows whatever the
-/// main window is doing: closed behind an open Settings window, or holding a sheet of its own. Started with a Release
+/// main window is doing: closed, on Settings, or holding a sheet of its own. Started with a Release
 /// app: its daily check, and Check for Updates… in the app menu.
 @MainActor @Observable
 final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
