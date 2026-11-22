@@ -2767,6 +2767,8 @@ mod tests {
         daemon: Arc<Daemon>,
         /// What a start gives its host: a home of the rig's own and the system shell.
         environment: HashMap<OsString, OsString>,
+        /// The account a start is on; None for Default.
+        account: Option<crate::accounts::AccountEnv>,
     }
 
     impl Drop for Rig {
@@ -2795,6 +2797,7 @@ mod tests {
             root,
             daemon,
             environment,
+            account: None,
         }
     }
 
@@ -2913,7 +2916,7 @@ mod tests {
             host_bin,
             codeconnect: Path::new("/nonexistent/codeconnect"),
             environment: &rig.environment,
-            account: None,
+            account: rig.account.as_ref(),
         }
     }
 
@@ -11057,6 +11060,7 @@ mod tests {
             daemon: daemon_on(&root),
             root,
             environment,
+            account: None,
         };
         let cwd = rig.root.to_str().unwrap().to_string();
         let codeconnect = rig.root.join("codeconnect");
@@ -11230,6 +11234,7 @@ mod tests {
             daemon: relauncher(&root, &claude, &host),
             root,
             environment,
+            account: None,
         };
         let cwd = rig.root.to_str().unwrap().to_string();
         let codeconnect = rig.root.join("codeconnect");
@@ -11774,6 +11779,88 @@ mod tests {
             "an end that named none relaunches at claude's default"
         );
         assert_eq!(effort(summary(&rig.daemon, &gone_by.uid).await), None);
+    /// **N4 G4: a relaunched run goes on the account it began on.** A run starts on account A, B is made active, ccd
+    /// is opened again, and a message relaunches the run: its host is launched with A's sign-in folder again and resumes
+    /// claude's same session. The active account is never read for a relaunch.
+    #[tokio::test]
+    async fn a_relaunched_run_keeps_the_account_it_began_on() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let host = rig.root.join("stub-host");
+        std::fs::write(
+            &host,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"${{CLAUDE_SECURESTORAGE_CONFIG_DIR-unset}}\" >> \"$1/account\"\n\
+                 echo $$ > \"$1/stub.pid\"\nprintf '{{\"protocol_version\":{HOST_PROTOCOL_VERSION},\"host_pid\":%s}}' \
+                 \"$$\" > \"$1/host.json\"\nexec sleep 20\n"
+            ),
+        )
+        .unwrap();
+        let a = rig.daemon.store.add_account("claude", "A").unwrap();
+        let b = rig.daemon.store.add_account("claude", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("claude", Some(&a.id))
+            .unwrap());
+        let on_a = crate::accounts::AccountEnv::for_account(&rig.root, &a)
+            .unwrap()
+            .unwrap();
+        let folder_of_a = on_a.argv()[1]
+            .to_str()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .to_string();
+        rig.account = Some(on_a);
+
+        let ended = ended_on_its_own(&rig).await;
+        let uid = ended.uid.clone();
+        assert_eq!(
+            rig.daemon.store.run_account(&uid).unwrap(),
+            Some(a),
+            "the run records A"
+        );
+        let session_id = capture()[2]["session_id"].as_str().unwrap().to_string();
+
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("claude", Some(&b.id))
+            .unwrap());
+        let claude = rig.root.join("bin").join("claude");
+        rig.daemon = relauncher(&rig.root, &claude, &host);
+        let old = pid_in(&ended.dir, "stub.pid");
+        let (sent, played) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-on-a", "still on A?"),
+            async {
+                let mut played = play_relaunched(&ended.dir, old).await;
+                let ToHost::Start { uuid, options, .. } = played.start.clone() else {
+                    panic!("not a start: {:?}", played.start);
+                };
+                assert_eq!(
+                    options.resume.as_deref(),
+                    Some(session_id.as_str()),
+                    "the same session, resumed"
+                );
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                   "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        let folders = std::fs::read_to_string(ended.dir.join("account")).unwrap();
+        assert_eq!(
+            folders.lines().collect::<Vec<_>>(),
+            [folder_of_a.as_str(), folder_of_a.as_str()],
+            "{folders}"
+        );
         stop(&played.dir);
     }
 
