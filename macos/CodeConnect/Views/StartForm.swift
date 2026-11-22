@@ -460,8 +460,9 @@ struct StartForm: View {
                     // or the choice or the list changes, so a click on a row in view moves nothing.
                     .task(id: [folderPath ?? "", "\(context.projects.count)"]) { list.scrollTo(folderPath) }
                 }
-                // As tall as its rows, up to 260 pt, then it scrolls.
-                .frame(minHeight: min(max(listHeight, 1), 44), maxHeight: min(max(listHeight, 1), 260))
+                // As tall as its rows, up to 260 pt, then it scrolls. An exact height: a panel is drawn over its button,
+                // which offers it only the button's own height, so a range would collapse the list to its least.
+                .frame(height: min(max(listHeight, 1), 260))
                 // The rows' fills are square and run edge to edge; the box's corners cut a first or last row's.
                 .clipShape(RoundedRectangle(cornerRadius: Theme.boxRadius))
                 .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
