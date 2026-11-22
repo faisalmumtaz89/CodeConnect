@@ -383,7 +383,7 @@ private struct ComputerSettings: View {
 
 // MARK: - Accounts
 
-/// This Mac's agents and the accounts they start on. A service that keeps accounts per agent (minor 47) is asked for
+/// This Mac's agents and the accounts they start on. A service that keeps accounts per agent (minor 48) is asked for
 /// them each time the section opens: per agent its Default, then the accounts added, oldest first, a check on the one
 /// new runs use, Use on the others, and Add Account…. Only the account in use is known to be signed in or not, by the
 /// agents' own answer; the others carry no such word. An older service shows which agents are signed in, and nothing

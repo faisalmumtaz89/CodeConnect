@@ -1,6 +1,6 @@
 import Foundation
 
-/// One account an agent can start on, kept by the computer (`accounts`, minor 47): its id, its agent, the name the
+/// One account an agent can start on, kept by the computer (`accounts`, minor 48): its id, its agent, the name the
 /// person gave it, and whether its agent says it is signed in.
 public struct AgentAccount: Decodable, Hashable, Sendable, Identifiable {
     /// The computer's own id for it.

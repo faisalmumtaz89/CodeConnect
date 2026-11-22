@@ -1118,7 +1118,7 @@ public final class DaemonConnection {
             send: .forgetFolderTrust(requestID: requestID, path: path))
     }
 
-    /// Each agent's accounts on the computer and the one its starts use (minor 47).
+    /// Each agent's accounts on the computer and the one its starts use (minor 48).
     public func listAccounts() async throws -> AccountBook {
         try await accountsRequest { .listAccounts(requestID: $0) }
     }

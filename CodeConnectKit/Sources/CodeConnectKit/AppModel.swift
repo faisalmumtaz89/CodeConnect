@@ -1186,7 +1186,7 @@ public final class AppModel {
     /// This computer's projects, and the sessions this phone started on it.
     public let starter = SessionStarter()
 
-    // MARK: Accounts (minor 47)
+    // MARK: Accounts (minor 48)
 
     /// This computer's accounts per agent and the one each agent's starts use, once asked; nil before.
     public private(set) var accountBook: AccountBook?
@@ -1258,7 +1258,7 @@ public final class AppModel {
     }
 
     #if DEBUG
-        /// `-CC_ACCOUNTS_WIRE <frame>`: a recorded `accounts` reply (fixtures/accounts/minor-47-wire.json) this computer
+        /// `-CC_ACCOUNTS_WIRE <frame>`: a recorded `accounts` reply (fixtures/accounts/minor-48-wire.json) this computer
         /// is taken to answer with, read from the arguments as given, so a fixture launch draws its accounts.
         private var fixtureAccountBook: AccountBook? {
             guard fixturesActive else { return nil }

@@ -945,7 +945,7 @@ public struct Capabilities: Codable, Sendable, Hashable {
     var servesCommandCatalog: Bool { advertises(["command_catalog"]) }
     /// `list_projects` and `start_session` are answerable.
     public var startsSessions: Bool { advertises(["start_session"]) }
-    /// `list_accounts`, `add_account` and `activate_account` are answerable (minor 47, paired devices only).
+    /// `list_accounts`, `add_account` and `activate_account` are answerable (minor 48, paired devices only).
     public var keepsAccounts: Bool { advertises(["accounts"]) }
     /// `get_project_git` is answerable, and `start_session` takes a
     /// `worktree` (minor 29). Without it a `worktree` is ignored and the start
@@ -2032,7 +2032,7 @@ public enum ClientMessage: Sendable {
     /// `folderTrust`.
     case forgetFolderTrust(requestID: String, path: String)
     /// Each agent's accounts on the computer and the one its starts use, answered `accounts` or `accounts_refused`.
-    /// Minor 47, sent only when `Capabilities.keepsAccounts`.
+    /// Minor 48, sent only when `Capabilities.keepsAccounts`.
     case listAccounts(requestID: String)
     /// Adds an account for `agent` named `label` (1 to 64 characters); it is not made the one its starts use.
     /// Answered `accounts` or `accounts_refused`.

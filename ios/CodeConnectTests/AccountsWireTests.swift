@@ -3,9 +3,9 @@ import XCTest
 @testable import CodeConnect
 @testable import CodeConnectKit
 
-/// **Several accounts per agent (minor 47) against the daemon's own bytes.**
+/// **Several accounts per agent (minor 48) against the daemon's own bytes.**
 ///
-/// `fixtures/accounts/minor-47-wire.json` is what a ccd built at the engine's slice answered one paired device, read
+/// `fixtures/accounts/minor-48-wire.json` is what a ccd built at the engine's slice answered one paired device, read
 /// from the source file: an empty list, an account added for each agent, Codex's made active, the same label again
 /// (the account already made, no twin), a name too long (refused, naming its request), and Default chosen again.
 @MainActor
@@ -16,7 +16,7 @@ final class AccountsWireTests: XCTestCase {
     private func wire() throws -> [String: JSONValue] {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let name = "fixtures/accounts/minor-47-wire.json"
+        let name = "fixtures/accounts/minor-48-wire.json"
         guard let data = try? Data(contentsOf: repoRoot.appendingPathComponent(name)) else {
             throw XCTSkip("\(name) is not reachable from this bundle")
         }
@@ -24,7 +24,7 @@ final class AccountsWireTests: XCTestCase {
     }
 
     private func step(_ key: String) throws -> (request: JSONValue, reply: JSONValue) {
-        let step = try XCTUnwrap(try wire()[key]?.objectValue, "no \(key) in minor-47-wire.json")
+        let step = try XCTUnwrap(try wire()[key]?.objectValue, "no \(key) in minor-48-wire.json")
         return (try XCTUnwrap(step["request"]), try XCTUnwrap(step["reply"]))
     }
 
@@ -54,7 +54,7 @@ final class AccountsWireTests: XCTestCase {
             codexSpentLedger: CodexSpentLedger(defaults: UserDefaults(suiteName: "cc.tests.\(UUID().uuidString)")!))
         model.connection.simulateConnectedForTesting()
         model.connection.simulateCapabilitiesForTesting(
-            try JSONDecoder().decode(Capabilities.self, from: Data(#"{"accounts": \#(accounts)}"#.utf8)), minor: 47)
+            try JSONDecoder().decode(Capabilities.self, from: Data(#"{"accounts": \#(accounts)}"#.utf8)), minor: 48)
         let sent = Sent()
         model.connection.sendStub = { message in MainActor.assumeIsolated { sent.sent.append(message) } }
         addTeardownBlock { @MainActor in model.scenePhaseChanged(to: .background) }
@@ -136,7 +136,7 @@ final class AccountsWireTests: XCTestCase {
         let decode = { (json: String) in try JSONDecoder().decode(Capabilities.self, from: Data(json.utf8)) }
         XCTAssertTrue(try decode(#"{"accounts": true}"#).keepsAccounts)
         XCTAssertFalse(try decode(#"{"accounts": false}"#).keepsAccounts)
-        XCTAssertFalse(try decode(#"{"start_session": true}"#).keepsAccounts, "a computer from before minor 47")
+        XCTAssertFalse(try decode(#"{"start_session": true}"#).keepsAccounts, "a computer from before minor 48")
         XCTAssertEqual(try wire()["hello_ack_capabilities_accounts"], .bool(true), "the fixture's own hello")
     }
 
@@ -221,7 +221,7 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertNil(model.accountsProblem)
     }
 
-    // MARK: Signing in and removing (machine/accounts-306, minor 47)
+    // MARK: Signing in and removing (machine/accounts-306, minor 48)
 
     /// What ccd's pinned wire test (ws.rs, the accounts round trip, at 3db0be74) holds: an account says whether it is
     /// signed in when that is known and whether a sign-in is going; a sign-in and a removal name the account; a pushed
