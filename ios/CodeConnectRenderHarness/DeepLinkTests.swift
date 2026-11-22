@@ -10,9 +10,10 @@ final class DeepLinkTests: XCTestCase {
 
     private static let link = "codeconnect://session/fx-1?request=toolu_fixture_high"
 
-    private func launch(_ arguments: [String]) -> XCUIApplication {
+    private func launch(_ arguments: [String], signals: FixtureSignals? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = arguments
+        signals?.arm(app)
         app.terminate()
         app.activate()
         return app
@@ -37,13 +38,13 @@ final class DeepLinkTests: XCTestCase {
     /// a notification tap, with the socket still catching up. The request id
     /// must be kept until its card exists, and spent only when the sheet opens.
     func testTheDeepLinkOpensTheCardWhenTheApprovalArrivesLate() throws {
-        let app = launch([
-            "-CC_FIXTURE", "deck", "-CC_DEEPLINK", Self.link,
-            "-CC_FIXTURE_LATE_APPROVALS_MS", "2500",
-        ])
+        let signals = FixtureSignals()
+        let app = launch(
+            ["-CC_FIXTURE", "deck", "-CC_DEEPLINK", Self.link, "-CC_FIXTURE_LATE_APPROVALS", "YES"], signals: signals)
         XCTAssertFalse(
             app.staticTexts["Decision"].waitForExistence(timeout: 1),
             "nothing to open yet: the approval has been held back")
+        signals.send("late-approvals")
         XCTAssertTrue(
             app.staticTexts["Decision"].waitForExistence(timeout: 10),
             "the sheet opens when the approval the link named finally arrives")

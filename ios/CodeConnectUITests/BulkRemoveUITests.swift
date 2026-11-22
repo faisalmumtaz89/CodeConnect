@@ -1,18 +1,23 @@
 import XCTest
 
-/// What `BulkRemoveUITests` and `BulkRemoveTimedUITests` share: how they launch the app and find their way to the state each tests.
-class BulkRemoveUITestsBase: XCTestCase {
-    let first = "session-01K1B3XQ8ZC0DE5FGH7JKMNP00"
+/// Selecting several ended sessions and removing them with one question.
+///
+/// Runs under `-CC_FIXTURE ended`, whose eight exited runs are removable. The
+/// sample fleet has no Mac, so every removal it is asked for comes back
+/// unanswered — which is exactly what lets these tests watch a refused batch.
+final class BulkRemoveUITests: XCTestCase {
 
-    let second = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
+    private let first = "session-01K1B3XQ8ZC0DE5FGH7JKMNP00"
+    private let second = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
 
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
 
-    func launchSelecting(_ extra: [String] = []) -> XCUIApplication {
+    private func launchSelecting(_ extra: [String] = [], signals: FixtureSignals? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow"] + extra
+        signals?.arm(app)
         app.launch()
         XCTAssertTrue(app.buttons["Show"].waitForExistence(timeout: 20))
         app.buttons["Show"].scrollClearOfTheBar(in: app)
@@ -27,17 +32,10 @@ class BulkRemoveUITestsBase: XCTestCase {
         return app
     }
 
-    func row(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
+    private func row(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
-}
 
-/// Selecting several ended sessions and removing them with one question.
-///
-/// Runs under `-CC_FIXTURE ended`, whose eight exited runs are removable. The
-/// sample fleet has no Mac, so every removal it is asked for comes back
-/// unanswered — which is exactly what lets these tests watch a refused batch.
-final class BulkRemoveUITests: BulkRemoveUITestsBase {
     func testRowsAreSelectedNotOpened() {
         let app = launchSelecting()
         XCTAssertTrue(app.buttons["Done"].exists, "selection is left with Done")
@@ -93,6 +91,35 @@ final class BulkRemoveUITests: BulkRemoveUITestsBase {
                 .firstMatch.waitForExistence(timeout: 10))
         XCTAssertTrue(row(app, first).isSelected)
         XCTAssertTrue(row(app, second).isSelected)
+    }
+
+    /// A batch confirmed and then left for a chat answers while the fleet is
+    /// out of view: back on the fleet, its note and the selection it kept are
+    /// what the fleet shows.
+    func testABatchAnsweredBehindAChatShowsOnReturn() {
+        let signals = FixtureSignals()
+        let app = launchSelecting(["-CC_FIXTURE_REMOVE_HELD", "YES"], signals: signals)
+        row(app, first).tap()
+        row(app, second).tap()
+        app.buttons["Remove (2)"].tap()
+        app.buttons["remove.confirm"].tap()
+        XCTAssertTrue(app.buttons["Removing…"].waitForExistence(timeout: 5), "the batch is held")
+
+        XCUIDevice.shared.system.open(URL(string: "codeconnect://session/fx-1")!)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["session-timeline"].waitForExistence(timeout: 10),
+            "a chat opens over the fleet while the batch is held")
+        // Released with the chat open, so the refusal lands behind it.
+        signals.send("remove")
+
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] '2 not removed'"))
+                .firstMatch.waitForExistence(timeout: 10),
+            "the note says what the batch did not remove")
+        XCTAssertTrue(row(app, first).isSelected)
+        XCTAssertTrue(row(app, second).isSelected)
+        XCTAssertTrue(app.buttons["Remove (2)"].isEnabled, "the batch is over")
     }
 
     func testDoneLeavesSelection() {

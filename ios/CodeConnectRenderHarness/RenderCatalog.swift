@@ -27,6 +27,8 @@ struct RenderScenario {
     /// see the "Test seams" section of `ios/README.md`.
     var arguments: [String] = []
     var environment: [String: String] = [:]
+    /// For a scenario whose fixture waits on the test (`FixtureSignals`): armed at each launch, sent from `reach`.
+    var signals: FixtureSignals? = nil
     /// How long to allow for the state to arrive. Generous only where the state
     /// itself takes time (`stale` crosses `LinkHealth.staleAfter` at 30s).
     var timeout: TimeInterval = 30

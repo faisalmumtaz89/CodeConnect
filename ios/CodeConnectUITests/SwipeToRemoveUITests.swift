@@ -1,6 +1,6 @@
 import XCTest
 
-/// What `SwipeToRemoveUITests` and `SwipeToRemoveTimedUITests` share: how they launch the app and find their way to the state each tests.
+/// What `SwipeToRemoveUITests` and `SwipeToRemoveSerialUITests` share: how they launch the app and find their way to the state each tests.
 class SwipeToRemoveUITestsBase: XCTestCase {
     /// The first uid `Fixtures.Variant.ended` reports.
     let endedRow = "session-01K1B3XQ8ZC0DE5FGH7JKMNP00"
@@ -15,9 +15,10 @@ class SwipeToRemoveUITestsBase: XCTestCase {
         continueAfterFailure = false
     }
 
-    func launchFleet(_ extra: [String] = []) -> XCUIApplication {
+    func launchFleet(_ extra: [String] = [], signals: FixtureSignals? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow"] + extra
+        signals?.arm(app)
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30))
         return app
@@ -60,12 +61,6 @@ class SwipeToRemoveUITestsBase: XCTestCase {
     }
 
     // MARK: Across a link drop
-
-    /// When the fixture drops the link, for the tests below: late enough for
-    /// each one's setup to finish first, which each of them checks. Counted
-    /// here from before the launch and in the app from its fixture loading,
-    /// so the check is stricter than the truth and can only fail safe.
-    let linkDropMS = 30_000
 
     /// One pixel of a screenshot, at a point in screen coordinates.
     func pixel(_ image: UIImage, at point: CGPoint) -> (UInt8, UInt8, UInt8) {
@@ -113,6 +108,117 @@ class SwipeToRemoveUITestsBase: XCTestCase {
 /// is offered on `lifecycle == .exited` alone, so under the other fixtures the
 /// component is not installed and a green test would mean nothing.
 final class SwipeToRemoveUITests: SwipeToRemoveUITestsBase {
+    /// The link dropping takes the Mac's removal capability with it, which
+    /// switches every row's swipe off; its return switches them back on, shut.
+    /// Waited out through the one control that says so on screen: Select is
+    /// offered only while the Mac can remove.
+    private func dropAndReturnTheLink(_ app: XCUIApplication, _ signals: FixtureSignals) {
+        let select = app.buttons["Select"]
+        XCTAssertTrue(select.exists, "Select is offered while the Mac can remove")
+        signals.send("link-drop")
+        XCTAssertTrue(select.waitForNonExistence(timeout: 15), "the link never dropped")
+        signals.send("link-return")
+        XCTAssertTrue(select.waitForExistence(timeout: 15), "the link never came back")
+    }
+
+    /// A refusal belongs to the opening that showed it. After the link drops
+    /// and returns the row comes back shut, and opening it again offers
+    /// "Remove", not the old reason.
+    func testARefusedRowReopensOfferingRemoveAfterTheLinkReturns() {
+        let signals = FixtureSignals()
+        let app = launchFleet(["-CC_FIXTURE_LINK_DROP", "YES"], signals: signals)
+        revealEndedRows(app)
+        liftRowsClearOfTheBar(app)
+        let middle = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
+
+        drag(app, from: middle, dx: -180, dy: 0)
+        let open = row(app, middle).frame
+        XCTAssertLessThan(open.minX, 16 - revealWidth + 2, "the row is open")
+        let face = CGRect(x: open.maxX, y: open.minY, width: revealWidth, height: open.height)
+        let resting = pixels(app.screenshot().image, in: face)
+        let showsResting = { (expected: Bool) in
+            let shows = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in
+                    (self.pixels(app.screenshot().image, in: face) == resting) == expected
+                }, object: nil)
+            shows.expectationDescription =
+                expected ? "the reopened row offers Remove, not the old refusal" : "the refusal shows"
+            return shows
+        }
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: open.maxX + revealWidth / 2, dy: open.midY)).tap()
+        XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5), "Remove asks first")
+        app.buttons["Remove"].tap()
+        wait(for: [showsResting(false)], timeout: 5)
+
+        dropAndReturnTheLink(app, signals)
+        XCTAssertEqual(row(app, middle).frame.minX, 16, accuracy: 2, "the row comes back shut")
+
+        drag(app, from: middle, dx: -180, dy: 0)
+        XCTAssertEqual(row(app, middle).frame.minX, open.minX, accuracy: 2, "the row opens again")
+        wait(for: [showsResting(true)], timeout: 3)
+    }
+
+    /// A row left open when the link dropped comes back shut, and a tap on it
+    /// opens its session, as a tap on any shut row does.
+    func testARowOpenAcrossALinkDropOpensItsSessionOnATap() {
+        let signals = FixtureSignals()
+        let app = launchFleet(["-CC_FIXTURE_LINK_DROP", "YES"], signals: signals)
+        revealEndedRows(app)
+        liftRowsClearOfTheBar(app)
+
+        drag(app, from: endedRow, dx: -180, dy: 0)
+        XCTAssertLessThan(row(app, endedRow).frame.minX, 16 - revealWidth + 2, "the row is open")
+
+        dropAndReturnTheLink(app, signals)
+        XCTAssertEqual(row(app, endedRow).frame.minX, 16, accuracy: 2, "the row comes back shut")
+
+        row(app, endedRow).tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["session-timeline"].waitForExistence(timeout: 10),
+            "a tap on the shut row must open its session")
+    }
+
+    /// A removal confirmed in a question asked before the link dropped, and
+    /// refused after it returned, still shows its reason on the row as it is
+    /// now: the answer belongs to the request, not to the swipe that asked.
+    func testARefusalAfterTheLinkReturnsShowsOnTheReopenedRow() {
+        let signals = FixtureSignals()
+        let app = launchFleet(["-CC_FIXTURE_LINK_DROP", "YES", "-CC_FIXTURE_REMOVE_HELD", "YES"], signals: signals)
+        revealEndedRows(app)
+        liftRowsClearOfTheBar(app)
+        let middle = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
+
+        drag(app, from: middle, dx: -180, dy: 0)
+        let open = row(app, middle).frame
+        XCTAssertLessThan(open.minX, 16 - revealWidth + 2, "the row is open")
+        let face = CGRect(x: open.maxX, y: open.minY, width: revealWidth, height: open.height)
+        let faceNow = { self.pixels(app.screenshot().image, in: face) }
+        let resting = faceNow()
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: open.maxX + revealWidth / 2, dy: open.midY)).tap()
+        XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5), "Remove asks first")
+
+        dropAndReturnTheLink(app, signals)
+        app.buttons["Remove"].tap()
+        drag(app, from: middle, dx: -180, dy: 0)
+        XCTAssertEqual(row(app, middle).frame.minX, open.minX, accuracy: 2, "the row opens again")
+        let removing = faceNow()
+        XCTAssertNotEqual(removing, resting, "the reopened row reads Removing… while the answer is on its way")
+        signals.send("remove")
+
+        let refused = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                let now = faceNow()
+                return now != removing && now != resting
+            }, object: nil)
+        refused.expectationDescription = "the refusal shows on the reopened row"
+        wait(for: [refused], timeout: 20)
+        XCTAssertEqual(
+            row(app, middle).frame.minX, open.minX, accuracy: 2,
+            "the row stays open showing why, so a closed row cannot pass for a refusal")
+    }
+
     // MARK: Scrolling must survive the gesture
 
     func testTheListStillScrollsWhenTheDragStartsOnARemovableRow() {

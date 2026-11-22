@@ -120,6 +120,7 @@ final class RenderPass: XCTestCase {
                     "-CC_RENDER_PROBE", "YES"
                 ]
             app.launchEnvironment = scenario.environment
+            scenario.signals?.arm(app)
 
             // **`activate()`, never `launch()`.** `xcodebuild test` plus
             // `XCUIApplication.launch()` resets the simulator's content-size

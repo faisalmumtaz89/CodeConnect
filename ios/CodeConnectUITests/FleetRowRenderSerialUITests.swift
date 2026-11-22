@@ -10,28 +10,34 @@ import XCTest
 /// Counted through `-CC_ROW_RENDER_PROBE`, which reports each row's redraws
 /// other than its own clock's, and how often it was made anew — a row
 /// recreated on every event would otherwise pass as unchanged. The fixture's
-/// last frame — `fx-5`'s next command — arrives late, while the fleet is on
-/// screen.
-final class FleetRowRenderTimedUITests: XCTestCase {
+/// last frames — `fx-5`'s next commands — are held back and released by the
+/// test (`FixtureSignals`) while the fleet is on screen or covered.
+///
+/// These count body passes, so they run serially: how SwiftUI coalesces updates
+/// on a loaded Mac is what the counts measure.
+///
+/// **Accepted miss.** The test releases an event at a moment of its own, which
+/// no longer sits half a second off the rows' one-second clock ticks. An event
+/// that lands in the same frame as a row's tick is drawn in the tick's pass and
+/// counted as the tick's, so `testAnEventRedrawsOnlyItsOwnRow` can miss that
+/// one redraw: about one frame in sixty at 60 Hz, some 1.7% of runs. It can
+/// hide a redraw, never invent one, so it cannot fail a correct build.
+final class FleetRowRenderSerialUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
-
-    /// Half a second off the whole seconds the fixture's clocks tick on, so the
-    /// event is not expected in the same pass as a row's own tick. A pass that
-    /// did hold both would count as the clock's and could hide a redraw; it
-    /// cannot invent one.
-    private let lateEventMS = 10_500
 
     func testAnEventRedrawsOnlyItsOwnRow() {
         let app = XCUIApplication()
         app.launchArguments = [
             "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
             "-CC_ROW_RENDER_PROBE", "YES",
-            "-CC_FIXTURE_LATE_EVENT_MS", "\(lateEventMS)",
+            "-CC_FIXTURE_LATE_EVENTS", "1",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ]
+        let signals = FixtureSignals()
+        signals.arm(app)
         app.launch()
 
         let changed = app.descendants(matching: .any)["session-fx-5"]
@@ -49,8 +55,9 @@ final class FleetRowRenderTimedUITests: XCTestCase {
             XCTAssertNotNil(before[key], "the probe counts \(key): \(before)")
         }
 
+        signals.send("late-1")
         XCTAssertTrue(
-            waitUntil(timeout: Double(lateEventMS) / 1000 + 15) {
+            waitUntil(timeout: 15) {
                 changed.label.contains("--pass 8")
             },
             "the changed row draws the new command")
@@ -78,12 +85,12 @@ final class FleetRowRenderTimedUITests: XCTestCase {
     /// change runs it again.
     ///
     /// The fixture holds back its last three frames — `fx-5`'s passes 6, 7
-    /// and 8 — and delivers them five seconds apart while `fx-1`'s chat is
+    /// and 8 — and the test releases them one by one while `fx-1`'s chat is
     /// open. The probe's `late` count proves each has landed before the
     /// reading after it, and the next has not; `fx-5` drawing pass 8 once back
     /// proves they reached the fleet.
     func testEventsBehindAChatRunNoFleetBody() {
-        let app = launchBehindAChat([])
+        let (app, signals) = launchBehindAChat([])
         let changed = app.descendants(matching: .any)["session-fx-5"]
         XCTAssertTrue(changed.waitForExistence(timeout: 25), "the running session's row")
         XCTAssertTrue(
@@ -91,7 +98,7 @@ final class FleetRowRenderTimedUITests: XCTestCase {
             "before the held-back events, fx-5 is on pass 5: \(changed.label)")
 
         app.descendants(matching: .any)["session-fx-1"].tap()
-        assertNoFleetWorkBehindTheChat(app)
+        assertNoFleetWorkBehindTheChat(app, signals)
     }
 
     /// The same when the chat is opened by a link at launch — a tapped
@@ -99,16 +106,16 @@ final class FleetRowRenderTimedUITests: XCTestCase {
     /// the fleet first appears, so the chat is pushed before the fleet was ever
     /// on screen to disappear from.
     func testEventsBehindAChatOpenedAtLaunchRunNoFleetBody() {
-        let app = launchBehindAChat(["-CC_DEEPLINK", "codeconnect://session/fx-1"])
-        assertNoFleetWorkBehindTheChat(app)
+        let (app, signals) = launchBehindAChat(["-CC_DEEPLINK", "codeconnect://session/fx-1"])
+        assertNoFleetWorkBehindTheChat(app, signals)
     }
 
     /// Behind the Deck, too, other sessions' events cost the fleet nothing.
     ///
     /// The Deck covers the whole screen, and the probe with it, so the fleet's
-    /// body passes are read only between covers. The Deck is opened twice: for
-    /// 8 s with nothing arriving, then for 52 s over the fixture's three
-    /// held-back frames. Opening and closing the Deck cost the fleet the same
+    /// body passes are read only between covers. The Deck is opened twice, for
+    /// the same time: with nothing arriving, then over the fixture's three
+    /// held-back frames, released one by one. Opening and closing the Deck cost the fleet the same
     /// passes both times; three events behind the second cover may add the one
     /// pass the opening leaves armed, and nothing per event.
     func testEventsBehindTheDeckRunNoFleetBody() {
@@ -116,9 +123,11 @@ final class FleetRowRenderTimedUITests: XCTestCase {
         app.launchArguments = [
             "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
             "-CC_ROW_RENDER_PROBE", "YES",
-            "-CC_FIXTURE_LATE_EVENT_MS", "40500,45500,50500",
+            "-CC_FIXTURE_LATE_EVENTS", "3",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ]
+        let signals = FixtureSignals()
+        signals.arm(app)
         app.launch()
         XCTAssertTrue(
             app.descendants(matching: .any)["session-fx-5"].waitForExistence(timeout: 25),
@@ -127,14 +136,13 @@ final class FleetRowRenderTimedUITests: XCTestCase {
 
         let start = fleet(app)
         XCTAssertEqual(start.late, 0, "no event has landed yet")
-        let quiet = behindTheDeck(app, for: 8)
+        behindTheDeck(app)
         let afterQuiet = fleet(app)
         XCTAssertEqual(afterQuiet.late, 0, "nothing arrived behind the first cover")
 
-        let busy = behindTheDeck(app, for: 52)
+        behindTheDeck(app, releasing: signals)
         let afterBusy = fleet(app)
         XCTAssertEqual(afterBusy.late, 3, "all three events arrived behind the second cover")
-        XCTAssertGreaterThanOrEqual(busy, quiet, "the second cover was held as long as the first")
 
         let changed = app.descendants(matching: .any)["session-fx-5"]
         XCTAssertTrue(
@@ -161,13 +169,13 @@ final class FleetRowRenderTimedUITests: XCTestCase {
         assertNoFleetWorkUnderTheDeckAtLaunch(["-CC_TAP", "approval"])
     }
 
-    /// Two launches into the Deck by `entry`, alike but for when the fixture's
-    /// three held-back frames arrive: behind the Deck, or after it has closed.
-    /// Behind it, they may cost the fleet's body the one pass the opening
+    /// Two launches into the Deck by `entry`, alike but for whether the
+    /// fixture's three held-back frames are released behind the Deck or not at
+    /// all. Behind it, they may cost the fleet's body the one pass the opening
     /// leaves armed, and nothing more.
     private func assertNoFleetWorkUnderTheDeckAtLaunch(_ entry: [String]) {
-        let behind = launchUnderTheDeck(entry, lateEventMS: "20500,25500,30500")
-        let after = launchUnderTheDeck(entry, lateEventMS: "60500,65500,70500")
+        let behind = launchUnderTheDeck(entry, releasingEvents: true)
+        let after = launchUnderTheDeck(entry, releasingEvents: false)
         XCTAssertEqual(behind.late, 3, "all three events arrived behind the Deck")
         XCTAssertEqual(after.late, 0, "none arrived before the reading")
         XCTAssertLessThanOrEqual(
@@ -176,25 +184,26 @@ final class FleetRowRenderTimedUITests: XCTestCase {
                 + "behind \(behind), after \(after)")
     }
 
-    /// Launch into the Deck by `entry`, hold it past the fixture's first
-    /// held-back events, close it, and read the probe.
+    /// Launch into the Deck by `entry`, hold it for `deckHold` (releasing the
+    /// fixture's held-back events behind it, if asked), close it, and read the
+    /// probe.
     private func launchUnderTheDeck(
-        _ entry: [String], lateEventMS: String
+        _ entry: [String], releasingEvents: Bool
     ) -> (bodies: Int, builds: Int, late: Int) {
         let app = XCUIApplication()
         app.launchArguments =
             [
                 "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
                 "-CC_ROW_RENDER_PROBE", "YES",
-                "-CC_FIXTURE_LATE_EVENT_MS", lateEventMS,
+                "-CC_FIXTURE_LATE_EVENTS", "3",
                 "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
             ] + entry
+        let signals = FixtureSignals()
+        signals.arm(app)
         app.launch()
+        let opened = Date()
         XCTAssertTrue(app.navigationBars["Waiting for you"].waitForExistence(timeout: 30), "the Deck opens")
-        // Past 30.5 s after the fixture loaded, which was before the Deck
-        // opened. The later launch must be read before its first event at
-        // 60.5 s; its `late` count says if a slow run was not.
-        RunLoop.current.run(until: Date().addingTimeInterval(34))
+        hold(from: opened, releasing: releasingEvents ? signals : nil)
         app.buttons["Done"].firstMatch.tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["cc-row-render-probe"].waitForExistence(timeout: 10),
@@ -211,36 +220,55 @@ final class FleetRowRenderTimedUITests: XCTestCase {
         return reading
     }
 
-    /// Open the Deck, hold it `seconds`, close it; how long it was held.
-    private func behindTheDeck(_ app: XCUIApplication, for seconds: TimeInterval) -> TimeInterval {
+    /// How long a cover is held, and when in it each held-back event is
+    /// released: apart, so each is its own change and the counts can tell
+    /// them apart.
+    private let deckHold: TimeInterval = 8
+    private let releases: [TimeInterval] = [2, 4, 6]
+
+    /// Hold a cover `deckHold` from `opened`, releasing `late-1`…`late-3` on
+    /// `releases` when `signals` is given.
+    private func hold(from opened: Date, releasing signals: FixtureSignals?) {
+        if let signals {
+            for (index, at) in releases.enumerated() {
+                RunLoop.current.run(until: opened.addingTimeInterval(at))
+                signals.send("late-\(index + 1)")
+            }
+        }
+        RunLoop.current.run(until: opened.addingTimeInterval(deckHold))
+    }
+
+    /// Open the Deck, hold it `deckHold`, close it.
+    private func behindTheDeck(_ app: XCUIApplication, releasing signals: FixtureSignals? = nil) {
         let opened = Date()
         XCUIDevice.shared.system.open(URL(string: "codeconnect://deck")!)
         XCTAssertTrue(app.navigationBars["Waiting for you"].waitForExistence(timeout: 15), "the Deck opens")
-        RunLoop.current.run(until: opened.addingTimeInterval(seconds))
+        hold(from: opened, releasing: signals)
         app.buttons["Done"].firstMatch.tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["cc-row-render-probe"].waitForExistence(timeout: 10),
             "the fleet is back")
         RunLoop.current.run(until: Date().addingTimeInterval(2))
-        return Date().timeIntervalSince(opened)
     }
 
-    private func launchBehindAChat(_ extra: [String]) -> XCUIApplication {
+    private func launchBehindAChat(_ extra: [String]) -> (XCUIApplication, FixtureSignals) {
         let app = XCUIApplication()
         app.launchArguments =
             [
                 "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
                 "-CC_ROW_RENDER_PROBE", "YES",
-                "-CC_FIXTURE_LATE_EVENT_MS", "20500,25500,30500",
+                "-CC_FIXTURE_LATE_EVENTS", "3",
                 "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
             ] + extra
+        let signals = FixtureSignals()
+        signals.arm(app)
         app.launch()
-        return app
+        return (app, signals)
     }
 
     /// With `fx-1`'s chat opening, read the probe before and between the three
     /// held-back events, go back, and hold the fleet to the rule above.
-    private func assertNoFleetWorkBehindTheChat(_ app: XCUIApplication) {
+    private func assertNoFleetWorkBehindTheChat(_ app: XCUIApplication, _ signals: FixtureSignals) {
         XCTAssertTrue(
             app.descendants(matching: .any)["session-timeline"].waitForExistence(timeout: 20),
             "fx-1's chat opens")
@@ -250,12 +278,11 @@ final class FleetRowRenderTimedUITests: XCTestCase {
         var readings = [fleet(app)]
         XCTAssertEqual(readings[0].late, 0, "the first reading comes before any event")
         for landed in 1...3 {
-            // The first event is due 20.5 s after the fixture loads, however
-            // soon the chat was open; the later ones five seconds apart.
+            signals.send("late-\(landed)")
             XCTAssertTrue(
-                waitUntil(timeout: landed == 1 ? 30 : 15) { fleet(app).late >= landed },
+                waitUntil(timeout: 15) { fleet(app).late >= landed },
                 "event \(landed) lands")
-            // Long enough for a pass it caused; short of the next event.
+            // Long enough for a pass it caused; the next event waits for the test.
             RunLoop.current.run(until: Date().addingTimeInterval(2))
             readings.append(fleet(app))
             XCTAssertEqual(
