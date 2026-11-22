@@ -108,14 +108,15 @@ public enum RunSettings: Sendable, Hashable {
     }
 
     /// **The one rule a model is named by**, wherever an app names one (ccd names an ended run's model by the same
-    /// rule): the part of its entry's description before the first " · " (the whole description when it has none),
-    /// when that part begins with the entry's label; otherwise the entry's label. Claude Code's "Sonnet" reads by
-    /// its description's "Sonnet 5.5"; a label its description does not repeat ("Qwen3.8-27B", a Codex model's) stays
-    /// as it is, and so does Default, whose description names the model it runs. The menu's own rows show the label
-    /// and the description as the agent wrote them.
+    /// rule): when its entry's description has a " · ", the part before the first one, if that part begins with the
+    /// entry's label; otherwise the entry's label. Claude Code's "Sonnet" reads by its description's "Sonnet 5.5";
+    /// a description with no " · " is a sentence, never a name, so its model keeps its label, as does a label its
+    /// description does not repeat ("Qwen3.8-27B", a Codex model's) and Default, whose description names the model it
+    /// runs. The menu's own rows show the label and the description as the agent wrote them.
     public static func modelName(label: String, detail: String?) -> String {
-        guard let first = detail?.components(separatedBy: " · ").first, first.hasPrefix(label) else { return label }
-        return first
+        guard let parts = detail?.components(separatedBy: " · "), parts.count > 1, parts[0].hasPrefix(label)
+        else { return label }
+        return parts[0]
     }
 }
 
