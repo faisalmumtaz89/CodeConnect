@@ -24,15 +24,48 @@ public struct MarkdownTable: Equatable {
     let raw: String
 }
 
+/// A Markdown list as an agent writes it: bullets, numbers or task boxes, nested by indentation.
+public struct AgentList: Equatable {
+    public enum Marker: Equatable {
+        case bullet
+        /// The number as written, with its `.` or `)`.
+        case ordered(String)
+        case task(done: Bool)
+    }
+
+    public struct Item: Equatable {
+        /// 0 for the outermost items, one more for each level of nesting.
+        public let depth: Int
+        public let marker: Marker
+        /// The item's words, inline Markdown, continuation lines joined by a space.
+        public let text: String
+
+        /// What both apps draw before the words: a bullet that changes with depth, or the number as written; nil for
+        /// a task, which draws its box.
+        public var glyph: String? {
+            switch marker {
+            case .bullet: ["•", "◦", "▪"][min(depth, 2)]
+            case .ordered(let number): number
+            case .task: nil
+            }
+        }
+    }
+
+    public let items: [Item]
+    /// The lines as written, for the collapsed preview.
+    let raw: [String]
+}
+
 /// Turning an agent's markdown into what a phone timeline can honestly render.
 ///
-/// The ceiling is deliberate: **inline styling, fenced code, headings and pipe
-/// tables**, nothing more. Bold, italics, inline code and links are what
-/// agents actually use in running prose; fences carry the one thing that must
-/// never be reflowed; a table is the one structure whose meaning *is* its
+/// The ceiling is deliberate: **inline styling, fenced code, headings, pipe
+/// tables and lists**, nothing more. Bold, italics, inline code and links are
+/// what agents actually use in running prose; fences carry the one thing that
+/// must never be reflowed; a table is the one structure whose meaning *is* its
 /// geometry — `| pass | 3 |` reflowed into prose stops saying which number
-/// belongs to which word. Anything else stays readable as the literal text
-/// the agent wrote.
+/// belongs to which word; a nested list's meaning is its indentation, which
+/// proportional type does not keep. Anything else stays readable as the
+/// literal text the agent wrote.
 public enum AgentProse {
 
     public enum Segment: Equatable {
@@ -47,6 +80,8 @@ public enum AgentProse {
         /// A GFM-shaped pipe table. Parsed here — cells, alignments, widths —
         /// so rendering and VoiceOver read structure, not delimiter art.
         case table(MarkdownTable)
+        /// A bulleted, numbered or task list, its nesting kept.
+        case list(AgentList)
     }
 
     /// Split on fence *delimiter lines* only: a line consisting of ``` with an
@@ -116,6 +151,14 @@ public enum AgentProse {
                 index += consumed
                 atBoundary = false
                 continue
+            } else if listItem(line) != nil {
+                flushProse()
+                let (list, consumed) = parseList(in: lines, from: index)
+                out.append(.list(list))
+                index += consumed
+                // As the item lines were before lists were parsed: a pipe line straight under a list is not a table.
+                atBoundary = false
+                continue
             } else {
                 prose.append(line)
                 atBoundary = line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -128,6 +171,68 @@ public enum AgentProse {
         }
         flushProse()
         return out
+    }
+
+    // MARK: - List grammar
+
+    /// A list item line: optional indentation, `-`, `*`, `+` or a number with `.` or `)` (at most nine digits), at
+    /// least one space, then words; `[ ]` or `[x]` after the marker makes it a task. A thematic break (`- - -`,
+    /// `* * *`) is not an item. Indentation counts a tab as four spaces.
+    static func listItem(_ line: String) -> (indent: Int, marker: AgentList.Marker, text: String)? {
+        let expanded = line.replacingOccurrences(of: "\t", with: "    ")
+        let indent = expanded.prefix(while: { $0 == " " }).count
+        let content = expanded.dropFirst(indent).trimmingCharacters(in: .whitespaces)
+        if content.count >= 3, content.allSatisfy({ "-*_ ".contains($0) }),
+            Set(content.filter { $0 != " " }).count == 1
+        {
+            return nil
+        }
+        guard let match = content.firstMatch(of: #/^([-*+]|[0-9]{1,9}[.)])[ ]+(.+)$/#) else { return nil }
+        let words = String(match.output.2)
+        let symbol = String(match.output.1)
+        if symbol.first?.isNumber == false, let task = words.firstMatch(of: #/^\[([ xX])\][ ]+(.+)$/#) {
+            return (indent, .task(done: task.output.1 != " "), String(task.output.2))
+        }
+        return (indent, symbol.first?.isNumber == true ? .ordered(symbol) : .bullet, words)
+    }
+
+    /// The list starting at `start`: items, the lines indented under an item (its continuation), and a blank line
+    /// followed by another item. It ends at a fence, a heading, any other line not indented under an item, or a blank
+    /// line not followed by an item. Depth comes from indentation: deeper than the item above opens a level, back to
+    /// an earlier indentation closes the levels inside it.
+    private static func parseList(in lines: [String], from start: Int) -> (AgentList, Int) {
+        var items: [AgentList.Item] = []
+        var indents: [Int] = []
+        var raw: [String] = []
+        var index = start
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                guard index + 1 < lines.count, listItem(lines[index + 1]) != nil else { break }
+                raw.append(line)
+                index += 1
+                continue
+            }
+            if beginsAnotherBlock(line) { break }
+            if let item = listItem(line) {
+                while let last = indents.last, item.indent < last { indents.removeLast() }
+                if let last = indents.last, item.indent > last {
+                    indents.append(item.indent)
+                } else if indents.isEmpty {
+                    indents.append(item.indent)
+                }
+                items.append(AgentList.Item(depth: indents.count - 1, marker: item.marker, text: item.text))
+            } else if let last = items.last, line.prefix(while: { $0 == " " || $0 == "\t" }).count >= 2 {
+                items[items.count - 1] = AgentList.Item(
+                    depth: last.depth, marker: last.marker, text: last.text + " " + trimmed)
+            } else {
+                break
+            }
+            raw.append(line)
+            index += 1
+        }
+        return (AgentList(items: items, raw: raw), index - start)
     }
 
     // MARK: - Table grammar
@@ -315,6 +420,8 @@ public enum AgentProse {
                 case .heading(let heading): return heading
                 case .code(let code): return code
                 case .table(let table): return tablePreviewLine(table)
+                // As written, as before lists were parsed: the preview's lines are the message's own.
+                case .list(let list): return droppingBlankLines(list.raw.joined(separator: "\n"))
                 }
             }
             .joined(separator: "\n")
