@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.7, with the iPhone app 1.1.24
+
+- On the Mac, Settings is a page of the main window, opened from the gear at the foot of the left panel or with ⌘,,
+  with a side list of General, Computers, Devices, Folders and Accounts; the separate Settings window is gone. General
+  holds this Mac's Tailscale, updates and the support and privacy pages; Computers lists the paired computers with
+  Remove… and Add Computer…; Accounts says whether Claude Code and Codex are installed and signed in on this Mac. Esc
+  or the back row returns to the agents as they were left.
+
 ## CodeConnect 0.19.6, with the iPhone app 1.1.23
 
 - A Claude Code run's model reads as its menu names it, such as "Sonnet" rather than claude-sonnet-5-5, on the Mac's
