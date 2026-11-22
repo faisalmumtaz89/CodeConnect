@@ -1560,21 +1560,22 @@ fn auth_reading(code: Option<i32>, stdout: &[u8]) -> Option<bool> {
     }
 }
 
-/// The `loggedIn` of the JSON object `auth status` prints after whatever the
-/// user's shell printed as it started: the last line that opens an object at its
-/// first column, read to the end. Nothing else of it is kept.
+/// The `loggedIn` of the object `auth status` prints ([`auth_status_object`]). Nothing else of it is kept.
 fn logged_in(stdout: &[u8]) -> Option<bool> {
+    auth_status_object(stdout)?.get("loggedIn")?.as_bool()
+}
+
+/// The JSON object `auth status` prints (over several lines) after whatever the user's shell printed as it
+/// started: the last line that opens an object at its first column, read to the end.
+pub(crate) fn auth_status_object(stdout: &[u8]) -> Option<serde_json::Value> {
     let text = String::from_utf8_lossy(stdout);
     let starts = text
         .match_indices('{')
         .map(|(at, _)| at)
         .filter(|&at| at == 0 || text.as_bytes()[at - 1] == b'\n');
-    starts.rev().find_map(|at| {
-        serde_json::from_str::<serde_json::Value>(&text[at..])
-            .ok()?
-            .get("loggedIn")?
-            .as_bool()
-    })
+    starts
+        .rev()
+        .find_map(|at| serde_json::from_str::<serde_json::Value>(&text[at..]).ok())
 }
 
 /// The first `X.Y.Z` in what `--version` printed, as numbers and as written.

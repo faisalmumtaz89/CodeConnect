@@ -451,13 +451,7 @@ pub(crate) async fn read_claude_facts(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     let output = crate::start_session::agent_output(command, FACTS_WAIT).await?;
-    // The object it prints after whatever the user's shell printed as it started.
-    let text = String::from_utf8_lossy(&output.stdout);
-    let status: serde_json::Value = text.lines().rev().find_map(|line| {
-        line.starts_with('{')
-            .then(|| serde_json::from_str(line).ok())
-            .flatten()
-    })?;
+    let status = crate::start_session::auth_status_object(&output.stdout)?;
     if status["loggedIn"] != true {
         return None;
     }
@@ -933,7 +927,7 @@ mod tests {
     /// A stand-in claude in `dir`, shaped from real claude 2.1.330 (app-qa's records, 2026-11-22): `auth login`
     /// writes the account's identity where its config directory points and a keychain item named from its storage
     /// folder (a file `item-<folder>` here), prints "Login successful" and exits 0; `auth status` prints one JSON
-    /// object with the real key list (signed out: analyticsDisabled, apiProvider, authMethod, configDirectory,
+    /// object, pretty-printed over several lines as the real one is, with the real key list (signed out: analyticsDisabled, apiProvider, authMethod, configDirectory,
     /// consoleProfileSignInOffered, loggedIn, loginExpiresAt null, projectsDirectory; signed in: those, plus email (the
     /// identity its config directory holds, the person's shared one without it), orgId, orgName, planTier,
     /// storedClaudeAiLogin and subscriptionType, all made up but the email) and exits 0 signed in, 1 signed out; `auth logout` takes the item and exits 0. A login
@@ -944,7 +938,7 @@ mod tests {
             &path,
             "#!/bin/sh\nhere=$(dirname \"$0\")\nn=$(basename \"${CLAUDE_SECURESTORAGE_CONFIG_DIR:-default}\")\n\
              if [ \"$1\" = auth ] && [ \"$2\" = login ]; then if [ -n \"$CLAUDE_CONFIG_DIR\" ]; then echo \"$n@example.test\" > \"$CLAUDE_CONFIG_DIR/.claude.json\"; else echo \"$n@example.test\" > \"$here/shared-identity\"; echo \"$n\" >> \"$here/shared\"; fi; : > \"$here/item-$n\"; echo 'Login successful'; exit 0; fi\n\
-             if [ \"$1\" = auth ] && [ \"$2\" = status ]; then if [ -n \"$CLAUDE_CONFIG_DIR\" ]; then e=$(cat \"$CLAUDE_CONFIG_DIR/.claude.json\" 2>/dev/null); else e=$(cat \"$here/shared-identity\" 2>/dev/null || echo default@example.test); fi; if [ -e \"$here/item-$n\" ]; then printf '{\"analyticsDisabled\":false,\"apiProvider\":\"firstParty\",\"authMethod\":\"claude.ai\",\"configDirectory\":\"%s\",\"consoleProfileSignInOffered\":false,\"email\":\"%s\",\"loggedIn\":true,\"loginExpiresAt\":\"2026-12-01T00:00:00Z\",\"orgId\":\"org-made-up\",\"orgName\":\"Made Up Org\",\"planTier\":\"made-up-tier\",\"projectsDirectory\":\"/p\",\"storedClaudeAiLogin\":true,\"subscriptionType\":\"max\"}\\n' \"${CLAUDE_CONFIG_DIR:-}\" \"$e\"; exit 0; fi; printf '{\"analyticsDisabled\":false,\"apiProvider\":\"firstParty\",\"authMethod\":\"none\",\"configDirectory\":\"%s\",\"consoleProfileSignInOffered\":true,\"loggedIn\":false,\"loginExpiresAt\":null,\"projectsDirectory\":\"/p\"}\\n' \"${CLAUDE_CONFIG_DIR:-}\"; exit 1; fi\n\
+             if [ \"$1\" = auth ] && [ \"$2\" = status ]; then if [ -n \"$CLAUDE_CONFIG_DIR\" ]; then e=$(cat \"$CLAUDE_CONFIG_DIR/.claude.json\" 2>/dev/null); else e=$(cat \"$here/shared-identity\" 2>/dev/null || echo default@example.test); fi; if [ -e \"$here/item-$n\" ]; then printf '{\\n  \"loggedIn\": true,\\n  \"authMethod\": \"claude.ai\",\\n  \"apiProvider\": \"firstParty\",\\n  \"email\": \"%s\",\\n  \"orgId\": \"org-made-up\",\\n  \"orgName\": \"Made Up Org\",\\n  \"planTier\": \"made-up-tier\",\\n  \"subscriptionType\": \"max\",\\n  \"storedClaudeAiLogin\": true,\\n  \"loginExpiresAt\": \"2026-12-01T00:00:00Z\",\\n  \"consoleProfileSignInOffered\": false,\\n  \"analyticsDisabled\": false,\\n  \"projectsDirectory\": \"/p\",\\n  \"configDirectory\": \"%s\"\\n}\\n' \"$e\" \"${CLAUDE_CONFIG_DIR:-}\"; exit 0; fi; printf '{\\n  \"loggedIn\": false,\\n  \"authMethod\": \"none\",\\n  \"apiProvider\": \"firstParty\",\\n  \"loginExpiresAt\": null,\\n  \"consoleProfileSignInOffered\": true,\\n  \"analyticsDisabled\": false,\\n  \"projectsDirectory\": \"/p\",\\n  \"configDirectory\": \"%s\"\\n}\\n' \"${CLAUDE_CONFIG_DIR:-}\"; exit 1; fi\n\
              if [ \"$1\" = auth ] && [ \"$2\" = logout ]; then rm -f \"$here/item-$n\"; exit 0; fi\nexit 2\n",
         )
         .unwrap();
