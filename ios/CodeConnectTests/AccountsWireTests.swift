@@ -372,10 +372,10 @@ final class AccountsWireTests: XCTestCase {
     func testAFailedMoveIsNamed() {
         XCTAssertEqual(
             AccountSwitchWords.failure(to: "ben@example.com", sessions: ["query-parser"]),
-            "query-parser couldn't start on ben@example.com.")
+            "query-parser couldn't start on ben@example.com. Its conversation says why.")
         XCTAssertEqual(
             AccountSwitchWords.failure(to: "ben@example.com", sessions: ["query-parser", "docs-site"]),
-            "2 sessions couldn't start on ben@example.com.")
+            "2 sessions couldn't start on ben@example.com. Their conversations say why.")
         XCTAssertNil(AccountSwitchWords.failure(to: "ben@example.com", sessions: []))
     }
 
@@ -403,5 +403,22 @@ final class AccountsWireTests: XCTestCase {
         model.connection.injectForTesting(try listing(9))
         await waitUntil({ model.accountSwitch(for: .claude) == nil }, "the move to end")
         XCTAssertNil(model.accountSwitch(for: .codex), "another agent's sessions aren't counted")
+    }
+
+    /// A window's caption is its own length, as the service names it: never a guess at "5-hour" or "Week".
+    func testAWindowIsCaptionedByItsOwnLength() {
+        XCTAssertEqual(AccountSwitchWords.caption(minutes: 300), "5-hour")
+        XCTAssertEqual(AccountSwitchWords.caption(minutes: 10080), "Week")
+        XCTAssertEqual(AccountSwitchWords.caption(minutes: 1440), "1-day")
+        XCTAssertEqual(AccountSwitchWords.caption(minutes: 120), "2-hour")
+    }
+
+    /// What a row says where it has no figures: a plan with no limits, a figure not yet reported, a sign-in waiting on
+    /// the browser.
+    func testARowWithoutFiguresStillSaysWhy() {
+        XCTAssertEqual(AccountSwitchWords.noPlanLimits, "No plan limits")
+        XCTAssertEqual(AccountSwitchWords.notReported, "Not reported yet")
+        XCTAssertEqual(
+            AccountSwitchWords.signingIn, "Finish signing in in your browser. This stops by itself after 10 minutes.")
     }
 }
