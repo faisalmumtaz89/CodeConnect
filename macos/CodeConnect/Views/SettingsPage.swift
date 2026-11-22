@@ -383,8 +383,11 @@ private struct ComputerSettings: View {
 
 // MARK: - Accounts
 
-/// Which agents are signed in on this Mac, as its service says when asked what it can start, asked again each time the
-/// section opens: what the app can read today, and nothing it cannot change.
+/// This Mac's agents and the accounts they start on. A service that keeps accounts per agent (minor 47) is asked for
+/// them each time the section opens: per agent its Default, then the accounts added, oldest first, a check on the one
+/// new runs use, Use on the others, and Add Account…. Only the account in use is known to be signed in or not, by the
+/// agents' own answer; the others carry no such word. An older service shows which agents are signed in, and nothing
+/// it cannot change.
 private struct AccountSettings: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
@@ -400,34 +403,126 @@ private struct AccountSettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
-            Text("The accounts Claude Code and Codex use on this Mac.")
-                .font(Theme.ui(13)).foregroundStyle(Theme.text2)
-            SettingsGroup(title: "On this Mac") {
-                if let model, let notice = model.linkHealth.notice {
-                    // Its link is down or not yet up: what the computers' rows say about it, in the place of an answer
-                    // its service can't stand behind now. The rows come back when it answers again.
-                    SettingsRow(title: notice.title, line: notice.sentence) { EmptyView() }
-                } else if let model, !model.starter.agents.isEmpty {
-                    ForEach(model.starter.agents, id: \.agent) { status in
-                        let installed = model.starter.availableAgents.contains(status.agent)
-                        // A missing agent's own sentence says why; a signed-in state needs none.
-                        SettingsRow(title: status.agent.displayName, line: installed ? nil : status.detail) {
-                            SettingsState(words: words(status, installed: installed), good: installed && status.signedIn == true)
+            if let model, model.keepsAccounts, model.linkHealth.notice == nil {
+                Text("For new runs on this Mac. A run keeps the account it started with.")
+                    .font(Theme.ui(13)).foregroundStyle(Theme.text2)
+                ForEach(StartAgent.allCases) { agent in AgentAccounts(model: model, agent: agent) }
+                if let problem = model.accountsProblem {
+                    Text(problem).font(Theme.ui(12)).foregroundStyle(Theme.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("settings.accounts.problem")
+                }
+            } else {
+                Text("The accounts Claude Code and Codex use on this Mac.")
+                    .font(Theme.ui(13)).foregroundStyle(Theme.text2)
+                SettingsGroup(title: "On this Mac") {
+                    if let model, let notice = model.linkHealth.notice {
+                        // Its link is down or not yet up: what the computers' rows say about it, in the place of an
+                        // answer its service can't stand behind now. The rows come back when it answers again.
+                        SettingsRow(title: notice.title, line: notice.sentence) { EmptyView() }
+                    } else if let model, !model.starter.agents.isEmpty {
+                        ForEach(model.starter.agents, id: \.agent) { status in
+                            let installed = model.starter.availableAgents.contains(status.agent)
+                            // A missing agent's own sentence says why; a signed-in state needs none.
+                            SettingsRow(title: status.agent.displayName, line: installed ? nil : status.detail) {
+                                SettingsState(
+                                    words: AccountWords.state(status, installed: installed),
+                                    good: installed && status.signedIn == true)
+                            }
                         }
+                    } else if model == nil, setup.settled {
+                        SettingsRow(title: "This Mac isn’t set up yet", line: "Set Up… in General sets it up.") { EmptyView() }
+                    } else {
+                        SettingsRow(title: "Asking this Mac…", line: nil) { EmptyView() }
                     }
-                } else if model == nil, setup.settled {
-                    SettingsRow(title: "This Mac isn’t set up yet", line: "Set Up… in General sets it up.") { EmptyView() }
-                } else {
-                    SettingsRow(title: "Asking this Mac…", line: nil) { EmptyView() }
                 }
             }
         }
-        .task(id: model?.machineID) { model?.listProjects() }
+        .task(id: model?.machineID) {
+            model?.listProjects()
+            await model?.loadAccounts()
+        }
+    }
+}
+
+/// One agent's accounts on this Mac: its Default, then the accounts added, oldest first; a check on the one its new
+/// runs use and Use on the others; Add Account… under them, a name for it in an ask.
+private struct AgentAccounts: View {
+    let model: AppModel
+    let agent: StartAgent
+    @State private var naming = false
+    @State private var name = ""
+
+    var body: some View {
+        let book = model.accountBook
+        let active = book?.activeID(for: agent)
+        VStack(alignment: .leading, spacing: 8) {
+            SettingsGroup(title: agent.displayName) {
+                if let book {
+                    row(nil, title: "Default", line: "\(agent.displayName) as it is set up on this Mac.", active: active == nil)
+                    ForEach(book.accounts(for: agent)) { account in
+                        row(account.id, title: account.label, line: nil, active: active == account.id)
+                    }
+                } else {
+                    // Not yet answered: no account is shown as in use before the computer says which.
+                    SettingsRow(title: "Asking this Mac…", line: nil) { EmptyView() }
+                }
+            }
+            ActionButton(title: "Add Account…", key: nil, prominent: false, id: "settings.accounts.\(agent.rawValue).add") {
+                name = ""
+                naming = true
+            }
+            .disabled(model.accountsBusy || book == nil)
+        }
+        .confirmation(Binding(get: { naming ? true : nil }, set: { naming = $0 ?? false })) { _ in
+            Confirmation(
+                title: "Add a \(agent.displayName) account",
+                message: "Its name, 1 to 64 characters. New runs start on it once you choose it.",
+                answers: [
+                    .init(title: "Cancel", kind: .cancel, id: "settings.accounts.add.cancel"),
+                    .init(title: "Add", kind: .plain, id: "settings.accounts.add.confirm") {
+                        let label = name
+                        Task { await model.addAccount(agent: agent, label: label) }
+                    },
+                ],
+                field: .init(placeholder: "Name", text: $name))
+        }
     }
 
-    /// From the fields that mean it: installed or not, then signed in, signed out, or not said (an older service, or
-    /// an agent it couldn't ask).
-    private func words(_ status: StartAgentStatus, installed: Bool) -> String {
+    /// A row: the account's name and, for the one in use, whether the agent is signed in, as the agents' own answer
+    /// says it; a check on it, Use on the others.
+    private func row(_ id: String?, title: String, line: String?, active: Bool) -> some View {
+        let rowID = "settings.accounts.\(agent.rawValue).\(id ?? "default")"
+        let status = model.starter.agents.first { $0.agent == agent }
+        let installed = model.starter.availableAgents.contains(agent)
+        return SettingsRow(title: title, line: line) {
+            if active {
+                HStack(spacing: 12) {
+                    if let status {
+                        SettingsState(
+                            words: AccountWords.state(status, installed: installed),
+                            good: installed && status.signedIn == true)
+                    }
+                    Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.text)
+                        .accessibilityLabel("In use for new runs")
+                        .accessibilityIdentifier("\(rowID).inUse")
+                }
+            } else {
+                ActionButton(title: "Use", key: nil, prominent: false, id: "\(rowID).use") {
+                    Task { await model.activateAccount(agent: agent, accountID: id) }
+                }
+                .disabled(model.accountsBusy)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(rowID)
+    }
+}
+
+/// An agent's sign-in, from the fields that mean it: installed or not, then signed in, signed out, or not said (an
+/// older service, or an agent it couldn't ask).
+private enum AccountWords {
+    static func state(_ status: StartAgentStatus, installed: Bool) -> String {
         guard installed else { return "Not installed" }
         switch status.signedIn {
         case true?: return "Signed in"
