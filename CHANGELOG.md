@@ -8,6 +8,8 @@ User-facing changes, newest first. Mac releases are cut per
 - On the Mac, the conversation shows a ring in the focus colour while it has the keyboard, so after Tab it is clear
   where the arrow, Page, Home and End keys will scroll; the ring goes when the keyboard moves on or the window is not
   in front.
+- On the Mac, a live run's reply row names the effort in use after its model, such as "· High", or "· Default" while
+  the agent has named none and the run uses its model's own, as the model panel's Effort section then says.
 
 ## CodeConnect 0.19.5, with the iPhone app 1.1.22
 
