@@ -17,19 +17,22 @@ public enum RunSettings: Sendable, Hashable {
     /// A live hosted Claude run offering its menus.
     case hostedLive(HostedSettings)
 
-    /// The effort a run is on, as the reply row names it beside the model: the effort the agent last named, by its
-    /// label, while the chosen model offers it (the panel's rule for its selection); "Default" while the chosen model
-    /// offers efforts and none of them is named (the menus name no model's default effort, and a fact left from the
-    /// model before a switch names none of this one's); nil when the chosen model offers none. Without menus, or with
-    /// no model chosen in them, only what the agent named. A setting the agent has not named reads "Default", as the
-    /// Default row does.
+    /// The effort a run is on, as the reply row names it beside the model: the effort in force on the chosen model
+    /// (`effortInForce`), by its label; "Default" while the chosen model offers efforts and neither names one; nil when
+    /// the chosen model offers none. Without menus, or with no model chosen in them, only what the agent named.
     public static func effortName(summary: SessionSummary) -> String? {
         let named = summary.effort.map { EffortConfirmation.label(for: $0.value) }
         guard let menus = summary.menus, let model = menus.models.first(where: { $0.value == menus.selectedModel })
         else { return named }
         guard !model.efforts.isEmpty else { return nil }
-        if let fact = summary.effort, model.efforts.contains(fact.value) { return named }
-        return "Default"
+        return effortInForce(on: model, fact: summary.effort?.value).map(EffortConfirmation.label(for:)) ?? "Default"
+    }
+
+    /// **The one rule an effort is shown and marked by** (decision 313): the effort the agent last named while the
+    /// model offers it; else, with none chosen (or a fact left from the model before a switch), the model's own
+    /// default effort as its entry names it; else none, which reads "Default" with nothing marked.
+    static func effortInForce(on model: MenuModel, fact: String?) -> String? {
+        [fact, model.defaultEffort].compactMap { $0 }.first { model.efforts.contains($0) }
     }
 
     /// The entry for a run, from its summary and the things only the client knows: the model the run
@@ -63,8 +66,9 @@ public enum RunSettings: Sendable, Hashable {
         let efforts = (selectedModel?.efforts ?? []).map {
             EffortChoice(value: $0, label: EffortConfirmation.label(for: $0))
         }
-        let selectedEffort = summary.effort
-            .flatMap { fact in efforts.first { $0.value == fact.value } }
+        let selectedEffort = selectedModel
+            .flatMap { effortInForce(on: $0, fact: summary.effort?.value) }
+            .flatMap { value in efforts.first { $0.value == value } }
         // The one string drawn for the run's model — the button, the header: the model the run is on once
         // it has said so, by `modelName`; before that the selected entry's name, and the fact as sent only when
         // the daemon named no selection. "Default" is a row of the menu, never the run's model.
