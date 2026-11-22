@@ -67,11 +67,12 @@ struct BranchRow: View {
         let opensAbove = BranchMenu.height(rows: rows) <= above || above > below
         let shown = BranchMenu.rows(fitting: opensAbove ? above : below, of: rows)
         let cut = shown < min(rows, BranchMenu.mostRows)
+        let placed = StartPanel.place(widest: BranchMenu.width, leading: frame.minX, pane: startWidth)
         return BranchMenu(
             git: git, folder: folder, running: context.runningFolders, place: newName == nil ? place : nil,
-            // As wide as it may be from the row's leading edge to 8 pt inside the pane, not the row's own width:
-            // beside the model button the row is narrow, and its names would be cut that need not be.
-            shownRows: shown, width: min(BranchMenu.width, startWidth - Self.margin - frame.minX)
+            // Inside the pane by the start form's one rule (`StartPanel`), not as narrow as its row: beside the model
+            // button the row is narrow, and its names would be cut that need not be.
+            shownRows: shown, width: placed.width
         ) { chosen in
             if let chosen {
                 place = chosen
@@ -83,6 +84,7 @@ struct BranchRow: View {
         }
         .openPanel()
         .offset(
+            x: placed.x - frame.minX,
             y: !opensAbove ? buttonBottom + gap : cut ? highest - frame.minY : -(BranchMenu.height(rows: shown) + gap))
     }
 

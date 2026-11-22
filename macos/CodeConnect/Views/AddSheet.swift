@@ -96,6 +96,19 @@ extension EnvironmentValues {
     @Entry var startWidth: CGFloat = 0
 }
 
+/// Where a panel of the start form stands across its pane: as wide as `widest` where the pane has the room, 8 pt
+/// clear of each of its sides, and its leading edge at `leading` moved only as far as it must to stay inside.
+enum StartPanel {
+    static let margin: CGFloat = 8
+
+    static func place(widest: CGFloat, leading: CGFloat, pane: CGFloat) -> (x: CGFloat, width: CGFloat) {
+        // Before the pane is measured, the panel as it is drawn.
+        guard pane > 0 else { return (leading, widest) }
+        let width = min(widest, pane - 2 * margin)
+        return (min(max(leading, margin), pane - margin - width), width)
+    }
+}
+
 /// The bottom bar every side shares: a note on the left, the answer on the right.
 struct SheetBar<Leading: View>: View {
     let action: String?
