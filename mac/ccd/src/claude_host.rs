@@ -285,7 +285,17 @@ async fn bring_up(
     .map_err(|err| format!("could not run the login shell: {err}"))?;
     let spawned = child.id();
     let attached = attach(
-        daemon, uid, start_uuid, run.prompt, start, &dir, since, spawned, &mut child, deadline,
+        daemon,
+        uid,
+        start_uuid,
+        run.prompt,
+        start,
+        &dir,
+        since,
+        spawned,
+        &mut child,
+        deadline,
+        Some(run.account.map(|account| account.id().to_string())),
     )
     .await;
     crate::start_session::reap(child);
@@ -304,6 +314,7 @@ async fn attach(
     spawned: Option<u32>,
     child: &mut tokio::process::Child,
     deadline: Instant,
+    account: Option<Option<String>>,
 ) -> Result<oneshot::Receiver<Begun>, String> {
     let record = loop {
         if let Some(record) = read_host_file(&dir.join("host.json")) {
@@ -383,6 +394,7 @@ async fn attach(
             replayed: true,
             resumed: resumes(Some(start)),
             effort: start_effort(Some(start)),
+            account,
         },
         Some(begun),
         lines,
@@ -483,6 +495,7 @@ pub(crate) async fn attach_run(
             // the seconds of a relaunch files its resumed start with no source (a written miss).
             resumed: false,
             effort,
+            account: None,
         },
         None,
         BufReader::new(read).lines(),
@@ -730,6 +743,9 @@ struct Linked {
     resumed: bool,
     /// The effort the start gives claude (a relaunch's), filed as the run's once claude has taken the start.
     effort: Option<String>,
+    /// The account this ccd launched the host on (`Some`; inside, `None` for Default), recorded as the run's once its
+    /// start goes live, whenever that is; `None` for a host attached again, whose account is recorded already.
+    account: Option<Option<String>>,
 }
 
 /// The effort `start` gives claude, if it names one.
@@ -802,6 +818,7 @@ async fn link(
         replayed,
         resumed,
         effort: start_effort_named,
+        account: mut launched_on,
     } = linked;
     let mut turns = Turns {
         init: turn,
@@ -925,6 +942,13 @@ async fn link(
                 {
                     Ok(true) => {
                         live = lifecycle == Lifecycle::Live;
+                        // Live on the account it was launched on, whether or not anyone still waits for the answer.
+                        if let (true, Some(account)) = (live, launched_on.take()) {
+                            if let Err(err) = daemon.db.set_run_account(uid.clone(), account).await
+                            {
+                                crate::log_error!("{uid}: could not record its account: {err:#}");
+                            }
+                        }
                         if let (true, Err(why)) = (switching, &said) {
                             crate::switch::relaunched(&daemon, &uid, Err(why.clone())).await;
                         }
@@ -2118,16 +2142,9 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
     };
     let lost = "The session is starting again; the message may or may not have reached Claude.";
     match tokio::time::timeout_at(deadline, begun).await {
-        Ok(Ok(Ok(()))) => {
-            // Live on it: the run's account is the one this launch was given.
-            let recorded = account.as_ref().map(|account| account.id().to_string());
-            if let Err(err) = daemon.db.set_run_account(uid.to_string(), recorded).await {
-                crate::log_error!("{uid}: could not record its account: {err:#}");
-            }
-            SendTextResult::Sent {
-                matched: text.to_string(),
-            }
-        }
+        Ok(Ok(Ok(()))) => SendTextResult::Sent {
+            matched: text.to_string(),
+        },
         // A refusal the link committed puts the run back `exited` and releases the claim; a
         // link that ended first leaves it starting, for the watch.
         Ok(Ok(Err(detail))) => match daemon.db.hosted_link(uid.to_string()).await {
@@ -12513,6 +12530,47 @@ mod tests {
                 );
                 relaunched
             }
+        );
+        stop(&relaunched.dir);
+    }
+
+    /// **A relaunch whose answer comes late still names the account it is live on** (306): a moved run's next
+    /// message relaunches it on B, but claude takes the start only after the message stopped waiting (Indeterminate);
+    /// once live, the run names B.
+    #[tokio::test]
+    async fn a_late_relaunch_still_names_the_account_it_is_live_on() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (uid, dir, old, b) = moved_to_b(&mut rig).await;
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-late", "on B?"), async {
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let ToHost::Start { uuid, .. } = relaunched.start.clone() else {
+                    panic!("not a start: {:?}", relaunched.start);
+                };
+                tokio::time::sleep(RELAUNCH_WAIT + Duration::from_secs(1)).await;
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        assert!(
+            matches!(sent, SendTextResult::Indeterminate { .. }),
+            "{sent:?}"
+        );
+        let live = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(live["lifecycle"], "live", "{live}");
+        assert_eq!(
+            live["account"],
+            serde_json::json!({"id": b.id, "label": "B"}),
+            "{live}"
         );
         stop(&relaunched.dir);
     }
