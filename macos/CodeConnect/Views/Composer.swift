@@ -297,7 +297,7 @@ private struct Composer: View {
                 case .deferToOtherPath:
                     EmptyView()
                 case .hostedReadOnly(let fact):
-                    ModelFactLabel(agent: summary?.agent ?? .claude, fact: fact)
+                    ModelFactLabel(agent: summary?.agent ?? .claude, fact: fact, effort: summary.flatMap(RunSettings.effortName))
                 case .hostedLive(let settings):
                     HostedSettingsButton(
                         model: model, key: key, agent: summary?.agent ?? .claude, settings: settings,
