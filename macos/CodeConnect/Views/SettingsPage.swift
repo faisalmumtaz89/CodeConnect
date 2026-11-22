@@ -475,7 +475,7 @@ private struct AgentAccounts: View {
                 Text(agent.displayName).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
                 Spacer()
                 ForEach(columns, id: \.self) { minutes in
-                    Text("\(ReplyStrip.caption(minutes: minutes)) used").font(Theme.ui(10.5)).foregroundStyle(Theme.text3)
+                    Text("\(AccountSwitchWords.caption(minutes: minutes)) used").font(Theme.ui(10.5)).foregroundStyle(Theme.text3)
                         .frame(minWidth: AccountRow.column, alignment: .trailing)
                 }
                 Color.clear.frame(width: AccountRow.trailing, height: 1)
@@ -615,18 +615,13 @@ private struct AccountRow: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(facts?.email ?? label).font(Theme.ui(13)).foregroundStyle(Theme.text)
                             .lineLimit(1).truncationMode(.middle)
+                            .accessibilityIdentifier("\(rowID).email")
                         Text(secondLine).font(Theme.ui(11.5)).foregroundStyle(signedOut ? Theme.amber : Theme.text3)
                             .lineLimit(1)
+                            .accessibilityIdentifier("\(rowID).line")
                     }
                     Spacer(minLength: 12)
-                    HStack(spacing: 0) {
-                        ForEach(columns, id: \.self) { minutes in
-                            let used = facts?.windows.first { $0.windowMinutes == minutes }?.usedPercent
-                            Text(used.map { "\($0)%" } ?? "").font(Theme.ui(13)).monospacedDigit()
-                                .foregroundStyle((used ?? 0) >= 90 ? Theme.amber : Theme.text2)
-                                .frame(minWidth: Self.column, alignment: .trailing)
-                        }
-                    }
+                    figures
                 }
                 menuButton.opacity(hovered ? 1 : 0)
             }
@@ -647,12 +642,32 @@ private struct AccountRow: View {
         .accessibilityIdentifier(rowID)
     }
 
+    /// Its share used of each column's window, right-aligned, an empty cell where it names no such window; or, in
+    /// their place, that its agent says the plan has no limits, or hasn't said yet.
+    @ViewBuilder private var figures: some View {
+        if let facts, !facts.windows.isEmpty {
+            HStack(spacing: 0) {
+                ForEach(columns, id: \.self) { minutes in
+                    let used = facts.windows.first { $0.windowMinutes == minutes }?.usedPercent
+                    Text(used.map { "\($0)%" } ?? "").font(Theme.ui(13)).monospacedDigit()
+                        .foregroundStyle((used ?? 0) >= 90 ? Theme.amber : Theme.text2)
+                        .frame(minWidth: Self.column, alignment: .trailing)
+                }
+            }
+            .accessibilityIdentifier("\(rowID).usage")
+        } else {
+            Text(facts == nil ? AccountSwitchWords.notReported : AccountSwitchWords.noPlanLimits)
+                .font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                .accessibilityIdentifier("\(rowID).usage")
+        }
+    }
+
     /// The plan in the agent's own word, capitalized; "Signed out"; or the row's note; "As set up on this Mac" for a
     /// Default whose agent hasn't said.
     private var secondLine: String {
         if signedOut { return "Signed out" }
         if let note { return note }
-        if signingIn { return "Signing in in the browser…" }
+        if signingIn { return AccountSwitchWords.signingIn }
         if let plan = facts?.plan { return plan.prefix(1).uppercased() + plan.dropFirst() }
         return id == nil ? "As set up on this Mac" : ""
     }
