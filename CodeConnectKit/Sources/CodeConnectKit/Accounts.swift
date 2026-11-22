@@ -1,13 +1,33 @@
 import Foundation
 
-/// One account an agent can start on, kept by the computer (`accounts`, minor 47): its id, its agent, and the name the
-/// person gave it. The computer says nothing else about it: no address, no sign-in.
+/// One account an agent can start on, kept by the computer (`accounts`, minor 47): its id, its agent, the name the
+/// person gave it, and whether its agent says it is signed in.
 public struct AgentAccount: Decodable, Hashable, Sendable, Identifiable {
     /// The computer's own id for it.
     public let id: String
     /// The agent as the computer names it; one this build does not know is kept and shown nowhere.
     public let agent: String
     public let label: String
+    /// Whether its agent says it is signed in; nil when the computer does not know.
+    public let signedIn: Bool?
+    /// A sign-in for it is going on the computer, waiting on the browser.
+    public let signingIn: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id, agent, label
+        case signedIn = "signed_in"
+        case signingIn = "signing_in"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        agent = try c.decode(String.self, forKey: .agent)
+        label = try c.decode(String.self, forKey: .label)
+        signedIn = try c.decodeIfPresent(Bool.self, forKey: .signedIn)
+        // Omitted when false.
+        signingIn = try c.decodeIfPresent(Bool.self, forKey: .signingIn) ?? false
+    }
 }
 
 /// The account an agent's new starts use.

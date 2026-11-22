@@ -2040,6 +2040,12 @@ public enum ClientMessage: Sendable {
     /// Makes `accountID` the account `agent`'s next starts use, or its Default for nil. Answered `accounts` or
     /// `accounts_refused`.
     case activateAccount(requestID: String, agent: String, accountID: String?)
+    /// Signs `accountID` in with its agent's own login in a browser on the computer. Answered at once with `accounts`,
+    /// that account `signing_in`; its end (finished, replaced, or after ten minutes) comes in a pushed `accounts`.
+    case signInAccount(requestID: String, accountID: String)
+    /// Removes `accountID` after its agent's own sign-out. Answered `accounts`, or `accounts_refused`
+    /// (`accounts_in_use` while a session runs on it, `accounts_unavailable` when it could not be signed out).
+    case removeAccount(requestID: String, accountID: String)
     /// One folder's repository: its checkouts and free branches. Minor 29,
     /// sent only when `Capabilities.startsInWorktrees`.
     case getProjectGit(path: String)
@@ -2248,6 +2254,14 @@ extension ClientMessage: Encodable {
             try c.encode(requestID, forKey: .requestID)
             try c.encode(agent, forKey: .agent)
             // Null names the Default, as the daemon reads an absent or null id.
+            try c.encode(accountID, forKey: .accountID)
+        case .signInAccount(let requestID, let accountID):
+            try c.encode("sign_in_account", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(accountID, forKey: .accountID)
+        case .removeAccount(let requestID, let accountID):
+            try c.encode("remove_account", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
             try c.encode(accountID, forKey: .accountID)
         case .getProjectGit(let path):
             try c.encode("get_project_git", forKey: .type)
@@ -2522,9 +2536,9 @@ public enum ServerMessage: Sendable {
     /// `forget_folder_trust`: every answer the computer keeps, newest first, once
     /// the request's change is made.
     case folderTrust(requestID: String, folders: [FolderAnswer])
-    /// The answer to `list_accounts`, `add_account` and `activate_account`: every account and the one each agent's
-    /// starts use, once the request's change is made.
-    case accounts(requestID: String, book: AccountBook)
+    /// Every account and the one each agent's starts use: the answer to an accounts request once its change is made,
+    /// naming it; or, with no `requestID`, pushed whenever the list changes on the computer. The latest is kept.
+    case accounts(requestID: String?, book: AccountBook)
     /// A refused `list_accounts`, `add_account` or `activate_account`, naming the request: nothing changed. `code` is
     /// `bad_request` or `accounts_unavailable`; `message` says why, in the computer's words.
     case accountsRefused(requestID: String, code: String, message: String)
@@ -2673,7 +2687,7 @@ extension ServerMessage: Decodable {
                 folders: try c.decode([FolderAnswer].self, forKey: .folders))
         case "accounts":
             self = .accounts(
-                requestID: try c.decode(String.self, forKey: .requestID),
+                requestID: try c.decodeIfPresent(String.self, forKey: .requestID),
                 book: AccountBook(
                     accounts: try c.decode([AgentAccount].self, forKey: .accounts),
                     active: try c.decode([ActiveAccount].self, forKey: .active)))

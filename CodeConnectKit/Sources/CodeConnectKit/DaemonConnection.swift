@@ -1133,6 +1133,17 @@ public final class DaemonConnection {
         try await accountsRequest { .activateAccount(requestID: $0, agent: agent.rawValue, accountID: accountID) }
     }
 
+    /// Removes `accountID` after its agent's own sign-out; every account, once removed.
+    public func removeAccount(accountID: String) async throws -> AccountBook {
+        try await accountsRequest { .removeAccount(requestID: $0, accountID: accountID) }
+    }
+
+    /// Starts `accountID`'s sign-in with its agent's own login in a browser on the computer; every account, that one
+    /// signing in. Its end comes in a pushed listing.
+    public func signInAccount(accountID: String) async throws -> AccountBook {
+        try await accountsRequest { .signInAccount(requestID: $0, accountID: accountID) }
+    }
+
     /// One accounts request at a time: a change is never sent while another is still unanswered.
     private func accountsRequest(_ message: (String) -> ClientMessage) async throws -> AccountBook {
         if accountsWaiters.values.contains(where: { $0.contains { $0.continuation != nil } }) {
@@ -1506,7 +1517,8 @@ public final class DaemonConnection {
         case .folderTrust(let requestID, let folders):
             deliver(store: \.folderTrustWaiters, key: requestID, value: folders)
         case .accounts(let requestID, let book):
-            deliver(store: \.accountsWaiters, key: requestID, value: book)
+            // A pushed listing names no request: the model keeps it (AppModel's own handling).
+            if let requestID { deliver(store: \.accountsWaiters, key: requestID, value: book) }
         case .accountsRefused(let requestID, _, let message):
             guard let waiter = accountsWaiters[requestID]?.first(where: { $0.continuation != nil }) else { break }
             abandon(

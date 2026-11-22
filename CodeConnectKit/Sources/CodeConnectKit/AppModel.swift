@@ -1229,6 +1229,19 @@ public final class AppModel {
         await accountsRequest { try await $0.activateAccount(agent: agent, accountID: accountID) }
     }
 
+    /// Removes `accountID` (its agent signs it out first); true once the computer has removed it.
+    @discardableResult
+    public func removeAccount(accountID: String) async -> Bool {
+        await accountsRequest { try await $0.removeAccount(accountID: accountID) }
+    }
+
+    /// Starts `accountID`'s sign-in in a browser on the computer; true once the computer has it going (that account
+    /// `signingIn` in the book). Its end arrives as a pushed listing.
+    @discardableResult
+    public func signInAccount(accountID: String) async -> Bool {
+        await accountsRequest { try await $0.signInAccount(accountID: accountID) }
+    }
+
     private func accountsRequest(_ ask: (DaemonConnection) async throws -> AccountBook) async -> Bool {
         guard keepsAccounts, !accountsBusy else { return false }
         accountsProblem = nil
@@ -2283,9 +2296,12 @@ public final class AppModel {
         case .testPushResult:
             // Same shape: the sheet's own request awaits the reply by id.
             break
+        case .accounts(nil, let book):
+            // Pushed when the list changes on the computer (from any device, or a sign-in's end): the latest is kept.
+            accountBook = book
         case .folderTrust, .accounts, .accountsRefused:
             // The same again: `listFolderTrust`, `setFolderTrust` and
-            // `forgetFolderTrust`, and the three accounts requests (answered or refused), each await
+            // `forgetFolderTrust`, and the accounts requests (answered or refused), each await
             // their reply by id.
             break
         case .projects(let projects, let agents):

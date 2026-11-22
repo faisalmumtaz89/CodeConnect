@@ -76,7 +76,9 @@ final class AccountsWireTests: XCTestCase {
 
     private func requestID(_ message: ClientMessage?) -> String? {
         switch message {
-        case .listAccounts(let id)?, .addAccount(let id, _, _)?, .activateAccount(let id, _, _)?: id
+        case .listAccounts(let id)?, .addAccount(let id, _, _)?, .activateAccount(let id, _, _)?,
+            .signInAccount(let id, _)?, .removeAccount(let id, _)?:
+            id
         default: nil
         }
     }
@@ -217,5 +219,83 @@ final class AccountsWireTests: XCTestCase {
             .accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: try book("list_after")))
         await loaded
         XCTAssertNil(model.accountsProblem)
+    }
+
+    // MARK: Signing in and removing (machine/accounts-306, minor 47)
+
+    /// What ccd's pinned wire test (ws.rs, the accounts round trip, at 3db0be74) holds: an account says whether it is
+    /// signed in when that is known and whether a sign-in is going; a sign-in and a removal name the account; a pushed
+    /// listing names no request.
+    private static let pinnedAccountID = "01M80QGTWR9RCHBSJWR169GXCN"
+
+    /// `signed_in` is read when the computer says it, and is not known when it does not.
+    func testAnAccountSaysWhetherItIsSignedIn() throws {
+        let decode = { (json: String) in try JSONDecoder().decode(AgentAccount.self, from: Data(json.utf8)) }
+        let id = Self.pinnedAccountID
+        XCTAssertEqual(try decode(#"{"id": "\#(id)", "agent": "codex", "label": "Work", "signed_in": true}"#).signedIn, true)
+        XCTAssertEqual(try decode(#"{"id": "\#(id)", "agent": "codex", "label": "Work", "signed_in": false}"#).signedIn, false)
+        XCTAssertNil(try decode(#"{"id": "\#(id)", "agent": "codex", "label": "Work"}"#).signedIn, "not known")
+        XCTAssertTrue(try decode(#"{"id": "\#(id)", "agent": "codex", "label": "Work", "signing_in": true}"#).signingIn)
+        XCTAssertFalse(try decode(#"{"id": "\#(id)", "agent": "codex", "label": "Work"}"#).signingIn, "omitted when false")
+    }
+
+    /// A sign-in and a removal name the account, as ccd reads them.
+    func testSignInAndRemoveEncodeAsCcdReadsThem() throws {
+        let id = Self.pinnedAccountID
+        XCTAssertEqual(
+            try encoded(.signInAccount(requestID: "a7", accountID: id)),
+            .object(["type": .string("sign_in_account"), "request_id": .string("a7"), "account_id": .string(id)]))
+        XCTAssertEqual(
+            try encoded(.removeAccount(requestID: "a8", accountID: id)),
+            .object(["type": .string("remove_account"), "request_id": .string("a8"), "account_id": .string(id)]))
+    }
+
+    /// A removal the computer refuses (a session runs on the account) is shown in its words, and nothing changes.
+    func testARefusedRemovalIsShownInTheComputersWords() async throws {
+        let (model, sent) = try model()
+        let before = try book("activate_codex_work")
+        async let loaded: Void = model.loadAccounts()
+        await waitUntil({ sent.sent.count == 1 }, "the list to be sent")
+        model.connection.injectForTesting(.accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: before))
+        await loaded
+
+        let work = try XCTUnwrap(before.accounts(for: .codex).first).id
+        async let removed = model.removeAccount(accountID: work)
+        await waitUntil({ sent.sent.count == 2 }, "the removal to be sent")
+        guard case .removeAccount(_, let named)? = sent.sent.last else { return XCTFail("sent \(String(describing: sent.sent.last))") }
+        XCTAssertEqual(named, work)
+        let words = "Sessions are running on this account. Choose another account first."
+        model.connection.injectForTesting(
+            .accountsRefused(requestID: try XCTUnwrap(requestID(sent.sent.last)), code: "accounts_in_use", message: words))
+        let wasRemoved = await removed
+        XCTAssertFalse(wasRemoved)
+        XCTAssertEqual(model.accountsProblem, words)
+        XCTAssertEqual(model.accountBook, before, "nothing removed")
+    }
+
+    /// A sign-in answers at once with the account signing in; its end comes as a listing the computer pushes, naming
+    /// no request, which the model keeps as the latest.
+    func testASignInAnswersAtOnceAndItsEndIsPushed() async throws {
+        let (model, sent) = try model()
+        let id = Self.pinnedAccountID
+        let account = { (rest: String) in
+            #"{"type": "accounts", "accounts": [{"id": "\#(id)", "agent": "codex", "label": "Work"\#(rest)}], "active": []}"#
+        }
+        let frame = { (json: String) in try JSONDecoder().decode(ServerMessage.self, from: Data(json.utf8)) }
+
+        async let started = model.signInAccount(accountID: id)
+        await waitUntil({ sent.sent.count == 1 }, "the sign-in to be sent")
+        guard case .accounts(_, let signing) = try frame(account(#", "signing_in": true"#)) else { return XCTFail() }
+        model.connection.injectForTesting(.accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: signing))
+        let wasStarted = await started
+        XCTAssertTrue(wasStarted)
+        XCTAssertEqual(model.accountBook?.accounts.first?.signingIn, true)
+        XCTAssertFalse(model.accountsBusy, "the page is free while the browser waits")
+
+        let pushed = try frame(account(#", "signed_in": true"#))
+        guard case .accounts(nil, _) = pushed else { return XCTFail("a pushed listing names no request") }
+        model.connection.injectForTesting(pushed)
+        await waitUntil({ model.accountBook?.accounts.first?.signedIn == true }, "the pushed listing to be kept")
+        XCTAssertEqual(model.accountBook?.accounts.first?.signingIn, false, "signing_in gone reads not signing in")
     }
 }
