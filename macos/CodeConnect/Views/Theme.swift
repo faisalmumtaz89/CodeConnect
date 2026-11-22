@@ -30,9 +30,8 @@ enum Theme {
     static let disabledOpacity = 0.45
     /// How much an unchosen segment lightens under the pointer: its label is dim, so it takes more than `hoverLift`.
     static let segmentLift = 0.15
-    /// How far a panel stands off the button that opens it: close enough that, under a two-line row, it covers the
-    /// row's second line whole rather than cutting through its text.
-    static let panelGap: CGFloat = 1
+    /// How far every anchored panel stands off the control that opens it, above or below: a clear gap, never touching.
+    static let panelGap: CGFloat = 6
 
     // The meaning colours and the text greys are the Kit's, shared with the iPhone; the grounds are the Mac's own.
     static let text = CC.text.primary
