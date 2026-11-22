@@ -2989,6 +2989,27 @@ impl Store {
 
     /// The account a run started on, as `begin_run` recorded it; `None` for its Default, and for every run recorded
     /// before accounts.
+    /// Removes the account `id` and any agent's choice of it (that agent goes back to its Default). The runs that
+    /// recorded it keep the id, which then names no account. The removed account, or None when there was none.
+    pub fn remove_account(&self, id: &str) -> Result<Option<Account>> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let removed = tx
+            .query_row(
+                "SELECT id, agent, label FROM accounts WHERE id = ?1",
+                params![id],
+                account_from,
+            )
+            .optional()?;
+        tx.execute(
+            "DELETE FROM account_selection WHERE account_id = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
     pub fn run_account(&self, session_uid: &str) -> Result<Option<Account>> {
         Ok(self
             .read()

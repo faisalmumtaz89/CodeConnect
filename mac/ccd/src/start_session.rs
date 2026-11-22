@@ -86,6 +86,21 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             )
             .await
         }
+        ClientMessage::RemoveAccount {
+            request_id,
+            account_id,
+        } => {
+            let environment = phone_environment();
+            let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
+            crate::accounts::remove(
+                &daemon.store,
+                &environment,
+                codex.as_deref(),
+                request_id,
+                account_id,
+            )
+            .await
+        }
         ClientMessage::ListAccounts { .. }
         | ClientMessage::AddAccount { .. }
         | ClientMessage::ActivateAccount { .. } => {

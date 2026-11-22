@@ -277,7 +277,8 @@ where
         | ClientMessage::ListAccounts { .. }
         | ClientMessage::AddAccount { .. }
         | ClientMessage::ActivateAccount { .. }
-        | ClientMessage::SignInAccount { .. } => {
+        | ClientMessage::SignInAccount { .. }
+        | ClientMessage::RemoveAccount { .. } => {
             send(
                 sink,
                 &ServerMessage::Error {

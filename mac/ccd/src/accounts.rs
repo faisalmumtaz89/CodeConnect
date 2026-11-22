@@ -136,6 +136,11 @@ impl AccountEnv {
         }
     }
 
+    /// The account's home, as its agent is given it.
+    pub(crate) fn folder(&self) -> &Path {
+        &self.folder
+    }
+
     /// The account's id, as a run records it.
     pub(crate) fn id(&self) -> &str {
         &self.id
@@ -383,6 +388,79 @@ pub(crate) async fn sign_in(
     with_signed_in(environment, Some(codex), listing).await
 }
 
+/// How long an agent's logout may take before the removal is refused.
+const LOGOUT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Removes `account_id`: its agent's own logout in its home, `codex` being Codex's path here; once the credential is
+/// gone, the row (and any choice of it). The home stays, its links and nothing of the account's: a thread started
+/// on the account is recorded through it and still resumes from another account (measured on codex 0.170.0,
+/// 2026-11-22). Refused, with nothing removed, when the credential is still there after the logout.
+pub(crate) async fn remove(
+    store: &crate::store::Store,
+    environment: &HashMap<OsString, OsString>,
+    codex: Option<&Path>,
+    request_id: String,
+    account_id: String,
+) -> protocol::ws::ServerMessage {
+    let account = match store.accounts() {
+        Ok(accounts) => accounts
+            .into_iter()
+            .find(|account| account.id == account_id),
+        Err(err) => return unavailable(request_id, "read the accounts", err),
+    };
+    let Some(account) = account else {
+        return refused(
+            request_id,
+            "that is not one of this computer's accounts".into(),
+        );
+    };
+    if account.agent != "codex" {
+        return refused(
+            request_id,
+            "a Claude Code account can't be removed from here yet".into(),
+        );
+    }
+    let Some(codex) = codex else {
+        return refused(request_id, "Codex isn't installed on this computer".into());
+    };
+    let home = match AccountEnv::for_account(&protocol::root_dir(), &account) {
+        Ok(Some(home)) => home,
+        Ok(None) => {
+            return refused(
+                request_id,
+                "this account's agent has no sign-in here".into(),
+            )
+        }
+        Err(err) => return unavailable(request_id, "find the account's home", err.into()),
+    };
+    let mut logout = crate::start_session::login_shell_command(
+        environment,
+        Some(&home),
+        &[codex.as_os_str(), std::ffi::OsStr::new("logout")],
+    );
+    logout
+        .current_dir(protocol::home_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    if let Ok(mut child) = logout.spawn() {
+        let _ = tokio::time::timeout(LOGOUT_WAIT, child.wait()).await;
+    }
+    if home.folder().join("auth.json").symlink_metadata().is_ok() {
+        return refused_as(
+            request_id,
+            "accounts_unavailable",
+            "Codex could not sign the account out, so nothing was removed".into(),
+        );
+    }
+    if let Err(err) = store.remove_account(&account.id) {
+        return unavailable(request_id, "remove the account", err);
+    }
+    let listing = listing(store, request_id);
+    with_signed_in(environment, Some(codex), listing).await
+}
+
 fn refused_as(request_id: String, code: &str, message: String) -> protocol::ws::ServerMessage {
     protocol::ws::ServerMessage::AccountsRefused {
         request_id,
@@ -425,7 +503,8 @@ mod tests {
         std::fs::write(
             &path,
             "#!/bin/sh\nhere=$(dirname \"$0\")\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then [ -f \"$CODEX_HOME/auth.json\" ]; exit $?; fi\n\
-             if [ \"$1\" = login ]; then if [ -e \"$here/hang\" ]; then echo $$ > \"$here/pid\"; exec sleep 30; fi; echo '{}' > \"$CODEX_HOME/auth.json\"; fi\n",
+             if [ \"$1\" = login ]; then if [ -e \"$here/hang\" ]; then echo $$ > \"$here/pid\"; exec sleep 30; fi; echo '{}' > \"$CODEX_HOME/auth.json\"; fi\n\
+             if [ \"$1\" = logout ]; then echo \"$CODEX_HOME\" >> \"$here/logouts\"; [ -e \"$here/keep\" ] || rm -f \"$CODEX_HOME/auth.json\"; fi\n",
         )
         .unwrap();
         std::process::Command::new("chmod")
@@ -659,6 +738,127 @@ mod tests {
                 .join("codex")
                 .join(&a.id),
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Removing an account signs it out and keeps its home as links** (306 Slice D, D1, D2): the stand-in's logout runs
+    /// with the account's home and takes its credential; the row and the agent's choice of it go (Default again); the
+    /// home stays, its links still the person's, so a thread recorded through it still resolves. A logout that leaves
+    /// the credential is refused and nothing is removed.
+    #[tokio::test]
+    async fn removing_an_account_signs_it_out_and_keeps_its_home_as_links() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-remove.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
+        std::fs::write(
+            home.join(".codex").join("sessions").join("rollout-a.jsonl"),
+            "{}",
+        )
+        .unwrap();
+        let codex = stand_in_codex(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.clone().into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-remove");
+        let _db = store.temp_db();
+        let a = store.add_account("codex", "A").unwrap();
+        assert!(store.activate_account("codex", Some(&a.id)).unwrap());
+        let folder = protocol::root_dir()
+            .join("accounts")
+            .join("codex")
+            .join(&a.id);
+        let signed = super::sign_in(
+            &store,
+            &super::SignIns::default(),
+            &environment,
+            Some(&codex),
+            "s1".into(),
+            a.id.clone(),
+            std::time::Duration::from_secs(20),
+        )
+        .await;
+        assert_eq!(
+            serde_json::to_value(&signed).unwrap()["accounts"][0]["signed_in"],
+            true
+        );
+
+        std::fs::write(root.join("keep"), "").unwrap();
+        let kept = serde_json::to_value(
+            super::remove(
+                &store,
+                &environment,
+                Some(&codex),
+                "r1".into(),
+                a.id.clone(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(
+            (kept["type"].as_str(), kept["code"].as_str()),
+            (Some("accounts_refused"), Some("accounts_unavailable")),
+            "{kept}"
+        );
+        assert_eq!(
+            store.accounts().unwrap().len(),
+            1,
+            "nothing removed while the credential is there"
+        );
+        std::fs::remove_file(root.join("keep")).unwrap();
+
+        let gone = serde_json::to_value(
+            super::remove(
+                &store,
+                &environment,
+                Some(&codex),
+                "r2".into(),
+                a.id.clone(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                gone["type"].as_str(),
+                gone["accounts"].clone(),
+                gone["active"].clone()
+            ),
+            (
+                Some("accounts"),
+                serde_json::json!([]),
+                serde_json::json!([])
+            ),
+            "{gone}"
+        );
+        let logouts = std::fs::read_to_string(root.join("logouts")).unwrap();
+        assert!(
+            logouts.lines().all(|line| Path::new(line) == folder),
+            "D1: {logouts}"
+        );
+        assert!(
+            folder.join("auth.json").symlink_metadata().is_err(),
+            "the credential is gone"
+        );
+        let sessions = folder.join("sessions");
+        assert!(
+            sessions
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "D2: the home stays as links"
+        );
+        assert!(
+            sessions.join("rollout-a.jsonl").exists(),
+            "a thread recorded through it still resolves"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -424,6 +424,14 @@ pub enum ClientMessage {
         request_id: String,
         account_id: String,
     },
+    /// **Removes `account_id`**: its agent's own logout in its home, then the account is gone from the list; an agent
+    /// whose active account it was goes back to its Default. A thread started on it still resumes on another account.
+    /// Answered with one [`ServerMessage::Accounts`], or [`ServerMessage::AccountsRefused`] when the agent could not
+    /// sign it out (nothing is removed then). Codex only, for now.
+    RemoveAccount {
+        request_id: String,
+        account_id: String,
+    },
     /// **The git worktrees and branches of one folder** (minor 29,
     /// `start_worktree`), answered with one [`ServerMessage::ProjectGit`]. Read
     /// only: nothing is fetched, written or run. `path` is absolute.
