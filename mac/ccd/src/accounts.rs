@@ -324,13 +324,13 @@ pub(crate) async fn with_signed_in(
 
 /// Signs `account_id` in with its agent's own login on this computer, `codex` being Codex's path here. Answers at
 /// once: the listing, that account `signing_in`. The login runs on in a group of its own; when it ends (finished in
-/// the browser, after `wait`, or replaced by a newer sign-in), its group is ended and `changed` is told, so the
-/// list is pushed. The handle is the login's, for a test to wait on.
+/// the browser, after `wait`, or replaced by a newer sign-in), its group is ended and `on_end` called, which pushes
+/// the list. The handle is the login's, for a test to wait on.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sign_in(
     store: &crate::store::Store,
     sign_ins: &Arc<SignIns>,
-    changed: &tokio::sync::broadcast::Sender<()>,
+    on_end: impl FnOnce() + Send + 'static,
     environment: &HashMap<OsString, OsString>,
     codex: Option<&Path>,
     request_id: String,
@@ -423,6 +423,15 @@ pub(crate) async fn sign_in(
     {
         let _ = earlier.send(tokio::sync::oneshot::channel().0);
     }
+    // The answer is read before the login starts, so it says this account is signing in, and the push at the
+    // login's end is the newer.
+    let reply = with_signed_in(
+        environment,
+        Some(codex),
+        listing(store, Some(request_id.clone())),
+    )
+    .await;
+    let reply = sign_ins.marked(reply);
     let mut child = match login.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -440,7 +449,6 @@ pub(crate) async fn sign_in(
         .zip(protocol::proc_identity::boot_identity());
     let running = {
         let sign_ins = Arc::clone(sign_ins);
-        let changed = changed.clone();
         tokio::spawn(async move {
             let mut told = None;
             tokio::select! {
@@ -469,12 +477,10 @@ pub(crate) async fn sign_in(
             if let Some(told) = told {
                 let _ = told.send(());
             }
-            let _ = changed.send(());
+            on_end();
         })
     };
-    let reply = listing(store, Some(request_id));
-    let reply = with_signed_in(environment, Some(codex), reply).await;
-    (sign_ins.marked(reply), Some(running))
+    (reply, Some(running))
 }
 
 impl SignIns {
@@ -726,11 +732,16 @@ mod tests {
         let folder = |id: &str| protocol::root_dir().join("accounts").join("codex").join(id);
         let person_before = tree(&home);
         let sign_ins = Arc::new(super::SignIns::default());
-        let (changed, mut heard) = tokio::sync::broadcast::channel(4);
+        let (changed, heard) = std::sync::mpsc::channel::<()>();
         let (answered, running) = super::sign_in(
             &store,
             &sign_ins,
-            &changed,
+            {
+                let changed = changed.clone();
+                move || {
+                    let _ = changed.send(());
+                }
+            },
             &environment,
             Some(&codex),
             "s1".into(),
@@ -822,7 +833,7 @@ mod tests {
         let _db = store.temp_db();
         let a = store.add_account("codex", "A").unwrap();
         let sign_ins = Arc::new(super::SignIns::default());
-        let (changed, mut heard) = tokio::sync::broadcast::channel(8);
+        let (changed, heard) = std::sync::mpsc::channel::<()>();
         let signed_in = || async {
             let reply =
                 super::with_signed_in(&environment, Some(&codex), super::listing(&store, None))
@@ -856,7 +867,12 @@ mod tests {
         let (_, late) = super::sign_in(
             &store,
             &sign_ins,
-            &changed,
+            {
+                let changed = changed.clone();
+                move || {
+                    let _ = changed.send(());
+                }
+            },
             &environment,
             Some(&codex),
             "s1".into(),
@@ -891,7 +907,12 @@ mod tests {
         let (_, first) = super::sign_in(
             &store,
             &sign_ins,
-            &changed,
+            {
+                let changed = changed.clone();
+                move || {
+                    let _ = changed.send(());
+                }
+            },
             &environment,
             Some(&codex),
             "s2".into(),
@@ -905,7 +926,12 @@ mod tests {
         let (_, second) = super::sign_in(
             &store,
             &sign_ins,
-            &changed,
+            {
+                let changed = changed.clone();
+                move || {
+                    let _ = changed.send(());
+                }
+            },
             &environment,
             Some(&codex),
             "s3".into(),
@@ -969,7 +995,7 @@ mod tests {
         let (_, running) = super::sign_in(
             &store,
             &Arc::new(super::SignIns::default()),
-            &tokio::sync::broadcast::channel(4).0,
+            || {},
             &environment,
             Some(&codex),
             "s1".into(),
@@ -1090,7 +1116,7 @@ mod tests {
         let (_, running) = super::sign_in(
             &store,
             &sign_ins,
-            &tokio::sync::broadcast::channel(4).0,
+            || {},
             &environment,
             Some(&codex),
             "s1".into(),

@@ -46,7 +46,8 @@ const BRANCH_READS_AT_ONCE: usize = 8;
 /// How long the login shell and the launcher may take to say an agent is there.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// An account request answered; a change it made (anything but a listing) is pushed to every paired device.
+/// An account request answered. A change it made (anything but a listing) is pushed as that same listing, naming
+/// no request; a sign-in's end is pushed when its login ends.
 async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessage {
     let environment = phone_environment();
     let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
@@ -56,10 +57,13 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             request_id,
             account_id,
         } => {
+            let ended = Arc::clone(daemon);
             crate::accounts::sign_in(
                 &daemon.store,
                 &daemon.sign_ins,
-                &daemon.accounts_tx,
+                move || {
+                    tokio::spawn(async move { push_accounts(&ended).await });
+                },
                 &environment,
                 codex.as_deref(),
                 request_id,
@@ -96,24 +100,37 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
         }
     };
     let reply = daemon.sign_ins.marked(reply);
-    if changes && matches!(reply, ServerMessage::Accounts { .. }) {
-        let _ = daemon.accounts_tx.send(());
+    if let (
+        true,
+        ServerMessage::Accounts {
+            accounts, active, ..
+        },
+    ) = (changes, &reply)
+    {
+        let _ = daemon.accounts_tx.send(ServerMessage::Accounts {
+            request_id: None,
+            accounts: accounts.clone(),
+            active: active.clone(),
+        });
     }
     reply
 }
 
-/// The accounts listing pushed to a paired device when it changes: no request named.
-pub(crate) async fn accounts_pushed(daemon: &Arc<Daemon>) -> ServerMessage {
+/// The accounts listing, read once and pushed to every connection that reads accounts.
+async fn push_accounts(daemon: &Arc<Daemon>) {
     let environment = phone_environment();
     let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
     let store = daemon.store.clone();
-    let reply = tokio::task::spawn_blocking(move || crate::accounts::listing(&store, None))
-        .await
-        .unwrap_or_else(|err| {
-            crate::accounts::unavailable(String::new(), "list", anyhow::anyhow!("{err}"))
-        });
-    let reply = crate::accounts::with_signed_in(&environment, codex.as_deref(), reply).await;
-    daemon.sign_ins.marked(reply)
+    let Ok(listing) =
+        tokio::task::spawn_blocking(move || crate::accounts::listing(&store, None)).await
+    else {
+        return;
+    };
+    if matches!(listing, ServerMessage::Accounts { .. }) {
+        let listing =
+            crate::accounts::with_signed_in(&environment, codex.as_deref(), listing).await;
+        let _ = daemon.accounts_tx.send(daemon.sign_ins.marked(listing));
+    }
 }
 
 /// The agents the phone can start.

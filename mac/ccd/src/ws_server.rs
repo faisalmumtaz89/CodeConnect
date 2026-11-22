@@ -392,9 +392,10 @@ where
     // message is already queued on this receiver when the id arrives, and the
     // authentication path re-checks `revoked` itself.
     let mut revocations = daemon.revocations_tx.subscribe();
-    // The accounts listing, pushed to a paired device whenever it changes (minor 47). An app that does not know the
-    // frame reads it as unknown and lets it go.
-    let mut accounts_changed = daemon.accounts_tx.subscribe();
+    // The accounts listing, pushed whenever it changes (minor 47), once this connection has itself sent an accounts
+    // request: an app too old to read the frame never asks, and an iPhone's warns of every frame it can't read.
+    // Subscribed at that first request, so nothing older than its answer follows it.
+    let mut accounts_pushed: Option<broadcast::Receiver<ServerMessage>> = None;
     let mut watermarks: HashMap<String, u64> = HashMap::new();
     let mut authed = false;
     // Which device this connection belongs to, if any.
@@ -689,6 +690,16 @@ where
                         }).await?;
                         continue;
                     }
+                    if accounts_pushed.is_none() && matches!(
+                        parsed,
+                        ClientMessage::ListAccounts { .. }
+                            | ClientMessage::AddAccount { .. }
+                            | ClientMessage::ActivateAccount { .. }
+                            | ClientMessage::SignInAccount { .. }
+                            | ClientMessage::RemoveAccount { .. }
+                    ) {
+                        accounts_pushed = Some(daemon.accounts_tx.subscribe());
+                    }
                     let daemon = daemon.clone();
                     let replies = replies_tx.clone();
                     tokio::spawn(async move {
@@ -876,15 +887,16 @@ where
                 }
             }
 
-            changed = accounts_changed.recv(), if device_id.is_some() => {
-                match changed {
-                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let daemon = Arc::clone(&daemon);
-                        let replies = replies_tx.clone();
-                        tokio::spawn(async move {
-                            let _ = replies.send(crate::start_session::accounts_pushed(&daemon).await);
-                        });
-                    }
+            pushed = async {
+                match accounts_pushed.as_mut() {
+                    Some(listing) => listing.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match pushed {
+                    Ok(listing) => send(&mut sink, &listing).await?,
+                    // Those missed are older than the ones still queued, which follow.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => return Ok(()),
                 }
             }
@@ -6769,10 +6781,15 @@ mod tests {
                 }
             }
         }
-        // A change made by one paired device is pushed to every paired device, naming no request.
+        // A change made by one paired device is pushed, naming no request, to each paired connection that has asked
+        // about accounts itself, and to no other: one that never asked may be an app that can't read the frame.
         let (mut watcher, _) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
             .await;
+        let (mut silent, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        ask(&mut watcher, list("w1"), "w1").await;
         let empty = ask(&mut phone, list("a1"), "a1").await;
         assert_eq!(empty["accounts"], serde_json::json!([]), "{empty}");
         assert_eq!(empty["active"], serde_json::json!([]), "{empty}");
@@ -6790,6 +6807,15 @@ mod tests {
         };
         assert_eq!(pushed.get("request_id"), None, "{pushed}");
         assert_eq!(pushed["accounts"][0]["label"], "Work", "{pushed}");
+        while let Ok(frame) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), next_json(&mut silent)).await
+        {
+            let frame = frame.expect("a frame");
+            assert_ne!(
+                frame["type"], "accounts",
+                "pushed to a connection that never asked: {frame}"
+            );
+        }
         let work = added["accounts"][0]["id"].as_str().unwrap().to_string();
         assert!(protocol::uid::is_well_formed(&work), "{added}");
         assert_eq!(added["accounts"][0]["agent"], "codex");

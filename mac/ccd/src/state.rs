@@ -202,8 +202,8 @@ pub struct Daemon {
     pub(crate) agents: crate::start_session::KnownAgents,
     /// The account sign-in this computer is running, if any ([`crate::accounts::sign_in`]).
     pub(crate) sign_ins: Arc<crate::accounts::SignIns>,
-    /// Told whenever the accounts listing changes, so each paired device is pushed it.
-    pub(crate) accounts_tx: broadcast::Sender<()>,
+    /// The accounts listing, sent once whenever it changes, for each connection that reads accounts to push.
+    pub(crate) accounts_tx: broadcast::Sender<protocol::ws::ServerMessage>,
 }
 
 /// **What the Claude-only gate found** — see [`Daemon::refuse_unless_claude`].
