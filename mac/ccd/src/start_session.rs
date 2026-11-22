@@ -1706,6 +1706,9 @@ pub(crate) fn login_shell_command(
     } else {
         (PathBuf::from("/bin/sh"), "-lc")
     };
+    if let Some(account) = account {
+        account.link_shared(environment);
+    }
     let mut command = tokio::process::Command::new(program);
     command
         .env_clear()
@@ -4299,6 +4302,52 @@ mod tests {
             0o700,
             "its folder is private"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A launch on a Codex account reads the person's own Codex config** (306 Slice A, A1): the login shell runs the
+    /// agent with the account's home, whose entries but its credential are the person's `~/.codex` ones.
+    #[tokio::test]
+    async fn a_launch_on_a_codex_account_reads_the_persons_config() {
+        let root = std::env::temp_dir().join(format!(
+            "ccs-launch.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(
+            home.join(".codex").join("config.toml"),
+            "the person's config",
+        )
+        .unwrap();
+        let env = environment(&[
+            ("HOME", home.to_str().unwrap()),
+            ("SHELL", "/bin/sh"),
+            ("PATH", "/usr/bin:/bin"),
+        ]);
+        let account = crate::store::Account {
+            id: protocol::uid::new().unwrap(),
+            agent: "codex".into(),
+            label: "Work".into(),
+        };
+        let account = crate::accounts::AccountEnv::for_account(&root, &account)
+            .unwrap()
+            .unwrap();
+        let out = login_shell_command(
+            &env,
+            Some(&account),
+            &[
+                OsStr::new("/bin/sh"),
+                OsStr::new("-c"),
+                OsStr::new("cat \"$CODEX_HOME/config.toml\""),
+            ],
+        )
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+        let said = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(said.lines().last(), Some("the person's config"), "{said}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -19,6 +19,7 @@
 //! the person's. Codex's documentation (learn.chatgpt.com/docs/auth) names no environment credential that outranks its
 //! home's login, so a Codex account drops nothing.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -96,6 +97,42 @@ impl AccountEnv {
         match store.active_account(agent.as_str())? {
             Some(account) => Ok(AccountEnv::for_account(root, &account)?),
             None => Ok(None),
+        }
+    }
+
+    /// A Codex account's home holds only its own credential (`auth.json`): every other entry of the person's own Codex
+    /// home (`CODEX_HOME` in `environment`, else `~/.codex`) that it lacks is linked into it before each launch, so a
+    /// start on the account has the person's config, trust, skills and threads, and a thread one account started
+    /// resumes on another (measured on codex 0.170.0, 2026-11-22: linked homes share the state db and `sessions/`).
+    /// Accepted misses: a `CODEX_HOME` the person sets only in a shell file is not seen here (the home linked is the
+    /// environment's, else `~/.codex`); and an entry codex makes in the account's home before the person's home has
+    /// it stays the account's own.
+    pub(crate) fn link_shared(&self, environment: &HashMap<OsString, OsString>) {
+        if self.variable != "CODEX_HOME" {
+            return;
+        }
+        let own = match environment.get(std::ffi::OsStr::new("CODEX_HOME")) {
+            Some(home) => PathBuf::from(home),
+            None => match environment.get(std::ffi::OsStr::new("HOME")) {
+                Some(home) => Path::new(home).join(".codex"),
+                None => return,
+            },
+        };
+        let Ok(entries) = std::fs::read_dir(&own) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let here = self.folder.join(&name);
+            if name == "auth.json" || here.symlink_metadata().is_ok() {
+                continue;
+            }
+            if let Err(err) = std::os::unix::fs::symlink(entry.path(), &here) {
+                crate::log_error!(
+                    "could not link {} into an account's home: {err}",
+                    here.display()
+                );
+            }
         }
     }
 
@@ -235,6 +272,84 @@ pub(crate) fn unavailable(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    /// **A Codex account's home is the person's, but for its credential** (306 Slice A, gates A1–A3): after a launch's
+    /// linking, the account sees the person's config; a file one account writes under `sessions/` is the other's too;
+    /// the person's `auth.json` is never linked; an entry the person's home gains later is linked at the next launch,
+    /// and a link already there is left as it is.
+    #[test]
+    fn a_codex_accounts_home_is_the_persons_but_for_its_credential() {
+        let root =
+            std::env::temp_dir().join(format!("ccs-home.{}", &protocol::uid::new().unwrap()[20..]));
+        let own = root.join("own-codex");
+        std::fs::create_dir_all(own.join("sessions")).unwrap();
+        std::fs::write(own.join("config.toml"), "model = \"x\"\n").unwrap();
+        std::fs::write(own.join("auth.json"), "{}").unwrap();
+        std::fs::write(own.join("state_5.sqlite"), "").unwrap();
+        let environment: HashMap<OsString, OsString> =
+            HashMap::from([(OsString::from("CODEX_HOME"), own.clone().into_os_string())]);
+        let account = |label: &str| {
+            let account = crate::store::Account {
+                id: protocol::uid::new().unwrap(),
+                agent: "codex".into(),
+                label: label.into(),
+            };
+            super::AccountEnv::for_account(&root, &account)
+                .unwrap()
+                .unwrap()
+        };
+        let (a, b) = (account("A"), account("B"));
+        let home = |env: &super::AccountEnv| {
+            Path::new(
+                env.argv()
+                    .last()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .split_once('=')
+                    .unwrap()
+                    .1,
+            )
+            .to_path_buf()
+        };
+        a.link_shared(&environment);
+        b.link_shared(&environment);
+        assert_eq!(
+            std::fs::read_to_string(home(&a).join("config.toml")).unwrap(),
+            "model = \"x\"\n",
+            "A1"
+        );
+        std::fs::write(home(&a).join("sessions").join("rollout-1.jsonl"), "{}").unwrap();
+        assert!(
+            home(&b).join("sessions").join("rollout-1.jsonl").exists(),
+            "A2: A's thread is B's too"
+        );
+        assert!(home(&a)
+            .join("state_5.sqlite")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(
+            home(&a).join("auth.json").symlink_metadata().is_err(),
+            "the credential is the account's own"
+        );
+        std::fs::create_dir(own.join("skills")).unwrap();
+        a.link_shared(&environment);
+        for name in ["config.toml", "sessions", "state_5.sqlite", "skills"] {
+            let meta = home(&a).join(name).symlink_metadata().unwrap();
+            assert!(meta.file_type().is_symlink(), "A3: {name} is still a link");
+            assert_eq!(
+                std::fs::read_link(home(&a).join(name)).unwrap(),
+                own.join(name)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **The accounts wire the apps read is what ccd answers** (`fixtures/accounts/minor-47-wire.json`, recorded from a
     /// ccd at 05faeaa3 by one paired device). Each request, in the recorded order, is answered by this build on a store
     /// of its own; the reply's bytes are the recorded reply's, the ids aside: ccd makes new ones, so each is read as the
