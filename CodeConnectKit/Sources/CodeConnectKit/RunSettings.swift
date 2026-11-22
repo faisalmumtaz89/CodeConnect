@@ -18,14 +18,17 @@ public enum RunSettings: Sendable, Hashable {
     case hostedLive(HostedSettings)
 
     /// The effort a run is on, as the reply row names it beside the model: the effort the agent last named, by its
-    /// label; "Default" while the run's model offers efforts and the agent has named none (the menus name no
-    /// model's default effort); nil when the model offers none and none is named. An ended run, its menus gone,
-    /// names only what the agent named. A setting the agent has not named reads "Default", as the Default row does.
+    /// label, while the chosen model offers it (the panel's rule for its selection); "Default" while the chosen model
+    /// offers efforts and none of them is named (the menus name no model's default effort, and a fact left from the
+    /// model before a switch names none of this one's); nil when the chosen model offers none. Without menus, or with
+    /// no model chosen in them, only what the agent named. A setting the agent has not named reads "Default", as the
+    /// Default row does.
     public static func effortName(summary: SessionSummary) -> String? {
-        if let fact = summary.effort { return EffortConfirmation.label(for: fact.value) }
-        guard let menus = summary.menus,
-            let model = menus.models.first(where: { $0.value == menus.selectedModel }), !model.efforts.isEmpty
-        else { return nil }
+        let named = summary.effort.map { EffortConfirmation.label(for: $0.value) }
+        guard let menus = summary.menus, let model = menus.models.first(where: { $0.value == menus.selectedModel })
+        else { return named }
+        guard !model.efforts.isEmpty else { return nil }
+        if let fact = summary.effort, model.efforts.contains(fact.value) { return named }
         return "Default"
     }
 
