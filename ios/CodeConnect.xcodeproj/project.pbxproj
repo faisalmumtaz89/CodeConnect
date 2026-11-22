@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		CC0000000000000000000102 /* CodeConnectKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000000000000000000F2 /* CodeConnectKit */; };
+		CC0000000000000000000302 /* FixtureSignals.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0000000000000000000301 /* FixtureSignals.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -39,6 +40,7 @@
 		CC00000000000000000000C2 /* CodeConnectUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodeConnectUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		CC00000000000000000000E6 /* CodeConnectTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodeConnectTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		CC0000000000000000000201 /* CodeConnectRenderHarness.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodeConnectRenderHarness.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC0000000000000000000301 /* FixtureSignals.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeConnectUITests/FixtureSignals.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -104,6 +106,7 @@
 				CC00000000000000000000E7 /* CodeConnectTests */,
 				CC00000000000000000000C1 /* CodeConnectUITests */,
 				CC0000000000000000000202 /* CodeConnectRenderHarness */,
+				CC0000000000000000000301 /* FixtureSignals.swift */,
 				CC00000000000000000000A3 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -317,6 +320,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CC0000000000000000000302 /* FixtureSignals.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

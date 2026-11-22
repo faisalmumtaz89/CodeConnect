@@ -11,9 +11,11 @@ final class QuestionCardTimedUITests: QuestionCardUITestsBase {
         app.launchArguments = [
             "-CC_QUESTION", "held",
             "-CC_DEEPLINK", "codeconnect://session/01K1B3XQ8ZC0DE5FGH7JKMNPQR",
-            "-CC_FIXTURE_ANSWER_MS", "20000",
+            // Held until the test sends `answer`, which it never does: the answer stays on its way.
+            "-CC_FIXTURE_ANSWER_HELD", "YES",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ]
+        FixtureSignals().arm(app)
         app.launch()
         let answer = app.buttons["Answer"].firstMatch
         XCTAssertTrue(answer.waitForExistence(timeout: 30), "the question's row on the timeline")

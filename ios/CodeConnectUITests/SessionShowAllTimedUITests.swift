@@ -17,17 +17,17 @@ final class SessionShowAllTimedUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    /// The fixture holds its last event back this long, so the tap comes
-    /// first and that event arrives while the reader is reading.
-    private let lateEventMS = 30_000
-
     func testShowAllAtTheTailKeepsLineOneWhereItWas() {
         let app = XCUIApplication()
         app.launchArguments = [
             "-CC_FIXTURE", "longOutput", "-CC_BIOMETRICS", "allow",
             "-CC_DEEPLINK", "codeconnect://session/fx-5",
-            "-CC_FIXTURE_LATE_EVENT_MS", "\(lateEventMS)",
+            // The fixture holds its last event back until `late-1`, so the tap comes first and that event
+            // arrives while the reader is reading.
+            "-CC_FIXTURE_LATE_EVENTS", "1",
         ]
+        let signals = FixtureSignals()
+        signals.arm(app)
         app.launch()
         let timeline = app.collectionViews["session-timeline"]
         XCTAssertTrue(timeline.waitForExistence(timeout: 20))
@@ -73,8 +73,9 @@ final class SessionShowAllTimedUITests: XCTestCase {
             lineOne.frame.minY, before, accuracy: 1,
             "line 1 stays where the reader saw it, not carried off to the last line")
 
+        signals.send("late-1")
         XCTAssertTrue(
-            waitUntil(timeout: Double(lateEventMS) / 1000 + 15) {
+            waitUntil(timeout: 15) {
                 app.staticTexts["1 new"].exists
             },
             "an event arriving while reading is counted, not followed")

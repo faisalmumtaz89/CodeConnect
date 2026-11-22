@@ -10,9 +10,10 @@ class BulkRemoveUITestsBase: XCTestCase {
         continueAfterFailure = false
     }
 
-    func launchSelecting(_ extra: [String] = []) -> XCUIApplication {
+    func launchSelecting(_ extra: [String] = [], signals: FixtureSignals? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow"] + extra
+        signals?.arm(app)
         app.launch()
         XCTAssertTrue(app.buttons["Show"].waitForExistence(timeout: 20))
         app.buttons["Show"].scrollClearOfTheBar(in: app)

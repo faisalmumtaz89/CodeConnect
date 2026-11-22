@@ -7,13 +7,12 @@ final class SwipeToRemoveTimedUITests: SwipeToRemoveUITestsBase {
     /// switches every row's swipe off; its return switches them back on, shut.
     /// Waited out through the one control that says so on screen: Select is
     /// offered only while the Mac can remove.
-    private func waitForTheLinkToDropAndReturn(_ app: XCUIApplication, launchedAt: Date) {
-        XCTAssertLessThan(
-            Date().timeIntervalSince(launchedAt), Double(linkDropMS) / 1000,
-            "the setup must finish before the link drops, or nothing below is tested")
+    private func dropAndReturnTheLink(_ app: XCUIApplication, _ signals: FixtureSignals) {
         let select = app.buttons["Select"]
         XCTAssertTrue(select.exists, "Select is offered while the Mac can remove")
-        XCTAssertTrue(select.waitForNonExistence(timeout: 30), "the link never dropped")
+        signals.send("link-drop")
+        XCTAssertTrue(select.waitForNonExistence(timeout: 15), "the link never dropped")
+        signals.send("link-return")
         XCTAssertTrue(select.waitForExistence(timeout: 15), "the link never came back")
     }
 
@@ -21,8 +20,8 @@ final class SwipeToRemoveTimedUITests: SwipeToRemoveUITestsBase {
     /// and returns the row comes back shut, and opening it again offers
     /// "Remove", not the old reason.
     func testARefusedRowReopensOfferingRemoveAfterTheLinkReturns() {
-        let launched = Date()
-        let app = launchFleet(["-CC_FIXTURE_LINK_DROP_MS", "\(linkDropMS)"])
+        let signals = FixtureSignals()
+        let app = launchFleet(["-CC_FIXTURE_LINK_DROP", "YES"], signals: signals)
         revealEndedRows(app)
         liftRowsClearOfTheBar(app)
         let middle = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
@@ -47,7 +46,7 @@ final class SwipeToRemoveTimedUITests: SwipeToRemoveUITestsBase {
         app.buttons["Remove"].tap()
         wait(for: [showsResting(false)], timeout: 5)
 
-        waitForTheLinkToDropAndReturn(app, launchedAt: launched)
+        dropAndReturnTheLink(app, signals)
         XCTAssertEqual(row(app, middle).frame.minX, 16, accuracy: 2, "the row comes back shut")
 
         drag(app, from: middle, dx: -180, dy: 0)
@@ -58,15 +57,15 @@ final class SwipeToRemoveTimedUITests: SwipeToRemoveUITestsBase {
     /// A row left open when the link dropped comes back shut, and a tap on it
     /// opens its session, as a tap on any shut row does.
     func testARowOpenAcrossALinkDropOpensItsSessionOnATap() {
-        let launched = Date()
-        let app = launchFleet(["-CC_FIXTURE_LINK_DROP_MS", "\(linkDropMS)"])
+        let signals = FixtureSignals()
+        let app = launchFleet(["-CC_FIXTURE_LINK_DROP", "YES"], signals: signals)
         revealEndedRows(app)
         liftRowsClearOfTheBar(app)
 
         drag(app, from: endedRow, dx: -180, dy: 0)
         XCTAssertLessThan(row(app, endedRow).frame.minX, 16 - revealWidth + 2, "the row is open")
 
-        waitForTheLinkToDropAndReturn(app, launchedAt: launched)
+        dropAndReturnTheLink(app, signals)
         XCTAssertEqual(row(app, endedRow).frame.minX, 16, accuracy: 2, "the row comes back shut")
 
         row(app, endedRow).tap()
@@ -79,10 +78,8 @@ final class SwipeToRemoveTimedUITests: SwipeToRemoveUITestsBase {
     /// refused after it returned, still shows its reason on the row as it is
     /// now: the answer belongs to the request, not to the swipe that asked.
     func testARefusalAfterTheLinkReturnsShowsOnTheReopenedRow() {
-        let launched = Date()
-        let app = launchFleet([
-            "-CC_FIXTURE_LINK_DROP_MS", "\(linkDropMS)", "-CC_FIXTURE_REMOVE_MS", "10000",
-        ])
+        let signals = FixtureSignals()
+        let app = launchFleet(["-CC_FIXTURE_LINK_DROP", "YES", "-CC_FIXTURE_REMOVE_HELD", "YES"], signals: signals)
         revealEndedRows(app)
         liftRowsClearOfTheBar(app)
         let middle = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
@@ -97,12 +94,13 @@ final class SwipeToRemoveTimedUITests: SwipeToRemoveUITestsBase {
             .withOffset(CGVector(dx: open.maxX + revealWidth / 2, dy: open.midY)).tap()
         XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5), "Remove asks first")
 
-        waitForTheLinkToDropAndReturn(app, launchedAt: launched)
+        dropAndReturnTheLink(app, signals)
         app.buttons["Remove"].tap()
         drag(app, from: middle, dx: -180, dy: 0)
         XCTAssertEqual(row(app, middle).frame.minX, open.minX, accuracy: 2, "the row opens again")
         let removing = faceNow()
         XCTAssertNotEqual(removing, resting, "the reopened row reads Removing… while the answer is on its way")
+        signals.send("remove")
 
         let refused = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in

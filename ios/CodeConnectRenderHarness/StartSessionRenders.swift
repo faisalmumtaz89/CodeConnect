@@ -21,10 +21,10 @@ extension RenderCatalog {
 
     private static func args(
         fixture: String = "deck", outcome: String? = nil, noCodex: Bool = false, twoComputers: Bool = false,
-        linkDropMS: Int? = nil
+        linkDrop: Bool = false
     ) -> [String] {
         ["-CC_FIXTURE", fixture, "-CC_FIXTURE_REAL_NAMES", "YES"]
-            + (linkDropMS.map { ["-CC_FIXTURE_LINK_DROP_MS", "\($0)"] } ?? [])
+            + (linkDrop ? ["-CC_FIXTURE_LINK_DROP", "YES"] : [])
             + (outcome.map { ["-CC_START_OUTCOME", $0] } ?? [])
             + (noCodex ? ["-CC_START_AGENTS", "claude"] : [])
             + (twoComputers
@@ -242,46 +242,58 @@ extension RenderCatalog {
             app.textFields.firstMatch.typeText(newWorktree)
             try driver.requireExists(driver.text(containing: "current commit", in: app), "Codex's base")
         },
-        RenderScenario(
-            name: "start2-j-link-drop", purpose: "steps: the link drops while browsing",
-            arguments: args(linkDropMS: 9000)
-        ) { app, driver in
-            try toBrowse(app, driver)
-            // The fixture drops the link 9 s in and brings it back 5 s later;
-            // the flow stays open on its folder across both.
-            Thread.sleep(forTimeInterval: 12)
-            try driver.requireExists(app.buttons["start-use-folder"], "the browser, still open")
-        },
-        RenderScenario(
-            name: "start2-j2-link-drop-computer", purpose: "steps: the chosen computer's link drops, the other's holds",
-            arguments: args(twoComputers: true, linkDropMS: 45000)
-        ) { app, driver in
-            let launched = Date()
-            try tap(app, "start-entry", driver)
-            try tap(app, "start-computer-Jordan’s Mac Studio", driver)
-            try driver.requireExists(app.buttons["start-project-query-parser"], "Jordan’s folders")
-            // Jordan's link drops 45 s in and is back 5 s later; the flow
-            // stays on Jordan's folders, not the other computer's.
-            let reached = Date().timeIntervalSince(launched)
-            guard reached < 44 else { throw RenderFailure.unreachable("the folder step before the drop (\(reached) s)") }
-            Thread.sleep(forTimeInterval: 45 + 8 - reached)
-            // gpu-benchmarks is the other computer's alone; its name is on the
-            // fleet behind the sheet, so the name proves nothing.
-            guard app.buttons["start-project-query-parser"].exists, !app.buttons["start-project-gpu-benchmarks"].exists
-            else { throw RenderFailure.unreachable("Jordan’s folders after the drop, not \(server)’s") }
-        },
-        RenderScenario(
-            name: "start2-k-none-connected", purpose: "steps: New while no computer is connected says why",
-            arguments: args(linkDropMS: 8000)
-        ) { app, driver in
-            try driver.fleet(app)
-            // The fixture drops the link 8 s after the app starts and brings it
-            // back 5 s later; New is tapped once the fleet says it is connecting.
-            try driver.require(driver.text(containing: "Connecting", in: app), "the dropped link")
-            try tap(app, "start-entry", driver)
-            try driver.requireExists(
-                driver.text(containing: "None of your computers is connected", in: app), "why none can start")
-        },
+        { () -> RenderScenario in
+            let signals = FixtureSignals()
+            return RenderScenario(
+                name: "start2-j-link-drop", purpose: "steps: the link drops while browsing",
+                arguments: args(linkDrop: true), signals: signals
+            ) { app, driver in
+                try toBrowse(app, driver)
+                // The link drops and comes back; the flow stays open on its folder across both.
+                signals.send("link-drop")
+                Thread.sleep(forTimeInterval: 2)
+                signals.send("link-return")
+                Thread.sleep(forTimeInterval: 2)
+                try driver.requireExists(app.buttons["start-use-folder"], "the browser, still open")
+            }
+        }(),
+        { () -> RenderScenario in
+            let signals = FixtureSignals()
+            return RenderScenario(
+                name: "start2-j2-link-drop-computer",
+                purpose: "steps: the chosen computer's link drops, the other's holds",
+                arguments: args(twoComputers: true, linkDrop: true), signals: signals
+            ) { app, driver in
+                try tap(app, "start-entry", driver)
+                try tap(app, "start-computer-Jordan’s Mac Studio", driver)
+                try driver.requireExists(app.buttons["start-project-query-parser"], "Jordan’s folders")
+                // Jordan's link drops and comes back; the flow stays on Jordan's folders, not the other computer's.
+                signals.send("link-drop")
+                Thread.sleep(forTimeInterval: 2)
+                signals.send("link-return")
+                Thread.sleep(forTimeInterval: 3)
+                // gpu-benchmarks is the other computer's alone; its name is on the
+                // fleet behind the sheet, so the name proves nothing.
+                guard app.buttons["start-project-query-parser"].exists,
+                    !app.buttons["start-project-gpu-benchmarks"].exists
+                else { throw RenderFailure.unreachable("Jordan’s folders after the drop, not \(server)’s") }
+            }
+        }(),
+        { () -> RenderScenario in
+            let signals = FixtureSignals()
+            return RenderScenario(
+                name: "start2-k-none-connected", purpose: "steps: New while no computer is connected says why",
+                arguments: args(linkDrop: true), signals: signals
+            ) { app, driver in
+                try driver.fleet(app)
+                // The link drops and stays down; New is tapped once the fleet says it is connecting.
+                signals.send("link-drop")
+                try driver.require(driver.text(containing: "Connecting", in: app), "the dropped link")
+                try tap(app, "start-entry", driver)
+                try driver.requireExists(
+                    driver.text(containing: "None of your computers is connected", in: app), "why none can start")
+            }
+        }(),
         RenderScenario(name: "start2-c-agent", purpose: "steps: the agent", arguments: args()) {
             app, driver in
             try toAgents(app, driver)

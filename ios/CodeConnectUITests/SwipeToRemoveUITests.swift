@@ -15,9 +15,10 @@ class SwipeToRemoveUITestsBase: XCTestCase {
         continueAfterFailure = false
     }
 
-    func launchFleet(_ extra: [String] = []) -> XCUIApplication {
+    func launchFleet(_ extra: [String] = [], signals: FixtureSignals? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow"] + extra
+        signals?.arm(app)
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30))
         return app
@@ -60,12 +61,6 @@ class SwipeToRemoveUITestsBase: XCTestCase {
     }
 
     // MARK: Across a link drop
-
-    /// When the fixture drops the link, for the tests below: late enough for
-    /// each one's setup to finish first, which each of them checks. Counted
-    /// here from before the launch and in the app from its fixture loading,
-    /// so the check is stricter than the truth and can only fail safe.
-    let linkDropMS = 30_000
 
     /// One pixel of a screenshot, at a point in screen coordinates.
     func pixel(_ image: UIImage, at point: CGPoint) -> (UInt8, UInt8, UInt8) {

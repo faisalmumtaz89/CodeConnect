@@ -11,9 +11,11 @@ final class DeckTimedUITests: DeckUITestsBase {
         app.launchArguments = [
             "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
             "-UIPreferredContentSizeCategoryName", TypeSize.medium.rawValue,
-            "-CC_FIXTURE_ANSWER_MS", "20000",
+            // Held until the test sends `answer`, which it never does: the answer stays on its way.
+            "-CC_FIXTURE_ANSWER_HELD", "YES",
             "-CC_DEEPLINK", "codeconnect://deck/\(Self.lowRequestID)",
         ]
+        FixtureSignals().arm(app)
         app.launch()
         let allow = allowButton(app, tool: "Read")
         XCTAssertTrue(allow.waitForExistence(timeout: 25))

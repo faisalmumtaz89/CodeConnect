@@ -6,13 +6,14 @@ class FleetRowChangeUITestsBase: XCTestCase {
         continueAfterFailure = false
     }
 
-    func launch(_ arguments: [String]) -> XCUIApplication {
+    func launch(_ arguments: [String], signals: FixtureSignals? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments =
             arguments + [
                 "-CC_BIOMETRICS", "allow",
                 "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
             ]
+        signals?.arm(app)
         app.launch()
         return app
     }

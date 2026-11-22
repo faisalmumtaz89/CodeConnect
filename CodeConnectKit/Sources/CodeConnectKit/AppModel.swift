@@ -811,7 +811,7 @@ public final class AppModel {
     }
 
     #if DEBUG
-        /// How many of `-CC_FIXTURE_LATE_EVENT_MS`'s held-back frames have been
+        /// How many of `-CC_FIXTURE_LATE_EVENTS`'s held-back frames have been
         /// delivered, so a test can see an event land behind a screen that
         /// does not draw it. Not observed: reading it redraws nothing.
         public static var lateFramesDelivered = 0
@@ -979,30 +979,29 @@ public final class AppModel {
                 connection.sendTextStub = { _, _ in Fixtures.sendTextResult(mode: sendMode) }
             }
             connection.simulateConnectedForTesting()
-            // **`-CC_FIXTURE_LATE_APPROVALS_MS <n>` is a socket still catching
+            // **`-CC_FIXTURE_LATE_APPROVALS YES` is a socket still catching
             // up.** A cold launch from a notification tap consumes its deep
             // link before the history that carries the decision has arrived.
             // The stream is split at the first approval and the tail delivered
-            // `n` ms later, in order — held back whole rather than approvals
-            // alone, because a fixture that skips ahead reads as a gap.
-            // `DeepLinkTests` is what drives it.
-            let lateApprovalsMS = UserDefaults.standard.integer(
-                forKey: "CC_FIXTURE_LATE_APPROVALS_MS")
+            // on the test's `late-approvals` signal (`FixtureSignal`), in order —
+            // held back whole rather than approvals alone, because a fixture that
+            // skips ahead reads as a gap. `DeepLinkTests` and
+            // `FleetRowChangeTimedUITests` drive it.
+            let lateApprovals = UserDefaults.standard.bool(forKey: "CC_FIXTURE_LATE_APPROVALS")
             var frames = Fixtures.frames(variant: variant)
-            // **`-CC_FIXTURE_LATE_EVENT_MS <n>[,<n>…]` is events arriving while
-            // the reader is on screen.** The stream's last frames are held back,
-            // one per delay, and delivered in stream order — the shortest delay
-            // first — each that many ms after the rest, so a UI test can act
-            // first and then see how each event is counted.
-            // `SessionShowAllTimedUITests` and `FleetRowRenderTimedUITests` drive it.
-            let lateEventMS = (UserDefaults.standard.string(forKey: "CC_FIXTURE_LATE_EVENT_MS")
-                ?? "").split(separator: ",").compactMap { Int($0) }.filter { $0 > 0 }.sorted()
-            if !lateEventMS.isEmpty, frames.count >= lateEventMS.count {
-                let late = frames.suffix(lateEventMS.count)
-                frames.removeLast(lateEventMS.count)
-                for (delay, frame) in zip(lateEventMS, late) {
-                    Task { @MainActor [weak connection] in
-                        try? await Task.sleep(for: .milliseconds(delay))
+            // **`-CC_FIXTURE_LATE_EVENTS <n>` is events arriving while the
+            // reader is on screen.** The stream's last `n` frames are held back
+            // and delivered in stream order, the `i`th on the test's `late-<i>`
+            // signal, so a UI test can act first and then see how each event is
+            // counted. `SessionShowAllTimedUITests` and `FleetRowRenderTimedUITests`
+            // drive it.
+            let lateEvents = UserDefaults.standard.integer(forKey: "CC_FIXTURE_LATE_EVENTS")
+            if lateEvents > 0, frames.count >= lateEvents {
+                let late = Array(frames.suffix(lateEvents))
+                frames.removeLast(lateEvents)
+                Task { @MainActor [weak connection] in
+                    for (index, frame) in late.enumerated() {
+                        await FixtureSignal.wait("late-\(index + 1)")
                         connection?.injectForTesting(frame)
                         Self.lateFramesDelivered += 1
                     }
@@ -1022,7 +1021,7 @@ public final class AppModel {
                     }
                 }
             }
-            if lateApprovalsMS > 0,
+            if lateApprovals,
                 let first = frames.firstIndex(where: {
                     if case .event(let event) = $0 { return event.kind == .approvalRequest }
                     return false
@@ -1031,7 +1030,7 @@ public final class AppModel {
                 let held = Array(frames[first...])
                 frames.removeSubrange(first...)
                 Task { @MainActor [weak connection] in
-                    try? await Task.sleep(for: .milliseconds(lateApprovalsMS))
+                    await FixtureSignal.wait("late-approvals")
                     for message in held { connection?.injectForTesting(message) }
                 }
             }
@@ -1044,33 +1043,31 @@ public final class AppModel {
             applyFixtureDiff()
             applyCachedFixture()
             applyPushStateFixture()
-            // **`-CC_FIXTURE_LINK_DROP_MS <n>` drops the link once, `n` ms in,**
-            // through the connection's own `stop()` — every waiter failed, the
-            // handshake and the Mac's capabilities forgotten — and brings it back
-            // five seconds later with the handshake the fixture ended up with
-            // (after the push seam, which replaces it). It is how a fixture run
+            // **`-CC_FIXTURE_LINK_DROP YES` drops the link once, on the test's
+            // `link-drop` signal,** through the connection's own `stop()` — every
+            // waiter failed, the handshake and the Mac's capabilities forgotten —
+            // and brings it back on `link-return` with the handshake the fixture
+            // ended up with (after the push seam, which replaces it). It is how a fixture run
             // takes the Mac's removal capability away and gives it back, with
             // the rows still on screen. It is narrower than a real drop: no
             // socket closes, no backoff runs, no redial is counted.
-            // **`-CC_FIXTURE_REMOVE_MS <n>` holds a removal's answer `n` ms,**
-            // then refuses it the way every fixture removal is refused, with no
-            // answer. Without it a fixture refuses at once, so a removal still
+            // **`-CC_FIXTURE_REMOVE_HELD YES` holds a removal's answer until the
+            // test's `remove` signal,** then refuses it the way every fixture
+            // removal is refused, with no answer. Without it a fixture refuses at once, so a removal still
             // on its way — "Removing…", and whatever happens around it — is a
             // state no fixture run can show.
-            let removeMS = UserDefaults.standard.integer(forKey: "CC_FIXTURE_REMOVE_MS")
-            if removeMS > 0 {
+            if UserDefaults.standard.bool(forKey: "CC_FIXTURE_REMOVE_HELD") {
                 connection.deleteStub = { _ in
-                    try await Task.sleep(for: .milliseconds(removeMS))
+                    await FixtureSignal.wait("remove")
                     throw ConnectionError.sentButUnanswered
                 }
             }
-            let linkDropMS = UserDefaults.standard.integer(forKey: "CC_FIXTURE_LINK_DROP_MS")
-            if linkDropMS > 0, let ack = connection.helloAck {
+            if UserDefaults.standard.bool(forKey: "CC_FIXTURE_LINK_DROP"), let ack = connection.helloAck {
                 Task { @MainActor [weak connection] in
-                    try? await Task.sleep(for: .milliseconds(linkDropMS))
+                    await FixtureSignal.wait("link-drop")
                     connection?.stop()
                     connection?.setPhaseForTesting(.connecting)
-                    try? await Task.sleep(for: .seconds(5))
+                    await FixtureSignal.wait("link-return")
                     connection?.injectForTesting(.helloAck(ack))
                 }
             }
