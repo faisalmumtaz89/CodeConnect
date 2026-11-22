@@ -56,8 +56,10 @@ Each block starts from the repository root.
    `iphone-ui (this Mac)`: success only when nothing failed and the skipped
    classes are exactly the live ones. Run before the push, it waits for the
    push and then posts. The release's pin job refuses a commit whose status is
-   not success. The live classes run against a computer given by
-   `TEST_RUNNER_CC_HOST` and `TEST_RUNNER_CC_TOKEN`, outside the gate:
+   not success. The status is posted only by the script, by the session that
+   ran it on this Mac, for a commit on `main` or about to be; never by hand.
+   The live classes run against a computer given by `TEST_RUNNER_CC_HOST` and
+   `TEST_RUNNER_CC_TOKEN`, outside the gate:
 
    ```sh
    (cd mac && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace)
