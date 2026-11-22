@@ -327,10 +327,18 @@ private struct ClosesPanel: ViewModifier {
             }
             return event
         }
-        // A resize closes it too: a panel never outlives the geometry it was placed from.
+        // A resize of a window of the app's own closes it too: a panel never outlives the geometry it was placed from.
+        // Not the system's helper windows, which a text field that takes the keyboard shows and sizes (its input
+        // and suggestion bubbles): those can't become main.
         resizing = NotificationCenter.default.addObserver(
             forName: NSWindow.didResizeNotification, object: nil, queue: .main
-        ) { _ in MainActor.assumeIsolated { close.wrappedValue = false } }
+        ) { note in
+            let resized = (note.object as? NSWindow).map(ObjectIdentifier.init)
+            MainActor.assumeIsolated {
+                guard NSApp.windows.first(where: { ObjectIdentifier($0) == resized })?.canBecomeMain == true else { return }
+                close.wrappedValue = false
+            }
+        }
     }
 
     private func stop() {
