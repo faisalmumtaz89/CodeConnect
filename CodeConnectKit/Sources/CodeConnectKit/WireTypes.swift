@@ -616,6 +616,10 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// no `menus` (it is not live): the label of the entry the run's model is, by the rule `RunSettings.modelName`
     /// names a live run's by. `nil` for any other run, for a model no entry runs, and from an older daemon.
     public let modelLabel: String?
+    /// The account the run's process runs on (minor 48), as recorded at its start or newest relaunch: a moved run names
+    /// the old one until its next message starts it on the new one. `nil` for a run CodeConnect did not start, for an
+    /// account since removed, and from an older daemon: not known, never Default.
+    public let account: RunAccount?
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
     /// last ended. `nil` outside a repository, on a detached head, before the
     /// first read, and from an older daemon.
@@ -648,6 +652,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case effort
         case menus
         case modelLabel = "model_label"
+        case account
         case gitBranch = "git_branch"
         case diffStat = "diff_stat"
     }
@@ -676,6 +681,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         effort = try c.decodeIfPresent(SessionFact.self, forKey: .effort)
         menus = try c.decodeIfPresent(RunMenus.self, forKey: .menus)
         modelLabel = try c.decodeIfPresent(String.self, forKey: .modelLabel)
+        account = try c.decodeIfPresent(RunAccount.self, forKey: .account)
         gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
         diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
     }
@@ -784,6 +790,17 @@ public struct RunMenus: Codable, Sendable, Hashable {
         case models, modes
         case selectedModel = "selected_model"
     }
+}
+
+/// An account a run runs on, as the daemon names it (`SessionSummary.account`, minor 48).
+public struct RunAccount: Codable, Sendable, Hashable {
+    /// The computer's id for it; `nil` for Default, the agent as it is on the computer.
+    public let id: String?
+    /// Its name as the person gave it, or "Default".
+    public let label: String
+
+    /// Default is told by its id alone: a person may name an account "Default".
+    public var isDefault: Bool { id == nil }
 }
 
 /// One model of a run's menu: the agent's own `value` (what a `set_model` carries), its label and its
