@@ -3,6 +3,13 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.10, with the iPhone app 1.1.27
+
+- A conversation continued after its agent ended, after a crash, a restart or a Mac reboot, keeps the effort it was
+  running at, as it already kept its model and mode. On the Mac and on the iPhone, the reply box of an ended run names
+  that effort after the model, and the next message picks the conversation up at it. A run that never chose an effort
+  stays at the agent's default, and so does a Codex run that ended before its first message.
+
 ## CodeConnect 0.19.9, with the iPhone app 1.1.26
 
 - On the iPhone, while a turn runs and the reply box is empty, the send button is Stop; once a message is typed it is

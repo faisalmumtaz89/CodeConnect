@@ -1,1 +1,1 @@
-This release brings the Mac’s Stop and the effort in use to the iPhone app’s reply box. The Mac app itself is unchanged.
+A conversation you continue after its agent ended, after a crash, a restart or a reboot, keeps the effort it was running at, as it already kept its model and mode, and its reply box names that effort after the model.
