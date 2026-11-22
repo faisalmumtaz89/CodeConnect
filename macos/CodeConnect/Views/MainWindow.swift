@@ -130,8 +130,9 @@ struct MainWindow: View {
                 .background(Theme.window)
             }
         }
-        // The panes' toggles at the window's top edge: the sidebar's and the list's beside the window's buttons, the
-        // run's at the right. The list and the run hide only while a run is open.
+        // The panes' toggles at the window's top edge: the sidebar's and the list's at the sidebar's right, their edge
+        // on its headings' "+" (12 in from it), or, with the sidebar hidden, beside the window's buttons; the run's at
+        // the right. The list and the run hide only while a run is open.
         .overlay(alignment: .topLeading) {
             if settings == nil {
                 HStack(spacing: 2) {
@@ -144,7 +145,8 @@ struct MainWindow: View {
                     }
                     .disabled(!runIsOpen)
                 }
-                .padding(.leading, 84)
+                .frame(width: sidebarHidden ? nil : 216 - 12, alignment: .trailing)
+                .padding(.leading, sidebarHidden ? 84 : 0)
                 .padding(.top, 13)
             }
         }
