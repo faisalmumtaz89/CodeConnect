@@ -1,1 +1,1 @@
-The conversation shows a focus ring while it has the keyboard, so you can see where the arrow and Page keys will scroll. The reply row names the effort in use beside the model.
+While a turn runs, the send button is Stop. The foot of the left panel shows this Mac’s Tailscale and opens Settings. The reply row names the effort in use beside the model, and the conversation shows a focus ring while it has the keyboard.
