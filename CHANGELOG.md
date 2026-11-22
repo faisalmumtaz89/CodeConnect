@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.9, with the iPhone app 1.1.26
+
+- On the iPhone, while a turn runs and the reply box is empty, the send button is Stop; once a message is typed it is
+  Send, so a message can still be sent mid-turn, while one that has to wait, such as behind a card to answer first,
+  leaves the button on Stop and keeps the draft. The Stop this turn button under the session's header is gone; the
+  list's Stop stays. Mid-turn, the keyboard's own dictation key still dictates into the box. A live run's model button
+  names the effort in use after the model, or Default when the agent has named none.
+
 ## CodeConnect 0.19.8, with the iPhone app 1.1.25
 
 - On the Mac, an agent is started in the main area of the window, whenever no run is open and with New Agent (⌘N), in
