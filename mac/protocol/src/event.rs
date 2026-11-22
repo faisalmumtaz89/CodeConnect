@@ -549,9 +549,6 @@ pub struct RunAccount {
     pub id: Option<String>,
     /// The account's name, or "Default".
     pub label: String,
-    /// The address the account is signed in as, once the computer has read it. Absent until then.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
 }
 
 /// Where a run's move to its agent's active account stands ([`SessionSummary::switching`]).
@@ -653,13 +650,12 @@ pub struct MenuMode {
 #[cfg(test)]
 mod tests {
     /// **A run's account, pinned as the apps read it** (minor 48): Default is `id` null, the one mark of it; an
-    /// account carries its id and name; `email` is absent until the computer has read one.
+    /// account carries its id and name.
     #[test]
     fn a_runs_account_is_pinned() {
         let default = RunAccount {
             id: None,
             label: "Default".into(),
-            email: None,
         };
         assert_eq!(
             serde_json::to_value(&default).unwrap(),
@@ -668,11 +664,10 @@ mod tests {
         let work = RunAccount {
             id: Some("01M80QGTWR9RCHBSJWR169GXCN".into()),
             label: "Work".into(),
-            email: Some("a@example.com".into()),
         };
         assert_eq!(
             serde_json::to_value(&work).unwrap(),
-            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "label": "Work", "email": "a@example.com"})
+            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "label": "Work"})
         );
     }
 

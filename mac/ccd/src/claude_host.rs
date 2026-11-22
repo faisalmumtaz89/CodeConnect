@@ -2077,13 +2077,7 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         prompt: text.to_string(),
     };
     let swapped = match serde_json::to_string(&start) {
-        Ok(line) => {
-            let recorded = account.as_ref().map(|account| account.id().to_string());
-            daemon
-                .db
-                .begin_claude_relaunch(uid.to_string(), line, recorded)
-                .await
-        }
+        Ok(line) => daemon.db.begin_claude_relaunch(uid.to_string(), line).await,
         Err(err) => Err(err.into()),
     };
     match swapped {
@@ -2124,9 +2118,16 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
     };
     let lost = "The session is starting again; the message may or may not have reached Claude.";
     match tokio::time::timeout_at(deadline, begun).await {
-        Ok(Ok(Ok(()))) => SendTextResult::Sent {
-            matched: text.to_string(),
-        },
+        Ok(Ok(Ok(()))) => {
+            // Live on it: the run's account is the one this launch was given.
+            let recorded = account.as_ref().map(|account| account.id().to_string());
+            if let Err(err) = daemon.db.set_run_account(uid.to_string(), recorded).await {
+                crate::log_error!("{uid}: could not record its account: {err:#}");
+            }
+            SendTextResult::Sent {
+                matched: text.to_string(),
+            }
+        }
         // A refusal the link committed puts the run back `exited` and releases the claim; a
         // link that ended first leaves it starting, for the watch.
         Ok(Ok(Err(detail))) => match daemon.db.hosted_link(uid.to_string()).await {
@@ -12273,6 +12274,10 @@ mod tests {
             });
         assert!(matches!(sent, SendTextResult::Refused { .. }), "{sent:?}");
         let failed = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(
+            failed["account"]["label"], "A",
+            "it never started on B: it still names the account it ran on: {failed}"
+        );
         assert_eq!(
             (
                 failed["lifecycle"].as_str(),

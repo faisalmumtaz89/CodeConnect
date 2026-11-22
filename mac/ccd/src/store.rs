@@ -2657,12 +2657,7 @@ impl Store {
     /// cursor goes back to 0, since a new host numbers its messages from 1; and its start line
     /// becomes `start`, which a restarted ccd sends again. Whether it moved: `false`, with nothing
     /// written, when it is no longer one to relaunch (a second message met it `starting`).
-    pub fn begin_claude_relaunch(
-        &self,
-        session_uid: &str,
-        start: &str,
-        account: Option<&str>,
-    ) -> Result<bool> {
+    pub fn begin_claude_relaunch(&self, session_uid: &str, start: &str) -> Result<bool> {
         let (table, _) = session_tables_for(&AgentKind::Claude);
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2683,9 +2678,9 @@ impl Store {
         )?;
         tx.execute(
             "UPDATE run_hosts SET host_pid = NULL, host_start_sec = NULL, host_start_usec = NULL,
-                                  boot_sec = NULL, boot_usec = NULL, cursor = 0, start = ?2, account_id = ?3
+                                  boot_sec = NULL, boot_usec = NULL, cursor = 0, start = ?2
               WHERE session_uid = ?1",
-            params![session_uid, start, account],
+            params![session_uid, start],
         )?;
         tx.commit()?;
         Ok(true)
@@ -2697,11 +2692,7 @@ impl Store {
     /// before its launch, so a second message meets `starting` and the watch never reads the old
     /// app-server as the relaunch's. The run as it was, its old app-server for the warrant; `None`,
     /// with nothing written, when it is not one to relaunch.
-    pub fn begin_relaunch(
-        &self,
-        session_uid: &str,
-        account: Option<&str>,
-    ) -> Result<Option<LiveCodexRun>> {
+    pub fn begin_relaunch(&self, session_uid: &str) -> Result<Option<LiveCodexRun>> {
         let (table, _) = session_tables_for(&AgentKind::Codex);
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2722,9 +2713,9 @@ impl Store {
         )?;
         tx.execute(
             "UPDATE run_hosts SET host_pid = NULL, host_start_sec = NULL, host_start_usec = NULL,
-                                  boot_sec = NULL, boot_usec = NULL, account_id = ?2
+                                  boot_sec = NULL, boot_usec = NULL
               WHERE session_uid = ?1",
-            params![session_uid, account],
+            params![session_uid],
         )?;
         tx.commit()?;
         Ok(Some(run))
@@ -3120,6 +3111,16 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// The run `session_uid` is live on `account` (`None`: its agent's Default), recorded once its relaunch went live,
+    /// so a relaunch that did not leaves the account its process ran on.
+    pub fn set_run_account(&self, session_uid: &str, account: Option<&str>) -> Result<()> {
+        self.write().execute(
+            "UPDATE run_hosts SET account_id = ?2 WHERE session_uid = ?1",
+            params![session_uid, account],
+        )?;
+        Ok(())
     }
 
     pub fn run_account(&self, session_uid: &str) -> Result<Option<Account>> {

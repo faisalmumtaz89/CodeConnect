@@ -3521,12 +3521,10 @@ impl Daemon {
                 Some(None) => Some(protocol::event::RunAccount {
                     id: None,
                     label: "Default".to_string(),
-                    email: None,
                 }),
                 Some(Some((id, Some(label)))) => Some(protocol::event::RunAccount {
                     id: Some(id.clone()),
                     label: label.clone(),
-                    email: None,
                 }),
                 _ => None,
             };

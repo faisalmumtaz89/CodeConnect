@@ -297,9 +297,8 @@ impl Db {
     pub async fn begin_relaunch(
         &self,
         session_uid: String,
-        account: Option<String>,
     ) -> Result<Option<crate::store::LiveCodexRun>> {
-        self.run(move |store| store.begin_relaunch(&session_uid, account.as_deref()))
+        self.run(move |store| store.begin_relaunch(&session_uid))
             .await
     }
 
@@ -321,13 +320,8 @@ impl Db {
             .await
     }
 
-    pub async fn begin_claude_relaunch(
-        &self,
-        session_uid: String,
-        start: String,
-        account: Option<String>,
-    ) -> Result<bool> {
-        self.run(move |store| store.begin_claude_relaunch(&session_uid, &start, account.as_deref()))
+    pub async fn begin_claude_relaunch(&self, session_uid: String, start: String) -> Result<bool> {
+        self.run(move |store| store.begin_claude_relaunch(&session_uid, &start))
             .await
     }
 
@@ -827,6 +821,15 @@ impl Db {
 
     pub async fn send_request_ids(&self, session_uid: String) -> Result<Vec<String>> {
         self.run(move |store| store.send_request_ids(&session_uid))
+            .await
+    }
+
+    pub async fn set_run_account(
+        &self,
+        session_uid: String,
+        account: Option<String>,
+    ) -> Result<()> {
+        self.run(move |store| store.set_run_account(&session_uid, account.as_deref()))
             .await
     }
 

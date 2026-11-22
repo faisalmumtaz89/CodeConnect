@@ -2261,10 +2261,9 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
             return false;
         }
     };
-    let recorded = account.as_ref().map(|account| account.id().to_string());
     // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
     let switching = crate::switch::switched(daemon, uid).await;
-    let mut run = match daemon.db.begin_relaunch(uid.to_string(), recorded).await {
+    let mut run = match daemon.db.begin_relaunch(uid.to_string()).await {
         Ok(Some(run)) => run,
         Ok(None) => return false,
         Err(err) => {
@@ -2306,7 +2305,12 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
     };
     match live {
         Ok((client, adapter, owed, cards)) => {
-            // Live on the new account: the switch is over before its start is filed.
+            // Live on it: the run's account is the one this launch was given, and a switch is over before its start
+            // is filed.
+            let recorded = account.as_ref().map(|account| account.id().to_string());
+            if let Err(err) = daemon.db.set_run_account(uid.to_string(), recorded).await {
+                crate::log_error!("{uid}: could not record its account: {err:#}");
+            }
             if switching {
                 crate::switch::relaunched(daemon, uid, Ok(())).await;
             }
@@ -8821,7 +8825,7 @@ mod tests {
         let daemon = relauncher(&rig);
         assert!(daemon
             .db
-            .begin_relaunch(uid.clone(), None)
+            .begin_relaunch(uid.clone())
             .await
             .unwrap()
             .is_some());
@@ -8829,10 +8833,7 @@ mod tests {
             said_now(&daemon, &uid, "say-second").await,
             engine_no_connection()
         );
-        assert_eq!(
-            daemon.db.begin_relaunch(uid.clone(), None).await.unwrap(),
-            None
-        );
+        assert_eq!(daemon.db.begin_relaunch(uid.clone()).await.unwrap(), None);
         assert_eq!(launches(&rig), 1);
     }
 
@@ -8849,17 +8850,13 @@ mod tests {
             db.delete_exited_session(uid.clone()).await.unwrap(),
             DeleteOutcome::Deleted { .. }
         ));
-        assert_eq!(db.begin_relaunch(uid, None).await.unwrap(), None);
+        assert_eq!(db.begin_relaunch(uid).await.unwrap(), None);
 
         let swapped_first = rig();
         let (uid, ws) = engine_run(&swapped_first, "req-del-2", "thr-del-2", "turn-1").await;
         app_server_ended(&swapped_first, &uid, ws).await;
         let db = &swapped_first.daemon.db;
-        assert!(db
-            .begin_relaunch(uid.clone(), None)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(db.begin_relaunch(uid.clone()).await.unwrap().is_some());
         assert_eq!(
             db.delete_exited_session(uid).await.unwrap(),
             DeleteOutcome::NotExited {
@@ -8879,7 +8876,7 @@ mod tests {
         assert!(rig
             .daemon
             .db
-            .begin_relaunch(uid.clone(), None)
+            .begin_relaunch(uid.clone())
             .await
             .unwrap()
             .is_some());
@@ -9050,12 +9047,7 @@ mod tests {
         };
 
         // The watch reads the run while it is starting, then the relaunch puts it back.
-        let old = db
-            .begin_relaunch(uid.clone(), None)
-            .await
-            .unwrap()
-            .unwrap()
-            .host;
+        let old = db.begin_relaunch(uid.clone()).await.unwrap().unwrap().host;
         let noted = rig.root.join("term");
         let dying = group_without_its_leader(&rig.root);
         db.record_host(uid.clone(), dying, boot).await.unwrap();
@@ -9083,12 +9075,7 @@ mod tests {
         );
 
         // The watch fails the run first, for the relaunch's own app-server, then the put-back.
-        let old = db
-            .begin_relaunch(uid.clone(), None)
-            .await
-            .unwrap()
-            .unwrap()
-            .host;
+        let old = db.begin_relaunch(uid.clone()).await.unwrap().unwrap().host;
         let dead = host_gone_with_its_group();
         db.record_host(uid.clone(), dead, boot).await.unwrap();
         crate::claude_host::end_if_host_gone(&rig.daemon, &uid).await;
