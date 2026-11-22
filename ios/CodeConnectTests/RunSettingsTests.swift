@@ -314,6 +314,11 @@ final class RunSettingsTests: XCTestCase {
         let none = try JSONDecoder().decode(
             SessionSummary.self, from: Data(JSONValue.object(unnamed).canonicalJSONString.utf8))
         XCTAssertEqual(RunSettings.effortName(summary: none), "Default")
+        // A fact the chosen model does not offer (left from the model before a switch) names none of its efforts.
+        unnamed["effort"] = .object(["seq": .int(7), "value": .string("ultra")])
+        let stale = try JSONDecoder().decode(
+            SessionSummary.self, from: Data(JSONValue.object(unnamed).canonicalJSONString.utf8))
+        XCTAssertEqual(RunSettings.effortName(summary: stale), "Default")
         XCTAssertNil(RunSettings.effortName(summary: try summary("session_hosted_starting")))
     }
 }
