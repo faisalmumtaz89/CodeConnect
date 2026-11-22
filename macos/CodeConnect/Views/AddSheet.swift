@@ -92,8 +92,6 @@ extension EnvironmentValues {
     @Entry var sheetRoom: CGFloat = .infinity
     /// How tall the start form's pane stands, in `StartForm.space`.
     @Entry var startHeight: CGFloat = 0
-    /// Raised by New Agent: the start form's first message takes the keyboard.
-    @Entry var startFocusRequest = 0
 }
 
 /// The bottom bar every side shares: a note on the left, the answer on the right.

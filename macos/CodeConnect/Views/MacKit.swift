@@ -273,6 +273,9 @@ private struct ClosesPanel: ViewModifier {
     @State private var light = PanelLight()
     @State private var monitor: Any?
     @State private var resizing: NSObjectProtocol?
+    /// The window's asks: while one is up (a name asked for from inside a panel), the clicks and keys are the ask's,
+    /// and the panel waits behind it.
+    @Environment(ConfirmationQueue.self) private var asks: ConfirmationQueue?
 
     func body(content: Content) -> some View {
         content
@@ -293,11 +296,13 @@ private struct ClosesPanel: ViewModifier {
         let frames = frames
         let close = $open
         let light = light
+        let asks = asks
         light.opened()
         // The window the panel opened in, which had the keyboard: keys typed in another window are that window's.
         let window = NSApp.keyWindow
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]) {
             event in
+            if MainActor.assumeIsolated({ asks?.isAsking == true }) { return event }
             // A scroll elsewhere closes it: an open panel never moves with, or hides behind, what scrolls under it. A
             // scroll over the panel scrolls the panel.
             if event.type == .scrollWheel {

@@ -13,10 +13,8 @@ struct MainWindow: View {
     /// The one "…" menu a row of the list or the sidebar opens, drawn over the whole window.
     @State private var rowMenu = RowMenu()
     @State private var adding: AddKind?
-    /// Raised by New Agent: the start form's first message takes the keyboard.
-    @State private var startFocus = 0
-    /// The start form's first message, kept while a run is open.
-    @State private var startMessage = ""
+    /// The window's start of an agent, the app's, so a closed window opens on the same start.
+    let startDraft: StartDraft
     /// The address Add a computer starts with, when a refused computer asked to pair again.
     @State private var repairing: String?
     /// The list, what it is narrowed to, and the run open beside it: the app's, so a closed window opens on them again.
@@ -49,9 +47,10 @@ struct MainWindow: View {
 
     init(
         scope: Binding<FleetScope>, filter: Binding<FleetFilter?>, opened: Binding<String?>, pendingAdd: Binding<AddKind?>,
-        settings: Binding<SettingsSection?>
+        settings: Binding<SettingsSection?>, startDraft: StartDraft
     ) {
         _settings = settings
+        self.startDraft = startDraft
         _scope = scope
         _filter = filter
         _opened = opened
@@ -109,8 +108,7 @@ struct MainWindow: View {
                         .environment(\.headerClearance, clearance(first: sidebarHidden && !showsList, last: true))
                 } else if showsStart {
                     if showsList { Rectangle().fill(Theme.hairline).frame(width: 1) }
-                    StartPane(addComputer: { adding = .computer }, message: $startMessage, started: started)
-                        .environment(\.startFocusRequest, startFocus)
+                    StartPane(draft: startDraft, addComputer: { adding = .computer }, started: started)
                 }
             } else {
                 EmptyFleet(adding: $adding)
@@ -192,7 +190,7 @@ struct MainWindow: View {
             }
             adding = nil
             opened = nil
-            startFocus += 1
+            startDraft.requestKeyboard()
         }
         .onChange(of: pendingAdd != nil, initial: true) {
             guard let pendingAdd else { return }
@@ -271,7 +269,7 @@ struct MainWindow: View {
 
     /// The run just started is open, in the list of every active agent, unfiltered.
     private func started(_ run: String) {
-        startMessage = ""
+        startDraft.didOpen()
         scope = .active
         filter = nil
         opened = run

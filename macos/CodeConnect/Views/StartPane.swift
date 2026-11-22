@@ -6,9 +6,9 @@ import SwiftUI
 /// none connected, or a computer's CodeConnect too old to start one from here). New Agent comes here.
 struct StartPane: View {
     @Environment(Machines.self) private var machines
+    /// The window's start, which the form draws.
+    let draft: StartDraft
     let addComputer: () -> Void
-    /// The first message, kept while a run is open.
-    @Binding var message: String
     /// The run just started is in the list, by its id.
     let started: (String) -> Void
     /// The form has been shown. It stays when its computer's link drops, which empties the computers that can start,
@@ -22,11 +22,8 @@ struct StartPane: View {
             Spacer(minLength: 16).frame(maxHeight: height * 0.22)
             Group {
                 if formShown || !machines.startContexts.isEmpty || machines.outstandingStart != nil {
-                    StartForm(
-                        resuming: machines.outstandingStart?.requestID, whyNone: why, message: $message,
-                        addComputer: addComputer, started: started
-                    )
-                    .onAppear { formShown = true }
+                    StartForm(started: started, addComputer: addComputer, whyNone: why, draft: draft)
+                        .onAppear { formShown = true }
                 } else {
                     noComputer
                 }
@@ -46,6 +43,17 @@ struct StartPane: View {
         .padding(.bottom, 10)
         .background(Theme.pane)
         .environment(\.startHeight, height)
+        // A start this Mac sent with no answer yet, from before the app last quit: the form opens on it.
+        .onAppear {
+            guard let start = machines.outstandingStart,
+                let owner = machines.models.first(where: { $0.starter.starts[start.requestID] != nil })
+            else { return }
+            draft.adopt(
+                start.requestID,
+                asking: StartDraft.Ask(
+                    computerID: StartContext(model: owner).id, folderPath: start.project.path, place: start.place,
+                    agent: start.agent, model: start.model, message: start.prompt ?? ""))
+        }
         .environment(\.sheetRoom, height)
     }
 

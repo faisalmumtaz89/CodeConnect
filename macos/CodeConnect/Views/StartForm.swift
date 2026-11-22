@@ -20,26 +20,12 @@ struct StartForm: View {
     /// Why no computer can start one now, said in the form while its computer's link is down.
     let whyNone: String
 
-    @State private var computerID: String?
+    /// The window's start: what is chosen on each computer, the first message, and the start sent. The form keeps
+    /// none of it, so it is the same start whenever and however the form is drawn again.
+    @Bindable var draft: StartDraft
     /// The computer button's panel is open.
     @State private var computerMenuOpen = false
-    /// What was chosen on each computer, by its id: coming back to a computer, after its link dropped or a switch,
-    /// finds its own choices.
-    @State private var choicesByComputer: [String: Choices] = [:]
-
-    /// One computer's choices in the form.
-    private struct Choices {
-        var query = ""
-        var folderPath: String?
-        var chosen: StartModelChoice?
-    }
-    @State private var query = ""
-    @State private var folderPath: String?
-    @State private var chosen: StartModelChoice?
     @State private var menuOpen = false
-    /// Where in the folder's repository it starts; a new worktree's name while one is being named.
-    @State private var place = StartPlace.folder
-    @State private var newName: String?
     @State private var branchMenuOpen = false
     /// The Folder box browses the computer's folders in place of its recent ones.
     @State private var browsing = false
@@ -50,10 +36,8 @@ struct StartForm: View {
     @State private var formWidth: CGFloat = 0
     /// The first message has the keyboard: as the form appears, and when New Agent asks for it.
     @FocusState private var messageFocused: Bool
-    @Environment(\.startFocusRequest) private var focusRequest
-    /// The first message, kept by the window while a run is open, so it is there when the form comes back.
-    @Binding var message: String
-    @State private var requestID: String?
+    /// An ask is up (New Folder's name): Start's keys are its, not Start's.
+    @Environment(ConfirmationQueue.self) private var asks
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
     /// this Mac. Nil without one, as in a test launch with no rig of its own.
     @State private var thisMac: String?
@@ -62,24 +46,42 @@ struct StartForm: View {
     /// The folder list's rows, measured: the box is as tall as they are, up to its most.
     @State private var listHeight: CGFloat = 0
 
-    /// `resuming`: a start this Mac sent with no answer yet, which the form opens on instead of a fresh one.
-    init(
-        resuming: String?, whyNone: String, message: Binding<String>, addComputer: @escaping () -> Void,
-        started: @escaping (String) -> Void
-    ) {
-        _requestID = State(initialValue: resuming)
-        _message = message
-        self.whyNone = whyNone
-        self.addComputer = addComputer
-        self.started = started
-    }
-
     private var contexts: [StartContext] { machines.startContexts }
 
     /// The chosen computer, else the one used last.
     private var context: StartContext? {
-        contexts.first { $0.id == computerID }
+        contexts.first { $0.id == draft.computerID }
             ?? contexts.max { ($0.lastUsed ?? .distantPast) < ($1.lastUsed ?? .distantPast) }
+    }
+
+    /// The chosen computer's choices, from the draft.
+    private var choices: StartDraft.Choices { context.map { draft.choices(on: $0.id) } ?? StartDraft.Choices() }
+    private var query: String { choices.query }
+    private var folderPath: String? { choices.folderPath }
+    private var place: StartPlace { choices.place }
+    private var newName: String? { choices.newName }
+
+    /// One of the chosen computer's choices, as a binding the form's controls write to the draft through.
+    private func choice<Value>(_ path: WritableKeyPath<StartDraft.Choices, Value>) -> Binding<Value> {
+        Binding(
+            get: { choices[keyPath: path] },
+            set: { value in if let context { draft.edit(on: context.id) { $0[keyPath: path] = value } } })
+    }
+
+    /// The sent start, found by its request on whichever computer it was sent to, not through the computers that can
+    /// start right now, which its own leaves while its link is down.
+    private var sentStart: (start: SessionStart, owner: AppModel)? {
+        guard let id = draft.sent?.requestID,
+            let owner = machines.models.first(where: { $0.starter.starts[id] != nil }),
+            let start = owner.starter.starts[id]
+        else { return nil }
+        return (start, owner)
+    }
+
+    /// Start can be pressed: the form is composing, nothing blocks it, no ask is up and none of its panels is open.
+    private var startable: Bool {
+        draft.phase(outcome: sentStart?.start.outcome) == .composing && blocked == nil && !asks.isAsking
+            && !folderOpen && !computerMenuOpen && !menuOpen && !branchMenuOpen
     }
 
     /// The selected folder: a recent one when it is one, else the one chosen or browsed to.
@@ -95,7 +97,7 @@ struct StartForm: View {
     /// The chosen model while the computer still offers it, else Kit's Default for the folder.
     private var pick: StartModelChoice? {
         guard let context else { return nil }
-        if let chosen, context.modelChoices.contains(chosen) { return chosen }
+        if let chosen = choices.model, context.modelChoices.contains(chosen) { return chosen }
         return context.defaultChoice(for: folder)
     }
 
@@ -105,7 +107,7 @@ struct StartForm: View {
         if StartAgent.allCases.contains(where: { context.models($0) == .checking }) { return context.checkingModels }
         guard pick != nil else { return context.noAgent }
         guard folder != nil else { return "Choose a folder." }
-        if message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return StartWords.writeTheFirstMessage }
+        if draft.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return StartWords.writeTheFirstMessage }
         if let name = newName?.trimmingCharacters(in: .whitespaces) {
             if name.isEmpty { return StartWords.nameTheWorktree }
             if !StartPlace.isValidName(name) { return StartWords.nameBreaksTheRule }
@@ -124,13 +126,10 @@ struct StartForm: View {
 
     var body: some View {
         Group {
-            // Found by its request on whichever computer it was sent to, not through the computers that can start
-            // right now, which its own leaves while its link is down.
-            if let requestID, let owner = machines.models.first(where: { $0.starter.starts[requestID] != nil }),
-                let start = owner.starter.starts[requestID]
-            {
-                // A page of its own in the form's column, as tall as its content.
-                sent(start, on: owner)
+            // The draft's page: the form while composing, else the sent start's page in the form's column, as tall as
+            // its content.
+            if let sentStart, draft.phase(outcome: sentStart.start.outcome) != .composing {
+                sent(sentStart.start, on: sentStart.owner)
                     .frame(maxWidth: Self.column)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
@@ -138,16 +137,20 @@ struct StartForm: View {
             }
         }
         .task(id: contexts.map(\.id)) { contexts.forEach { $0.load() } }
-        // Another folder, or the same path on another computer, starts in the folder as it is, and its repository is
-        // read, as the iPhone's folder step does.
+        // Another folder, or the same path on another computer, has its repository read, as the iPhone's folder step
+        // does. Where in it the start goes is the draft's: only the person's own pick of a folder resets it.
         .task(id: [context?.id ?? "", folderPath ?? ""]) {
-            place = .folder
-            newName = nil
             branchMenuOpen = false
             guard let context, let folder, context.asksGit else { return }
             context.askGit(folder.path)
             #if DEBUG
+                var place = place
+                var newName = newName
                 RenderWindow.branch(in: context.git(folder.path) ?? nil, place: &place, newName: &newName)
+                draft.edit(on: context.id) {
+                    $0.place = place
+                    $0.newName = newName
+                }
                 // Opened once the render has sized its window: a resize closes an open panel.
                 guard RenderWindow.opensBranchMenu else { return }
                 try? await Task.sleep(for: .seconds(1))
@@ -170,7 +173,7 @@ struct StartForm: View {
             }
             .task {
                 browsing = RenderWindow.browsed != nil
-                if let words = RenderWindow.startMessage { message = words }
+                if let words = RenderWindow.startMessage { draft.message = words }
                 if browsing || RenderWindow.opensFolderPanel {
                     // Opened once the render has sized its window: a resize closes an open panel.
                     try? await Task.sleep(for: .seconds(2))
@@ -178,8 +181,8 @@ struct StartForm: View {
                 }
                 if let path = RenderWindow.chosenFolder {
                     for _ in 0..<150 {
-                        if context?.projects.contains(where: { $0.path == path }) == true {
-                            folderPath = path
+                        if let context, context.projects.contains(where: { $0.path == path }) {
+                            if folderPath != path { draft.chooseFolder(path, on: context.id) }
                             break
                         }
                         try? await Task.sleep(for: .milliseconds(200))
@@ -190,17 +193,12 @@ struct StartForm: View {
                 start()
             }
         #endif
-        // A selection is the computer's it was made on. Leaving a computer, for another or because its link dropped,
-        // files its choices under it; arriving at one brings back that computer's own, so no choice reaches another
-        // computer and none is lost to a link that drops and comes back.
-        .onChange(of: context?.id) { old, new in
-            if let old { choicesByComputer[old] = Choices(query: query, folderPath: folderPath, chosen: chosen) }
-            let back = new.flatMap { choicesByComputer[$0] } ?? Choices()
-            query = back.query
-            folderPath = back.folderPath
-            chosen = back.chosen
-            browsing = false
-        }
+        // Another computer browses from its own home.
+        .onChange(of: context?.id) { browsing = false }
+        // New Agent: the first message takes the keyboard, a turn after the form draws, and no panel stays open. Taken
+        // once, whether the form was there before the request or comes with it.
+        .onAppear { takeKeyboard() }
+        .onChange(of: draft.wantsKeyboard) { takeKeyboard() }
     }
 
     /// A sent start: the folder question when its computer asked it, else its progress.
@@ -216,9 +214,9 @@ struct StartForm: View {
                 again: { backToForm(from: start) },
                 stopRetrying: {
                     owner.starter.stopRetrying(start.requestID)
-                    requestID = nil
+                    draft.withdraw()
                 },
-                close: { requestID = nil },
+                close: { backToForm(from: start) },
                 started: { started($0) })
         }
     }
@@ -266,9 +264,17 @@ struct StartForm: View {
         }
         .frame(maxWidth: Self.column, alignment: .leading)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { formWidth = $0 }
-        // New Agent gives the first message the keyboard. Not as the form merely appears: a run closed from the list
-        // keeps the list's keys.
-        .onChange(of: focusRequest) { messageFocused = true }
+    }
+
+    /// New Agent's request for the keyboard, taken once: the panels close and the first message has it a turn later.
+    /// Not as the form merely appears: a run closed from the list keeps the list's keys.
+    private func takeKeyboard() {
+        guard draft.takeKeyboardRequest() else { return }
+        folderOpen = false
+        computerMenuOpen = false
+        menuOpen = false
+        branchMenuOpen = false
+        DispatchQueue.main.async { messageFocused = true }
     }
 
     /// The form's own coordinates, top-left origin, in which a menu inside it finds the room it has.
@@ -294,27 +300,35 @@ struct StartForm: View {
         .accessibilityIdentifier(id)
     }
 
+    /// Start: the withdrawn start again under its own id when the form asks exactly what it asked, else a new start
+    /// (`StartDraft.send`), so one ask never runs twice.
     private func start() {
-        guard blocked == nil, let context, let folder, let pick else { return }
-        requestID = context.start(
-            folder, place: startPlace, agent: pick.agent, model: pick.model,
-            prompt: message.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard startable, let context, let folder, let pick else { return }
+        let ask = StartDraft.Ask(
+            computerID: context.id, folderPath: folder.path, place: startPlace, agent: pick.agent, model: pick.model,
+            message: draft.message)
+        switch draft.send(for: ask, outcome: sentStart?.start.outcome) {
+        case .resume(let requestID):
+            context.resume(requestID)
+            draft.didResume()
+        case .new:
+            let requestID = context.start(
+                folder, place: startPlace, agent: pick.agent, model: pick.model, prompt: ask.message)
+            draft.didSend(requestID, asking: ask)
+        }
     }
 
-    /// Back to the form from a start that failed or asked about its folder, with its first message put back when the
-    /// form has none, as in a form opened on that start.
-    private func backToForm(from start: SessionStart) {
-        if message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { message = start.prompt ?? "" }
-        requestID = nil
-    }
+    /// Back to the form from a start's page, with its first message put back when the form has none.
+    private func backToForm(from start: SessionStart) { draft.compose(restoring: start.prompt) }
 
     /// The folder question's answer: the start that asked, sent again with it. Only the question on screen is
     /// answered, and only once.
     private func answer(_ asked: SessionStart, _ trust: FolderTrust, in context: StartContext) {
-        guard requestID == asked.requestID else { return }
-        requestID = context.start(
+        guard let ask = draft.sent?.ask, draft.sent?.requestID == asked.requestID else { return }
+        let requestID = context.start(
             asked.project, place: asked.place, agent: asked.agent, model: asked.model, prompt: asked.prompt ?? "",
             trust: trust)
+        draft.didSend(requestID, asking: ask)
     }
 
     // MARK: Computer
@@ -323,7 +337,7 @@ struct StartForm: View {
     /// answers, as every computer the form offers does.
     @ViewBuilder private func computerChip(_ context: StartContext) -> some View {
         if contexts.count > 1 {
-            ComputerButton(contexts: contexts, chosen: context, open: $computerMenuOpen) { computerID = $0 }
+            ComputerButton(contexts: contexts, chosen: context, open: $computerMenuOpen) { draft.computerID = $0 }
                 .help(Self.summary(context, now: .now))
         } else {
             ComputerName(name: context.machineName)
@@ -400,7 +414,7 @@ struct StartForm: View {
                 Text("No recent folders on \(context.machineName) yet.").font(Theme.ui(12)).foregroundStyle(Theme.text2)
                 if let picked = picked(context) { pickedRow(picked) }
             } else {
-                TextField("", text: $query, prompt: Text("Search recent folders").foregroundStyle(Theme.text3))
+                TextField("", text: choice(\.query), prompt: Text("Search recent folders").foregroundStyle(Theme.text3))
                     .accessibilityLabel("Search recent folders")
                     .accessibilityIdentifier("start.search")
                     // The field and the folders under it are one stop for the keyboard: ↑ and ↓ move the chosen
@@ -450,14 +464,13 @@ struct StartForm: View {
     /// One arrow-key step through the folders as shown, the picked one first.
     private func moveFolder(_ context: StartContext, down: Bool) -> KeyPress.Result {
         let shown = (picked(context).map { [$0.path] } ?? []) + startFilter(context.projects, query).map(\.path)
-        folderPath = ListStep.step(from: folderPath, in: shown, down: down)
+        draft.chooseFolder(ListStep.step(from: folderPath, in: shown, down: down), on: context.id)
         return .handled
     }
 
     private func folderRow(_ project: StartProject) -> some View {
         Button {
-            folderPath = project.path
-            folderOpen = false
+            choose(project.path)
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -526,8 +539,7 @@ struct StartForm: View {
 
     /// A chosen folder is the selected one, as a recent row is; the search goes, so a recent one chosen is in view.
     private func choose(_ path: String) {
-        query = ""
-        folderPath = path
+        if let context, folderPath != path { draft.chooseFolder(path, on: context.id) }
         folderOpen = false
     }
 
@@ -562,7 +574,7 @@ struct StartForm: View {
     /// menus open upward, over what is above the box.
     private func composer(_ context: StartContext) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            TextField("", text: $message, prompt: Text("First message").foregroundStyle(Theme.text3), axis: .vertical)
+            TextField("", text: $draft.message, prompt: Text("First message").foregroundStyle(Theme.text3), axis: .vertical)
                 .accessibilityLabel("First message")
                 .accessibilityIdentifier("start.message")
                 .textFieldStyle(.plain)
@@ -571,10 +583,10 @@ struct StartForm: View {
                 .focused($messageFocused)
                 .padding(.horizontal, 4)
             HStack(alignment: .bottom, spacing: 2) {
-                ModelButton(context: context, pick: pick, open: $menuOpen) { chosen = $0 }
+                ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }
                 if let folder, context.branchAhead(folder) {
                     BranchRow(
-                        context: context, folder: folder, agent: pick?.agent, place: $place, newName: $newName,
+                        context: context, folder: folder, agent: pick?.agent, place: choice(\.place), newName: choice(\.newName),
                         open: $branchMenuOpen, top: 0
                     )
                 }
@@ -592,18 +604,19 @@ struct StartForm: View {
         }
     }
 
-    /// Start: filled once it can be pressed; ⌘↩, as a form's action is (decision 289).
+    /// Start: filled once it can be pressed; ⌘↩, as a form's action is (decision 289). One rule for both, `startable`:
+    /// while an ask or a panel of the form is up, its keys are that ask's or panel's.
     private var startButton: some View {
         Button(action: start) {
             Image(systemName: "arrow.up")
                 .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(blocked == nil ? Color.black : Theme.text3)
+                .foregroundStyle(startable ? Color.black : Theme.text3)
                 .frame(width: 24, height: 24)
-                .background(Circle().fill(blocked == nil ? Theme.text : Theme.window))
+                .background(Circle().fill(startable ? Theme.text : Theme.window))
         }
         .buttonStyle(.hover(radius: 12, over: true, id: "start.start"))
-        .keyboardShortcut(.return, modifiers: .command)
-        .disabled(blocked != nil)
+        .keyboardShortcut(startable ? KeyboardShortcut(.return, modifiers: .command) : nil)
+        .disabled(!startable)
         .help(blocked ?? "Start (⌘↩)")
         .accessibilityLabel("Start")
         .accessibilityIdentifier("start.start")
@@ -618,7 +631,7 @@ private struct StartProgress: View {
     let again: () -> Void
     /// No more sends of the start from this Mac, and the form comes back.
     let stopRetrying: () -> Void
-    /// The form again, while the start goes on: its run joins the list when it has started.
+    /// Back to the form from the failure page, the failed start let go.
     let close: () -> Void
     let started: (String) -> Void
     /// The computer's own words for a launch that failed are shown.
@@ -686,11 +699,12 @@ private struct StartProgress: View {
             .padding(.horizontal, 18)
             .padding(.top, 18)
             Spacer(minLength: 18)
+            // No Close while it is being sent: the start stays on screen until it is answered or withdrawn (Stop
+            // retrying), so it is never forgotten while it may still run.
             SheetBar(
-                action: nil, actionID: "", blocked: true, perform: {}, cancel: close, cancelID: "start.close",
-                cancelTitle: "Close"
+                action: nil, actionID: "", blocked: true, perform: {}, cancel: nil, cancelID: "start.close"
             ) {
-                Text("It keeps starting if you close this.").font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                EmptyView()
             }
         }
     }
