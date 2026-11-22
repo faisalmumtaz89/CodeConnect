@@ -22,13 +22,7 @@ struct SessionPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Place(summary: row.summary, computer: row.machineName) {
-                // A Codex run or a Claude run started from the app, whenever Kit says it can be stopped; only on the
-                // conversation, where the composer's note says what became of the stop.
-                if tab == .conversation, model.stopUnavailable(for: row.id) == nil {
-                    StopTurn(model: model, key: row.id)
-                }
-            }
+            Place(summary: row.summary, computer: row.machineName)
             Rectangle().fill(Theme.hairline).frame(height: 1)
             Heading(row: row, model: model, tab: $tab)
             ZStack(alignment: .topLeading) {
@@ -74,11 +68,10 @@ struct SessionPane: View {
 }
 
 /// Where the run is: its computer, its folder as a shell prints it, and the branch checked out there when git
-/// names one (none outside a repository or on a detached head); what can be done to the run sits at its end.
-private struct Place<Actions: View>: View {
+/// names one (none outside a repository or on a detached head).
+private struct Place: View {
     let summary: SessionSummary
     let computer: String?
-    @ViewBuilder let actions: Actions
     @Environment(\.headerClearance) private var headerClearance
 
     var body: some View {
@@ -91,7 +84,6 @@ private struct Place<Actions: View>: View {
                 Text(branch).font(Theme.mono(11.5)).lineLimit(1).accessibilityIdentifier("session.branch")
             }
             Spacer(minLength: 8)
-            actions
         }
         .font(Theme.ui(12))
         .foregroundStyle(Theme.text2)
@@ -206,23 +198,6 @@ struct LineDelta: View {
         .font(Theme.mono(11))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("+\(added) −\(removed)")
-    }
-}
-
-/// Stops the turn the run is running, a Codex run's over Codex's own link and a Claude run's through the host it was
-/// started on: no keyboard involved. Greyed for a moment after a turn changes, as Kit rules.
-private struct StopTurn: View {
-    let model: AppModel
-    let key: String
-
-    var body: some View {
-        let stopping = model.codexStop(for: key) == .inFlight
-        let greyed = model.codexControls(for: key).isStopGreyed(now: model.now)
-        ActionButton(title: stopping ? SessionWords.stopping : SessionWords.stopThisTurn, key: nil, prominent: false, id: "session.stop") {
-            Task { await model.stopCodexTurn(sessionKey: key) }
-        }
-        .disabled(stopping || greyed)
-        .help(greyed ? SessionWords.tryAgainInAMoment : SessionWords.stopHelp)
     }
 }
 
