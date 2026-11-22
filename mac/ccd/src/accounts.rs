@@ -255,17 +255,14 @@ fn listing(store: &crate::store::Store, request_id: String) -> protocol::ws::Ser
     }
 }
 
+/// How a sign-in going is ended: it is sent where to say its login's group is gone.
+type Ending = tokio::sync::oneshot::Sender<tokio::sync::oneshot::Sender<()>>;
+
 /// The sign-in a computer is running, by its number, and how to end it. One at a time: the agent's callback is one port.
 #[derive(Default)]
 pub(crate) struct SignIns {
-    /// The one going: its number, its account, and how to end it (told back once its login's group is gone).
-    going: std::sync::Mutex<
-        Option<(
-            u64,
-            String,
-            tokio::sync::oneshot::Sender<tokio::sync::oneshot::Sender<()>>,
-        )>,
-    >,
+    /// The one going: its number, its account, and how to end it.
+    going: std::sync::Mutex<Option<(u64, String, Ending)>>,
     count: std::sync::atomic::AtomicU64,
 }
 
