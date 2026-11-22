@@ -83,9 +83,12 @@ struct HostedSettingsSheet: View {
             CCSectionHeader("Effort")
             card {
                 ForEach(Array(live.efforts.enumerated()), id: \.element.value) { index, entry in
+                    let isSelected = live.selectedEffort?.value == entry.value
                     choiceRow(
                         title: entry.label,
-                        isSelected: live.selectedEffort?.value == entry.value,
+                        // The model's own default, marked while no effort is chosen (decision 318).
+                        detail: isSelected && live.effortIsDefault ? "Default" : nil,
+                        isSelected: isSelected,
                         isLast: index == live.efforts.count - 1, disabled: live.inFlight
                     ) { await model.setEffort(for: sessionKey, effortValue: entry.value) }
                 }

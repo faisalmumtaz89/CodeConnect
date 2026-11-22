@@ -460,4 +460,27 @@ final class RunSettingsTests: XCTestCase {
         guard case .hostedLive(let s) = RunSettings.of(summary: run) else { return XCTFail("a live Claude run") }
         XCTAssertNil(s.selectedEffort)
     }
+
+    /// **A default marked is named as the default** (decision 318): while the mark is the entry's own default, the
+    /// panel says so; once an effort is chosen, it does not.
+    func testTheMarkSaysWhenItIsTheModelsDefault() throws {
+        for (key, name) in [("session_codex_live", "codex-settings-wire"), ("session_hosted_live", "minor-46-wire")] {
+            guard case .hostedLive(let unset) = RunSettings.of(summary: try summary(key, in: name, effort: nil))
+            else { return XCTFail("\(name): a live run") }
+            XCTAssertNotNil(unset.selectedEffort, name)
+            XCTAssertTrue(unset.effortIsDefault, "\(name): no effort chosen, the mark is the default")
+            guard case .hostedLive(let stale) = RunSettings.of(
+                summary: try summary(key, in: name, effort: "from-another-model"))
+            else { return XCTFail("\(name): a live run") }
+            XCTAssertTrue(stale.effortIsDefault, "\(name): a fact this model does not offer, the mark is the default")
+            guard case .hostedLive(let chosen) = RunSettings.of(summary: try summary(key, in: name, effort: "high"))
+            else { return XCTFail("\(name): a live run") }
+            XCTAssertFalse(chosen.effortIsDefault, "\(name): a chosen effort is no default")
+        }
+        // Nothing marked (an entry that names no default) is no default marked either.
+        guard case .hostedLive(let fable) = RunSettings.of(
+            summary: try summary("session_hosted_live", in: "minor-46-wire", effort: nil, selected: "fable"))
+        else { return XCTFail("a live Claude run") }
+        XCTAssertFalse(fable.effortIsDefault)
+    }
 }

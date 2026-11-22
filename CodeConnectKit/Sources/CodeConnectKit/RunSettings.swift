@@ -69,6 +69,8 @@ public enum RunSettings: Sendable, Hashable {
         let selectedEffort = selectedModel
             .flatMap { effortInForce(on: $0, fact: summary.effort?.value) }
             .flatMap { value in efforts.first { $0.value == value } }
+        let effortIsDefault =
+            selectedEffort != nil && !(summary.effort.map { fact in efforts.contains { $0.value == fact.value } } ?? false)
         // The one string drawn for the run's model — the button, the header: the model the run is on once
         // it has said so, by `modelName`; before that the selected entry's name, and the fact as sent only when
         // the daemon named no selection. "Default" is a row of the menu, never the run's model.
@@ -80,7 +82,7 @@ public enum RunSettings: Sendable, Hashable {
             HostedSettings(
                 models: models, modes: menus.modes,
                 selectedModel: selectedModel, selectedMode: selectedMode,
-                efforts: efforts, selectedEffort: selectedEffort,
+                efforts: efforts, selectedEffort: selectedEffort, effortIsDefault: effortIsDefault,
                 modelDisplay: modelDisplay.text, modelDisplayReported: modelDisplay.reported, inFlight: inFlight,
                 lastOutcome: lastOutcome))
     }
@@ -145,6 +147,9 @@ public struct HostedSettings: Sendable, Hashable {
     /// The selected model's efforts, each with its display name. Empty when no model is selected.
     public let efforts: [EffortChoice]
     public let selectedEffort: EffortChoice?
+    /// `selectedEffort` is the chosen model's own default, not one the run was set to (decision 318): the agent named
+    /// no effort, or one this model does not offer. The panel then names it as the default; the lines name its level.
+    public let effortIsDefault: Bool
     /// The model string for a single-line surface (the button, the header): the model the run has
     /// confirmed, by `RunSettings.modelName`; before it has, the selected row's name, or the fact as sent
     /// when nothing matched.

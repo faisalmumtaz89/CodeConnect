@@ -164,7 +164,7 @@ struct HostedSettingsButton: View {
             }
             if !settings.efforts.isEmpty {
                 divider
-                header(settings.selectedEffort == nil ? "Effort · Default" : "Effort")
+                header(settings.selectedEffort == nil || settings.effortIsDefault ? "Effort · Default" : "Effort")
                 efforts
             }
         }
