@@ -874,7 +874,7 @@ async fn link(
                     Ok(relaunched) => relaunched,
                     Err(why) => break why,
                 };
-                let switching = daemon.db.switching(uid.clone()).await.unwrap_or(false);
+                let switching = crate::switch::switched(&daemon, &uid).await;
                 let (lifecycle, said) = match status {
                     OutcomeStatus::Done => (Lifecycle::Live, Ok(())),
                     // claude never took a refused relaunch's message, so the run stays
@@ -914,14 +914,19 @@ async fn link(
                         None,
                     ));
                 }
+                // Going live on the new account ends the switch before anything of the start is told, so a device
+                // listing on those events reads it over.
+                if switching && status == OutcomeStatus::Done {
+                    crate::switch::set(&daemon, &uid, None).await;
+                }
                 match daemon
                     .commit_start_outcome(&uid, host, seq, lifecycle, initialize, words, relaunched)
                     .await
                 {
                     Ok(true) => {
                         live = lifecycle == Lifecycle::Live;
-                        if switching {
-                            crate::switch::relaunched(&daemon, &uid, said.clone()).await;
+                        if let (true, Err(why)) = (switching, &said) {
+                            crate::switch::relaunched(&daemon, &uid, Err(why.clone())).await;
                         }
                         // From the outcome, not the lifecycle committed: a refused relaunch is
                         // `exited`, and its host's `exited` is still acknowledged so it ends.
@@ -999,8 +1004,13 @@ async fn link(
                 }
             }
             Ok(FromHost::Exited { seq, code, signal }) if live => {
-                // Stopped by its switch: the end names the account it goes on; its next message starts it there.
-                let switched = stopping && daemon.db.switching(uid.clone()).await.unwrap_or(false);
+                // Ended by its switch: the end names the account it goes on; its next message starts it there. Any
+                // other end of a run waiting to move is what it is, and the move is off.
+                let state = daemon.db.switch_state(uid.clone()).await.ok().flatten();
+                let switched = state == Some(crate::store::Store::SWITCH_MOVED);
+                if state == Some(crate::store::Store::SWITCH_WAITING) {
+                    crate::switch::set(&daemon, &uid, None).await;
+                }
                 // Claude ended without ccd stopping it, so the person's next message
                 // relaunches it, as when the watch finds its host gone.
                 let (from, payload) = if switched {
@@ -1195,12 +1205,14 @@ pub(crate) async fn end_if_host_gone(daemon: &Arc<Daemon>, uid: &str) {
         }
         return;
     }
-    // A live run marked to switch account ended by its switch: its end names the account.
-    let switched = match (
-        watch.lifecycle == Lifecycle::Live,
-        daemon.db.switching(uid.to_string()).await,
-    ) {
-        (true, Ok(true)) => daemon
+    // A live run its switch ended: its end names the account. Any other end of a run waiting to move is what it is,
+    // and the move is off.
+    let state = daemon.db.switch_state(uid.to_string()).await.ok().flatten();
+    if state == Some(crate::store::Store::SWITCH_WAITING) {
+        crate::switch::set(daemon, uid, None).await;
+    }
+    let switched = match (watch.lifecycle == Lifecycle::Live, state) {
+        (true, Some(crate::store::Store::SWITCH_MOVED)) => daemon
             .db
             .get_session(uid.to_string())
             .await
@@ -1253,7 +1265,13 @@ pub(crate) async fn stop_run(daemon: &Arc<Daemon>, uid: &str) -> StopRunResult {
     match lifecycle {
         Lifecycle::Live => {}
         Lifecycle::Stopping => return StopRunResult::Stopping,
-        Lifecycle::Exited | Lifecycle::Failed => return StopRunResult::AlreadyEnded,
+        // A run a switch ended reads live until its next message: End run makes it the ordinary end it is, filed.
+        Lifecycle::Exited | Lifecycle::Failed => {
+            if crate::switch::switched(daemon, uid).await {
+                crate::switch::ended(daemon, uid).await;
+            }
+            return StopRunResult::AlreadyEnded;
+        }
         Lifecycle::Starting => return refuse("It is still starting; end it once it has started."),
         Lifecycle::Unknown => return refuse("This computer does not know whether it is running."),
     }
@@ -1271,9 +1289,7 @@ pub(crate) async fn stop_run(daemon: &Arc<Daemon>, uid: &str) -> StopRunResult {
         }
     }
     // The person's stop is an end, not a switch.
-    if let Err(err) = daemon.db.clear_switching(uid.to_string()).await {
-        crate::log_error!("{uid}: could not clear its switch: {err:#}");
-    }
+    crate::switch::set(daemon, uid, None).await;
     // A run whose link is not attached is stopped by the escalation.
     daemon.stop_through_link(uid).await;
     tokio::spawn(escalate_stop(Arc::clone(daemon), uid.to_string()));
@@ -1991,7 +2007,7 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         Ok::<_, String>((ready.path, host_bin, codeconnect, kept))
     };
     // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
-    let switching = daemon.db.switching(uid.to_string()).await.unwrap_or(false);
+    let switching = crate::switch::switched(daemon, uid).await;
     let (claude, host_bin, codeconnect, kept) = match checked.await {
         Ok(checked) => checked,
         Err(why) => {
@@ -12148,13 +12164,9 @@ mod tests {
         stop(&relaunched.dir);
     }
 
-    /// **A relaunch that cannot start on the new account does not end the run quietly** (306 S9): a run moved from A
-    /// to B whose next message's relaunch claude refuses stays ended and relaunchable, reads `failed`, and has a line
-    /// of its own saying why.
-    #[tokio::test]
-    async fn a_switch_whose_relaunch_is_refused_says_why() {
-        let _env = crate::ProcessEnvRead::take();
-        let mut rig = relaunch_rig();
+    /// A run on `rig` moved from A to B (306 Slice E): idle on A, B chosen, ended at once by its switch, its host
+    /// gone and its socket closed. Its uid, its folder, the ended host's pid and B.
+    async fn moved_to_b(rig: &mut Rig) -> (String, PathBuf, i32, crate::store::Account) {
         let a = rig.daemon.store.add_account("claude", "A").unwrap();
         let b = rig.daemon.store.add_account("claude", "B").unwrap();
         assert!(rig
@@ -12163,7 +12175,7 @@ mod tests {
             .activate_account("claude", Some(&a.id))
             .unwrap());
         rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap();
-        let mut played = live_run(&rig).await;
+        let mut played = live_run(rig).await;
         let uid = played.uid.clone();
         sdk(&mut played.write, 3, init_in(&rig.root)).await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
@@ -12198,6 +12210,18 @@ mod tests {
             dir, lines, write, ..
         } = played;
         drop((lines, write));
+        (uid, dir, old, b)
+    }
+
+    /// **A relaunch that cannot start on the new account does not end the run quietly** (306 S9): a run moved from A
+    /// to B whose next message's relaunch claude refuses stays ended and relaunchable, reads `failed`, and has a line
+    /// of its own saying why.
+    #[tokio::test]
+    async fn a_switch_whose_relaunch_is_refused_says_why() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (uid, dir, old, _b) = moved_to_b(&mut rig).await;
+        let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
 
         let (sent, relaunched) =
             tokio::join!(send_as_app(&rig.daemon, &uid, "r-on-b", "on B?"), async {
@@ -12231,11 +12255,250 @@ mod tests {
         let why: Vec<_> = stored(&rig, &uid)
             .into_iter()
             .filter(|event| event["payload"]["notification_type"] == "switch_failed")
-            .map(|event| event["payload"]["message"].clone())
+            .map(|event| {
+                (
+                    event["payload"]["message"].clone(),
+                    event["payload"]["switched_to"]["label"].clone(),
+                )
+            })
             .collect();
         assert_eq!(
             why,
-            [serde_json::json!("Couldn’t start on B: B is signed out")]
+            [(
+                serde_json::json!("Couldn’t start on B: B is signed out"),
+                serde_json::json!("B")
+            )],
+            "said, and the account typed"
+        );
+        // Signed in again, the next message's relaunch goes live: the switch is over, nothing reads failed.
+        let refused_host = pid_in(&relaunched.dir, "stub.pid");
+        stop(&relaunched.dir);
+        gone(refused_host).await;
+        let Played { lines, write, .. } = relaunched;
+        drop((lines, write));
+        let (sent, again) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-again", "on B now?"),
+            async {
+                let mut again = play_relaunched(&dir, refused_host).await;
+                let ToHost::Start { uuid, .. } = again.start.clone() else {
+                    panic!("not a start: {:?}", again.start);
+                };
+                say(
+                    &mut again.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut again.lines).await, Some(ToHost::Ack { seq: 2 }));
+                again
+            }
+        );
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        let live = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(
+            (live["lifecycle"].as_str(), live.get("switching")),
+            (Some("live"), None),
+            "{live}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        window_over.send(()).unwrap();
+        let frames = window.await.unwrap();
+        let states: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame["type"] == "sessions")
+            .map(|frame| frame["sessions"][0]["switching"].clone())
+            .collect();
+        assert!(states.contains(&serde_json::json!("failed")), "{states:?}");
+        assert_eq!(
+            states.last(),
+            Some(&serde_json::Value::Null),
+            "cleared by the relaunch: {states:?}"
+        );
+        crate::switch::window::keep(&frames, "switch-failed-then-recovered-claude-wire.json");
+        stop(&again.dir);
+    }
+
+    /// **End run on a moved run ends it** (306 Slice E): a run moved to B reads live until its next message; End run
+    /// then clears its move, so it reads as the relaunchable end it is.
+    #[tokio::test]
+    async fn end_run_on_a_moved_run_ends_it() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (uid, dir, old, _b) = moved_to_b(&mut rig).await;
+        let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
+        assert_eq!(
+            stop_run(&rig.daemon, &uid).await,
+            StopRunResult::AlreadyEnded
+        );
+        let ended = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(
+            (
+                ended["lifecycle"].as_str(),
+                ended.get("switching"),
+                ended["relaunchable"].as_bool()
+            ),
+            (Some("exited"), None, Some(true)),
+            "{ended}"
+        );
+        // Its next message relaunches it, as for any ended run.
+        let (sent, relaunched) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-after-end", "again"),
+            async {
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let ToHost::Start { uuid, .. } = relaunched.start.clone() else {
+                    panic!("not a start: {:?}", relaunched.start);
+                };
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            }
+        );
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        window_over.send(()).unwrap();
+        let frames = window.await.unwrap();
+        let ends: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame["type"] == "event" && frame["event"]["kind"] == "session_end")
+            .map(|frame| frame["event"]["payload"]["reason"].clone())
+            .collect();
+        assert_eq!(
+            ends,
+            [serde_json::json!(PROCESS_ENDED)],
+            "End files an ordinary end"
+        );
+        crate::switch::window::keep(&frames, "switch-then-end-then-message-claude-wire.json");
+        stop(&relaunched.dir);
+    }
+
+    /// **A moved run offers no settings, and a change sent anyway is refused in words** (306 Slice E): its summary
+    /// carries no menus, as an ended run's does not, and a change from an app that sends one is refused saying when
+    /// it can be made.
+    #[tokio::test]
+    async fn a_moved_run_offers_no_settings_and_refuses_a_change_in_words() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (uid, _dir, _old, _b) = moved_to_b(&mut rig).await;
+        let moved = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(
+            (moved["switching"].as_str(), moved.get("menus")),
+            (Some("moved"), None),
+            "{moved}"
+        );
+        let changed = rig
+            .daemon
+            .set_setting(
+                &uid,
+                Setting::Model {
+                    model: Some("sonnet".into()),
+                    effort: None,
+                },
+            )
+            .await;
+        assert_eq!(
+            changed,
+            SettingResult::Refused {
+                reason: "This session starts on B with your next message; its settings can be changed then.".into()
+            }
+        );
+    }
+
+    /// **A run waiting to move whose claude ends by itself is an ordinary end** (306 Slice E; decisions 214, 215,
+    /// 253, 308): a run in Bypass permissions marked to move, mid-turn, whose claude exits on its own: its end is
+    /// "its process ended", it no longer reads moving, and its next message relaunches it at the person's default
+    /// mode, not Bypass.
+    #[tokio::test]
+    async fn a_waiting_run_whose_claude_dies_is_an_ordinary_end() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let a = rig.daemon.store.add_account("claude", "A").unwrap();
+        let b = rig.daemon.store.add_account("claude", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("claude", Some(&a.id))
+            .unwrap());
+        rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        sdk(
+            &mut played.write,
+            4,
+            serde_json::json!({"type": "system", "subtype": "status", "status": null,
+                "permissionMode": "bypassPermissions",
+                "uuid": "9d1f0000-0000-4000-8000-0000000002b1",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("claude", Some(&b.id))
+            .unwrap());
+        crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let Played {
+            dir, lines, write, ..
+        } = played;
+        drop((lines, write));
+        let ends: Vec<_> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_end")
+            .map(|event| event["payload"].clone())
+            .collect();
+        assert_eq!(
+            ends,
+            [serde_json::json!({"exit_code": 1, "reason": PROCESS_ENDED})],
+            "an ordinary end"
+        );
+        let ended = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(
+            (ended["lifecycle"].as_str(), ended.get("switching")),
+            (Some("exited"), None),
+            "{ended}"
+        );
+        let (_, relaunched) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-after", "still there?"),
+            async {
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let ToHost::Start { uuid, options, .. } = relaunched.start.clone() else {
+                    panic!("not a start: {:?}", relaunched.start);
+                };
+                assert_eq!(
+                    options.permission_mode, None,
+                    "Bypass is not given back by a crash"
+                );
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            }
         );
         stop(&relaunched.dir);
     }

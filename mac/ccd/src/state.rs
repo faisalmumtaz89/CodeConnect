@@ -3514,8 +3514,12 @@ impl Daemon {
                 fact.value = id.clone();
             }
             session.model_label = model_labels.remove(&session.session_uid);
-            match switching.get(&session.session_uid) {
-                Some(1) => {
+            match switching.get(&session.session_uid).copied() {
+                Some(crate::store::Store::SWITCH_FAILED) => {
+                    session.switching = Some(protocol::event::Switching::Failed)
+                }
+                // Moved once its process has ended; until then, whatever stopped it, it is waiting.
+                Some(_) => {
                     session.switching = Some(match session.lifecycle {
                         Lifecycle::Live | Lifecycle::Stopping => {
                             protocol::event::Switching::Waiting
@@ -3525,7 +3529,6 @@ impl Daemon {
                     session.lifecycle = Lifecycle::Live;
                     session.relaunchable = false;
                 }
-                Some(_) => session.switching = Some(protocol::event::Switching::Failed),
                 None => {}
             }
         }
@@ -3659,6 +3662,26 @@ impl Daemon {
                 return refuse("This computer could not read its sessions.");
             }
         };
+        // A run its switch ended has no process to change; its settings are the ended run's until its next message.
+        if row.lifecycle != Lifecycle::Live
+            && self
+                .db
+                .switch_state(row.session_uid.clone())
+                .await
+                .ok()
+                .flatten()
+                == Some(crate::store::Store::SWITCH_MOVED)
+        {
+            let label = self
+                .store
+                .active_account(row.agent.as_str())
+                .ok()
+                .flatten()
+                .map_or_else(|| "Default".to_string(), |account| account.label);
+            return refuse(&format!(
+                "This session starts on {label} with your next message; its settings can be changed then."
+            ));
+        }
         if row.agent == protocol::agent::AgentKind::Codex {
             let commands = match self.inner.lock().await.host_links.get(&row.session_uid) {
                 Some(HostLink::Codex(_, commands)) => Some(commands.clone()),

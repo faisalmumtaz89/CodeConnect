@@ -12,7 +12,8 @@ the rest of your Codex home (its settings, trust, skills and sessions) shared. C
 account moves each running session to it between turns: once a session is idle its app server
 is ended, and your next message to it starts it again on the same thread with the new sign-in.
 A message queued in Codex itself (`codex queue`) is not kept across that, and a command or
-helper an agent left running in the background is stopped when its session moves.
+helper an agent left running in the background is stopped when its session moves. A moved
+session's settings can be changed once your next message has started it.
 
 So: **turns your phone starts are your turns.** Saying something from the phone spends the
 same account allowance as a turn you start in Codex yourself. There is no CodeConnect

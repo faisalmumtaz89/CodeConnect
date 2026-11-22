@@ -830,26 +830,22 @@ impl Db {
             .await
     }
 
-    pub async fn fail_switching(&self, session_uid: String) -> Result<()> {
-        self.run(move |store| store.fail_switching(&session_uid))
-            .await
-    }
-
     pub async fn switching_runs(&self) -> Result<Vec<(String, i64)>> {
         self.run(move |store| store.switching_runs()).await
     }
 
-    pub async fn switching(&self, session_uid: String) -> Result<bool> {
-        self.run(move |store| store.switching(&session_uid)).await
+    pub async fn switch_state(&self, session_uid: String) -> Result<Option<i64>> {
+        self.run(move |store| store.switch_state(&session_uid))
+            .await
+    }
+
+    pub async fn set_switch_state(&self, session_uid: String, state: Option<i64>) -> Result<()> {
+        self.run(move |store| store.set_switch_state(&session_uid, state))
+            .await
     }
 
     pub async fn mark_switching(&self, agent: String) -> Result<Vec<String>> {
         self.run(move |store| store.mark_switching(&agent)).await
-    }
-
-    pub async fn clear_switching(&self, session_uid: String) -> Result<()> {
-        self.run(move |store| store.clear_switching(&session_uid))
-            .await
     }
 
     pub async fn host_sends(&self, session_uid: String) -> Result<Vec<(String, String)>> {

@@ -2258,7 +2258,7 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
     };
     let recorded = account.as_ref().map(|account| account.id().to_string());
     // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
-    let switching = daemon.db.switching(uid.to_string()).await.unwrap_or(false);
+    let switching = crate::switch::switched(daemon, uid).await;
     let mut run = match daemon.db.begin_relaunch(uid.to_string(), recorded).await {
         Ok(Some(run)) => run,
         Ok(None) => return false,
@@ -2415,7 +2415,7 @@ async fn launch_again(
     };
     let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
     // A run moved by a switch of account keeps its mode (decision 308).
-    let switched = daemon.db.switching(uid.clone()).await.unwrap_or(false);
+    let switched = crate::switch::switched(daemon, uid).await;
     let kept = daemon
         .db
         .newest_codex_settings(uid.clone())
@@ -9331,6 +9331,71 @@ mod tests {
                 &resumed["params"]["sandbox"]
             ),
             (&json!("on-request"), &json!("workspace-write"))
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A run waiting to move whose app-server dies by itself is an ordinary end** (306 Slice E; decisions 233,
+    /// 253, 308): a run in Full Access marked to move whose app-server ends on its own ends "its process ended",
+    /// no longer reads moving, and its next message resumes it at Default, not Full Access.
+    #[tokio::test]
+    async fn a_waiting_codex_run_whose_app_server_dies_is_an_ordinary_end() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
+        tell(
+            &mut ws,
+            &settings_report(
+                "gpt-6.1-sol",
+                "high",
+                "never",
+                "dangerFullAccess",
+                "default",
+            ),
+        )
+        .await;
+        settings_as_sent(&rig.daemon, &uid, "full-access").await;
+        let b = rig.daemon.store.add_account("codex", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("codex", Some(&b.id))
+            .unwrap());
+        assert_eq!(
+            rig.daemon.db.mark_switching("codex".into()).await.unwrap(),
+            std::slice::from_ref(&uid)
+        );
+        app_server_ended(&rig, &uid, ws).await;
+        let ends: Vec<_> = rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::SessionEnd)
+            .map(|event| event.payload)
+            .collect();
+        assert_eq!(
+            ends,
+            [json!({"exit_code": null, "reason": crate::claude_host::PROCESS_ENDED})],
+            "an ordinary end"
+        );
+        let ended = serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(
+            (ended["lifecycle"].as_str(), ended.get("switching")),
+            (Some("exited"), None),
+            "{ended}"
+        );
+        let (_daemon, ws, resumed) = relaunched(&rig, &uid, "thr-x6", "turn-2").await;
+        assert_eq!(
+            (
+                &resumed["params"]["approvalPolicy"],
+                &resumed["params"]["sandbox"]
+            ),
+            (&json!("on-request"), &json!("workspace-write")),
+            "Full Access is not given back by a crash"
         );
         drop(ws);
         end_run(&rig, &uid).await;

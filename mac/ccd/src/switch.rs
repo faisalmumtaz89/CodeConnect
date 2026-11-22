@@ -9,7 +9,9 @@
 //! the run ended and relaunchable, its own line saying why, `failed`. A run already on the active account when its
 //! idle point comes only loses its mark, so choosing again, or choosing back, is never a lock.
 //!
-//! A Codex run with no link when the choice is made moves when its link attaches. A second message sent while the
+//! A moved run offers no settings, as an ended run offers none: they can be changed once its next message has
+//! started it. A Codex run with no link when the choice is made moves when its link
+//! attaches. A second message sent while the
 //! first one's relaunch is starting is refused, as for any ended run. Accepted misses: a message queued inside Codex
 //! itself (`codex queue`) does not survive the app-server's end; a command or helper an agent left running in the
 //! background is stopped when its session moves (ccd sees no background shell, background subagent or Codex
@@ -20,6 +22,7 @@ use std::sync::Arc;
 use protocol::agent::AgentKind;
 
 use crate::state::Daemon;
+use crate::store::Store;
 
 /// How a switched run's end reason begins: such a run is one to relaunch, as one whose process ended is.
 pub(crate) const SWITCHED: &str = "Switched to ";
@@ -54,7 +57,7 @@ pub(crate) async fn begin(daemon: &Arc<Daemon>, agent: &AgentKind) {
 /// The run `uid` at a point it may be idle: when it is marked, it moves if idle, or loses its mark if it is on the
 /// active account already.
 pub(crate) async fn at_idle(daemon: &Arc<Daemon>, uid: &str) {
-    if !daemon.db.switching(uid.to_string()).await.unwrap_or(false) {
+    if daemon.db.switch_state(uid.to_string()).await.ok().flatten() != Some(Store::SWITCH_WAITING) {
         return;
     }
     let Ok(Some(row)) = daemon.db.get_session(uid.to_string()).await else {
@@ -73,16 +76,53 @@ pub(crate) async fn at_idle(daemon: &Arc<Daemon>, uid: &str) {
         .flatten()
         .map(|account| account.id);
     if active == current {
-        if let Err(err) = daemon.db.clear_switching(uid.to_string()).await {
-            crate::log_error!("{uid}: could not clear its switch: {err:#}");
-        }
+        set(daemon, uid, None).await;
         return;
     }
     if !idle(daemon, uid, &row.agent).await {
         return;
     }
-    // The run's own link stops it as an End run would, the run left live; its end is filed as switched.
-    daemon.stop_through_link(uid).await;
+    // Ended by its switch from here: the end its process makes is filed as switched, any other end (a crash) as
+    // what it is. The run's own link stops it as an End run would, the run left live.
+    set(daemon, uid, Some(Store::SWITCH_MOVED)).await;
+    if !daemon.stop_through_link(uid).await {
+        set(daemon, uid, Some(Store::SWITCH_WAITING)).await;
+    }
+}
+
+/// The run `uid`'s switch now stands at `state`.
+pub(crate) async fn set(daemon: &Daemon, uid: &str, state: Option<i64>) {
+    if let Err(err) = daemon.db.set_switch_state(uid.to_string(), state).await {
+        crate::log_error!("{uid}: could not keep where its switch stands: {err:#}");
+    }
+}
+
+/// Whether the run `uid`'s newest end was its switch's, so its relaunch is the switch's: moved, or its start on the
+/// new account not gone through yet.
+pub(crate) async fn switched(daemon: &Daemon, uid: &str) -> bool {
+    matches!(
+        daemon.db.switch_state(uid.to_string()).await.ok().flatten(),
+        Some(Store::SWITCH_MOVED | Store::SWITCH_FAILED)
+    )
+}
+
+/// End run on the run `uid`, ended by its switch and not started again: its move is off, and its end is filed as
+/// an ordinary one (its process has ended), so it reads as the relaunchable end it is.
+pub(crate) async fn ended(daemon: &Arc<Daemon>, uid: &str) {
+    set(daemon, uid, None).await;
+    let Ok(id) = protocol::uid::uuid_v4() else {
+        return;
+    };
+    let end = protocol::event::PendingEvent::new(
+        &protocol::event::SessionKey::new(uid, uid),
+        protocol::event::EventKind::SessionEnd,
+        serde_json::json!({"exit_code": null, "reason": crate::claude_host::PROCESS_ENDED}),
+        protocol::event::Source::Daemon,
+    )
+    .with_source_event_id(format!("switch-end:{id}"));
+    if let Err(err) = daemon.ingest(end).await {
+        crate::log_error!("{uid}: could not file its end: {err:#}");
+    }
 }
 
 /// The relaunch by the next message of the run `uid`, marked switching, went live on the new account (`Ok`), or
@@ -90,32 +130,30 @@ pub(crate) async fn at_idle(daemon: &Arc<Daemon>, uid: &str) {
 pub(crate) async fn relaunched(daemon: &Arc<Daemon>, uid: &str, outcome: Result<(), String>) {
     let why = match outcome {
         Ok(()) => {
-            if let Err(err) = daemon.db.clear_switching(uid.to_string()).await {
-                crate::log_error!("{uid}: could not clear its switch: {err:#}");
-            }
+            set(daemon, uid, None).await;
             return;
         }
         Err(why) => why,
     };
-    if let Err(err) = daemon.db.fail_switching(uid.to_string()).await {
-        crate::log_error!("{uid}: could not mark its switch failed: {err:#}");
-    }
+    set(daemon, uid, Some(Store::SWITCH_FAILED)).await;
     let agent = match daemon.db.get_session(uid.to_string()).await {
         Ok(Some(row)) => row.agent,
         _ => return,
     };
-    let label = daemon
-        .store
-        .active_account(agent.as_str())
-        .ok()
-        .flatten()
-        .map_or_else(|| "Default".to_string(), |account| account.label);
+    let active = daemon.store.active_account(agent.as_str()).ok().flatten();
+    let label = active
+        .as_ref()
+        .map_or("Default", |account| account.label.as_str());
     let notice = protocol::event::PendingEvent::new(
         &protocol::event::SessionKey::new(uid, uid),
         protocol::event::EventKind::Notification,
         serde_json::json!({
             "notification_type": protocol::event::notice::SWITCH_FAILED,
             "message": format!("Couldn’t start on {label}: {why}"),
+            protocol::event::SWITCHED_TO: {
+                "account_id": active.as_ref().map(|account| account.id.clone()),
+                "label": label,
+            },
         }),
         protocol::event::Source::Daemon,
     );
@@ -230,6 +268,11 @@ pub(crate) mod window {
                 "never listed ended: {listing}"
             );
         }
+        keep(frames, name);
+    }
+
+    /// `frames` written to `fixtures/accounts/<name>` when `CC_RECORD_SWITCH` is set.
+    pub(crate) fn keep(frames: &[serde_json::Value], name: &str) {
         if std::env::var_os("CC_RECORD_SWITCH").is_some() {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../fixtures/accounts")

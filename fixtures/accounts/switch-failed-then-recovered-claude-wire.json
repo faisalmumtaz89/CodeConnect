@@ -1,0 +1,233 @@
+[
+  {
+    "event": {
+      "kind": "link_state",
+      "payload": {
+        "link": "attached",
+        "reason": "agent host linked"
+      },
+      "seq": 7,
+      "session_id": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+      "session_uid": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+      "source": "daemon",
+      "ts": "2026-11-22T18:46:43.598Z"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-22T18:46:42.969Z",
+        "cwd": "/tmp/cch2.ABJ277WB7Q",
+        "last_seq": 7,
+        "lifecycle": "live",
+        "link": "attached",
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 3,
+          "value": "default"
+        },
+        "project_label": "cch2.ABJ277WB7Q",
+        "session_id": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+        "session_uid": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+        "switching": "moved",
+        "updated_at": "2026-11-22T18:46:43.491Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  {
+    "event": {
+      "kind": "notification",
+      "payload": {
+        "message": "Couldn’t start on B: B is signed out",
+        "notification_type": "switch_failed",
+        "switched_to": {
+          "account_id": "01M8299ZGR8KZ0W4BPWDTRBQQD",
+          "label": "B"
+        }
+      },
+      "seq": 8,
+      "session_id": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+      "session_uid": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+      "source": "daemon",
+      "ts": "2026-11-22T18:46:43.599Z"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-22T18:46:42.969Z",
+        "cwd": "/tmp/cch2.ABJ277WB7Q",
+        "last_seq": 8,
+        "lifecycle": "exited",
+        "link": "attached",
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 3,
+          "value": "default"
+        },
+        "project_label": "cch2.ABJ277WB7Q",
+        "relaunchable": true,
+        "session_id": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+        "session_uid": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+        "switching": "failed",
+        "updated_at": "2026-11-22T18:46:43.599Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  {
+    "event": {
+      "kind": "link_state",
+      "payload": {
+        "link": "attached",
+        "reason": "agent host linked"
+      },
+      "seq": 9,
+      "session_id": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+      "session_uid": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+      "source": "daemon",
+      "ts": "2026-11-22T18:46:43.776Z"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-22T18:46:42.969Z",
+        "cwd": "/tmp/cch2.ABJ277WB7Q",
+        "last_seq": 9,
+        "lifecycle": "starting",
+        "link": "attached",
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 3,
+          "value": "default"
+        },
+        "project_label": "cch2.ABJ277WB7Q",
+        "session_id": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+        "session_uid": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+        "switching": "failed",
+        "updated_at": "2026-11-22T18:46:43.721Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  {
+    "event": {
+      "kind": "user_message",
+      "payload": {
+        "request_id": "r-again",
+        "text": "on B now?"
+      },
+      "seq": 10,
+      "session_id": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+      "session_uid": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+      "source": "daemon",
+      "source_event_id": "say:71cbc7ec-63de-8186-a5c3-70499a192ca6",
+      "ts": "2026-11-22T18:46:43.777Z"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-22T18:46:42.969Z",
+        "cwd": "/tmp/cch2.ABJ277WB7Q",
+        "last_seq": 10,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "Default (recommended)",
+              "resolved_model": "claude-opus-5-5",
+              "value": "default"
+            },
+            {
+              "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "Sonnet",
+              "resolved_model": "claude-sonnet-5-5",
+              "value": "sonnet"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Ask before edits",
+              "value": "default"
+            },
+            {
+              "label": "Accept edits",
+              "value": "acceptEdits"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Bypass permissions",
+              "value": "bypassPermissions"
+            }
+          ],
+          "selected_model": "default"
+        },
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 3,
+          "value": "default"
+        },
+        "project_label": "cch2.ABJ277WB7Q",
+        "session_id": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+        "session_uid": "01M8299ZGSRFFX29Z8KF3Q5Q2T",
+        "updated_at": "2026-11-22T18:46:43.777Z"
+      }
+    ],
+    "type": "sessions"
+  }
+]

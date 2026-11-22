@@ -10,11 +10,11 @@
         "status": "completed"
       },
       "seq": 3,
-      "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-      "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
+      "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+      "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
       "source": "codex",
       "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-e98c-7b63-b1c7-cde2b878973e",
-      "ts": "2026-11-22T18:01:28.670Z",
+      "ts": "2026-11-22T18:46:43.903Z",
       "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
     },
     "type": "event"
@@ -26,8 +26,8 @@
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
-        "created_at": "2026-11-22T18:01:27.798Z",
-        "cwd": "/tmp/ccx3.W2FVC0VAGP/project",
+        "created_at": "2026-11-22T18:46:43.031Z",
+        "cwd": "/tmp/ccx3.ABJ277WB7N/project",
         "effort": {
           "seq": 2,
           "value": "high"
@@ -73,10 +73,10 @@
           "value": "full-access"
         },
         "project_label": "project",
-        "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-        "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
+        "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+        "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
         "switching": "waiting",
-        "updated_at": "2026-11-22T18:01:28.062Z"
+        "updated_at": "2026-11-22T18:46:43.345Z"
       }
     ],
     "type": "sessions"
@@ -89,10 +89,10 @@
         "reason": "agent host disconnected"
       },
       "seq": 4,
-      "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-      "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
+      "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+      "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
       "source": "daemon",
-      "ts": "2026-11-22T18:01:28.696Z"
+      "ts": "2026-11-22T18:46:43.927Z"
     },
     "type": "event"
   },
@@ -103,8 +103,8 @@
         "blocked_on": [],
         "codex_link": "none",
         "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
-        "created_at": "2026-11-22T18:01:27.798Z",
-        "cwd": "/tmp/ccx3.W2FVC0VAGP/project",
+        "created_at": "2026-11-22T18:46:43.031Z",
+        "cwd": "/tmp/ccx3.ABJ277WB7N/project",
         "effort": {
           "seq": 2,
           "value": "high"
@@ -150,10 +150,10 @@
           "value": "full-access"
         },
         "project_label": "project",
-        "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-        "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
+        "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+        "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
         "switching": "waiting",
-        "updated_at": "2026-11-22T18:01:28.062Z"
+        "updated_at": "2026-11-22T18:46:43.345Z"
       }
     ],
     "type": "sessions"
@@ -165,16 +165,16 @@
         "exit_code": null,
         "reason": "Switched to B",
         "switched_to": {
-          "account_id": "01M826Q3Z8Y5SV4Y922T946G76",
+          "account_id": "01M8299ZGJDASDWQPG48FSTPC3",
           "label": "B"
         }
       },
       "seq": 5,
-      "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-      "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
+      "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+      "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
       "source": "daemon",
-      "source_event_id": "exit:01M826Q3ZPT6KZY5AJ9YZQJHF9:54638",
-      "ts": "2026-11-22T18:01:28.697Z"
+      "source_event_id": "exit:01M8299ZJQXMP43MZH8JY9VYMD:76166",
+      "ts": "2026-11-22T18:46:43.928Z"
     },
     "type": "event"
   },
@@ -185,8 +185,8 @@
         "blocked_on": [],
         "codex_link": "bound_not_started",
         "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
-        "created_at": "2026-11-22T18:01:27.798Z",
-        "cwd": "/tmp/ccx3.W2FVC0VAGP/project",
+        "created_at": "2026-11-22T18:46:43.031Z",
+        "cwd": "/tmp/ccx3.ABJ277WB7N/project",
         "effort": {
           "seq": 2,
           "value": "high"
@@ -203,10 +203,10 @@
           "value": "full-access"
         },
         "project_label": "project",
-        "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-        "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
+        "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+        "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
         "switching": "moved",
-        "updated_at": "2026-11-22T18:01:28.697Z"
+        "updated_at": "2026-11-22T18:46:43.928Z"
       }
     ],
     "type": "sessions"
@@ -218,11 +218,11 @@
         "source": "resume"
       },
       "seq": 6,
-      "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-      "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
+      "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+      "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
       "source": "daemon",
-      "source_event_id": "start:01M826Q3ZPT6KZY5AJ9YZQJHF9:54677",
-      "ts": "2026-11-22T18:01:29.213Z"
+      "source_event_id": "start:01M8299ZJQXMP43MZH8JY9VYMD:76262",
+      "ts": "2026-11-22T18:46:44.374Z"
     },
     "type": "event"
   },
@@ -233,8 +233,8 @@
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
-        "created_at": "2026-11-22T18:01:27.798Z",
-        "cwd": "/tmp/ccx3.W2FVC0VAGP/project",
+        "created_at": "2026-11-22T18:46:43.031Z",
+        "cwd": "/tmp/ccx3.ABJ277WB7N/project",
         "last_seq": 7,
         "lifecycle": "live",
         "link": "attached",
@@ -276,9 +276,9 @@
           "value": "full-access"
         },
         "project_label": "project",
-        "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-        "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-        "updated_at": "2026-11-22T18:01:29.210Z"
+        "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+        "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
+        "updated_at": "2026-11-22T18:46:44.374Z"
       }
     ],
     "type": "sessions"
@@ -291,10 +291,10 @@
         "reason": "agent host linked"
       },
       "seq": 7,
-      "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-      "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
+      "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+      "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
       "source": "daemon",
-      "ts": "2026-11-22T18:01:29.216Z"
+      "ts": "2026-11-22T18:46:44.374Z"
     },
     "type": "event"
   },
@@ -305,9 +305,9 @@
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
-        "created_at": "2026-11-22T18:01:27.798Z",
-        "cwd": "/tmp/ccx3.W2FVC0VAGP/project",
-        "last_seq": 8,
+        "created_at": "2026-11-22T18:46:43.031Z",
+        "cwd": "/tmp/ccx3.ABJ277WB7N/project",
+        "last_seq": 7,
         "lifecycle": "live",
         "link": "attached",
         "menus": {
@@ -348,9 +348,9 @@
           "value": "full-access"
         },
         "project_label": "project",
-        "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-        "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-        "updated_at": "2026-11-22T18:01:29.210Z"
+        "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+        "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
+        "updated_at": "2026-11-22T18:46:44.374Z"
       }
     ],
     "type": "sessions"
@@ -363,11 +363,11 @@
         "text": "on B now?"
       },
       "seq": 8,
-      "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-      "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
+      "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+      "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
       "source": "daemon",
-      "source_event_id": "say:f7e1995f-f24e-8667-9cb4-d6fbeed4d791",
-      "ts": "2026-11-22T18:01:29.267Z",
+      "source_event_id": "say:5b410ca6-33e3-84d0-8dae-ad6ee8802401",
+      "ts": "2026-11-22T18:46:44.376Z",
       "turn_id": "turn-on-b"
     },
     "type": "event"
@@ -379,8 +379,8 @@
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "01a1777e-e972-76c2-935f-10e66361111d",
-        "created_at": "2026-11-22T18:01:27.798Z",
-        "cwd": "/tmp/ccx3.W2FVC0VAGP/project",
+        "created_at": "2026-11-22T18:46:43.031Z",
+        "cwd": "/tmp/ccx3.ABJ277WB7N/project",
         "last_seq": 8,
         "lifecycle": "live",
         "link": "attached",
@@ -422,9 +422,9 @@
           "value": "full-access"
         },
         "project_label": "project",
-        "session_id": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-        "session_uid": "01M826Q3ZPT6KZY5AJ9YZQJHF9",
-        "updated_at": "2026-11-22T18:01:29.210Z"
+        "session_id": "01M8299ZJQXMP43MZH8JY9VYMD",
+        "session_uid": "01M8299ZJQXMP43MZH8JY9VYMD",
+        "updated_at": "2026-11-22T18:46:44.374Z"
       }
     ],
     "type": "sessions"

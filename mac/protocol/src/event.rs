@@ -113,8 +113,8 @@ pub mod notice {
     /// A Stop cancelled the person's message `request_id` before claude ran it
     /// (`reason: "stopped"`): it was never sent to the model.
     pub const SEND_NOT_SENT: &str = "send_not_sent";
-    /// A run moving to another account could not start there (`{message}`, minor 47): it is ended and
-    /// relaunchable ([`super::Switching::Failed`]).
+    /// A run moving to another account could not start there (`{message}`, and the account typed as on the
+    /// switch's end, [`super::SWITCHED_TO`], minor 47): it is ended and relaunchable ([`super::Switching::Failed`]).
     pub const SWITCH_FAILED: &str = "switch_failed";
 }
 

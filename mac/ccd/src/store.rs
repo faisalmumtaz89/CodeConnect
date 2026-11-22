@@ -3025,6 +3025,12 @@ impl Store {
         Ok(removed)
     }
 
+    /// A switch's states ([`Store::switch_state`]): waiting for the run's idle point; ended there by the switch, its
+    /// next message to start it on the new account; that start not gone through.
+    pub const SWITCH_WAITING: i64 = 1;
+    pub const SWITCH_FAILED: i64 = 2;
+    pub const SWITCH_MOVED: i64 = 3;
+
     /// Marks every live run of `agent` as switching to its agent's active account; the uids marked.
     pub fn mark_switching(&self, agent: &str) -> Result<Vec<String>> {
         let conn = self.write();
@@ -3044,48 +3050,40 @@ impl Store {
         Ok(uids)
     }
 
-    /// Whether the run `session_uid` is marked switching.
-    pub fn switching(&self, session_uid: &str) -> Result<bool> {
+    /// Where the run `session_uid`'s switch of account stands: [`Store::SWITCH_WAITING`],
+    /// [`Store::SWITCH_MOVED`], [`Store::SWITCH_FAILED`], or `None`.
+    pub fn switch_state(&self, session_uid: &str) -> Result<Option<i64>> {
         Ok(self
             .read()
             .query_row(
-                "SELECT 1 FROM run_hosts WHERE session_uid = ?1 AND switching = 1",
+                "SELECT switching FROM run_hosts WHERE session_uid = ?1",
                 params![session_uid],
-                |_| Ok(()),
+                |row| row.get::<_, Option<i64>>(0),
             )
             .optional()?
-            .is_some())
+            .flatten())
     }
 
-    /// Every run whose switch is going (`1`) or could not complete (`2`), with which.
+    /// The run `session_uid`'s switch now stands at `state` (`None`: it has none).
+    pub fn set_switch_state(&self, session_uid: &str, state: Option<i64>) -> Result<()> {
+        self.write().execute(
+            "UPDATE run_hosts SET switching = ?2 WHERE session_uid = ?1",
+            params![session_uid, state],
+        )?;
+        Ok(())
+    }
+
+    /// Every run with a switch of account, and where it stands.
     pub fn switching_runs(&self) -> Result<Vec<(String, i64)>> {
         let conn = self.read();
-        let mut stmt =
-            conn.prepare("SELECT session_uid, switching FROM run_hosts WHERE switching IN (1, 2)")?;
+        let mut stmt = conn
+            .prepare("SELECT session_uid, switching FROM run_hosts WHERE switching IS NOT NULL")?;
         let runs = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(runs)
-    }
-
-    /// The run `session_uid`'s switch could not complete: it is marked for the person's attention (`2`).
-    pub fn fail_switching(&self, session_uid: &str) -> Result<()> {
-        self.write().execute(
-            "UPDATE run_hosts SET switching = 2 WHERE session_uid = ?1",
-            params![session_uid],
-        )?;
-        Ok(())
-    }
-
-    /// The run `session_uid` is on its account now: its switching mark goes.
-    pub fn clear_switching(&self, session_uid: &str) -> Result<()> {
-        self.write().execute(
-            "UPDATE run_hosts SET switching = NULL WHERE session_uid = ?1",
-            params![session_uid],
-        )?;
-        Ok(())
     }
 
     /// Whether a run still going (starting, live or stopping) records the account `id`.
