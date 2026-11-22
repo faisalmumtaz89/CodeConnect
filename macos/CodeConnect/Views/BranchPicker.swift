@@ -273,7 +273,9 @@ struct BranchMenu: View {
         -> some View
     {
         item(index: index, id: "start.branch.\(title)", name: title, checked: place == choice, choose: { choose(choice) }) {
-            Text(verbatim: title).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1).fixedSize()
+            // Cut in the middle when the menu is narrower than the name, where a branch's prefix and its end both show.
+            Text(verbatim: title).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1)
+                .truncationMode(.middle).layoutPriority(1)
             if let detail { ModelDetail(text: detail) }
         }
         .disabled(disabled)
