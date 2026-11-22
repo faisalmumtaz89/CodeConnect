@@ -6778,6 +6778,18 @@ mod tests {
         let unchanged = ask(&mut phone, list("a5"), "a5").await;
         assert_eq!(unchanged["active"], chosen["active"], "{unchanged}");
 
+        // One label per agent: the same label again is the account it made, not a twin; a name is 1 to 64 characters.
+        let again = ask(&mut phone, add("a7", AgentKind::Codex, "  Work "), "a7").await;
+        assert_eq!(again["accounts"], added["accounts"], "{again}");
+        for label in ["   ", &"x".repeat(65)] {
+            let refused = ask(&mut phone, add("a8", AgentKind::Codex, label), "a8").await;
+            assert_eq!(refused["code"], "bad_request", "{refused}");
+        }
+        // An agent with no accounts here is refused, Default included.
+        let other = AgentKind::from_str_lossy("gemini");
+        let refused = ask(&mut phone, activate("a9", other, None), "a9").await;
+        assert_eq!(refused["code"], "bad_request", "{refused}");
+
         let default = ask(&mut phone, activate("a6", AgentKind::Codex, None), "a6").await;
         assert_eq!(default["active"], serde_json::json!([]), "{default}");
         assert_eq!(

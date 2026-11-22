@@ -9,6 +9,15 @@
 //! The variable is set at exec, after the login shell's start-up files ([`AccountEnv::argv`]), so nothing those files
 //! export can move a start off its account; `/usr/bin/env` execs the agent in its place, so the process ccd spawned
 //! keeps its pid throughout.
+//!
+//! A named Claude Code account also drops the environment's credentials that outrank a stored login, so the account's
+//! own sign-in is what pays. Claude Code's order (code.claude.com/docs/en/authentication, "Authentication precedence"):
+//! a cloud provider (`CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`), `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`,
+//! `apiKeyHelper`, `CLAUDE_CODE_OAUTH_TOKEN`, a named profile (`ANTHROPIC_PROFILE`) or federation variables
+//! (`ANTHROPIC_FEDERATION_RULE_ID` with `ANTHROPIC_ORGANIZATION_ID`; unsetting either stops them), then the stored
+//! login. `apiKeyHelper` and an active `oidc_federation` profile are settings and files, not the environment, and stay
+//! the person's. Codex's documentation (learn.chatgpt.com/docs/auth) names no environment credential that outranks its
+//! home's login, so a Codex account drops nothing.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -26,11 +35,32 @@ fn variable(agent: &str) -> Option<&'static str> {
     }
 }
 
+/// The environment's credentials that outrank `agent`'s stored login (see the module's note).
+fn outranking(agent: &str) -> &'static [&'static str] {
+    match agent {
+        "claude" => &[
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_PROFILE",
+            "ANTHROPIC_FEDERATION_RULE_ID",
+        ],
+        _ => &[],
+    }
+}
+
+/// The longest label kept, in characters.
+const LABEL_MAX: usize = 64;
+
 /// An account's folder, as a start on it is given it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AccountEnv {
     id: String,
     variable: &'static str,
+    outranking: &'static [&'static str],
     folder: PathBuf,
 }
 
@@ -52,6 +82,7 @@ impl AccountEnv {
         Ok(Some(AccountEnv {
             id: account.id.clone(),
             variable,
+            outranking: outranking(&account.agent),
             folder,
         }))
     }
@@ -73,13 +104,18 @@ impl AccountEnv {
         &self.id
     }
 
-    /// The argv a launch runs its agent behind: `/usr/bin/env NAME=<folder>`, run by the login shell's `exec` after
-    /// its start-up files.
-    pub(crate) fn argv(&self) -> [OsString; 2] {
+    /// The argv a launch runs its agent behind: `/usr/bin/env -u <outranking>… NAME=<folder>`, run by the login
+    /// shell's `exec` after its start-up files.
+    pub(crate) fn argv(&self) -> Vec<OsString> {
         let mut setting = OsString::from(self.variable);
         setting.push("=");
         setting.push(&self.folder);
-        [OsString::from("/usr/bin/env"), setting]
+        let mut argv = vec![OsString::from("/usr/bin/env")];
+        for name in self.outranking {
+            argv.extend([OsString::from("-u"), OsString::from(name)]);
+        }
+        argv.push(setting);
+        argv
     }
 }
 
@@ -100,10 +136,17 @@ pub(crate) fn answer(
             if variable(agent.as_str()).is_none() {
                 return refused(format!("{} has no accounts here", agent.as_str()));
             }
-            if let Err(err) = store.add_account(agent.as_str(), label.trim()) {
+            let label = label.trim();
+            if label.is_empty() || label.chars().count() > LABEL_MAX {
+                return refused(format!("an account's name is 1 to {LABEL_MAX} characters"));
+            }
+            if let Err(err) = store.add_account(agent.as_str(), label) {
                 return unavailable("keep the account", err);
             }
             request_id
+        }
+        ClientMessage::ActivateAccount { agent, .. } if variable(agent.as_str()).is_none() => {
+            return refused(format!("{} has no accounts here", agent.as_str()));
         }
         ClientMessage::ActivateAccount {
             request_id,

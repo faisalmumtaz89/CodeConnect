@@ -3037,10 +3037,10 @@ mod tests {
             ClientMessage::ActivateAccount {
                 request_id: "a3".into(),
                 agent: crate::agent::AgentKind::Claude,
-                account_id: Some("01K1ACCOUNT0000000000000000".into()),
+                account_id: Some("01M80QGTWR9RCHBSJWR169GXCN".into()),
             },
             serde_json::json!({"type": "activate_account", "request_id": "a3", "agent": "claude",
-                "account_id": "01K1ACCOUNT0000000000000000"}),
+                "account_id": "01M80QGTWR9RCHBSJWR169GXCN"}),
         );
         round_trip_client(
             ClientMessage::ActivateAccount {
@@ -3064,21 +3064,23 @@ mod tests {
             }
         ));
 
+        // An id ccd made (a store's `add_account` in a test run), as every account id is.
+        assert!(crate::uid::is_well_formed("01M80QGTWR9RCHBSJWR169GXCN"));
         let reply = ServerMessage::Accounts {
             request_id: "a2".into(),
             accounts: vec![AgentAccount {
-                id: "01K1ACCOUNT0000000000000000".into(),
+                id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
                 agent: crate::agent::AgentKind::Codex,
                 label: "Work".into(),
             }],
             active: vec![ActiveAccount {
                 agent: crate::agent::AgentKind::Codex,
-                account_id: "01K1ACCOUNT0000000000000000".into(),
+                account_id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
             }],
         };
         let expected = serde_json::json!({"type": "accounts", "request_id": "a2",
-            "accounts": [{"id": "01K1ACCOUNT0000000000000000", "agent": "codex", "label": "Work"}],
-            "active": [{"agent": "codex", "account_id": "01K1ACCOUNT0000000000000000"}]});
+            "accounts": [{"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work"}],
+            "active": [{"agent": "codex", "account_id": "01M80QGTWR9RCHBSJWR169GXCN"}]});
         assert_eq!(serde_json::to_value(&reply).unwrap(), expected);
         let decoded: ServerMessage = serde_json::from_value(expected.clone()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), expected);

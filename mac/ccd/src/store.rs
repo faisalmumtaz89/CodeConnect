@@ -2898,12 +2898,24 @@ impl Store {
     /// A new account for `agent` (`claude` or `codex`), labelled `label`, with an id of ccd's own making: the only
     /// name its folder is given. Not yet the active one.
     pub fn add_account(&self, agent: &str, label: &str) -> Result<Account> {
+        let conn = self.write();
+        // One label per agent: the same label again (a retry after a lost reply) is the account it made.
+        if let Some(account) = conn
+            .query_row(
+                "SELECT id, agent, label FROM accounts WHERE agent = ?1 AND label = ?2",
+                params![agent, label],
+                account_from,
+            )
+            .optional()?
+        {
+            return Ok(account);
+        }
         let account = Account {
             id: protocol::uid::new()?,
             agent: agent.to_owned(),
             label: label.to_owned(),
         };
-        self.write().execute(
+        conn.execute(
             "INSERT INTO accounts(id, agent, label, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![
                 account.id,

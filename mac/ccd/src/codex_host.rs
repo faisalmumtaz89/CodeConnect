@@ -8051,7 +8051,10 @@ mod tests {
         let on_a = crate::accounts::AccountEnv::for_account(&rig.root, &a)
             .unwrap()
             .unwrap();
-        let home_of_a = on_a.argv()[1]
+        let home_of_a = on_a
+            .argv()
+            .last()
+            .unwrap()
             .to_str()
             .unwrap()
             .split_once('=')

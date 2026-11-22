@@ -4205,7 +4205,8 @@ mod tests {
     /// **An account's folder is what a launch sees, whatever the login shell exports** (N4 G3). The person's own
     /// start-up file exports a conflicting `CODEX_HOME` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`: a launch on an account
     /// sees the account's folder; a launch on Default sees the file's own value, untouched. The red half: the same
-    /// variable set in the environment handed to the shell, as a naive launch would, is overwritten by that file.
+    /// variable set in the environment handed to the shell, as a naive launch would, is overwritten by that file. The
+    /// file also exports an API key, which outranks a stored login: a Claude Code account never sees it, Default does.
     #[tokio::test]
     async fn an_accounts_folder_wins_over_the_login_shells_own_export() {
         let root = std::env::temp_dir().join(format!(
@@ -4216,7 +4217,8 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
             home.join(".profile"),
-            "export CODEX_HOME=/conflict/codex\nexport CLAUDE_SECURESTORAGE_CONFIG_DIR=/conflict/claude\n",
+            "export CODEX_HOME=/conflict/codex\nexport CLAUDE_SECURESTORAGE_CONFIG_DIR=/conflict/claude\n\
+             export ANTHROPIC_API_KEY=sk-from-profile\n",
         )
         .unwrap();
         let env = environment(&[
@@ -4233,7 +4235,8 @@ mod tests {
                     OsStr::new("/bin/sh"),
                     OsStr::new("-c"),
                     OsStr::new(
-                        "printf '%s %s\\n' \"$CODEX_HOME\" \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\"",
+                        "printf '%s %s %s\\n' \"$CODEX_HOME\" \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" \
+                         \"${ANTHROPIC_API_KEY-unset}\"",
                     ),
                 ],
             );
@@ -4257,7 +4260,9 @@ mod tests {
             .unwrap()
             .unwrap();
         let folder = |env: &crate::accounts::AccountEnv| {
-            env.argv()[1]
+            env.argv()
+                .last()
+                .unwrap()
                 .to_str()
                 .unwrap()
                 .split_once('=')
@@ -4268,23 +4273,26 @@ mod tests {
 
         assert_eq!(
             said(env.clone(), None).await,
-            "/conflict/codex /conflict/claude",
-            "Default is the person's own"
+            "/conflict/codex /conflict/claude sk-from-profile",
+            "Default is the person's own, its key included"
         );
         assert_eq!(
             said(env.clone(), Some(codex.clone())).await,
-            format!("{} /conflict/claude", folder(&codex)),
+            format!("{} /conflict/claude sk-from-profile", folder(&codex)),
             "Codex's account wins over the file, and nothing else moves"
         );
         assert_eq!(
             said(env.clone(), Some(claude.clone())).await,
-            format!("/conflict/codex {}", folder(&claude)),
-            "Claude Code's account wins over the file"
+            format!("/conflict/codex {} unset", folder(&claude)),
+            "Claude Code's account wins over the file, and the key that would outrank it is gone"
         );
         // Red: set before the shell, the file's export wins and the start would leave its account.
         let mut naive = env.clone();
         naive.insert(OsString::from("CODEX_HOME"), OsString::from(folder(&codex)));
-        assert_eq!(said(naive, None).await, "/conflict/codex /conflict/claude");
+        assert_eq!(
+            said(naive, None).await,
+            "/conflict/codex /conflict/claude sk-from-profile"
+        );
         assert_eq!(
             protocol::fsperm::mode_of(Path::new(&folder(&codex))).unwrap() & 0o777,
             0o700,
