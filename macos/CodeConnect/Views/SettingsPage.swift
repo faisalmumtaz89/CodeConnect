@@ -446,34 +446,80 @@ private struct AccountSettings: View {
     }
 }
 
-/// One agent's accounts on this Mac: its Default, then the accounts added, oldest first; a check on the one its new
-/// runs use and Use on the others; Add Account… under them, a name for it in an ask.
+/// One agent's accounts on this Mac, as design A draws them (decision 307): its Default, then the accounts added,
+/// each by the email its agent signs in as and its plan beneath; the share used of each window the agent names, in
+/// columns captioned on the group's title line; the row in use filled, with a check at its leading edge; a click on
+/// another uses it. "…" on hover (and a right-click) holds Sign In Again… on a signed-out row and Remove… on an added
+/// one. "Add account…" is the group's quiet last row. Under the group, a switch in progress in words.
 private struct AgentAccounts: View {
     let model: AppModel
     let agent: StartAgent
     @State private var naming = false
     @State private var name = ""
+    @State private var removing: AgentAccount?
+
+    /// The windows the agent names across its accounts, in the order it names them: the group's columns.
+    private func columns(_ book: AccountBook) -> [Int] {
+        let all = ([book.defaultFacts(for: agent)] + book.accounts(for: agent).map(\.facts)).compactMap { $0 }
+        var seen: [Int] = []
+        for window in all.flatMap(\.windows) where !seen.contains(window.windowMinutes) { seen.append(window.windowMinutes) }
+        return seen
+    }
 
     var body: some View {
         let book = model.accountBook
         let active = book?.activeID(for: agent)
+        let columns = book.map(columns) ?? []
         VStack(alignment: .leading, spacing: 8) {
-            SettingsGroup(title: agent.displayName) {
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                Text(agent.displayName).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
+                Spacer()
+                ForEach(columns, id: \.self) { minutes in
+                    Text("\(ReplyStrip.caption(minutes: minutes)) used").font(Theme.ui(10.5)).foregroundStyle(Theme.text3)
+                        .frame(minWidth: AccountRow.column, alignment: .trailing)
+                }
+                Color.clear.frame(width: AccountRow.trailing, height: 1)
+            }
+            .padding(.leading, 4)
+            VStack(spacing: 0) {
                 if let book {
-                    row(nil, title: "Default", line: "\(agent.displayName) as it is set up on this Mac.", active: active == nil)
+                    AccountRow(
+                        model: model, agent: agent, id: nil, facts: book.defaultFacts(for: agent), label: "Default",
+                        signedOut: false, signingIn: false, note: nil, columns: columns, inUse: active == nil,
+                        remove: nil)
                     ForEach(book.accounts(for: agent)) { account in
-                        row(account.id, title: account.label, line: nil, active: active == account.id)
+                        AccountRow(
+                            model: model, agent: agent, id: account.id, facts: account.facts, label: account.label,
+                            signedOut: account.signedIn == false && !account.notSeparate, signingIn: account.signingIn,
+                            note: note(account, in: book), columns: columns, inUse: active == account.id,
+                            remove: { removing = account })
                     }
+                    Button { name = ""; naming = true } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "plus").font(.system(size: 11, weight: .medium)).frame(width: AccountRow.lead)
+                            Text("Add account…").font(Theme.ui(13))
+                            Spacer()
+                        }
+                        .foregroundStyle(Theme.text3)
+                        .padding(.horizontal, 10).padding(.vertical, 9)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.accountsBusy)
+                    .accessibilityIdentifier("settings.accounts.\(agent.rawValue).add")
                 } else {
                     // Not yet answered: no account is shown as in use before the computer says which.
-                    SettingsRow(title: "Asking this Mac…", line: nil) { EmptyView() }
+                    Text("Asking this Mac…").font(Theme.ui(13)).foregroundStyle(Theme.text3)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 9)
                 }
             }
-            ActionButton(title: "Add Account…", key: nil, prominent: false, id: "settings.accounts.\(agent.rawValue).add") {
-                name = ""
-                naming = true
+            .padding(6)
+            .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.hairline))
+            if let move = switchInProgress {
+                if let sentence = move.sentence { line(sentence, Theme.text3, id: "switching") }
+                if let failure = move.failure { line(failure, Theme.amber, id: "switchFailed") }
             }
-            .disabled(model.accountsBusy || book == nil)
         }
         .confirmation(Binding(get: { naming ? true : nil }, set: { naming = $0 ?? false })) { _ in
             Confirmation(
@@ -488,37 +534,159 @@ private struct AgentAccounts: View {
                 ],
                 field: .init(placeholder: "Name", text: $name))
         }
+        .confirmation(Binding(get: { removing }, set: { removing = $0 })) { account in
+            Confirmation(
+                title: "Remove \(account.facts?.email ?? account.label)?",
+                message: "\(agent.displayName) signs it out of this Mac. New runs use another account.",
+                answers: [
+                    .init(title: "Cancel", kind: .cancel, id: "settings.accounts.remove.cancel"),
+                    .init(title: "Remove", kind: .destructive, id: "settings.accounts.remove.confirm") {
+                        Task { await model.removeAccount(accountID: account.id) }
+                    },
+                ])
+        }
     }
 
-    /// A row: the account's name and, for the one in use, whether the agent is signed in, as the agents' own answer
-    /// says it; a check on it, Use on the others.
-    private func row(_ id: String?, title: String, line: String?, active: Bool) -> some View {
-        let rowID = "settings.accounts.\(agent.rawValue).\(id ?? "default")"
-        let status = model.starter.agents.first { $0.agent == agent }
-        let installed = model.starter.availableAgents.contains(agent)
-        return SettingsRow(title: title, line: line) {
-            if active {
-                HStack(spacing: 12) {
-                    if let status {
-                        SettingsState(
-                            words: AccountWords.state(status, installed: installed),
-                            good: installed && status.signedIn == true)
+    /// The switch in progress, as the sessions' own summaries say it.
+    private var switchInProgress: AccountSwitch? {
+        #if DEBUG
+            if let fixture = AccountSwitch.fixture { return fixture }
+        #endif
+        return model.accountSwitch(for: agent)
+    }
+
+    /// A row's quiet second line when the account isn't a sign-in of its own.
+    private func note(_ account: AgentAccount, in book: AccountBook) -> String? {
+        if account.notSeparate { return AccountSwitchWords.notSeparate }
+        guard account.sameAsAnother, let email = account.facts?.email else { return nil }
+        return AccountSwitchWords.sameSignIn(as: email)
+    }
+
+    private func line(_ text: String, _ color: Color, id: String) -> some View {
+        Text(text).font(Theme.ui(11.5)).foregroundStyle(color).fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 4)
+            .accessibilityIdentifier("settings.accounts.\(agent.rawValue).\(id)")
+    }
+}
+
+/// One account's row, the whole of it the choice: the email (else its name) and its plan, "Signed out" in amber, or
+/// its quiet note beneath; its figures under the group's columns, right-aligned, an empty cell where it names no such
+/// window. In use: the Settings selection fill and a leading check; a sign-in waiting on the browser: a spinner there.
+/// Under the pointer: the lighter hover fill, the pointing hand, and a "…" at the trailing edge.
+private struct AccountRow: View {
+    let model: AppModel
+    let agent: StartAgent
+    let id: String?
+    let facts: AccountFacts?
+    let label: String
+    let signedOut: Bool
+    let signingIn: Bool
+    let note: String?
+    let columns: [Int]
+    let inUse: Bool
+    let remove: (() -> Void)?
+    @State private var hovered = false
+
+    static let lead: CGFloat = 16
+    static let column: CGFloat = 76
+    /// The "…"'s slot and its gap, kept on every row so nothing moves.
+    static let trailing: CGFloat = 6 + 10 + 30
+
+    private var rowID: String { "settings.accounts.\(agent.rawValue).\(id ?? "default")" }
+
+    var body: some View {
+        Button {
+            guard !inUse else { return }
+            Task { await model.activateAccount(agent: agent, accountID: id) }
+        } label: {
+            HStack(spacing: 8) {
+                HStack(spacing: 10) {
+                    ZStack {
+                        Color.clear
+                        if signingIn {
+                            ProgressView().controlSize(.mini)
+                        } else if inUse {
+                            Image(systemName: "checkmark").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text)
+                                .accessibilityLabel("In use")
+                                .accessibilityIdentifier("\(rowID).inUse")
+                        }
                     }
-                    Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.text)
-                        .accessibilityLabel("In use for new runs")
-                        .accessibilityIdentifier("\(rowID).inUse")
+                    .frame(width: Self.lead, height: 16)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(facts?.email ?? label).font(Theme.ui(13)).foregroundStyle(Theme.text)
+                            .lineLimit(1).truncationMode(.middle)
+                        Text(secondLine).font(Theme.ui(11.5)).foregroundStyle(signedOut ? Theme.amber : Theme.text3)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 12)
+                    HStack(spacing: 0) {
+                        ForEach(columns, id: \.self) { minutes in
+                            let used = facts?.windows.first { $0.windowMinutes == minutes }?.usedPercent
+                            Text(used.map { "\($0)%" } ?? "").font(Theme.ui(13)).monospacedDigit()
+                                .foregroundStyle((used ?? 0) >= 90 ? Theme.amber : Theme.text2)
+                                .frame(minWidth: Self.column, alignment: .trailing)
+                        }
+                    }
                 }
-            } else {
-                ActionButton(title: "Use", key: nil, prominent: false, id: "\(rowID).use") {
-                    Task { await model.activateAccount(agent: agent, accountID: id) }
-                }
-                .disabled(model.accountsBusy)
+                menuButton.opacity(hovered ? 1 : 0)
             }
+            .padding(.horizontal, 10).padding(.vertical, 9)
+            .background(
+                inUse ? Theme.selected : hovered ? Color.white.opacity(Theme.hoverLift) : .clear,
+                in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .disabled(model.accountsBusy)
+        .onHover { inside in
+            hovered = inside
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .contextMenu { menuItems }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(rowID)
     }
+
+    /// The plan in the agent's own word, capitalized; "Signed out"; or the row's note; "As set up on this Mac" for a
+    /// Default whose agent hasn't said.
+    private var secondLine: String {
+        if signedOut { return "Signed out" }
+        if let note { return note }
+        if signingIn { return "Signing in in the browser…" }
+        if let plan = facts?.plan { return plan.prefix(1).uppercased() + plan.dropFirst() }
+        return id == nil ? "As set up on this Mac" : ""
+    }
+
+    @ViewBuilder private var menuItems: some View {
+        if signedOut, let id {
+            Button("Sign In Again…") { Task { await model.signInAccount(accountID: id) } }
+        }
+        if let remove { Button("Remove…", role: .destructive, action: remove) }
+    }
+
+    private var menuButton: some View {
+        Menu { menuItems } label: {
+            Image(systemName: "ellipsis").font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.text3)
+                .frame(width: 22, height: 18)
+        }
+        .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+        .accessibilityLabel("More")
+        .accessibilityIdentifier("\(rowID).more")
+    }
 }
+
+#if DEBUG
+    extension AccountSwitch {
+        /// `-CC_ACCOUNTS_SWITCH <target>,<waiting>,<moved>[,<failed session>…]`: a render's page as a switch toward
+        /// `target` stands.
+        static var fixture: AccountSwitch? {
+            guard let raw = UserDefaults.standard.string(forKey: "CC_ACCOUNTS_SWITCH") else { return nil }
+            let parts = raw.split(separator: ",").map(String.init)
+            guard parts.count >= 3, let waiting = Int(parts[1]), let moved = Int(parts[2]) else { return nil }
+            return AccountSwitch(target: parts[0], waiting: waiting, moved: moved, failed: Array(parts.dropFirst(3)))
+        }
+    }
+#endif
 
 /// An agent's sign-in, from the fields that mean it: installed or not, then signed in, signed out, or not said (an
 /// older service, or an agent it couldn't ask).

@@ -186,6 +186,13 @@ public struct AccountSwitch: Equatable, Sendable {
     public let moved: Int
     public let failed: [String]
 
+    public init(target: String, waiting: Int, moved: Int, failed: [String]) {
+        self.target = target
+        self.waiting = waiting
+        self.moved = moved
+        self.failed = failed
+    }
+
     public var sentence: String? { AccountSwitchWords.sentence(to: target, waiting: waiting, moved: moved) }
     public var failure: String? { AccountSwitchWords.failure(to: target, sessions: failed) }
 }
