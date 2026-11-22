@@ -3,6 +3,18 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.13, with the iPhone app 1.1.30
+
+- On the Mac and the iPhone, when you have not chosen an effort, the reply row and the settings name the model's own
+  default effort, such as "Medium" or "Low", and the settings mark it as the default. Choosing it makes it yours.
+  Claude Code's default is the one its documentation gives for the current models; Codex's is the one Codex names.
+- On the Mac, an ended conversation that cannot be continued names the effort it ended with beside its model in its
+  header.
+- On the iPhone, an ended conversation that cannot be continued names its model and effort above the line that says
+  it has ended.
+- On the iPhone, a conversation the phone is still catching up on says "Catching up with" the computer, instead of
+  "Not on your computer’s list".
+
 ## CodeConnect 0.19.12, with the iPhone app 1.1.29
 
 - On the Mac, the start form's model and branch menus stay inside the form at small window sizes, the model menu
