@@ -496,7 +496,7 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menus: Option<RunMenus>,
     /// The name the apps give `model` on a Claude run CodeConnect started that is sent no
-    /// `menus` (minor 46: it has ended), by the rule they name a live run's model by: the label
+    /// `menus` (minor 46: it is not live), by the rule they name a live run's model by: the label
     /// of its start's entry whose value the model is, else of the entry, the default one aside,
     /// that runs it. Omitted for any other run and for a model no entry names.
     #[serde(default, skip_serializing_if = "Option::is_none")]

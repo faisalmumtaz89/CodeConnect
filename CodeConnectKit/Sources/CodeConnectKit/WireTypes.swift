@@ -611,7 +611,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// controls are drawn at all.
     public let menus: RunMenus?
     /// The menu's name for the run's model (minor 46), sent for a Claude run CodeConnect started that is sent
-    /// no `menus` (it has ended): the label of the entry the run's model is, by the rule `RunSettings.modelName`
+    /// no `menus` (it is not live): the label of the entry the run's model is, by the rule `RunSettings.modelName`
     /// names a live run's by. `nil` for any other run, for a model no entry runs, and from an older daemon.
     public let modelLabel: String?
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn

@@ -849,9 +849,10 @@ pub const PROTOCOL_MISMATCH: &str =
 ///   * `46` — **An ended run names its model as its menu did.**
 ///
 ///     No message changes shape. A [`event::SessionSummary`] of a Claude run CodeConnect started that is
-///     sent no `menus` (it has ended) may carry `model_label`, the label of the start's entry for its
-///     model, by the rule the apps name a live run's model by, so an ended run reads "Opus", not
-///     `claude-opus-5-5`. A daemon below 46 sends none, and an app shows the model as reported.
+///     sent no `menus` (it is not live: stopping or ended) may carry `model_label`, the label of the
+///     start's entry for its model, by the rule the apps name a live run's model by, so an ended run
+///     reads "Opus", not `claude-opus-5-5`. A daemon below 46 sends none, and an app shows the model as
+///     reported.
 pub const PROTOCOL_MINOR: u32 = 46;
 
 #[cfg(test)]

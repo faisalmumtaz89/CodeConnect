@@ -86,7 +86,7 @@ public enum RunSettings: Sendable, Hashable {
     /// Codex run's), else of the entry that runs it (its `resolvedModel`, the id a Claude run reports). The Default
     /// entry is never the one: its label names no model, so a run on the default model reads by the entry of the
     /// model it runs. Claude's receipt of a change is no id: it reads by the entry the daemon says is chosen, by the
-    /// model that entry runs, and by its own label when the agent gives it no id. A run sent no menus (it has ended)
+    /// model that entry runs, and by its own label when the agent gives it no id. A run sent no menus (not live)
     /// reads by the label the daemon names its model by (`label`, minor 46). A model no entry names reads as the
     /// agent reported it.
     public static func modelName(confirmed: String, menus: RunMenus?, label: String? = nil) -> RunModelName {
