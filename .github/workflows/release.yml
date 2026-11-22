@@ -72,10 +72,12 @@ jobs:
   pin:
     name: Pin the release commit
     runs-on: ubuntu-latest
-    # Reading CI's runs needs actions: read; this job writes nothing.
+    # Reading CI's runs needs actions: read, and the commit's statuses
+    # statuses: read; this job writes nothing.
     permissions:
       contents: read
       actions: read
+      statuses: read
     outputs:
       sha: ${{ steps.pin.outputs.sha }}
       version: ${{ steps.pin.outputs.version }}
@@ -148,6 +150,23 @@ jobs:
             exit 1
           fi
           echo "CI passed on $SHA: $url"
+
+      # The iPhone UI suite runs on a Mac, not here (RELEASING.md, step 1), and
+      # posts its verdict as the commit status `iphone-ui (this Mac)`. The
+      # combined status holds the newest status per context: anything but
+      # success, or none, is a refusal.
+      - name: Refuse a commit the iPhone UI suite has not passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.pin.outputs.sha }}
+        run: |
+          state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/status" \
+            --jq '.statuses[] | select(.context == "iphone-ui (this Mac)") | "\(.state) \(.description)"')
+          if [ "${state%% *}" != success ]; then
+            echo "::error::the iPhone UI suite on $SHA is '${state:-not run}'; run it on a Mac (RELEASING.md, step 1)"
+            exit 1
+          fi
+          echo "iPhone UI suite passed on $SHA: ${state#* }"
 
       # Before anything is built or signed, so a mistake costs seconds.
       - name: Refuse a release that is not newer than the published one

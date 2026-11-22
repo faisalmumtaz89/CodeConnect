@@ -46,13 +46,20 @@ app that speaks it.
 
 Each block starts from the repository root.
 
-1. **Gates.** Everything CI runs, plus the whole iPhone UI suite here. CI's
-   `ios-ui` job leaves out two groups of classes by name, as ci.yml sets out:
-   the live ones, which need a computer, and the timed ones, whose timings
-   hold on a Mac and not on the runner. The suite runs on a fresh iPhone 17 Pro,
-   on the newest iOS that supports it, signed as Xcode signs it by default; the
-   live classes run against a computer given by `TEST_RUNNER_CC_HOST` and
-   `TEST_RUNNER_CC_TOKEN`, and skip without one:
+1. **Gates.** Everything CI runs, and the whole iPhone UI suite on a Mac.
+   CI runs no UI tests: a GitHub runner has no computer for the live classes,
+   and the timed ones' measurements hold on a Mac, not on a runner. The
+   suite's gate is `ios/scripts/ui-suite-gate.sh <commit>`: in a clean
+   checkout of exactly that commit it runs the whole suite, one test at a
+   time, on a fresh iPhone 17 Pro with no computer given, so the live classes
+   skip, and posts the verdict on the commit as its status
+   `iphone-ui (this Mac)`: success only when nothing failed and the skipped
+   classes are exactly the live ones. Run before the push, it waits for the
+   push and then posts. The release's pin job refuses a commit whose status is
+   not success. The status is posted only by the script, by the session that
+   ran it on this Mac, for a commit on `main` or about to be; never by hand.
+   The live classes run against a computer given by `TEST_RUNNER_CC_HOST` and
+   `TEST_RUNNER_CC_TOKEN`, outside the gate:
 
    ```sh
    (cd mac && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace)
@@ -60,15 +67,8 @@ Each block starts from the repository root.
      -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
      -only-testing:CodeConnectTests \
      CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=)
-   udid=$(xcrun simctl create "iPhone 17 Pro" com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro)
-   (cd ios && rm -rf .artifacts/uitest-deriveddata && xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
-     -destination "id=$udid" -derivedDataPath .artifacts/uitest-deriveddata \
-     -only-testing:CodeConnectUITests)
-   xcrun simctl delete "$udid"
+   ios/scripts/ui-suite-gate.sh "$(git rev-parse HEAD)"
    ```
-
-   Keep the UI run's closing line (`Executed N tests, with 0 failures`) with
-   the commit it ran on: a release needs that line for the commit it tags.
 
    CI builds the Mac app (`mac-app`: Debug, and again without the `DEBUG`
    condition) and runs no tests of it, since it has none; build it here as
@@ -107,6 +107,10 @@ Each block starts from the repository root.
    version. The release's pin job refuses a commit whose newest CI run has not
    passed; a tag pushed too early is built by running the Release workflow
    for it once CI is green.
+
+   Every commit pushed to `main` gets a CI run of its own, and none is
+   cancelled by a later push (ci.yml's `concurrency`), so the newest green
+   commit can always be tagged.
 
    If `mac/push-relay` changed since the last release
    (`git diff --stat vPREVIOUS HEAD -- mac/push-relay`), deploy the relay from

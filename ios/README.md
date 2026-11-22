@@ -105,8 +105,8 @@ same in any new UI test rather than reading the simulator's ambient size.
 
 **A test that rests on time has a class of its own**, named `<Class>TimedUITests`: one whose fixture is timed
 from launch (a `-CC_FIXTURE_…_MS` argument), that asserts an elapsed time, or that drives a long press into a
-drag. It shares its class's helpers through `<Class>UITestsBase`. The timed classes run here before every
-release; CI's runner, about half this Mac's speed, leaves them out by name, as it does the live classes.
+drag. It shares its class's helpers through `<Class>UITestsBase`. CI runs no UI tests: the whole suite, the timed
+classes with it, runs on a Mac through `ios/scripts/ui-suite-gate.sh` before every release (RELEASING.md, step 1).
 
 Against a live `ccd`, the environment has to reach the **test runner**, not
 `xcodebuild`:
