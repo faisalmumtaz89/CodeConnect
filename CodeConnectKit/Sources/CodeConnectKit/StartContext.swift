@@ -169,13 +169,13 @@ public struct StartContext {
 
     /// The model button's words: `Claude Code · Default`, `Codex · GPT-6-Astra`.
     public func title(_ choice: StartModelChoice) -> String {
-        return "\(choice.agent.displayName) · \(choice.isDefault ? "Default" : choice.label)"
+        return "\(choice.agent.displayName) · \(choice.isDefault ? "Default" : choice.name)"
     }
 
     /// What Start does: `Starts Claude Code with its default model.`, or with
-    /// the chosen model's label.
+    /// the chosen model's name.
     public static func starts(_ choice: StartModelChoice) -> String {
-        "Starts \(choice.agent.displayName) with \(choice.isDefault ? "its default model" : choice.label)."
+        "Starts \(choice.agent.displayName) with \(choice.isDefault ? "its default model" : choice.name)."
     }
 }
 
@@ -203,6 +203,10 @@ public struct StartModelChoice: Hashable, Sendable {
     /// The agent's default: no model named, or Claude Code's own `default`,
     /// which the computer passes on as no model either.
     public var isDefault: Bool { model == nil || model == "default" }
+
+    /// The model's name where a line names it (the button, the note, a start's summary), by
+    /// `RunSettings.modelName`; the menu's row shows `label` and `detail` as sent.
+    public var name: String { RunSettings.modelName(label: label, detail: detail) }
 }
 
 extension Machines {

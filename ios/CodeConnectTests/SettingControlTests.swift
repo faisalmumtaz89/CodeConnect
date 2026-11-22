@@ -73,7 +73,7 @@ final class SettingControlTests: XCTestCase {
         XCTAssertTrue(inFlightDuringSend, "the menus are disabled while the call is in flight")
         let s = try XCTUnwrap(live(model, key))
         XCTAssertFalse(s.inFlight)
-        XCTAssertEqual(s.lastOutcome, SettingOutcome(text: "Model set to Sonnet.", tone: .success))
+        XCTAssertEqual(s.lastOutcome, SettingOutcome(text: "Model set to Sonnet 5.5.", tone: .success))
     }
 
     /// A refused change shows the agent's own sentence, verbatim, as a warning — and effort rides

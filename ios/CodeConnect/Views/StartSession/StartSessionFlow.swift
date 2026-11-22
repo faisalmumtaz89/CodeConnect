@@ -655,7 +655,7 @@ struct StartStepsSheet: View {
                     summary("Folder", project.shownPath, .folder, mono: true, oneLine: true)
                     summary("Agent", agent.displayName, .agent)
                     if let pick = pick(agent) {
-                        summary("Model", pick.isDefault ? "Default" : pick.label, .model)
+                        summary("Model", pick.isDefault ? "Default" : pick.name, .model)
                     }
                     if git != nil {
                         summary(
