@@ -180,8 +180,8 @@ struct MainWindow: View {
         // host, which closes with every other panel.
         .environment(\.agentsShown, settings == nil)
         .focusedSceneValue(\.adding, $adding)
-        // New Agent is the start form in the main area: the open run closes, and the form takes the keyboard. Before
-        // any computer is added there is no form: New Agent adds a computer first.
+        // New Agent is the start form in the main area: Settings and the open run close, and the form takes the
+        // keyboard. Before any computer is added there is no form: New Agent adds a computer first.
         .onChange(of: adding, initial: true) { _, kind in
             guard kind == .agent else { return }
             guard machines.showsFleet else {
@@ -189,6 +189,7 @@ struct MainWindow: View {
                 return
             }
             adding = nil
+            settings = nil
             opened = nil
             startDraft.requestKeyboard()
         }
