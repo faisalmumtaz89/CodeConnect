@@ -100,4 +100,75 @@ final class SwitchedRunTimelineTests: XCTestCase {
             XCTAssertGreaterThan(listings, 0, "\(resource) carries no listing")
         }
     }
+
+    /// The status and reply box each listing gives, with what the run had drawn by then, and the settings it draws.
+    private func listings(_ resource: String) async throws -> [(summary: SessionSummary, status: FleetStatus)] {
+        var seen: [Event] = []
+        var out: [(SessionSummary, FleetStatus)] = []
+        for frame in try frames(resource) {
+            switch frame {
+            case .event(let event):
+                seen.append(event)
+            case .sessions(let sessions):
+                let summary = try XCTUnwrap(sessions.first)
+                // What had been drawn by then, which may be nothing yet (a first link row draws none).
+                let state = SessionState(sessionKey: summary.sessionKey)
+                for event in seen { state.ingest(event) }
+                await state.settleForTesting()
+                out.append((summary, FleetStatusRule.status(summary: summary, shown: state.shown, reviewedSeq: 0)))
+            }
+        }
+        return out
+    }
+
+    /// **A start on the new account that was refused** draws one warning row by the account ccd types, its sentence
+    /// beneath, never a title made from the notice's kind; the run reads ended with the reply box kept (its next
+    /// message relaunches it), and once a relaunch goes live it reads live with no failed mark.
+    func testAFailedSwitchDrawsOneWarningRowAndRecoversLive() async throws {
+        let all = events(try frames("switch-failed-then-recovered-claude-wire"))
+        let notice = try XCTUnwrap(all.first { $0.kind == .notification && $0.notificationType == "switch_failed" })
+        let drawn = await state(all)
+        XCTAssertEqual(
+            drawn.timeline.filter { $0.seq == notice.seq }.map(\.content),
+            [.notice(NoticeItem(
+                kind: .other, symbol: "warning", title: "Couldn’t move to B",
+                detail: "Couldn’t start on B: B is signed out", severity: .warning))])
+        let read = try await listings("switch-failed-then-recovered-claude-wire")
+        let failed = try XCTUnwrap(read.first { $0.summary.lifecycle == .exited })
+        XCTAssertEqual(failed.status, .ended, "a refused start reads ended")
+        XCTAssertFalse(failed.summary.takesNoReply, "its next message relaunches it")
+        let last = try XCTUnwrap(read.last)
+        XCTAssertEqual(last.summary.lifecycle, .live)
+        XCTAssertFalse(last.status == .ended || last.status == .failed, "recovered, it reads live: \(last.status)")
+    }
+
+    /// **End run on a moved run** files an ordinary end: it draws "Run ended" and the run reads ended, relaunchable;
+    /// the message after it relaunches it and it reads live.
+    func testEndRunOnAMovedRunReadsRunEnded() async throws {
+        let all = events(try frames("switch-then-end-then-message-claude-wire"))
+        let drawn = await state(all)
+        XCTAssertEqual(notices(drawn).map(\.title), ["Run ended"])
+        let read = try await listings("switch-then-end-then-message-claude-wire")
+        XCTAssertEqual(read.first?.status, .ended)
+        XCTAssertFalse(read.first?.summary.takesNoReply ?? true)
+        XCTAssertFalse(read.last.map { $0.status == .ended || $0.status == .failed } ?? true)
+    }
+
+    /// A moved run's listing, the one right after the typed end, carries no menus until its next message starts it,
+    /// so both apps draw the read-only settings line (`hostedReadOnly`), never a live-looking menu.
+    func testAMovedRunsSettingsAreReadOnly() throws {
+        for resource in ["switch-claude-wire", "switch-codex-wire"] {
+            let all = try frames(resource)
+            let end = try XCTUnwrap(all.firstIndex {
+                if case .event(let event) = $0 { event.kind == .sessionEnd } else { false }
+            })
+            guard case .sessions(let sessions) = all[end + 1], let moved = sessions.first else {
+                return XCTFail("\(resource): no listing follows the end")
+            }
+            XCTAssertNil(moved.menus, "\(resource): a moved run lists no menus")
+            guard case .hostedReadOnly = RunSettings.of(summary: moved) else {
+                return XCTFail("\(resource): a moved run draws a live settings line")
+            }
+        }
+    }
 }

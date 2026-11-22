@@ -768,6 +768,12 @@ public enum TimelineBuilder {
             return NoticeItem(
                 kind: .other, symbol: "gauge", title: effort.map { "Effort set to \($0)" } ?? "Effort set",
                 detail: nil, severity: .info)
+        case EngineNotice.switchFailed:
+            // ccd's own notice that a run moved to another account could not start there: a warning by the account
+            // it names, ccd's sentence beneath. Drawn by its type, it read a grey "Switch Failed".
+            return NoticeItem(
+                kind: .other, symbol: "warning", title: "Couldn’t move to \(event.switchedToLabel ?? "the account")",
+                detail: event.notificationMessage, severity: .warning)
         case EngineNotice.mailNudge:
             // ccd's own notice that it woke a Claude run for its mail; its message is the wake line, which is ccd's
             // words to the agent, not the reader's, so the row is the one a Codex wake draws.
