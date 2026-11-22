@@ -680,6 +680,7 @@ impl Run {
             diff_stat: None,
             relaunchable: false,
             switching: None,
+            account: None,
         }
     }
 

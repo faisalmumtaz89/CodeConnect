@@ -3390,6 +3390,8 @@ impl Daemon {
         // A run moving to another account reads live throughout (306 Slice E, S1). Its mark is read before its row:
         // the mark goes only once the run is live again, so a row read after it is never an earlier one unmarked.
         let switching: HashMap<String, i64> = self.db.switching_runs().await?.into_iter().collect();
+        let accounts: HashMap<String, crate::store::RecordedAccount> =
+            self.db.run_accounts().await?.into_iter().collect();
         let rows = self.db.list_sessions().await?;
         // Read up front, before the lock is taken, one query per row.
         let mut last_seqs: HashMap<String, u64> = HashMap::with_capacity(rows.len());
@@ -3514,6 +3516,20 @@ impl Daemon {
                 fact.value = id.clone();
             }
             session.model_label = model_labels.remove(&session.session_uid);
+            // The account its process runs on: Default, or an account still kept; one since removed is not known.
+            session.account = match accounts.get(&session.session_uid) {
+                Some(None) => Some(protocol::event::RunAccount {
+                    id: None,
+                    label: "Default".to_string(),
+                    email: None,
+                }),
+                Some(Some((id, Some(label)))) => Some(protocol::event::RunAccount {
+                    id: Some(id.clone()),
+                    label: label.clone(),
+                    email: None,
+                }),
+                _ => None,
+            };
             match switching.get(&session.session_uid).copied() {
                 Some(crate::store::Store::SWITCH_FAILED) => {
                     session.switching = Some(protocol::event::Switching::Failed)
@@ -4680,6 +4696,7 @@ impl Daemon {
                 diff_stat: tree.and_then(|tree| tree.diff_stat),
                 relaunchable: relaunchable.contains(&row.session_uid),
                 switching: None,
+                account: None,
             });
         }
         out

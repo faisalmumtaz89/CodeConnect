@@ -1259,6 +1259,10 @@ pub enum MutationClaim {
     NoSession,
 }
 
+/// The account a run records ([`Store::run_accounts`]): `None` for its agent's Default, else its id and its label
+/// (`None` once the account is removed).
+pub type RecordedAccount = Option<(String, Option<String>)>;
+
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         if let Some(parent) = path.parent() {
@@ -3098,6 +3102,24 @@ impl Store {
             )
             .optional()?
             .is_some())
+    }
+
+    /// Every run CodeConnect started, with the account it records: `None` for its agent's Default, `Some(id, label)`
+    /// for an account, and a label of `None` for an account since removed.
+    pub fn run_accounts(&self) -> Result<Vec<(String, RecordedAccount)>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT h.session_uid, h.account_id, a.label
+               FROM run_hosts AS h LEFT JOIN accounts AS a ON a.id = h.account_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: Option<String> = row.get(1)?;
+                let label: Option<String> = row.get(2)?;
+                Ok((row.get::<_, String>(0)?, id.map(|id| (id, label))))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     pub fn run_account(&self, session_uid: &str) -> Result<Option<Account>> {

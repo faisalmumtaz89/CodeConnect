@@ -535,6 +535,23 @@ pub struct SessionSummary {
     /// throughout, its `lifecycle` aside, until its next message is running on the new account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switching: Option<Switching>,
+    /// The account the run's process runs on, as recorded at its start or its newest relaunch (minor 48): not its
+    /// agent's active choice, which a moving run takes only with its next message. On every run CodeConnect
+    /// started; absent on any other, and from a daemon below 48: absent is "not known", never Default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<RunAccount>,
+}
+
+/// The account a run runs on ([`SessionSummary::account`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunAccount {
+    /// The account's id; null for its agent's Default, the one mark of Default (a label can be anything).
+    pub id: Option<String>,
+    /// The account's name, or "Default".
+    pub label: String,
+    /// The address the account is signed in as, once the computer has read it. Absent until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 /// Where a run's move to its agent's active account stands ([`SessionSummary::switching`]).
@@ -635,6 +652,30 @@ pub struct MenuMode {
 
 #[cfg(test)]
 mod tests {
+    /// **A run's account, pinned as the apps read it** (minor 48): Default is `id` null, the one mark of it; an
+    /// account carries its id and name; `email` is absent until the computer has read one.
+    #[test]
+    fn a_runs_account_is_pinned() {
+        let default = RunAccount {
+            id: None,
+            label: "Default".into(),
+            email: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&default).unwrap(),
+            serde_json::json!({"id": null, "label": "Default"})
+        );
+        let work = RunAccount {
+            id: Some("01M80QGTWR9RCHBSJWR169GXCN".into()),
+            label: "Work".into(),
+            email: Some("a@example.com".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&work).unwrap(),
+            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "label": "Work", "email": "a@example.com"})
+        );
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -777,6 +818,7 @@ mod tests {
             diff_stat: None,
             relaunchable: false,
             switching: None,
+            account: None,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);

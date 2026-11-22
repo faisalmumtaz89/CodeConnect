@@ -88,6 +88,10 @@
     "type": "setting_result"
   },
   "session_hosted_live": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "claude",
     "blocked_on": [],
     "claude_session_id": "5f0c1e2a-0000-4000-8000-000000000001",
@@ -167,6 +171,10 @@
     "updated_at": "2026-11-15T09:00:00.000Z"
   },
   "session_hosted_live_init": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "claude",
     "blocked_on": [],
     "claude_session_id": "5f0c1e2a-0000-4000-8000-000000000001",
@@ -246,6 +254,10 @@
     "updated_at": "2026-11-15T09:00:00.000Z"
   },
   "session_hosted_live_minor_38": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "claude",
     "blocked_on": [],
     "claude_session_id": "5f0c1e2a-0000-4000-8000-000000000001",
@@ -269,6 +281,10 @@
     "updated_at": "2026-11-15T09:00:00.000Z"
   },
   "session_hosted_starting": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "claude",
     "blocked_on": [],
     "codex_link": "none",

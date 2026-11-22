@@ -94,6 +94,10 @@
     }
   },
   "session_hosted_detached": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "claude",
     "blocked_on": [],
     "claude_session_id": "5f0c1e2a-0000-4000-8000-000000000001",
@@ -264,6 +268,10 @@
     }
   ],
   "session_hosted_live": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "claude",
     "blocked_on": [],
     "claude_session_id": "5f0c1e2a-0000-4000-8000-000000000001",

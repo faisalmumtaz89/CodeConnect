@@ -12072,6 +12072,11 @@ mod tests {
 
         let waiting = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
         assert_eq!(
+            waiting["account"],
+            serde_json::json!({"id": a.id, "label": "A"}),
+            "moved, it still names the account its process ran on: {waiting}"
+        );
+        assert_eq!(
             (waiting["lifecycle"].as_str(), waiting["switching"].as_str()),
             (Some("live"), Some("moved")),
             "nothing started until a message: {waiting}"
@@ -12130,6 +12135,11 @@ mod tests {
             "filed once"
         );
         let after = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(
+            after["account"],
+            serde_json::json!({"id": b.id, "label": "B"}),
+            "on B once started there"
+        );
         assert_eq!(
             (after["lifecycle"].as_str(), after.get("switching")),
             (Some("live"), None),

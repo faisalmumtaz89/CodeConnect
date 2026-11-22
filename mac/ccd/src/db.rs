@@ -830,6 +830,10 @@ impl Db {
             .await
     }
 
+    pub async fn run_accounts(&self) -> Result<Vec<(String, crate::store::RecordedAccount)>> {
+        self.run(move |store| store.run_accounts()).await
+    }
+
     pub async fn switching_runs(&self) -> Result<Vec<(String, i64)>> {
         self.run(move |store| store.switching_runs()).await
     }
