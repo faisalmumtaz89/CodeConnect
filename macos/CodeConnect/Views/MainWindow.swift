@@ -130,9 +130,10 @@ struct MainWindow: View {
                 .background(Theme.window)
             }
         }
-        // The panes' toggles at the window's top edge: the sidebar's and the list's at the sidebar's right, their edge
-        // on its headings' "+" (12 in from it), or, with the sidebar hidden, beside the window's buttons; the run's at
-        // the right. The list and the run hide only while a run is open.
+        // The panes' toggles at the window's top edge: the sidebar's and the list's at the sidebar's right, the list
+        // glyph's ink ending where its headings' "+" ink ends (198; it sits 2 pt deeper in its 28 pt plate than the "+"
+        // in its 20, whose plate ends 12 in), or, with the sidebar hidden, beside the window's buttons; the run's at the
+        // right. The list and the run hide only while a run is open.
         .overlay(alignment: .topLeading) {
             if settings == nil {
                 HStack(spacing: 2) {
@@ -145,7 +146,7 @@ struct MainWindow: View {
                     }
                     .disabled(!runIsOpen)
                 }
-                .frame(width: sidebarHidden ? nil : 216 - 12, alignment: .trailing)
+                .frame(width: sidebarHidden ? nil : 216 - 10, alignment: .trailing)
                 .padding(.leading, sidebarHidden ? 84 : 0)
                 .padding(.top, 13)
             }
