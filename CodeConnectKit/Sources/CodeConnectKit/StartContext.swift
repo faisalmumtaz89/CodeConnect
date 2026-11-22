@@ -28,6 +28,9 @@ public struct StartContext {
         model.startSession(project, place: place, agent: agent, model: choice, prompt: prompt, trust: trust)
     }
 
+    /// A start this computer was sent and its sender stopped retrying, sent again under its own id.
+    public func resume(_ requestID: String) { model.resumeStart(requestID) }
+
     /// The folder's repository, once the computer has said: `.some(nil)` for
     /// a folder that is not one.
     public func git(_ path: String) -> StartGit?? { starter.git[path] }

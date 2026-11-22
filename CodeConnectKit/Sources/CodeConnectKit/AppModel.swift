@@ -1294,6 +1294,18 @@ public final class AppModel {
         return requestID
     }
 
+    /// A start stopped retrying, sent again under its own id (`SessionStarter.resume`).
+    public func resumeStart(_ requestID: String) {
+        starter.resume(requestID)
+        #if DEBUG
+            if fixturesActive {
+                answerFixtureStart(requestID)
+                return
+            }
+        #endif
+        sendStart(requestID)
+    }
+
     /// One send of one start. A send that fails, or a link that drops before
     /// the answer, is sent again by the next handshake under the same id.
     private func sendStart(_ requestID: String) {

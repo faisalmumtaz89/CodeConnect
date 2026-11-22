@@ -431,6 +431,13 @@ public final class SessionStarter {
         starts[requestID]?.retryStopped = true
     }
 
+    /// The reader asks again for a start it stopped retrying, unchanged: it is sent again under its own id, so a start
+    /// that already reached the computer is answered as it was and never runs twice. A no-op once answered.
+    public func resume(_ requestID: String) {
+        guard starts[requestID]?.outcome == nil else { return }
+        starts[requestID]?.retryStopped = false
+    }
+
     /// Starts sent and not yet answered, to send again, unchanged, after a
     /// reconnect. `sendStart`'s guard is the one place a retry-stopped start is
     /// held back from the actual send.
