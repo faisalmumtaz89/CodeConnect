@@ -348,4 +348,40 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertFalse(account.sameAsAnother)
         XCTAssertEqual(try book("list_empty").defaults, [])
     }
+
+    // MARK: The words of a switch in progress (design A)
+
+    /// Sessions move with their next message; those still in a turn finish it first.
+    func testASwitchSaysWhoMovesAndWhoFinishesFirst() {
+        XCTAssertEqual(
+            AccountSwitchWords.sentence(to: "ben@example.com", waiting: 2, moved: 1),
+            "3 sessions will use ben@example.com from their next message. 2 finish their turn first.")
+        XCTAssertEqual(
+            AccountSwitchWords.sentence(to: "ben@example.com", waiting: 0, moved: 4),
+            "4 sessions will use ben@example.com from their next message.")
+        XCTAssertEqual(
+            AccountSwitchWords.sentence(to: "ben@example.com", waiting: 1, moved: 0),
+            "1 session will use ben@example.com from its next message. It finishes its turn first.")
+        XCTAssertEqual(
+            AccountSwitchWords.sentence(to: "ben@example.com", waiting: 0, moved: 1),
+            "1 session will use ben@example.com from its next message.")
+        XCTAssertNil(AccountSwitchWords.sentence(to: "ben@example.com", waiting: 0, moved: 0), "no live session: no sentence")
+    }
+
+    /// A session that couldn't start on the new account is named; several are counted.
+    func testAFailedMoveIsNamed() {
+        XCTAssertEqual(
+            AccountSwitchWords.failure(to: "ben@example.com", sessions: ["query-parser"]),
+            "query-parser couldn't start on ben@example.com.")
+        XCTAssertEqual(
+            AccountSwitchWords.failure(to: "ben@example.com", sessions: ["query-parser", "docs-site"]),
+            "2 sessions couldn't start on ben@example.com.")
+        XCTAssertNil(AccountSwitchWords.failure(to: "ben@example.com", sessions: []))
+    }
+
+    /// Two accounts signed in as one address, and an account that isn't its own, each say so in one line.
+    func testTheRowsQuietLinesSayWhatTheyMean() {
+        XCTAssertEqual(AccountSwitchWords.sameSignIn(as: "ada@example.com"), "The same sign-in as ada@example.com")
+        XCTAssertEqual(AccountSwitchWords.notSeparate, "Uses this computer's own Codex sign-in, so it isn't a separate account")
+    }
 }
