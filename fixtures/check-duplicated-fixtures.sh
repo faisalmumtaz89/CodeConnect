@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Every fixture the iOS or Mac target carries a *copy* of must be byte-identical to the
-# copy under `fixtures/codex/`, `fixtures/claude/` or `fixtures/wire/`, which is the one the Rust
+# copy under `fixtures/codex/`, `fixtures/claude/`, `fixtures/wire/` or `fixtures/accounts/`, which is the one the Rust
 # side reads and the one the capture tooling regenerates. `ci.yml` runs this exact script — the workflow
 # invokes it rather than restating the loop, so the local gate and the CI gate
 # cannot drift apart the way the fixtures themselves did.
@@ -27,7 +27,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source_dirs=("$root/fixtures/codex" "$root/fixtures/claude" "$root/fixtures/wire")
+source_dirs=("$root/fixtures/codex" "$root/fixtures/claude" "$root/fixtures/wire" "$root/fixtures/accounts")
 copy_dirs=("$root/ios/CodeConnect/Resources" "$root/ios/CodeConnectTests/Resources" "$root/macos/CodeConnect/Resources")
 
 # A directory that moved must fail the check rather than quietly contribute no

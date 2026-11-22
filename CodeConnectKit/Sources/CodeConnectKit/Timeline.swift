@@ -303,6 +303,9 @@ public enum TimelineBuilder {
         /// yet loaded, and one after any of the conversation is a restart under
         /// it; either says something.
         var atSessionTop = events.first?.seq == 1
+        /// The run was moved to another account and has not started again yet: the start that follows is that
+        /// restart, which says nothing to the reader.
+        var switched = false
 
         for event in events {
             switch event.kind {
@@ -552,6 +555,20 @@ public enum TimelineBuilder {
                 while case .notice(let notice)? = items.last?.content, notice.kind == .link {
                     items.removeLast()
                 }
+                // A switch of account is no end: the run reads live throughout, so one quiet row names the account,
+                // and its link letting go and coming back is the switch itself.
+                if let account = event.switchedToLabel {
+                    switched = true
+                    linkWasDown = false
+                    items.append(
+                        event.item(
+                            .notice(
+                                NoticeItem(
+                                    kind: .other, symbol: "arrows-clockwise", title: "Switched to \(account)",
+                                    detail: nil, severity: .info))))
+                    break
+                }
+                switched = false
                 runEnded = true
                 items.append(event.item(.notice(endNotice(for: event))))
 
@@ -562,6 +579,10 @@ public enum TimelineBuilder {
 
             case .sessionStart:
                 runEnded = false
+                if switched {
+                    switched = false
+                    break
+                }
                 if atSessionTop { break }
                 guard let title = startTitle(source: event.payload["source"]?.stringValue, origin: event.source)
                 else { break }
