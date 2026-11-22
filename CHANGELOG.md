@@ -3,6 +3,17 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.11, with the iPhone app 1.1.28
+
+- On the Mac and the iPhone, a model is named in full wherever it is named, "Sonnet 5.5" rather than "Sonnet": on
+  the Mac's reply row and session header, the iPhone's settings line, both apps' start forms, and the line after a
+  model change. The model menus keep the agent's own words.
+- On the Mac, the start form stands in the middle of the main area. Return in its first message starts the agent, and
+  Shift-Return adds a line.
+- On the Mac, the sidebar's and the list's toggles sit at the right edge of the sidebar's top, or beside the window's
+  buttons while the sidebar is hidden. A panel opened by a button stands a little off it.
+- On the iPhone, the conversation no longer shows through the line with the model and permissions above the reply box.
+
 ## CodeConnect 0.19.10, with the iPhone app 1.1.27
 
 - A conversation continued after its agent ended, after a crash, a restart or a Mac reboot, keeps the effort it was

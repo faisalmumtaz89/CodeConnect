@@ -1,1 +1,1 @@
-A conversation you continue after its agent ended, after a crash, a restart or a reboot, keeps the effort it was running at, as it already kept its model and mode, and its reply box names that effort after the model.
+A model is named in full now, Sonnet 5.5 rather than Sonnet. The start form stands in the middle of the window, and Return starts the agent. The sidebar’s toggles sit at the right edge of its top.
