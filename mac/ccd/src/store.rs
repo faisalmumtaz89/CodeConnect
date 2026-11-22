@@ -8285,7 +8285,7 @@ mod tests {
                 &store,
                 &crate::accounts::SignIns::default(),
                 &std::collections::HashMap::new(),
-                None,
+                crate::accounts::Agents::default(),
                 "r1".into(),
                 a.id.clone(),
             )

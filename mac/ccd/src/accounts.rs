@@ -28,6 +28,17 @@ use protocol::agent::AgentKind;
 
 use crate::store::Account;
 
+/// `program`'s argv for its own `what` (`login`, `logout`): Codex's `login` / `logout`, Claude Code's
+/// `auth login` / `auth logout`.
+fn login_args<'a>(agent: &str, program: &'a Path, what: &'static str) -> Vec<&'a std::ffi::OsStr> {
+    let mut args = vec![program.as_os_str()];
+    if agent == "claude" {
+        args.push(std::ffi::OsStr::new("auth"));
+    }
+    args.push(std::ffi::OsStr::new(what));
+    args
+}
+
 /// The variable that points `agent` at an account's folder.
 fn variable(agent: &str) -> Option<&'static str> {
     match agent {
@@ -64,6 +75,36 @@ pub(crate) struct AccountEnv {
     variable: &'static str,
     outranking: &'static [&'static str],
     folder: PathBuf,
+    /// Claude Code's config directory set to the folder too: for its own sign-in, status and logout only, so the
+    /// identity they write and read is the account's own and the person's shared one is never touched (measured on
+    /// claude 2.1.330, 2026-11-22). A session on the account runs with the storage variable alone, as before.
+    signing: bool,
+}
+
+/// The programs of the agents on this computer, as a start would find them.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Agents<'a> {
+    pub(crate) codex: Option<&'a Path>,
+    pub(crate) claude: Option<&'a Path>,
+}
+
+impl Agents<'_> {
+    /// The program of the agent `agent` names (`codex`, `claude`).
+    pub(crate) fn path(&self, agent: &str) -> Option<&Path> {
+        match agent {
+            "codex" => self.codex,
+            "claude" => self.claude,
+            _ => None,
+        }
+    }
+}
+
+/// An agent's name as a person reads it.
+fn product(agent: &str) -> &'static str {
+    match agent {
+        "claude" => "Claude Code",
+        _ => "Codex",
+    }
 }
 
 impl AccountEnv {
@@ -86,6 +127,7 @@ impl AccountEnv {
             variable,
             outranking: outranking(&account.agent),
             folder,
+            signing: false,
         }))
     }
 
@@ -158,7 +200,20 @@ impl AccountEnv {
             argv.extend([OsString::from("-u"), OsString::from(name)]);
         }
         argv.push(setting);
+        if self.signing && self.variable == "CLAUDE_SECURESTORAGE_CONFIG_DIR" {
+            let mut config = OsString::from("CLAUDE_CONFIG_DIR=");
+            config.push(&self.folder);
+            argv.push(config);
+        }
         argv
+    }
+
+    /// This account's environment for its agent's own sign-in, status and logout ([`AccountEnv::signing`]).
+    pub(crate) fn signing(&self) -> AccountEnv {
+        AccountEnv {
+            signing: true,
+            ..self.clone()
+        }
     }
 }
 
@@ -276,7 +331,7 @@ pub(crate) fn listing(
     }
 }
 
-/// What each Codex account (and the Default, keyed [`DEFAULT`]) says of itself, read on demand and kept in memory
+/// What each account (and each agent's Default, keyed [`default_key`]) says of itself, read on demand and kept in memory
 /// only: never stored, never logged. A read happens only when a device asks for the listing and what is held for
 /// that account is older than [`FACTS_FRESH`] (or missing), one at a time per account.
 #[derive(Default)]
@@ -285,8 +340,10 @@ pub(crate) struct Facts {
     reading: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
-/// The key of an agent's Default among [`Facts`].
-pub(crate) const DEFAULT: &str = "default";
+/// The key of `agent`'s Default among [`Facts`].
+pub(crate) fn default_key(agent: &AgentKind) -> String {
+    format!("default:{}", agent.as_str())
+}
 
 /// How long what an account says of itself is shown without reading it again.
 pub(crate) const FACTS_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
@@ -340,34 +397,76 @@ impl Facts {
             return reply;
         };
         let known = self.known.lock().unwrap();
-        for account in accounts
-            .iter_mut()
-            .filter(|account| account.agent == AgentKind::Codex)
-        {
+        for account in accounts.iter_mut() {
             account.facts = known.get(&account.id).map(|(facts, _)| facts.clone());
         }
-        let default = known.get(DEFAULT).map(|(facts, _)| facts.clone());
-        let emails: Vec<String> = accounts
-            .iter()
-            .filter(|account| account.agent == AgentKind::Codex)
-            .filter_map(|account| account.facts.as_ref()?.email.clone())
-            .chain(default.as_ref().and_then(|facts| facts.email.clone()))
-            .collect();
-        for account in accounts.iter_mut() {
-            account.same_as_another = account
-                .facts
-                .as_ref()
-                .and_then(|facts| facts.email.as_ref())
-                .is_some_and(|email| emails.iter().filter(|other| *other == email).count() > 1);
-        }
-        if let Some(facts) = default {
-            defaults.push(protocol::ws::DefaultAccount {
-                agent: AgentKind::Codex,
-                facts,
-            });
+        for agent in [AgentKind::Codex, AgentKind::Claude] {
+            let default = known
+                .get(&default_key(&agent))
+                .map(|(facts, _)| facts.clone());
+            // Two of one agent's accounts, its Default among them, signed in as one email are one account.
+            let emails: Vec<String> = accounts
+                .iter()
+                .filter(|account| account.agent == agent)
+                .filter_map(|account| account.facts.as_ref()?.email.clone())
+                .chain(default.as_ref().and_then(|facts| facts.email.clone()))
+                .collect();
+            for account in accounts.iter_mut().filter(|account| account.agent == agent) {
+                account.same_as_another = account
+                    .facts
+                    .as_ref()
+                    .and_then(|facts| facts.email.as_ref())
+                    .is_some_and(|email| emails.iter().filter(|other| *other == email).count() > 1);
+            }
+            if let Some(facts) = default {
+                defaults.push(protocol::ws::DefaultAccount { agent, facts });
+            }
         }
         reply
     }
+}
+
+/// What Claude Code at `claude` says of the account whose folder `account` gives (its Default, the person's own,
+/// for none): its email, and its plan when it names one, from `auth status` with the folder as its config directory
+/// (an account's sign-in keeps its identity there). None when it is not signed in, or did not answer within
+/// [`FACTS_WAIT`]. Its usage is not read here.
+pub(crate) async fn read_claude_facts(
+    environment: &HashMap<OsString, OsString>,
+    account: Option<&AccountEnv>,
+    claude: &Path,
+) -> Option<protocol::ws::AccountFacts> {
+    let signing = account.map(AccountEnv::signing);
+    let mut command = crate::start_session::agent_command(
+        environment,
+        signing.as_ref(),
+        &[
+            claude.as_os_str(),
+            std::ffi::OsStr::new("auth"),
+            std::ffi::OsStr::new("status"),
+        ],
+    );
+    command
+        .current_dir(protocol::home_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let output = crate::start_session::agent_output(command, FACTS_WAIT).await?;
+    // The object it prints after whatever the user's shell printed as it started.
+    let text = String::from_utf8_lossy(&output.stdout);
+    let status: serde_json::Value = text.lines().rev().find_map(|line| {
+        line.starts_with('{')
+            .then(|| serde_json::from_str(line).ok())
+            .flatten()
+    })?;
+    if status["loggedIn"] != true {
+        return None;
+    }
+    Some(protocol::ws::AccountFacts {
+        email: status["email"].as_str().map(str::to_string),
+        plan: status["subscriptionType"].as_str().map(str::to_string),
+        windows: Vec::new(),
+        read_at: protocol::time::now_rfc3339(),
+    })
 }
 
 /// What the codex at `codex` says of the account whose home `account` gives (its Default for none): its email and
@@ -463,42 +562,49 @@ pub(crate) struct SignIns {
 /// How long a sign-in may wait for the person in the browser before its login is ended.
 pub(crate) const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// `reply`, an accounts listing, with each Codex account's `signed_in` as `codex login status` says with its home
-/// (`codex`, none when Codex is not here), and `not_separate` when that sign-in is not in the home. Claude Code's
-/// accounts are not asked yet.
+/// `reply`, an accounts listing, with each account's `signed_in` as its agent says with its home: Codex's
+/// `login status`, and `not_separate` when that sign-in is not in the home; Claude Code's `auth status`, its config
+/// directory the account's folder. Not known for an agent not on this computer.
 pub(crate) async fn with_signed_in(
     environment: &HashMap<OsString, OsString>,
-    codex: Option<&Path>,
+    agents: Agents<'_>,
     mut reply: protocol::ws::ServerMessage,
 ) -> protocol::ws::ServerMessage {
-    let (protocol::ws::ServerMessage::Accounts { accounts, .. }, Some(codex)) = (&mut reply, codex)
-    else {
+    let protocol::ws::ServerMessage::Accounts { accounts, .. } = &mut reply else {
         return reply;
     };
     let root = protocol::root_dir();
     // Every account asked at once: each ask is a login shell and the agent's own start.
-    let asked = accounts
-        .iter_mut()
-        .filter(|account| account.agent == AgentKind::Codex)
-        .map(|account| {
-            let row = Account {
-                id: account.id.clone(),
-                agent: "codex".into(),
-                label: account.label.clone(),
+    let asked = accounts.iter_mut().map(|account| {
+        let row = Account {
+            id: account.id.clone(),
+            agent: account.agent.as_str().to_string(),
+            label: account.label.clone(),
+        };
+        let root = &root;
+        async move {
+            let (Some(program), Ok(Some(home))) =
+                (agents.path(&row.agent), AccountEnv::for_account(root, &row))
+            else {
+                return;
             };
-            let root = &root;
-            async move {
-                if let Ok(Some(home)) = AccountEnv::for_account(root, &row) {
-                    let signed_in =
-                        crate::start_session::codex_signed_in(environment, Some(&home), codex)
-                            .await;
-                    // Signed in with no credential in the account's own home: Codex keeps it in the computer's
-                    // credential store, shared, so this account is not separate.
-                    account.not_separate = signed_in && !home.folder().join("auth.json").exists();
-                    account.signed_in = Some(signed_in && !account.not_separate);
-                }
+            if row.agent == "claude" {
+                account.signed_in = crate::start_session::claude_signed_in(
+                    environment,
+                    Some(&home.signing()),
+                    program,
+                )
+                .await;
+                return;
             }
-        });
+            let signed_in =
+                crate::start_session::codex_signed_in(environment, Some(&home), program).await;
+            // Signed in with no credential in the account's own home: Codex keeps it in the computer's
+            // credential store, shared, so this account is not separate.
+            account.not_separate = signed_in && !home.folder().join("auth.json").exists();
+            account.signed_in = Some(signed_in && !account.not_separate);
+        }
+    });
     futures_util::future::join_all(asked).await;
     reply
 }
@@ -513,7 +619,7 @@ pub(crate) async fn sign_in(
     sign_ins: &Arc<SignIns>,
     on_end: impl FnOnce() + Send + 'static,
     environment: &HashMap<OsString, OsString>,
-    codex: Option<&Path>,
+    agents: Agents<'_>,
     request_id: String,
     account_id: String,
     wait: std::time::Duration,
@@ -536,23 +642,15 @@ pub(crate) async fn sign_in(
             None,
         );
     };
-    if account.agent != "codex" {
-        return (
-            refused(
-                request_id,
-                "Claude Code's sign-in can't be started from here yet".into(),
-            ),
-            None,
+    let Some(program) = agents.path(&account.agent) else {
+        let missing = format!(
+            "{} isn't installed on this computer",
+            product(&account.agent)
         );
-    }
-    let Some(codex) = codex else {
-        return (
-            refused(request_id, "Codex isn't installed on this computer".into()),
-            None,
-        );
+        return (refused(request_id, missing), None);
     };
     let home = match AccountEnv::for_account(&protocol::root_dir(), &account) {
-        Ok(Some(home)) => home,
+        Ok(Some(home)) => home.signing(),
         Ok(None) => {
             return (
                 refused(
@@ -573,7 +671,7 @@ pub(crate) async fn sign_in(
     let mut login = crate::start_session::agent_command(
         environment,
         Some(&home),
-        &[codex.as_os_str(), std::ffi::OsStr::new("login")],
+        &login_args(&account.agent, program, "login"),
     );
     login
         .current_dir(protocol::home_dir())
@@ -597,7 +695,7 @@ pub(crate) async fn sign_in(
     // login's end is the newer.
     let reply = with_signed_in(
         environment,
-        Some(codex),
+        agents,
         listing(store, Some(request_id.clone())),
     )
     .await;
@@ -692,7 +790,7 @@ pub(crate) async fn remove_with(
     store: &crate::store::Store,
     sign_ins: &SignIns,
     environment: &HashMap<OsString, OsString>,
-    codex: Option<&Path>,
+    agents: Agents<'_>,
     request_id: String,
     account_id: String,
 ) -> protocol::ws::ServerMessage {
@@ -708,12 +806,6 @@ pub(crate) async fn remove_with(
             "that is not one of this computer's accounts".into(),
         );
     };
-    if account.agent != "codex" {
-        return refused(
-            request_id,
-            "a Claude Code account can't be removed from here yet".into(),
-        );
-    }
     match store.account_in_use(&account.id) {
         Ok(false) => {}
         Ok(true) => {
@@ -727,11 +819,15 @@ pub(crate) async fn remove_with(
     }
     // A sign-in held for it is ended first, so no credential lands in its home after it is gone.
     sign_ins.end_for(&account.id).await;
-    let Some(codex) = codex else {
-        return refused(request_id, "Codex isn't installed on this computer".into());
+    let Some(program) = agents.path(&account.agent) else {
+        let missing = format!(
+            "{} isn't installed on this computer",
+            product(&account.agent)
+        );
+        return refused(request_id, missing);
     };
     let home = match AccountEnv::for_account(&protocol::root_dir(), &account) {
-        Ok(Some(home)) => home,
+        Ok(Some(home)) => home.signing(),
         Ok(None) => {
             return refused(
                 request_id,
@@ -743,7 +839,7 @@ pub(crate) async fn remove_with(
     let mut logout = crate::start_session::agent_command(
         environment,
         Some(&home),
-        &[codex.as_os_str(), std::ffi::OsStr::new("logout")],
+        &login_args(&account.agent, program, "logout"),
     );
     logout
         .current_dir(protocol::home_dir())
@@ -751,18 +847,28 @@ pub(crate) async fn remove_with(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let _ = crate::start_session::agent_output(logout, LOGOUT_WAIT).await;
-    if home.folder().join("auth.json").symlink_metadata().is_ok() {
+    // Signed out: Codex's credential gone from the home; Claude Code's own status says so with the folder.
+    let signed_out = if account.agent == "claude" {
+        crate::start_session::claude_signed_in(environment, Some(&home), program).await
+            == Some(false)
+    } else {
+        home.folder().join("auth.json").symlink_metadata().is_err()
+    };
+    if !signed_out {
         return refused_as(
             request_id,
             "accounts_unavailable",
-            "Codex could not sign the account out, so nothing was removed".into(),
+            format!(
+                "{} could not sign the account out, so nothing was removed",
+                product(&account.agent)
+            ),
         );
     }
     if let Err(err) = store.remove_account(&account.id) {
         return unavailable(request_id, "remove the account", err);
     }
     let listing = listing(store, Some(request_id));
-    with_signed_in(environment, Some(codex), listing).await
+    with_signed_in(environment, agents, listing).await
 }
 
 fn refused_as(request_id: String, code: &str, message: String) -> protocol::ws::ServerMessage {
@@ -814,6 +920,30 @@ mod tests {
              if [ \"$1\" = app-server ] && [ -e \"$here/hangfacts\" ]; then sleep 120 & kid=$!; echo $kid > \"$here/kid\"; wait; fi\n\
              if [ \"$1\" = app-server ]; then n=$(basename \"${CODEX_HOME:-default}\"); while IFS= read -r line; do case \"$line\" in *'\"id\":1,'*) printf '{\"id\":1,\"result\":{\"userAgent\":\"stand-in\"}}\\n';; *account/rateLimits/read*) printf '{\"id\":3,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":42,\"windowDurationMins\":300,\"resetsAt\":1800000000},\"secondary\":null,\"planType\":\"plus\"}}}\\n';; *account/read*) [ -e \"$here/same\" ] && n=same; printf '{\"id\":2,\"result\":{\"account\":{\"email\":\"%s@example.test\",\"planType\":\"plus\",\"type\":\"chatgpt\",\"workspaceName\":null},\"requiresOpenaiAuth\":true}}\\n' \"$n\";; esac; done; exit 0; fi\n\
              if [ \"$1\" = logout ]; then echo \"$CODEX_HOME\" >> \"$here/logouts\"; [ -e \"$here/keep\" ] || rm -f \"$CODEX_HOME/auth.json\"; fi\n",
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&path)
+            .status()
+            .unwrap();
+        path
+    }
+
+    /// A stand-in claude in `dir`, shaped from real claude 2.1.330 (app-qa's records, 2026-11-22): `auth login`
+    /// writes the account's identity where its config directory points and a keychain item named from its storage
+    /// folder (a file `item-<folder>` here), prints "Login successful" and exits 0; `auth status` prints one JSON
+    /// object (`loggedIn`, `authMethod`, and the `email` of the identity its config directory holds, the person's
+    /// shared one without it) and exits 0 signed in, 1 signed out; `auth logout` takes the item and exits 0. A login
+    /// run without a config directory of its own writes the person's shared identity, and says so in `shared`.
+    fn stand_in_claude(dir: &Path) -> std::path::PathBuf {
+        let path = dir.join("claude");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nhere=$(dirname \"$0\")\nn=$(basename \"${CLAUDE_SECURESTORAGE_CONFIG_DIR:-default}\")\n\
+             if [ \"$1\" = auth ] && [ \"$2\" = login ]; then if [ -n \"$CLAUDE_CONFIG_DIR\" ]; then echo \"$n@example.test\" > \"$CLAUDE_CONFIG_DIR/.claude.json\"; else echo \"$n@example.test\" > \"$here/shared-identity\"; echo \"$n\" >> \"$here/shared\"; fi; : > \"$here/item-$n\"; echo 'Login successful'; exit 0; fi\n\
+             if [ \"$1\" = auth ] && [ \"$2\" = status ]; then if [ -n \"$CLAUDE_CONFIG_DIR\" ]; then e=$(cat \"$CLAUDE_CONFIG_DIR/.claude.json\" 2>/dev/null); else e=$(cat \"$here/shared-identity\" 2>/dev/null || echo default@example.test); fi; if [ -e \"$here/item-$n\" ]; then printf '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"%s\"}\\n' \"$e\"; exit 0; fi; printf '{\"loggedIn\":false,\"authMethod\":\"none\"}\\n'; exit 1; fi\n\
+             if [ \"$1\" = auth ] && [ \"$2\" = logout ]; then rm -f \"$here/item-$n\"; exit 0; fi\nexit 2\n",
         )
         .unwrap();
         std::process::Command::new("chmod")
@@ -893,7 +1023,10 @@ mod tests {
                 }
             },
             &environment,
-            Some(&codex),
+            super::Agents {
+                codex: Some(&codex),
+                claude: None,
+            },
             "s1".into(),
             a.id.clone(),
             std::time::Duration::from_secs(20),
@@ -916,9 +1049,19 @@ mod tests {
             heard.try_recv().is_ok(),
             "the list is pushed when the login ends"
         );
-        let reply = serde_json::to_value(sign_ins.marked(
-            super::with_signed_in(&environment, Some(&codex), super::listing(&store, None)).await,
-        ))
+        let reply = serde_json::to_value(
+            sign_ins.marked(
+                super::with_signed_in(
+                    &environment,
+                    super::Agents {
+                        codex: Some(&codex),
+                        claude: None,
+                    },
+                    super::listing(&store, None),
+                )
+                .await,
+            ),
+        )
         .unwrap();
         assert_eq!(
             row_of(&reply, &a.id).get("signing_in"),
@@ -987,7 +1130,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let facts = super::Facts::default();
-        let mut keys = vec![a.id.clone(), super::DEFAULT.to_string()];
+        let mut keys = vec![
+            a.id.clone(),
+            super::default_key(&protocol::agent::AgentKind::Codex),
+        ];
         assert_eq!(facts.claim_stale(&keys), keys, "nothing held: both read");
         assert_eq!(
             facts.claim_stale(&keys),
@@ -999,7 +1145,7 @@ mod tests {
             super::read_facts(&environment, Some(&on_a), &codex).await,
         );
         facts.read(
-            super::DEFAULT,
+            &super::default_key(&protocol::agent::AgentKind::Codex),
             super::read_facts(&environment, None, &codex).await,
         );
         assert_eq!(
@@ -1110,6 +1256,108 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A Claude Code account signs in, is read and is removed in its own folder, never the person's identity**
+    /// (306 Slices B, C and D for Claude; measured on claude 2.1.330, 2026-11-22): its `auth login` runs with both the
+    /// storage variable and the config directory set to the account's folder, so the person's shared identity is never
+    /// written; its status reads signed in; its email is read from that folder; the Default's is the person's own; and
+    /// its removal signs it out with the same two variables and takes the row.
+    #[tokio::test]
+    async fn a_claude_account_lives_in_its_own_folder() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-claude.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let claude = stand_in_claude(&root);
+        let agents = super::Agents {
+            codex: None,
+            claude: Some(&claude),
+        };
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.clone().into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-claude-acct");
+        let _db = store.temp_db();
+        let a = store.add_account("claude", "A").unwrap();
+        let folder = protocol::root_dir()
+            .join("accounts")
+            .join("claude")
+            .join(&a.id);
+        let (answered, running) = super::sign_in(
+            &store,
+            &Arc::new(super::SignIns::default()),
+            || {},
+            &environment,
+            agents,
+            "s1".into(),
+            a.id.clone(),
+            std::time::Duration::from_secs(20),
+        )
+        .await;
+        assert_eq!(
+            serde_json::to_value(&answered).unwrap()["accounts"][0]["signing_in"],
+            true,
+            "{answered:?}"
+        );
+        running.unwrap().await.unwrap();
+        assert!(
+            !root.join("shared").exists(),
+            "the person's shared identity was written"
+        );
+        assert!(
+            folder.join(".claude.json").exists(),
+            "the account's identity is in its own folder"
+        );
+        let listed = serde_json::to_value(
+            super::with_signed_in(&environment, agents, super::listing(&store, None)).await,
+        )
+        .unwrap();
+        assert_eq!(listed["accounts"][0]["signed_in"], true, "{listed}");
+        // Its email, and the Default's, the person's own.
+        let on_a = super::AccountEnv::for_account(&protocol::root_dir(), &a)
+            .unwrap()
+            .unwrap();
+        let facts = super::read_claude_facts(&environment, Some(&on_a), &claude).await;
+        assert_eq!(
+            facts.and_then(|facts| facts.email),
+            Some(format!("{}@example.test", a.id))
+        );
+        std::fs::write(root.join("item-default"), "").unwrap();
+        let default = super::read_claude_facts(&environment, None, &claude).await;
+        assert_eq!(
+            default.and_then(|facts| facts.email).as_deref(),
+            Some("default@example.test")
+        );
+        // Removed: signed out with the same two variables, the row gone.
+        let removed = serde_json::to_value(
+            super::remove_with(
+                &store,
+                &super::SignIns::default(),
+                &environment,
+                agents,
+                "r1".into(),
+                a.id.clone(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(removed["accounts"], serde_json::json!([]), "{removed}");
+        assert!(
+            !root.join(format!("item-{}", a.id)).exists(),
+            "its keychain item is gone"
+        );
+        assert!(
+            root.join("item-default").exists(),
+            "the person's own is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A sign-in Codex keeps in the computer's credential store is not separate** (306): with Codex storing its
     /// credential outside the account's home (the keyring), a sign-in that ends signed in leaves no auth.json in
     /// the home: the listing says `not_separate`, and not signed in.
@@ -1138,7 +1386,10 @@ mod tests {
             &sign_ins,
             || {},
             &environment,
-            Some(&codex),
+            super::Agents {
+                codex: Some(&codex),
+                claude: None,
+            },
             "s1".into(),
             a.id.clone(),
             std::time::Duration::from_secs(20),
@@ -1146,7 +1397,15 @@ mod tests {
         .await;
         running.unwrap().await.unwrap();
         let reply = serde_json::to_value(
-            super::with_signed_in(&environment, Some(&codex), super::listing(&store, None)).await,
+            super::with_signed_in(
+                &environment,
+                super::Agents {
+                    codex: Some(&codex),
+                    claude: None,
+                },
+                super::listing(&store, None),
+            )
+            .await,
         )
         .unwrap();
         assert_eq!(
@@ -1190,9 +1449,15 @@ mod tests {
         let sign_ins = Arc::new(super::SignIns::default());
         let (changed, heard) = std::sync::mpsc::channel::<()>();
         let signed_in = || async {
-            let reply =
-                super::with_signed_in(&environment, Some(&codex), super::listing(&store, None))
-                    .await;
+            let reply = super::with_signed_in(
+                &environment,
+                super::Agents {
+                    codex: Some(&codex),
+                    claude: None,
+                },
+                super::listing(&store, None),
+            )
+            .await;
             serde_json::to_value(&reply).unwrap()["accounts"][0]["signed_in"].clone()
         };
         let gone = |pid: i32| async move {
@@ -1229,7 +1494,10 @@ mod tests {
                 }
             },
             &environment,
-            Some(&codex),
+            super::Agents {
+                codex: Some(&codex),
+                claude: None,
+            },
             "s1".into(),
             a.id.clone(),
             std::time::Duration::from_millis(600),
@@ -1269,7 +1537,10 @@ mod tests {
                 }
             },
             &environment,
-            Some(&codex),
+            super::Agents {
+                codex: Some(&codex),
+                claude: None,
+            },
             "s2".into(),
             a.id.clone(),
             std::time::Duration::from_secs(20),
@@ -1288,7 +1559,10 @@ mod tests {
                 }
             },
             &environment,
-            Some(&codex),
+            super::Agents {
+                codex: Some(&codex),
+                claude: None,
+            },
             "s3".into(),
             a.id.clone(),
             std::time::Duration::from_secs(20),
@@ -1352,7 +1626,10 @@ mod tests {
             &Arc::new(super::SignIns::default()),
             || {},
             &environment,
-            Some(&codex),
+            super::Agents {
+                codex: Some(&codex),
+                claude: None,
+            },
             "s1".into(),
             a.id.clone(),
             std::time::Duration::from_secs(20),
@@ -1367,7 +1644,10 @@ mod tests {
                 &store,
                 &super::SignIns::default(),
                 &environment,
-                Some(&codex),
+                super::Agents {
+                    codex: Some(&codex),
+                    claude: None,
+                },
                 "r1".into(),
                 a.id.clone(),
             )
@@ -1391,7 +1671,10 @@ mod tests {
                 &store,
                 &super::SignIns::default(),
                 &environment,
-                Some(&codex),
+                super::Agents {
+                    codex: Some(&codex),
+                    claude: None,
+                },
                 "r2".into(),
                 a.id.clone(),
             )
@@ -1473,7 +1756,10 @@ mod tests {
             &sign_ins,
             || {},
             &environment,
-            Some(&codex),
+            super::Agents {
+                codex: Some(&codex),
+                claude: None,
+            },
             "s1".into(),
             a.id.clone(),
             std::time::Duration::from_secs(20),
@@ -1486,7 +1772,10 @@ mod tests {
             &store,
             &sign_ins,
             &environment,
-            Some(&codex),
+            super::Agents {
+                codex: Some(&codex),
+                claude: None,
+            },
             "r1".into(),
             a.id.clone(),
         )

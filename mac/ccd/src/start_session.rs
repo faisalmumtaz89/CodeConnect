@@ -51,6 +51,11 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessage {
     let environment = phone_environment();
     let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
+    let claude = claude_path(&environment, daemon.config.claude_bin.as_deref()).await;
+    let agents = crate::accounts::Agents {
+        codex: codex.as_deref(),
+        claude: claude.as_deref(),
+    };
     let changes = !matches!(message, ClientMessage::ListAccounts { .. });
     let chosen = match &message {
         ClientMessage::ActivateAccount { agent, .. } => Some(agent.clone()),
@@ -72,7 +77,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                     tokio::spawn(async move { push_accounts(&ended).await });
                 },
                 &environment,
-                codex.as_deref(),
+                agents,
                 request_id,
                 account_id,
                 crate::accounts::SIGN_IN_WAIT,
@@ -89,7 +94,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                 &daemon.store,
                 &daemon.sign_ins,
                 &environment,
-                codex.as_deref(),
+                agents,
                 request_id,
                 account_id,
             )
@@ -104,7 +109,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                     .unwrap_or_else(|err| {
                         crate::accounts::unavailable(request_id, "answer", anyhow::anyhow!("{err}"))
                     });
-            crate::accounts::with_signed_in(&environment, codex.as_deref(), reply).await
+            crate::accounts::with_signed_in(&environment, agents, reply).await
         }
     };
     let reply = daemon.account_facts.told(daemon.sign_ins.marked(reply));
@@ -142,6 +147,11 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
 async fn push_accounts(daemon: &Arc<Daemon>) {
     let environment = phone_environment();
     let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
+    let claude = claude_path(&environment, daemon.config.claude_bin.as_deref()).await;
+    let agents = crate::accounts::Agents {
+        codex: codex.as_deref(),
+        claude: claude.as_deref(),
+    };
     let store = daemon.store.clone();
     let Ok(listing) =
         tokio::task::spawn_blocking(move || crate::accounts::listing(&store, None)).await
@@ -149,56 +159,75 @@ async fn push_accounts(daemon: &Arc<Daemon>) {
         return;
     };
     if matches!(listing, ServerMessage::Accounts { .. }) {
-        let listing =
-            crate::accounts::with_signed_in(&environment, codex.as_deref(), listing).await;
+        let listing = crate::accounts::with_signed_in(&environment, agents, listing).await;
         let _ = daemon
             .accounts_tx
             .send(daemon.account_facts.told(daemon.sign_ins.marked(listing)));
     }
 }
 
-/// Each Codex account, and the Default, whose facts are old or missing and not being read, read again (one read at a
-/// time per account, all at once), then the listing pushed once.
+/// Each account, and each agent's Default, whose facts are old or missing and not being read, read again (one read
+/// at a time per account, all at once), then the listing pushed once.
 async fn refresh_facts(daemon: &Arc<Daemon>) {
     let environment = phone_environment();
-    let Some(codex) = codex_path(&environment, daemon.config.codex_bin.as_deref()).await else {
-        return;
-    };
+    let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
+    let claude = claude_path(&environment, daemon.config.claude_bin.as_deref()).await;
     let Ok(accounts) = daemon.store.accounts() else {
         return;
     };
-    let codex_accounts: Vec<_> = accounts
-        .into_iter()
-        .filter(|account| account.agent == "codex")
-        .collect();
-    let keys: Vec<String> = codex_accounts
-        .iter()
-        .map(|account| account.id.clone())
-        .chain(std::iter::once(crate::accounts::DEFAULT.to_string()))
-        .collect();
+    // Each account and Default of an agent on this computer, by its key.
+    let mut wanted: Vec<(String, AgentKind, Option<crate::store::Account>)> = Vec::new();
+    for (agent, present) in [
+        (AgentKind::Codex, codex.is_some()),
+        (AgentKind::Claude, claude.is_some()),
+    ] {
+        if !present {
+            continue;
+        }
+        wanted.push((crate::accounts::default_key(&agent), agent.clone(), None));
+        for account in accounts
+            .iter()
+            .filter(|account| account.agent == agent.as_str())
+        {
+            wanted.push((account.id.clone(), agent.clone(), Some(account.clone())));
+        }
+    }
+    let keys: Vec<String> = wanted.iter().map(|(key, _, _)| key.clone()).collect();
     let claimed = daemon.account_facts.claim_stale(&keys);
     if claimed.is_empty() {
         return;
     }
     let root = protocol::root_dir();
-    let reads = claimed.iter().map(|key| {
-        let account = codex_accounts.iter().find(|account| &account.id == key);
-        let (environment, codex, root) = (&environment, &codex, &root);
-        async move {
-            let home = match account {
-                Some(account) => match crate::accounts::AccountEnv::for_account(root, account) {
-                    Ok(home) => home,
-                    Err(_) => {
-                        daemon.account_facts.read(key, None);
-                        return;
+    let reads = wanted
+        .iter()
+        .filter(|(key, _, _)| claimed.contains(key))
+        .map(|(key, agent, account)| {
+            let (environment, root, codex, claude) = (&environment, &root, &codex, &claude);
+            async move {
+                let home = match account {
+                    Some(account) => {
+                        match crate::accounts::AccountEnv::for_account(root, account) {
+                            Ok(home) => home,
+                            Err(_) => {
+                                daemon.account_facts.read(key, None);
+                                return;
+                            }
+                        }
                     }
-                },
-                None => None,
-            };
-            let facts = crate::accounts::read_facts(environment, home.as_ref(), codex).await;
-            daemon.account_facts.read(key, facts);
-        }
-    });
+                    None => None,
+                };
+                let facts = match (agent, codex, claude) {
+                    (AgentKind::Codex, Some(codex), _) => {
+                        crate::accounts::read_facts(environment, home.as_ref(), codex).await
+                    }
+                    (AgentKind::Claude, _, Some(claude)) => {
+                        crate::accounts::read_claude_facts(environment, home.as_ref(), claude).await
+                    }
+                    _ => None,
+                };
+                daemon.account_facts.read(key, facts);
+            }
+        });
     futures_util::future::join_all(reads).await;
     push_accounts(daemon).await;
 }
@@ -1510,7 +1539,7 @@ async fn login_path_hits(
 /// Whether `claude auth status` says the claude at `path` is signed in: exit 0 with
 /// `loggedIn` true, signed out exit 1 with it false, and anything else unknown.
 /// Its output is read for that one field only, and dropped here.
-async fn claude_signed_in(
+pub(crate) async fn claude_signed_in(
     environment: &HashMap<OsString, OsString>,
     account: Option<&crate::accounts::AccountEnv>,
     path: &Path,
