@@ -4171,7 +4171,10 @@ mod tests {
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
         };
-        assert_eq!(daemon.store.begin_run(&row, &uid, None, None).unwrap(), None);
+        assert_eq!(
+            daemon.store.begin_run(&row, &uid, None, None).unwrap(),
+            None
+        );
         let pendings: Vec<PendingEvent> = (0..events)
             .map(|n| PendingEvent {
                 session_uid: uid.clone(),
@@ -5172,7 +5175,10 @@ mod tests {
                 agent: protocol::agent::AgentKind::Claude,
                 codex_thread_id: None,
             };
-            assert_eq!(server.store.begin_run(&row, &uid, None, None).unwrap(), None);
+            assert_eq!(
+                server.store.begin_run(&row, &uid, None, None).unwrap(),
+                None
+            );
         }
         let list = Message::Text(r#"{"type":"list_projects"}"#.into());
 
@@ -5337,7 +5343,10 @@ mod tests {
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
         };
-        assert_eq!(store.begin_run(&row, &row.session_uid, None, None).unwrap(), None);
+        assert_eq!(
+            store.begin_run(&row, &row.session_uid, None, None).unwrap(),
+            None
+        );
     }
 
     /// **The start-session wire a minor-28 daemon sent, still in what this build
@@ -6026,22 +6035,25 @@ mod tests {
                 None
             );
         }
-        server.daemon.agents.set(vec![None, None], vec![
-            AgentAvailability {
-                agent: AgentKind::Claude,
-                available: true,
-                detail: None,
-                models: Vec::new(),
-                signed_in: None,
-            },
-            AgentAvailability {
-                agent: AgentKind::Codex,
-                available: false,
-                detail: Some("could not find the codex binary: install Codex".into()),
-                models: Vec::new(),
-                signed_in: None,
-            },
-        ]);
+        server.daemon.agents.set(
+            vec![None, None],
+            vec![
+                AgentAvailability {
+                    agent: AgentKind::Claude,
+                    available: true,
+                    detail: None,
+                    models: Vec::new(),
+                    signed_in: None,
+                },
+                AgentAvailability {
+                    agent: AgentKind::Codex,
+                    available: false,
+                    detail: Some("could not find the codex binary: install Codex".into()),
+                    models: Vec::new(),
+                    signed_in: None,
+                },
+            ],
+        );
 
         register_stub_session(&server.store, app.display().to_string());
         let (mut phone, ack) = server
@@ -6675,10 +6687,19 @@ mod tests {
     async fn accounts_are_kept_and_chosen_by_a_paired_device() {
         use protocol::agent::AgentKind;
         let (server, _) = live_server(protocol::config::Config::default()).await;
-        let frame = |message: ClientMessage| Message::Text(serde_json::to_string(&message).unwrap());
-        let list = |id: &str| frame(ClientMessage::ListAccounts { request_id: id.into() });
+        let frame =
+            |message: ClientMessage| Message::Text(serde_json::to_string(&message).unwrap());
+        let list = |id: &str| {
+            frame(ClientMessage::ListAccounts {
+                request_id: id.into(),
+            })
+        };
         let add = |id: &str, agent: AgentKind, label: &str| {
-            frame(ClientMessage::AddAccount { request_id: id.into(), agent, label: label.into() })
+            frame(ClientMessage::AddAccount {
+                request_id: id.into(),
+                agent,
+                label: label.into(),
+            })
         };
         let activate = |id: &str, agent: AgentKind, account: Option<&str>| {
             frame(ClientMessage::ActivateAccount {
@@ -6690,13 +6711,19 @@ mod tests {
 
         let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
         assert_eq!(ack["capabilities"]["accounts"], false, "{ack}");
-        for refused in [list("b1"), add("b2", AgentKind::Codex, "Work"), activate("b3", AgentKind::Codex, None)] {
+        for refused in [
+            list("b1"),
+            add("b2", AgentKind::Codex, "Work"),
+            activate("b3", AgentKind::Codex, None),
+        ] {
             bootstrap.send(refused).await.unwrap();
             let reply = next_json(&mut bootstrap).await.unwrap();
             assert_eq!(reply["code"], "not_authorised", "{reply}");
         }
 
-        let (mut phone, ack) = server.hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests")).await;
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
         assert_eq!(ack["capabilities"]["accounts"], true, "{ack}");
         async fn ask(
             phone: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
@@ -6722,19 +6749,41 @@ mod tests {
         let work = added["accounts"][0]["id"].as_str().unwrap().to_string();
         assert!(protocol::uid::is_well_formed(&work), "{added}");
         assert_eq!(added["accounts"][0]["agent"], "codex");
-        assert_eq!(added["active"], serde_json::json!([]), "adding does not choose it: {added}");
+        assert_eq!(
+            added["active"],
+            serde_json::json!([]),
+            "adding does not choose it: {added}"
+        );
 
-        let chosen = ask(&mut phone, activate("a3", AgentKind::Codex, Some(&work)), "a3").await;
-        assert_eq!(chosen["active"], serde_json::json!([{"agent": "codex", "account_id": work}]), "{chosen}");
+        let chosen = ask(
+            &mut phone,
+            activate("a3", AgentKind::Codex, Some(&work)),
+            "a3",
+        )
+        .await;
+        assert_eq!(
+            chosen["active"],
+            serde_json::json!([{"agent": "codex", "account_id": work}]),
+            "{chosen}"
+        );
 
         // Codex's account is not Claude's.
-        let refused = ask(&mut phone, activate("a4", AgentKind::Claude, Some(&work)), "a4").await;
+        let refused = ask(
+            &mut phone,
+            activate("a4", AgentKind::Claude, Some(&work)),
+            "a4",
+        )
+        .await;
         assert_eq!(refused["code"], "bad_request", "{refused}");
         let unchanged = ask(&mut phone, list("a5"), "a5").await;
         assert_eq!(unchanged["active"], chosen["active"], "{unchanged}");
 
         let default = ask(&mut phone, activate("a6", AgentKind::Codex, None), "a6").await;
         assert_eq!(default["active"], serde_json::json!([]), "{default}");
-        assert_eq!(default["accounts"].as_array().unwrap().len(), 1, "Default keeps the account: {default}");
+        assert_eq!(
+            default["accounts"].as_array().unwrap().len(),
+            1,
+            "Default keeps the account: {default}"
+        );
     }
 }

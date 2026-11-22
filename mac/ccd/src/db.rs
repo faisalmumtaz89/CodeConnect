@@ -229,8 +229,10 @@ impl Db {
         start: Option<String>,
         account: Option<String>,
     ) -> Result<Option<crate::store::HostedRun>> {
-        self.run(move |store| store.begin_run(&row, &request_id, start.as_deref(), account.as_deref()))
-            .await
+        self.run(move |store| {
+            store.begin_run(&row, &request_id, start.as_deref(), account.as_deref())
+        })
+        .await
     }
 
     pub async fn record_host(

@@ -169,7 +169,12 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     let trust = serde_json::to_string(&run.trust).expect("a folder answer is always JSON");
     match daemon
         .db
-        .begin_run(row, run.request_id.to_string(), Some(trust), run.account.map(|a| a.id().to_string()))
+        .begin_run(
+            row,
+            run.request_id.to_string(),
+            Some(trust),
+            run.account.map(|a| a.id().to_string()),
+        )
         .await
     {
         Ok(Some(existing)) => return crate::claude_host::answer_for(existing),
@@ -7221,7 +7226,10 @@ mod tests {
                 .unwrap()
                 .unwrap()
         };
-        assert_eq!(daemon.store.begin_run(&row, &sender, None, None).unwrap(), None);
+        assert_eq!(
+            daemon.store.begin_run(&row, &sender, None, None).unwrap(),
+            None
+        );
         daemon
             .send_agent_message_on(
                 Some(&tailnet),
@@ -8035,15 +8043,34 @@ mod tests {
         let first = after["thread"]["turns"][0]["id"].as_str().unwrap();
         let a = rig.daemon.store.add_account("codex", "A").unwrap();
         let b = rig.daemon.store.add_account("codex", "B").unwrap();
-        assert!(rig.daemon.store.activate_account("codex", Some(&a.id)).unwrap());
-        let on_a = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap().unwrap();
-        let home_of_a = on_a.argv()[1].to_str().unwrap().split_once('=').unwrap().1.to_string();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("codex", Some(&a.id))
+            .unwrap());
+        let on_a = crate::accounts::AccountEnv::for_account(&rig.root, &a)
+            .unwrap()
+            .unwrap();
+        let home_of_a = on_a.argv()[1]
+            .to_str()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .to_string();
 
-        let codex = stand_in(&rig, "printf '%s\\n' \"${CODEX_HOME-unset}\" >> codex_home\nexec sleep 30");
+        let codex = stand_in(
+            &rig,
+            "printf '%s\\n' \"${CODEX_HOME-unset}\" >> codex_home\nexec sleep 30",
+        );
         let mut script = whole_start();
         script.truncate(3);
         script[2].1 = json!({"result": {"thread": {"id": thread}, "model": "gpt-test"}});
-        let run = Run { trust: Trust::Trusted, account: Some(&on_a), ..run(&rig, "req-on-a", &codex) };
+        let run = Run {
+            trust: Trust::Trusted,
+            account: Some(&on_a),
+            ..run(&rig, "req-on-a", &codex)
+        };
         let (result, ws) = tokio::join!(start(&rig.daemon, run), async {
             let (_, mut ws) = play_app_server(&rig, script).await;
             let first_turn = asked(&mut ws, "turn/start").await;
@@ -8053,9 +8080,17 @@ mod tests {
         let uid = started_uid(&result);
         row_once(&rig, &uid, Lifecycle::Live).await;
         link_attached(&rig.daemon, &uid).await;
-        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(a.clone()), "the run records A");
+        assert_eq!(
+            rig.daemon.store.run_account(&uid).unwrap(),
+            Some(a.clone()),
+            "the run records A"
+        );
 
-        assert!(rig.daemon.store.activate_account("codex", Some(&b.id)).unwrap());
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("codex", Some(&b.id))
+            .unwrap());
         app_server_ended(&rig, &uid, ws).await;
         let daemon = relauncher(&rig);
         let mut said = saying(&daemon, &uid, "say-again", "still on A?");
@@ -8069,8 +8104,15 @@ mod tests {
 
         let dir = crate::claude_host::run_dir(&rig.root, &uid);
         let homes = std::fs::read_to_string(dir.join("codex_home")).unwrap();
-        assert_eq!(homes.lines().collect::<Vec<_>>(), [home_of_a.as_str(), home_of_a.as_str()], "{homes}");
-        assert_eq!(resumed["params"]["threadId"], thread, "the same thread, resumed");
+        assert_eq!(
+            homes.lines().collect::<Vec<_>>(),
+            [home_of_a.as_str(), home_of_a.as_str()],
+            "{homes}"
+        );
+        assert_eq!(
+            resumed["params"]["threadId"], thread,
+            "the same thread, resumed"
+        );
     }
 
     /// **X5-2 G2: a run ended by End run is not relaunched.** It reads `none`, and a message to

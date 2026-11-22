@@ -2905,7 +2905,12 @@ impl Store {
         };
         self.write().execute(
             "INSERT INTO accounts(id, agent, label, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![account.id, account.agent, account.label, protocol::time::now_rfc3339()],
+            params![
+                account.id,
+                account.agent,
+                account.label,
+                protocol::time::now_rfc3339()
+            ],
         )?;
         Ok(account)
     }
@@ -2913,7 +2918,8 @@ impl Store {
     /// Every account, both agents, oldest first.
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let conn = self.read();
-        let mut stmt = conn.prepare("SELECT id, agent, label FROM accounts ORDER BY created_at, id")?;
+        let mut stmt =
+            conn.prepare("SELECT id, agent, label FROM accounts ORDER BY created_at, id")?;
         let rows = stmt
             .query_map([], account_from)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2959,7 +2965,10 @@ impl Store {
                 )?;
             }
             None => {
-                tx.execute("DELETE FROM account_selection WHERE agent = ?1", params![agent])?;
+                tx.execute(
+                    "DELETE FROM account_selection WHERE agent = ?1",
+                    params![agent],
+                )?;
             }
         }
         tx.commit()?;
@@ -7902,7 +7911,10 @@ mod tests {
             row.created_at = at.into();
             row.agent = agent;
             row.lifecycle = lifecycle;
-            assert_eq!(store.begin_run(&row, &session.uid, None, None).unwrap(), None);
+            assert_eq!(
+                store.begin_run(&row, &session.uid, None, None).unwrap(),
+                None
+            );
             session.uid
         };
         let old = file(
@@ -7989,7 +8001,10 @@ mod tests {
     fn seed_run(store: &Store, session: &SessionKey, lifecycle: Lifecycle, events: u32) {
         let mut row = session_row(session);
         row.lifecycle = lifecycle;
-        assert_eq!(store.begin_run(&row, &session.uid, None, None).unwrap(), None);
+        assert_eq!(
+            store.begin_run(&row, &session.uid, None, None).unwrap(),
+            None
+        );
         for i in 0..events {
             store
                 .append_event(&pending(
@@ -8169,7 +8184,10 @@ mod tests {
         let mut row = session_row(session);
         row.lifecycle = lifecycle;
         row.transcript_path = Some(format!("/tmp/{}.jsonl", session.uid));
-        assert_eq!(store.begin_run(&row, &session.uid, None, None).unwrap(), None);
+        assert_eq!(
+            store.begin_run(&row, &session.uid, None, None).unwrap(),
+            None
+        );
     }
 
     fn transcript_of(store: &Store, session: &SessionKey) -> Option<String> {
@@ -8188,7 +8206,12 @@ mod tests {
     fn a_database_from_before_accounts_takes_them_on_and_keeps_them() {
         let (store, path) = temp_store();
         let legacy = key("AA", "cc-1");
-        assert_eq!(store.begin_run(&session_row(&legacy), &legacy.uid, None, None).unwrap(), None);
+        assert_eq!(
+            store
+                .begin_run(&session_row(&legacy), &legacy.uid, None, None)
+                .unwrap(),
+            None
+        );
         drop(store);
         {
             let conn = Connection::open(&path).unwrap();
@@ -8198,15 +8221,29 @@ mod tests {
             .unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.run_account(&legacy.uid).unwrap(), None, "a run from before is on its Default");
+        assert_eq!(
+            store.run_account(&legacy.uid).unwrap(),
+            None,
+            "a run from before is on its Default"
+        );
         let work = store.add_account("codex", "Work").unwrap();
         let home = store.add_account("claude", "Home").unwrap();
         assert!(store.activate_account("codex", Some(&work.id)).unwrap());
-        assert!(!store.activate_account("claude", Some(&work.id)).unwrap(), "codex's account is not claude's");
+        assert!(
+            !store.activate_account("claude", Some(&work.id)).unwrap(),
+            "codex's account is not claude's"
+        );
         assert!(store.activate_account("claude", Some(&home.id)).unwrap());
         let on_work = key("BB", "cx-1");
         assert_eq!(
-            store.begin_run(&codex_session_row(&on_work), &on_work.uid, None, Some(&work.id)).unwrap(),
+            store
+                .begin_run(
+                    &codex_session_row(&on_work),
+                    &on_work.uid,
+                    None,
+                    Some(&work.id)
+                )
+                .unwrap(),
             None
         );
         drop(store);
@@ -8220,8 +8257,16 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert!(store.activate_account("codex", None).unwrap());
-        assert_eq!(store.active_account("codex").unwrap(), None, "Default again");
-        assert_eq!(store.run_account(&on_work.uid).unwrap(), Some(work), "a run keeps the account it began on");
+        assert_eq!(
+            store.active_account("codex").unwrap(),
+            None,
+            "Default again"
+        );
+        assert_eq!(
+            store.run_account(&on_work.uid).unwrap(),
+            Some(work),
+            "a run keeps the account it began on"
+        );
     }
 
     /// On the way up to `6`, every run that had ended forgets its transcript, once,
@@ -8289,7 +8334,10 @@ mod tests {
         assert_eq!(store.begin_run(&row, &codex.uid, None, None).unwrap(), None);
         let mut second = codex_session_row(&doomed);
         second.lifecycle = Lifecycle::Live;
-        assert_eq!(store.begin_run(&second, &doomed.uid, None, None).unwrap(), None);
+        assert_eq!(
+            store.begin_run(&second, &doomed.uid, None, None).unwrap(),
+            None
+        );
         store
             .append_event(&pending(&codex, EventKind::ToolCall, Some("one")))
             .unwrap();

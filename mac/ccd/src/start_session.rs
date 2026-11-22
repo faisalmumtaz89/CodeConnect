@@ -75,7 +75,9 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             let store = daemon.store.clone();
             tokio::task::spawn_blocking(move || crate::accounts::answer(&store, message))
                 .await
-                .unwrap_or_else(|err| crate::accounts::unavailable("answer", anyhow::anyhow!("{err}")))
+                .unwrap_or_else(|err| {
+                    crate::accounts::unavailable("answer", anyhow::anyhow!("{err}"))
+                })
         }
         ClientMessage::GetProjectGit { path } => project_git(daemon, path).await,
         // Off the async workers: a read can wait on macOS asking the user.
@@ -129,17 +131,19 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             // same login shell, since `auth status` turns on variables alone.
             let environment = phone_environment();
             // The account the agent's starts use now, read once for this start: its checks and its run go on it.
-            let account = match crate::accounts::AccountEnv::active(&daemon.store, &state_dir, &agent) {
-                Ok(account) => account,
-                Err(err) => {
-                    let detail = format!("could not read {}'s account: {err:#}", agent.as_str());
-                    crate::log_error!("{detail}");
-                    return ServerMessage::StartSessionResult {
-                        result: failed(StartFailure::LaunchFailed, detail),
-                        request_id,
-                    };
-                }
-            };
+            let account =
+                match crate::accounts::AccountEnv::active(&daemon.store, &state_dir, &agent) {
+                    Ok(account) => account,
+                    Err(err) => {
+                        let detail =
+                            format!("could not read {}'s account: {err:#}", agent.as_str());
+                        crate::log_error!("{detail}");
+                        return ServerMessage::StartSessionResult {
+                            result: failed(StartFailure::LaunchFailed, detail),
+                            request_id,
+                        };
+                    }
+                };
             // A start without a first message, or with one of only white space, starts
             // the run waiting for the person's message: its prompt is empty.
             let prompt = prompt
@@ -240,7 +244,12 @@ impl KnownAgents {
     }
 
     /// What `agent` offered on `account` at `version`, if that is the version it was asked at.
-    fn offered(&self, agent: &AgentKind, account: Option<&crate::accounts::AccountEnv>, version: &str) -> Option<Offer> {
+    fn offered(
+        &self,
+        agent: &AgentKind,
+        account: Option<&crate::accounts::AccountEnv>,
+        version: &str,
+    ) -> Option<Offer> {
         let offers = self.offers.lock().unwrap_or_else(|p| p.into_inner());
         offers
             .get(&offer_key(agent, account))
@@ -248,7 +257,13 @@ impl KnownAgents {
             .map(|(_, offer)| offer.clone())
     }
 
-    fn keep(&self, agent: &AgentKind, account: Option<&crate::accounts::AccountEnv>, version: &str, offer: Offer) {
+    fn keep(
+        &self,
+        agent: &AgentKind,
+        account: Option<&crate::accounts::AccountEnv>,
+        version: &str,
+        offer: Offer,
+    ) {
         let mut offers = self.offers.lock().unwrap_or_else(|p| p.into_inner());
         offers.insert(offer_key(agent, account), (version.to_string(), offer));
     }
@@ -267,22 +282,33 @@ fn active_accounts(daemon: &Daemon) -> Vec<Option<crate::accounts::AccountEnv>> 
     let root = protocol::root_dir();
     AGENTS
         .iter()
-        .map(|agent| match crate::accounts::AccountEnv::active(&daemon.store, &root, agent) {
-            Ok(account) => account,
-            Err(err) => {
-                crate::log_error!("could not read {}'s account; its Default stands: {err:#}", agent.as_str());
-                None
-            }
-        })
+        .map(
+            |agent| match crate::accounts::AccountEnv::active(&daemon.store, &root, agent) {
+                Ok(account) => account,
+                Err(err) => {
+                    crate::log_error!(
+                        "could not read {}'s account; its Default stands: {err:#}",
+                        agent.as_str()
+                    );
+                    None
+                }
+            },
+        )
         .collect()
 }
 
 fn selections(accounts: &[Option<crate::accounts::AccountEnv>]) -> Selections {
-    accounts.iter().map(|account| account.as_ref().map(|account| account.id().to_string())).collect()
+    accounts
+        .iter()
+        .map(|account| account.as_ref().map(|account| account.id().to_string()))
+        .collect()
 }
 
 /// The agents as a check finds them now, each on the account its starts use, kept for the next list.
-async fn check_and_keep(daemon: &Arc<Daemon>, accounts: &[Option<crate::accounts::AccountEnv>]) -> Vec<AgentAvailability> {
+async fn check_and_keep(
+    daemon: &Arc<Daemon>,
+    accounts: &[Option<crate::accounts::AccountEnv>],
+) -> Vec<AgentAvailability> {
     let checked = check_agents(
         &daemon.agents,
         &phone_environment(),
@@ -591,10 +617,11 @@ async fn claude_start(
         Ok(trust) => trust,
         Err(asked) => return asked,
     };
-    let ready = match claude_preflight(environment, account, daemon.config.claude_bin.as_deref()).await {
-        Ok(ready) => ready,
-        Err(refusal) => return refusal,
-    };
+    let ready =
+        match claude_preflight(environment, account, daemon.config.claude_bin.as_deref()).await {
+            Ok(ready) => ready,
+            Err(refusal) => return refusal,
+        };
     let host_bin = match crate::claude_host::host_binary(&daemon.config) {
         Ok(host_bin) => host_bin,
         Err(why) => return failed(StartFailure::LaunchFailed, why),
@@ -1043,9 +1070,16 @@ async fn agent_availability(
     match codex_probe(environment, configured).await {
         Err((_, detail)) => unavailable(detail),
         Ok(ready) => {
-            let offer = offer(known, environment, account, &ready.path, agent, &ready.version)
-                .await
-                .unwrap_or_default();
+            let offer = offer(
+                known,
+                environment,
+                account,
+                &ready.path,
+                agent,
+                &ready.version,
+            )
+            .await
+            .unwrap_or_default();
             startable(agent, offer.signed_in, offer.models, &this_computer())
         }
     }
@@ -1202,10 +1236,14 @@ async fn version_at_floor(
             ),
         )
     };
-    let said = probe_output(environment, None, &[path.as_os_str(), OsStr::new("--version")])
-        .await
-        .filter(|output| output.status.success())
-        .ok_or_else(unread)?;
+    let said = probe_output(
+        environment,
+        None,
+        &[path.as_os_str(), OsStr::new("--version")],
+    )
+    .await
+    .filter(|output| output.status.success())
+    .ok_or_else(unread)?;
     let (number, version) = last_line(&said.stdout)
         .as_deref()
         .and_then(version_in)
@@ -1445,7 +1483,14 @@ async fn offer(
     if let (Some(kept), false) = (&kept, signed_in) {
         return Some(kept.clone());
     }
-    let mut asked = ask(environment, account, &[codex.as_os_str()], agent, !signed_in).await?;
+    let mut asked = ask(
+        environment,
+        account,
+        &[codex.as_os_str()],
+        agent,
+        !signed_in,
+    )
+    .await?;
     if signed_in {
         asked.signed_in = Some(true);
     }
@@ -1613,7 +1658,11 @@ fn offer_from(agent: &AgentKind, said: &[serde_json::Value]) -> Option<Offer> {
 
 /// Whether `login status` says the codex at `codex` is signed in. It reads the stored
 /// sign-in and starts nothing, so, unlike an ask, it leaves nothing behind.
-async fn codex_signed_in(environment: &HashMap<OsString, OsString>, account: Option<&crate::accounts::AccountEnv>, codex: &Path) -> bool {
+async fn codex_signed_in(
+    environment: &HashMap<OsString, OsString>,
+    account: Option<&crate::accounts::AccountEnv>,
+    codex: &Path,
+) -> bool {
     let mut command = login_shell_command(
         environment,
         account,
@@ -4106,24 +4155,50 @@ mod tests {
     /// answer a listing made on B.
     #[test]
     fn what_one_account_offered_is_never_anothers() {
-        let root = std::env::temp_dir().join(format!("ccs-offers.{}", &protocol::uid::new().unwrap()[20..]));
+        let root = std::env::temp_dir().join(format!(
+            "ccs-offers.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
         let on = |label: &str| {
-            let account =
-                crate::store::Account { id: protocol::uid::new().unwrap(), agent: "codex".into(), label: label.into() };
-            crate::accounts::AccountEnv::for_account(&root, &account).unwrap().unwrap()
+            let account = crate::store::Account {
+                id: protocol::uid::new().unwrap(),
+                agent: "codex".into(),
+                label: label.into(),
+            };
+            crate::accounts::AccountEnv::for_account(&root, &account)
+                .unwrap()
+                .unwrap()
         };
         let (a, b) = (on("A"), on("B"));
         let known = KnownAgents::default();
-        let offer = Offer { signed_in: Some(true), ..Default::default() };
+        let offer = Offer {
+            signed_in: Some(true),
+            ..Default::default()
+        };
         known.keep(&AgentKind::Codex, Some(&a), "0.167.0", offer.clone());
-        assert_eq!(known.offered(&AgentKind::Codex, Some(&a), "0.167.0"), Some(offer));
-        assert_eq!(known.offered(&AgentKind::Codex, Some(&b), "0.167.0"), None, "B is asked itself");
-        assert_eq!(known.offered(&AgentKind::Codex, None, "0.167.0"), None, "and so is Default");
+        assert_eq!(
+            known.offered(&AgentKind::Codex, Some(&a), "0.167.0"),
+            Some(offer)
+        );
+        assert_eq!(
+            known.offered(&AgentKind::Codex, Some(&b), "0.167.0"),
+            None,
+            "B is asked itself"
+        );
+        assert_eq!(
+            known.offered(&AgentKind::Codex, None, "0.167.0"),
+            None,
+            "and so is Default"
+        );
 
         let made_on_a = selections(&[None, Some(a.clone())]);
         known.set(made_on_a.clone(), Vec::new());
         assert_eq!(known.get(&made_on_a), Some(Vec::new()));
-        assert_eq!(known.get(&selections(&[None, Some(b)])), None, "a check on A does not answer for B");
+        assert_eq!(
+            known.get(&selections(&[None, Some(b)])),
+            None,
+            "a check on A does not answer for B"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4133,7 +4208,10 @@ mod tests {
     /// variable set in the environment handed to the shell, as a naive launch would, is overwritten by that file.
     #[tokio::test]
     async fn an_accounts_folder_wins_over_the_login_shells_own_export() {
-        let root = std::env::temp_dir().join(format!("ccs-account.{}", &protocol::uid::new().unwrap()[20..]));
+        let root = std::env::temp_dir().join(format!(
+            "ccs-account.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
         let home = root.join("home");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
@@ -4146,31 +4224,53 @@ mod tests {
             ("SHELL", "/bin/sh"),
             ("PATH", "/usr/bin:/bin"),
         ]);
-        let said = |environment: HashMap<OsString, OsString>, account: Option<crate::accounts::AccountEnv>| async move {
+        let said = |environment: HashMap<OsString, OsString>,
+                    account: Option<crate::accounts::AccountEnv>| async move {
             let mut command = login_shell_command(
                 &environment,
                 account.as_ref(),
                 &[
                     OsStr::new("/bin/sh"),
                     OsStr::new("-c"),
-                    OsStr::new("printf '%s %s\\n' \"$CODEX_HOME\" \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\""),
+                    OsStr::new(
+                        "printf '%s %s\\n' \"$CODEX_HOME\" \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\"",
+                    ),
                 ],
             );
             let out = command.stdin(Stdio::null()).output().await.unwrap();
-            String::from_utf8(out.stdout).unwrap().lines().last().unwrap_or_default().to_string()
+            String::from_utf8(out.stdout)
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap_or_default()
+                .to_string()
         };
         let account = |agent: &str| crate::store::Account {
             id: protocol::uid::new().unwrap(),
             agent: agent.into(),
             label: "Work".into(),
         };
-        let codex = crate::accounts::AccountEnv::for_account(&root, &account("codex")).unwrap().unwrap();
-        let claude = crate::accounts::AccountEnv::for_account(&root, &account("claude")).unwrap().unwrap();
+        let codex = crate::accounts::AccountEnv::for_account(&root, &account("codex"))
+            .unwrap()
+            .unwrap();
+        let claude = crate::accounts::AccountEnv::for_account(&root, &account("claude"))
+            .unwrap()
+            .unwrap();
         let folder = |env: &crate::accounts::AccountEnv| {
-            env.argv()[1].to_str().unwrap().split_once('=').unwrap().1.to_string()
+            env.argv()[1]
+                .to_str()
+                .unwrap()
+                .split_once('=')
+                .unwrap()
+                .1
+                .to_string()
         };
 
-        assert_eq!(said(env.clone(), None).await, "/conflict/codex /conflict/claude", "Default is the person's own");
+        assert_eq!(
+            said(env.clone(), None).await,
+            "/conflict/codex /conflict/claude",
+            "Default is the person's own"
+        );
         assert_eq!(
             said(env.clone(), Some(codex.clone())).await,
             format!("{} /conflict/claude", folder(&codex)),
@@ -4185,7 +4285,11 @@ mod tests {
         let mut naive = env.clone();
         naive.insert(OsString::from("CODEX_HOME"), OsString::from(folder(&codex)));
         assert_eq!(said(naive, None).await, "/conflict/codex /conflict/claude");
-        assert_eq!(protocol::fsperm::mode_of(Path::new(&folder(&codex))).unwrap() & 0o777, 0o700, "its folder is private");
+        assert_eq!(
+            protocol::fsperm::mode_of(Path::new(&folder(&codex))).unwrap() & 0o777,
+            0o700,
+            "its folder is private"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4505,7 +4609,14 @@ esac"#;
         let rig = Rig::new("codex-offer", ANSWERING);
         let known = KnownAgents::default();
         let codex = |version: &'static str| {
-            offer(&known, &rig.env, None, &rig.launcher, &AgentKind::Codex, version)
+            offer(
+                &known,
+                &rig.env,
+                None,
+                &rig.launcher,
+                &AgentKind::Codex,
+                version,
+            )
         };
         answer(&rig, "codex", CODEX_SIGNED_OUT);
         login_status(&rig, 1);
@@ -4558,7 +4669,8 @@ esac"#;
         };
         rig.claude_says("ask", CLAUDE_SIGNED_OUT);
         for _ in 0..2 {
-            let models = claude_models(&known, &rig.env, None, &ready("2.1.319", Some(false))).await;
+            let models =
+                claude_models(&known, &rig.env, None, &ready("2.1.319", Some(false))).await;
             assert!(models.is_empty(), "{models:?}");
         }
         assert_eq!(asks(), 0, "a signed-out list starts no claude");
@@ -4923,8 +5035,14 @@ esac"#;
         }
         let rig = recording("no-claude");
         std::fs::remove_file(&rig.claude).unwrap();
-        let listed =
-            agent_availability(&AgentKind::Claude, &KnownAgents::default(), &rig.env, None, None).await;
+        let listed = agent_availability(
+            &AgentKind::Claude,
+            &KnownAgents::default(),
+            &rig.env,
+            None,
+            None,
+        )
+        .await;
         assert!(!listed.available);
         assert_eq!(
             listed.detail,
@@ -4975,7 +5093,9 @@ esac"#;
             let env = rig.env.clone();
             async move {
                 let claude_bin = claude_bin.map(|path| path.display().to_string());
-                claude_probe(&env, None, claude_bin.as_deref()).await.unwrap()
+                claude_probe(&env, None, claude_bin.as_deref())
+                    .await
+                    .unwrap()
             }
         };
         let ready = found(Some(configured.clone())).await;
@@ -5001,8 +5121,14 @@ esac"#;
             this_computer()
         );
         rig.claude_says("version", "2.1.267 (Claude Code)\n");
-        let listed =
-            agent_availability(&AgentKind::Claude, &KnownAgents::default(), &rig.env, None, None).await;
+        let listed = agent_availability(
+            &AgentKind::Claude,
+            &KnownAgents::default(),
+            &rig.env,
+            None,
+            None,
+        )
+        .await;
         assert!(!listed.available);
         assert_eq!(listed.detail, Some(sentence.clone()));
         let result = rig.start(&rig.project(), Some("hi")).await;
@@ -5041,8 +5167,14 @@ esac"#;
         let rig = recording("signed-out");
         rig.claude_says("auth", AUTH_SIGNED_OUT);
         rig.claude_says("auth_exit", "1");
-        let listed =
-            agent_availability(&AgentKind::Claude, &KnownAgents::default(), &rig.env, None, None).await;
+        let listed = agent_availability(
+            &AgentKind::Claude,
+            &KnownAgents::default(),
+            &rig.env,
+            None,
+            None,
+        )
+        .await;
         assert!(listed.available);
         assert_eq!(listed.signed_in, Some(false));
         let sentence = format!("Claude Code on {} isn’t signed in.", this_computer());
@@ -5090,7 +5222,10 @@ esac"#;
             assert!(clean(&format!("{ready:?}")), "{ready:?}");
             let known = KnownAgents::default();
             let listed = agent_availability(&AgentKind::Claude, &known, &rig.env, None, None).await;
-            let kept = format!("{:?}", known.offered(&AgentKind::Claude, None, &ready.version));
+            let kept = format!(
+                "{:?}",
+                known.offered(&AgentKind::Claude, None, &ready.version)
+            );
             assert!(clean(&kept), "{kept}");
             assert!(
                 kept.contains("B18-CONTROL-MODEL"),
@@ -5144,8 +5279,14 @@ esac"#;
     async fn the_probe_runs_claude_itself_with_no_config_dir() {
         let rig = recording("direct");
         rig.claude_says("ask", CLAUDE_SIGNED_OUT);
-        let listed =
-            agent_availability(&AgentKind::Claude, &KnownAgents::default(), &rig.env, None, None).await;
+        let listed = agent_availability(
+            &AgentKind::Claude,
+            &KnownAgents::default(),
+            &rig.env,
+            None,
+            None,
+        )
+        .await;
         assert_eq!(listed.models.len(), 5);
         let runs = rig.claude_runs();
         assert!(runs.lines().any(|run| run == "--version"), "{runs}");

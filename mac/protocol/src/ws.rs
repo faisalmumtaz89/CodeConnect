@@ -3020,7 +3020,9 @@ mod tests {
             assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
         }
         round_trip_client(
-            ClientMessage::ListAccounts { request_id: "a1".into() },
+            ClientMessage::ListAccounts {
+                request_id: "a1".into(),
+            },
             serde_json::json!({"type": "list_accounts", "request_id": "a1"}),
         );
         round_trip_client(
@@ -3054,7 +3056,13 @@ mod tests {
             serde_json::json!({"type": "activate_account", "request_id": "a5", "agent": "codex"}),
         )
         .unwrap();
-        assert!(matches!(bare, ClientMessage::ActivateAccount { account_id: None, .. }));
+        assert!(matches!(
+            bare,
+            ClientMessage::ActivateAccount {
+                account_id: None,
+                ..
+            }
+        ));
 
         let reply = ServerMessage::Accounts {
             request_id: "a2".into(),
@@ -3081,7 +3089,10 @@ mod tests {
             "capture": true, "push": false, "tls": true
         });
         let caps: Capabilities = serde_json::from_value(older).expect("decodes");
-        assert!(!caps.accounts, "a daemon that does not say keeps no accounts");
+        assert!(
+            !caps.accounts,
+            "a daemon that does not say keeps no accounts"
+        );
     }
 
     /// **The start-session wire, pinned as the phone matches it** (minor 28).

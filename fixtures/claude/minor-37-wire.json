@@ -1,5 +1,6 @@
 {
   "hello_ack_capabilities": {
+    "accounts": true,
     "browse_folders": true,
     "can_approve_reliably": true,
     "claude_interrupt": true,

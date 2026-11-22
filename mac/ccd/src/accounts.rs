@@ -36,7 +36,10 @@ pub(crate) struct AccountEnv {
 
 impl AccountEnv {
     /// `account`'s folder under `root`, made (0700) when it is not there yet. None for an agent with no such variable.
-    pub(crate) fn for_account(root: &Path, account: &Account) -> std::io::Result<Option<AccountEnv>> {
+    pub(crate) fn for_account(
+        root: &Path,
+        account: &Account,
+    ) -> std::io::Result<Option<AccountEnv>> {
         let Some(variable) = variable(&account.agent) else {
             return Ok(None);
         };
@@ -46,7 +49,11 @@ impl AccountEnv {
         }
         let folder = root.join("accounts").join(&account.agent).join(&account.id);
         protocol::fsperm::private_dir(&folder)?;
-        Ok(Some(AccountEnv { id: account.id.clone(), variable, folder }))
+        Ok(Some(AccountEnv {
+            id: account.id.clone(),
+            variable,
+            folder,
+        }))
     }
 
     /// The account `agent`'s starts use now, read once per start; None for its Default.
@@ -78,11 +85,18 @@ impl AccountEnv {
 
 /// A device's ask about accounts, answered with every account and each agent's active one once the ask's change is
 /// made. An unknown agent, or an id that is not one of the agent's, is refused and nothing changes.
-pub(crate) fn answer(store: &crate::store::Store, message: protocol::ws::ClientMessage) -> protocol::ws::ServerMessage {
+pub(crate) fn answer(
+    store: &crate::store::Store,
+    message: protocol::ws::ClientMessage,
+) -> protocol::ws::ServerMessage {
     use protocol::ws::ClientMessage;
     let request_id = match message {
         ClientMessage::ListAccounts { request_id } => request_id,
-        ClientMessage::AddAccount { request_id, agent, label } => {
+        ClientMessage::AddAccount {
+            request_id,
+            agent,
+            label,
+        } => {
             if variable(agent.as_str()).is_none() {
                 return refused(format!("{} has no accounts here", agent.as_str()));
             }
@@ -91,13 +105,17 @@ pub(crate) fn answer(store: &crate::store::Store, message: protocol::ws::ClientM
             }
             request_id
         }
-        ClientMessage::ActivateAccount { request_id, agent, account_id } => {
-            match store.activate_account(agent.as_str(), account_id.as_deref()) {
-                Ok(true) => request_id,
-                Ok(false) => return refused(format!("that is not one of {}'s accounts", agent.as_str())),
-                Err(err) => return unavailable("choose the account", err),
+        ClientMessage::ActivateAccount {
+            request_id,
+            agent,
+            account_id,
+        } => match store.activate_account(agent.as_str(), account_id.as_deref()) {
+            Ok(true) => request_id,
+            Ok(false) => {
+                return refused(format!("that is not one of {}'s accounts", agent.as_str()))
             }
-        }
+            Err(err) => return unavailable("choose the account", err),
+        },
         _ => unreachable!("only the account frames are answered here"),
     };
     listing(store, request_id)
@@ -111,7 +129,10 @@ fn listing(store: &crate::store::Store, request_id: String) -> protocol::ws::Ser
     let mut active = Vec::new();
     for agent in [AgentKind::Claude, AgentKind::Codex] {
         match store.active_account(agent.as_str()) {
-            Ok(Some(account)) => active.push(protocol::ws::ActiveAccount { agent, account_id: account.id }),
+            Ok(Some(account)) => active.push(protocol::ws::ActiveAccount {
+                agent,
+                account_id: account.id,
+            }),
             Ok(None) => {}
             Err(err) => return unavailable("read the accounts", err),
         }
@@ -131,7 +152,10 @@ fn listing(store: &crate::store::Store, request_id: String) -> protocol::ws::Ser
 }
 
 fn refused(message: String) -> protocol::ws::ServerMessage {
-    protocol::ws::ServerMessage::Error { code: "bad_request".into(), message }
+    protocol::ws::ServerMessage::Error {
+        code: "bad_request".into(),
+        message,
+    }
 }
 
 pub(crate) fn unavailable(what: &str, err: anyhow::Error) -> protocol::ws::ServerMessage {

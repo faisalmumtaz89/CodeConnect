@@ -190,7 +190,12 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     };
     match daemon
         .db
-        .begin_run(row, run.request_id.to_string(), Some(line), run.account.map(|a| a.id().to_string()))
+        .begin_run(
+            row,
+            run.request_id.to_string(),
+            Some(line),
+            run.account.map(|a| a.id().to_string()),
+        )
         .await
     {
         Ok(Some(existing)) => return answer_for(existing),
@@ -1920,7 +1925,9 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         Ok(Some(account)) => match crate::accounts::AccountEnv::for_account(root, &account) {
             Ok(account) => account,
             Err(err) => {
-                crate::log_error!("{uid}: could not find its account's folder to relaunch it: {err:#}");
+                crate::log_error!(
+                    "{uid}: could not find its account's folder to relaunch it: {err:#}"
+                );
                 return refuse_relaunch(daemon, uid, request_id, not_running).await;
             }
         },
@@ -5093,7 +5100,10 @@ mod tests {
                 .unwrap()
                 .unwrap()
         };
-        assert_eq!(daemon.store.begin_run(&row, &sender, None, None).unwrap(), None);
+        assert_eq!(
+            daemon.store.begin_run(&row, &sender, None, None).unwrap(),
+            None
+        );
         daemon
             .send_agent_message_on(
                 Some(&tailnet),
