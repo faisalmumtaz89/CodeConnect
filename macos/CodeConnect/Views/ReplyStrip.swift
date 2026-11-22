@@ -18,7 +18,9 @@ struct ReplyStripFacts: Equatable {
 
     /// nil: not reported yet.
     var context: Context?
-    /// nil: the agent reports no windows (Claude Code today), and the Limits group is left out.
+    /// How many times the conversation was compacted.
+    var compactions = 0
+    /// nil: the agent reports no windows yet; empty never stands for that.
     var windows: [Window]?
     /// The email of the account the run's process runs on; nil while unknown.
     var email: String?
@@ -100,23 +102,25 @@ struct ReplyStrip: View {
                     figure("\(Self.tokens(context.used)) / \(Self.tokens(context.size))", Theme.text2)
                 }
                 figure(Self.percent(context.share), Self.tone(context.share, else: Theme.text))
+                if facts.compactions > 0 { figure("\(facts.compactions)×", Theme.text3) }
             } else {
                 notReported(layout)
             }
         })
     }
 
-    /// "Limits used": the figures are the share used in every layout, with a meter or without. Absent while the agent
-    /// reports no windows: a group that would never fill isn't drawn.
     private func limitsGroup(_ layout: Layout) -> AnyView? {
-        guard let windows = facts.windows, !windows.isEmpty else { return nil }
-        return AnyView(group("Limits used") {
-            ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
-                HStack(spacing: 6) {
-                    figure(Self.caption(minutes: window.minutes), Theme.text3)
-                    if layout == .full || layout == .short { Matrix(share: window.share, columns: layout == .full ? 14 : 8) }
-                    figure(Self.percent(window.share), Self.tone(window.share, else: Theme.text))
+        AnyView(group("Limits") {
+            if let windows = facts.windows, !windows.isEmpty {
+                ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
+                    HStack(spacing: 6) {
+                        figure(Self.caption(minutes: window.minutes), Theme.text3)
+                        if layout == .full || layout == .short { Matrix(share: window.share, columns: layout == .full ? 14 : 8) }
+                        figure(Self.percent(window.share), Self.tone(window.share, else: Theme.text))
+                    }
                 }
+            } else {
+                notReported(layout)
             }
         })
     }
@@ -228,7 +232,7 @@ private struct Matrix: View {
                 ReplyStripFacts()
             case "hot":
                 ReplyStripFacts(
-                    context: .init(used: 584_000, size: 1_000_000),
+                    context: .init(used: 584_000, size: 1_000_000), compactions: 1,
                     windows: [.init(minutes: 300, share: 0.96), .init(minutes: 10080, share: 0.61)], email: "ada@example.com")
             case "moving":
                 ReplyStripFacts(
