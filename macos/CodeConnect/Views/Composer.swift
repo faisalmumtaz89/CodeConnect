@@ -348,7 +348,17 @@ private struct Composer: View {
         }
     }
 
-    private var sendButton: some View {
+    /// Send, or while a turn runs Stop (`StopTurnButton`), as chat apps do. Return still sends what is typed: a Codex
+    /// run takes it into the running turn, a Claude run takes it once the turn ends.
+    @ViewBuilder private var sendButton: some View {
+        if model.stopUnavailable(for: key) == nil {
+            StopTurnButton(model: model, key: key)
+        } else {
+            plainSendButton
+        }
+    }
+
+    private var plainSendButton: some View {
         Button(action: submit) {
             Image(systemName: "arrow.up")
                 .font(.system(size: 11, weight: .bold))

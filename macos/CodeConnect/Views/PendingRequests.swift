@@ -52,12 +52,18 @@ struct HoldsReplyBox: PreferenceKey {
     static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
 }
 
-/// The reply box's own surface, edge and margins, holding a request's answers in its place.
+/// The reply box's own surface, edge and margins, holding a request's answers in its place, and at its trailing edge,
+/// apart from the answers, the Stop the reply box has while the run's turn runs (`StopTurnButton`).
 struct ReplyBoxFrame<Content: View>: View {
+    let model: AppModel
+    let key: String
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) { content }
+        HStack(alignment: .bottom, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) { content }
+            StopTurnButton(model: model, key: key)
+        }
             .padding(12)
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.09)))
@@ -101,6 +107,38 @@ struct RequestBlock: View {
             QuestionBlock(approval: approval, questions: questions, model: model)
         } else {
             DecisionBlock(approval: approval, model: model)
+        }
+    }
+}
+
+/// Stops the turn the run is running, a Codex run's over Codex's own link and a Claude run's through the host it was
+/// started on: one white button with the stop square, where the send button would be. It shows whenever Kit says the
+/// turn can be stopped, in the reply box in Send's place and in the foot of a card that has taken the box's place,
+/// apart from the card's answers. Greyed while the stop is on its way, and for a moment after a turn changes, as Kit
+/// rules; the note above the box says what became of it.
+struct StopTurnButton: View {
+    let model: AppModel
+    let key: String
+    static let size: CGFloat = 24
+
+    var body: some View {
+        if model.stopUnavailable(for: key) == nil {
+            let stopping = model.codexStop(for: key) == .inFlight
+            let greyed = model.codexControls(for: key).isStopGreyed(now: model.now)
+            Button {
+                Task { await model.stopCodexTurn(sessionKey: key) }
+            } label: {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.black)
+                    .frame(width: 8, height: 8)
+                    .frame(width: Self.size, height: Self.size)
+                    .background(Circle().fill(Theme.text))
+            }
+            .buttonStyle(.hover(radius: 12, over: true, id: "session.stop"))
+            .disabled(stopping || greyed)
+            .help(stopping ? SessionWords.stopping : greyed ? SessionWords.tryAgainInAMoment : SessionWords.stopHelp)
+            .accessibilityLabel("Stop")
+            .accessibilityIdentifier("session.stop")
         }
     }
 }
