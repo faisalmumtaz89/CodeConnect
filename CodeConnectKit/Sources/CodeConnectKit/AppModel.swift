@@ -1190,8 +1190,8 @@ public final class AppModel {
 
     /// This computer's accounts per agent and the one each agent's starts use, once asked; nil before.
     public private(set) var accountBook: AccountBook?
-    /// What the computer said when it refused, or could not answer, the last accounts request; cleared by its next
-    /// answer.
+    /// What the computer said when it refused, or could not answer, the last accounts request; cleared as the next
+    /// one starts.
     public private(set) var accountsProblem: String?
     /// An accounts request is in flight: one at a time, since a refusal names no request.
     public private(set) var accountsBusy = false
@@ -1209,6 +1209,8 @@ public final class AppModel {
         #if DEBUG
             if let fixture = fixtureAccountBook {
                 accountBook = fixture
+                // `-CC_ACCOUNTS_PROBLEM <words>`: the page as it stands after the computer refused a change.
+                accountsProblem = UserDefaults.standard.string(forKey: "CC_ACCOUNTS_PROBLEM")
                 return
             }
         #endif
@@ -1229,6 +1231,7 @@ public final class AppModel {
 
     private func accountsRequest(_ ask: (DaemonConnection) async throws -> AccountBook) async -> Bool {
         guard keepsAccounts, !accountsBusy else { return false }
+        accountsProblem = nil
         accountsBusy = true
         defer { accountsBusy = false }
         do {

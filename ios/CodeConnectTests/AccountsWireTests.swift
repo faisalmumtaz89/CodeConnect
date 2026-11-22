@@ -186,4 +186,23 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertEqual(model.accountBook, before, "unchanged by a refusal")
         XCTAssertFalse(model.accountsBusy, "free for the next request")
     }
+
+    /// A refusal is shown until the next accounts request starts, never longer: the page asks again when the link
+    /// comes back, so a refusal from before a reconnect is gone as soon as it asks.
+    func testARefusalLastsOnlyUntilTheNextRequest() async throws {
+        let (model, sent) = try model()
+        async let added = model.addAccount(agent: .codex, label: String(repeating: "x", count: 65))
+        await waitUntil({ sent.sent.count == 1 }, "the add to be sent")
+        model.connection.injectForTesting(try reply("refused_label_too_long"))
+        _ = await added
+        XCTAssertEqual(model.accountsProblem, "an account's name is 1 to 64 characters")
+
+        async let loaded: Void = model.loadAccounts()
+        await waitUntil({ sent.sent.count == 2 }, "the list to be sent")
+        XCTAssertNil(model.accountsProblem, "gone once the next request starts, before its answer")
+        model.connection.injectForTesting(
+            .accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: try book("list_after")))
+        await loaded
+        XCTAssertNil(model.accountsProblem)
+    }
 }

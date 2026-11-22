@@ -438,7 +438,8 @@ private struct AccountSettings: View {
                 }
             }
         }
-        .task(id: model?.machineID) {
+        // Asked again when the link comes back, so a refusal from before is gone once it asks.
+        .task(id: "\(model?.machineID ?? "")\(model?.connection.phase.isConnected == true)") {
             model?.listProjects()
             await model?.loadAccounts()
         }
