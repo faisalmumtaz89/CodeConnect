@@ -403,7 +403,11 @@ private struct AccountSettings: View {
             Text("The accounts Claude Code and Codex use on this Mac.")
                 .font(Theme.ui(13)).foregroundStyle(Theme.text2)
             SettingsGroup(title: "On this Mac") {
-                if let model, !model.starter.agents.isEmpty {
+                if let model, let notice = model.linkHealth.notice {
+                    // Its link is down or not yet up: what the computers' rows say about it, in the place of an answer
+                    // its service can't stand behind now. The rows come back when it answers again.
+                    SettingsRow(title: notice.title, line: notice.sentence) { EmptyView() }
+                } else if let model, !model.starter.agents.isEmpty {
                     ForEach(model.starter.agents, id: \.agent) { status in
                         let installed = model.starter.availableAgents.contains(status.agent)
                         // A missing agent's own sentence says why; a signed-in state needs none.
@@ -411,9 +415,6 @@ private struct AccountSettings: View {
                             SettingsState(words: words(status, installed: installed), good: installed && status.signedIn == true)
                         }
                     }
-                } else if let model, let notice = model.linkHealth.notice {
-                    // Its link is down or not yet up: what the computers' rows say about it.
-                    SettingsRow(title: notice.title, line: notice.sentence) { EmptyView() }
                 } else if model == nil, setup.settled {
                     SettingsRow(title: "This Mac isn’t set up yet", line: "Set Up… in General sets it up.") { EmptyView() }
                 } else {
