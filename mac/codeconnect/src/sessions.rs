@@ -251,7 +251,7 @@ mod tests {
             git_branch: None,
             diff_stat: None,
             relaunchable: false,
-            switching: false,
+            switching: None,
         }
     }
 

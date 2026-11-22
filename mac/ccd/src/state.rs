@@ -2646,7 +2646,7 @@ impl Daemon {
             claimed_hash,
             reply,
         };
-        if crate::codex_host::relaunch(self, &session.uid, Some(ask)).await {
+        if crate::codex_host::relaunch(self, &session.uid, ask).await {
             return Daemon::compose_result(
                 self.engine_report(&session.uid, request_id, told).await,
             );
@@ -3389,7 +3389,7 @@ impl Daemon {
     pub async fn sessions(&self) -> Result<Vec<SessionSummary>> {
         // A run moving to another account reads live throughout (306 Slice E, S1). Its mark is read before its row:
         // the mark goes only once the run is live again, so a row read after it is never an earlier one unmarked.
-        let switching: HashSet<String> = self.db.switching_runs().await?.into_iter().collect();
+        let switching: HashMap<String, i64> = self.db.switching_runs().await?.into_iter().collect();
         let rows = self.db.list_sessions().await?;
         // Read up front, before the lock is taken, one query per row.
         let mut last_seqs: HashMap<String, u64> = HashMap::with_capacity(rows.len());
@@ -3514,10 +3514,19 @@ impl Daemon {
                 fact.value = id.clone();
             }
             session.model_label = model_labels.remove(&session.session_uid);
-            if switching.contains(&session.session_uid) {
-                session.lifecycle = Lifecycle::Live;
-                session.relaunchable = false;
-                session.switching = true;
+            match switching.get(&session.session_uid) {
+                Some(1) => {
+                    session.switching = Some(match session.lifecycle {
+                        Lifecycle::Live | Lifecycle::Stopping => {
+                            protocol::event::Switching::Waiting
+                        }
+                        _ => protocol::event::Switching::Moved,
+                    });
+                    session.lifecycle = Lifecycle::Live;
+                    session.relaunchable = false;
+                }
+                Some(_) => session.switching = Some(protocol::event::Switching::Failed),
+                None => {}
             }
         }
         Ok(sessions)
@@ -4647,7 +4656,7 @@ impl Daemon {
                 git_branch: tree.and_then(|tree| tree.branch.clone()),
                 diff_stat: tree.and_then(|tree| tree.diff_stat),
                 relaunchable: relaunchable.contains(&row.session_uid),
-                switching: false,
+                switching: None,
             });
         }
         out

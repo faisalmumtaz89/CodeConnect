@@ -2242,7 +2242,7 @@ async fn new_thread(
 /// the link runs the ladder on what was launched, puts the run back to `exited`
 /// ([`crate::store::Store::undo_relaunch`]), also when the watch found the new app-server gone
 /// first and failed the run for it, and drops `ask` with nothing claimed or sent.
-pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: Option<ComposeAsk>) -> bool {
+pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -> bool {
     let Some((root, launcher)) = daemon.relaunch_from.get() else {
         return false;
     };
@@ -2257,6 +2257,8 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: Option<Compos
         }
     };
     let recorded = account.as_ref().map(|account| account.id().to_string());
+    // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
+    let switching = daemon.db.switching(uid.to_string()).await.unwrap_or(false);
     let mut run = match daemon.db.begin_relaunch(uid.to_string(), recorded).await {
         Ok(Some(run)) => run,
         Ok(None) => return false,
@@ -2273,7 +2275,7 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: Option<Compos
             root,
             launcher,
             &mut run,
-            ask.as_ref(),
+            &ask,
             account.as_ref(),
             &mut launched,
         ),
@@ -2299,6 +2301,10 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: Option<Compos
     };
     match live {
         Ok((client, adapter, owed, cards)) => {
+            // Live on the new account: the switch is over before its start is filed.
+            if switching {
+                crate::switch::relaunched(daemon, uid, Ok(())).await;
+            }
             let (leader, _) = launched.expect("an app-server that answered was recorded");
             crate::log_info!(
                 "{uid}: relaunched; its app-server's leader is {}",
@@ -2320,11 +2326,14 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: Option<Compos
                 adapter,
                 owed,
                 cards,
-                ask,
+                Some(ask),
             ));
         }
         Err(why) => {
             crate::log_info!("{uid}: not relaunched: {why}");
+            if switching {
+                crate::switch::relaunched(daemon, uid, Err(why.clone())).await;
+            }
             if let Some((leader, boot)) = launched {
                 stop(uid, leader, boot).await;
             }
@@ -2339,20 +2348,6 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: Option<Compos
         }
     }
     true
-}
-
-/// The run `uid`, ended by its switch (306 Slice E), started again at once with no message on Codex's active
-/// account; its mark dropped either way, so a relaunch that does not go through reads as the end it is.
-pub(crate) fn relaunch_switched(
-    daemon: Arc<Daemon>,
-    uid: String,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    Box::pin(async move {
-        if !relaunch(&daemon, &uid, None).await {
-            crate::log_error!("{uid}: its switch's relaunch did not go through");
-        }
-        crate::switch::settled(&daemon, &uid).await;
-    })
 }
 
 /// [`relaunch`]'s steps from its warrant to its resume: the old app-server's group without a
@@ -2371,7 +2366,7 @@ async fn launch_again(
     root: &Path,
     launcher: &Result<PathBuf, String>,
     run: &mut LiveCodexRun,
-    ask: Option<&ComposeAsk>,
+    ask: &ComposeAsk,
     account: Option<&crate::accounts::AccountEnv>,
     launched: &mut Option<(ProcessIdentity, Option<BootIdentity>)>,
 ) -> Result<(Client, CodexAdapter, Option<Owed>, HashMap<String, Card>), String> {
@@ -2405,9 +2400,9 @@ async fn launch_again(
         .map_err(|err| format!("could not open its host.log: {err}"))?;
     let launch = Run {
         root,
-        request_id: ask.map_or("", |ask| ask.request_id.as_str()),
+        request_id: &ask.request_id,
         cwd: &run.cwd,
-        prompt: ask.map_or("", |ask| ask.text.as_str()),
+        prompt: &ask.text,
         model: None,
         // The run keeps the models its start kept.
         models: &[],
@@ -2419,12 +2414,14 @@ async fn launch_again(
         trust: run.trust,
     };
     let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
+    // A run moved by a switch of account keeps its mode (decision 308).
+    let switched = daemon.db.switching(uid.clone()).await.unwrap_or(false);
     let kept = daemon
         .db
         .newest_codex_settings(uid.clone())
         .await
         .map_err(|err| format!("could not read its settings: {err:#}"))?
-        .and_then(|kept| narrower_than_default(kept, ask.is_none()));
+        .and_then(|kept| narrower_than_default(kept, switched));
     let client = bring_up(daemon, uid, &launch, &folders, log, deadline, launched).await?;
     // The run's effort needs nothing here: Codex's own resume restores the thread's effort (seen on 0.170.0 on
     // 2026-11-22).
@@ -8188,10 +8185,10 @@ mod tests {
     }
 
     /// **A switch moves a live Codex run to the chosen account at its turn's end, reading live throughout** (306
-    /// Slice E, S1, S6): a run on A is mid-turn when B is chosen, so nothing is stopped until its turn completes;
-    /// then its app-server's group is ended, its end filed as "Switched to B" while the run still reads live and
-    /// switching, and codex is launched again at once on B's home with no message, resuming the same thread; live,
-    /// the run is no longer switching and records B.
+    /// Slice E, decision 311; S1, S2, S3, S6): a run on A, in Full Access, is mid-turn when B is chosen, so nothing
+    /// is stopped until its turn completes; then its app-server's group is ended and its end filed typed as a switch
+    /// to B, the run reading live, `moved`; its next message relaunches codex on B's home, resuming the same thread in
+    /// Full Access, and is that relaunch's one turn; live, the run is no longer switching and records B.
     #[tokio::test]
     async fn a_switch_moves_a_live_codex_run_at_its_turns_end() {
         let _env = crate::ProcessEnvRead::take();
@@ -8283,8 +8280,8 @@ mod tests {
         assert!(alive(leader), "nothing is stopped mid-turn");
         let marked = serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap();
         assert_eq!(
-            (marked["lifecycle"].as_str(), marked["switching"].as_bool()),
-            (Some("live"), Some(true)),
+            (marked["lifecycle"].as_str(), marked["switching"].as_str()),
+            (Some("live"), Some("waiting")),
             "{marked}"
         );
 
@@ -8304,12 +8301,31 @@ mod tests {
         }
         // Its connection closes as it ends.
         drop(ws);
-        let (_ws, resumed) = relaunch_served(
-            &rig,
-            2,
-            json!({"thread": {"id": thread}, "model": "gpt-test"}),
-        )
-        .await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let now = serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap();
+            assert_eq!(now["lifecycle"], "live", "never read ended: {now}");
+            if now["switching"] == "moved" {
+                break;
+            }
+            assert!(Instant::now() < deadline, "never moved: {now}");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(launches(&rig), 1, "nothing started until a message");
+        let mut said = saying(&rig.daemon, &uid, "say-on-b", "on B now?");
+        let (mut ws, resumed) = tokio::select! {
+            served = relaunch_served(&rig, 2, json!({"thread": {"id": thread}, "model": "gpt-test"})) => served,
+            refused = &mut said => panic!("answered before codex was launched again: {refused:?}"),
+        };
+        let sent = asked(&mut ws, "turn/start").await;
+        assert_eq!(
+            sent["params"]["input"],
+            json!([{"type": "text", "text": "on B now?"}]),
+            "the message is its turn"
+        );
+        answer(&mut ws, &sent, json!({"turn": {"id": "turn-on-b"}})).await;
+        said.await.unwrap();
         assert_eq!(
             resumed["params"]["threadId"], thread,
             "the same thread, resumed"
@@ -8382,133 +8398,75 @@ mod tests {
         unsafe { libc::kill(-relaunched, libc::SIGKILL) };
     }
 
-    /// **A choice made while a Codex run starts again moves it once more, from the link it attaches** (306 Slice
-    /// E): a run moving from A to B is resuming on B when C is chosen, which marks nothing (it is not live); as it
-    /// settles on B it is marked again, and its new link, idle, ends its group, so it starts again on C.
+    /// **A Codex relaunch that cannot start on the new account does not end the run quietly** (306 S9): a run moved
+    /// to B whose next message's codex cannot start stays ended and relaunchable, reads `failed`, and has a line of
+    /// its own saying why.
     #[tokio::test]
-    async fn a_choice_made_while_a_codex_run_starts_again_moves_it_once_more() {
+    async fn a_codex_switch_whose_relaunch_fails_says_why() {
         let _env = crate::ProcessEnvRead::take();
         let mut rig = rig();
         rig.daemon = relauncher(&rig);
-        let thread = "thr-switch".to_string();
-        let a = rig.daemon.store.add_account("codex", "A").unwrap();
-        let b = rig.daemon.store.add_account("codex", "B").unwrap();
-        let c = rig.daemon.store.add_account("codex", "C").unwrap();
-        assert!(rig
+        let fail = rig.root.join("fail");
+        let script = format!("[ -e '{}' ] && exit 1\nexec sleep 30", fail.display());
+        let (uid, ws) = engine_run_on(&rig, "req-s9", "thr-s9", "turn-1", &script).await;
+        let leader = rig
             .daemon
-            .store
-            .activate_account("codex", Some(&a.id))
-            .unwrap());
-        let home = |account: &crate::store::Account| {
-            crate::accounts::AccountEnv::for_account(&rig.root, account)
-                .unwrap()
-                .unwrap()
-                .argv()
-                .last()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .split_once('=')
-                .unwrap()
-                .1
-                .to_string()
-        };
-        let on_a = crate::accounts::AccountEnv::for_account(&rig.root, &a)
+            .db
+            .watched_host(uid.clone())
+            .await
             .unwrap()
-            .unwrap();
-        let codex = stand_in(
-            &rig,
-            "printf '%s\\n' \"${CODEX_HOME-unset}\" >> codex_home\nexec sleep 30",
-        );
-        let mut script = whole_start();
-        script.truncate(3);
-        script[2].1 = json!({"result": {"thread": {"id": thread}, "model": "gpt-test"}});
-        let run = Run {
-            trust: Trust::Trusted,
-            account: Some(&on_a),
-            ..run(&rig, "req-on-a", &codex)
-        };
-        let (result, ws) = tokio::join!(start(&rig.daemon, run), async {
-            let (_, mut ws) = play_app_server(&rig, script).await;
-            let first_turn = asked(&mut ws, "turn/start").await;
-            answer(&mut ws, &first_turn, json!({"turn": {"id": "turn-1"}})).await;
-            ws
-        });
-        let uid = started_uid(&result);
-        row_once(&rig, &uid, Lifecycle::Live).await;
-        link_attached(&rig.daemon, &uid).await;
-        let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
-        let leader_now = || async {
-            rig.daemon
-                .db
-                .watched_host(uid.clone())
-                .await
-                .unwrap()
-                .unwrap()
-                .host
-                .pid
-        };
-        let ended = |leader: i32| async move {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while alive(leader) {
-                assert!(Instant::now() < deadline, "its app-server was not ended");
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        };
-
-        let first = leader_now().await;
+            .unwrap()
+            .host
+            .pid;
+        let b = rig.daemon.store.add_account("codex", "B").unwrap();
         assert!(rig
             .daemon
             .store
             .activate_account("codex", Some(&b.id))
             .unwrap());
         crate::switch::begin(&rig.daemon, &AgentKind::Codex).await;
-        ended(first).await;
-        drop(ws);
-        let (ws, _) = relaunch_served_with(&rig, 2, |_| {
-            // C is chosen while the run resumes on B.
-            assert!(rig
-                .daemon
-                .store
-                .activate_account("codex", Some(&c.id))
-                .unwrap());
-            json!({"thread": {"id": "thr-switch"}, "model": "gpt-test"})
-        })
-        .await;
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
         let deadline = Instant::now() + Duration::from_secs(10);
-        while rig.daemon.store.run_account(&uid).unwrap() != Some(b.clone())
-            || leader_now().await == first
+        while alive(leader) {
+            assert!(Instant::now() < deadline, "its app-server was not ended");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        drop(ws);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while summary_of(&rig.daemon, &uid).await.switching
+            != Some(protocol::event::Switching::Moved)
         {
-            assert!(Instant::now() < deadline, "never live on B");
+            assert!(Instant::now() < deadline, "never moved");
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        ended(leader_now().await).await;
-        drop(ws);
-        let (_ws, _) = relaunch_served(
-            &rig,
-            3,
-            json!({"thread": {"id": "thr-switch"}, "model": "gpt-test"}),
-        )
-        .await;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while summary_of(&rig.daemon, &uid).await.switching {
-            assert!(Instant::now() < deadline, "still switching");
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        assert_eq!(
-            rig.daemon.store.run_account(&uid).unwrap(),
-            Some(c.clone()),
-            "the run records C"
+        std::fs::write(&fail, "").unwrap();
+        let said = saying(&rig.daemon, &uid, "say-s9", "on B?").await.unwrap();
+        assert!(
+            matches!(said, protocol::ws::ComposeResult::Rejected { .. }),
+            "{said:?}"
         );
-        let dir = crate::claude_host::run_dir(&rig.root, &uid);
-        let homes = std::fs::read_to_string(dir.join("codex_home")).unwrap();
+        let failed = serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap();
         assert_eq!(
-            homes.lines().collect::<Vec<_>>(),
-            [home(&a), home(&b), home(&c)],
-            "{homes}"
+            (
+                failed["lifecycle"].as_str(),
+                failed["switching"].as_str(),
+                failed["relaunchable"].as_bool()
+            ),
+            (Some("exited"), Some("failed"), Some(true)),
+            "{failed}"
         );
-        // SAFETY: kill(2) of the group the last stand-in leads.
-        unsafe { libc::kill(-leader_now().await, libc::SIGKILL) };
+        let why: Vec<String> = rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.payload["notification_type"] == "switch_failed")
+            .map(|event| event.payload["message"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(why.len(), 1, "{why:?}");
+        assert!(why[0].starts_with("Couldn’t start on B: "), "{why:?}");
     }
 
     /// **A Codex run marked to switch while it has no link moves once its link attaches** (306 Slice E): the choice

@@ -830,7 +830,12 @@ impl Db {
             .await
     }
 
-    pub async fn switching_runs(&self) -> Result<Vec<String>> {
+    pub async fn fail_switching(&self, session_uid: String) -> Result<()> {
+        self.run(move |store| store.fail_switching(&session_uid))
+            .await
+    }
+
+    pub async fn switching_runs(&self) -> Result<Vec<(String, i64)>> {
         self.run(move |store| store.switching_runs()).await
     }
 

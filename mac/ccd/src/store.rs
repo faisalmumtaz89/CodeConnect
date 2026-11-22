@@ -3057,14 +3057,26 @@ impl Store {
             .is_some())
     }
 
-    /// Every run marked switching.
-    pub fn switching_runs(&self) -> Result<Vec<String>> {
+    /// Every run whose switch is going (`1`) or could not complete (`2`), with which.
+    pub fn switching_runs(&self) -> Result<Vec<(String, i64)>> {
         let conn = self.read();
-        let mut stmt = conn.prepare("SELECT session_uid FROM run_hosts WHERE switching = 1")?;
-        let uids = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
+        let mut stmt =
+            conn.prepare("SELECT session_uid, switching FROM run_hosts WHERE switching IN (1, 2)")?;
+        let runs = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(uids)
+        Ok(runs)
+    }
+
+    /// The run `session_uid`'s switch could not complete: it is marked for the person's attention (`2`).
+    pub fn fail_switching(&self, session_uid: &str) -> Result<()> {
+        self.write().execute(
+            "UPDATE run_hosts SET switching = 2 WHERE session_uid = ?1",
+            params![session_uid],
+        )?;
+        Ok(())
     }
 
     /// The run `session_uid` is on its account now: its switching mark goes.

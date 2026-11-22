@@ -1,15 +1,19 @@
-//! Moving a computer's live runs to an agent's active account (decision 306, Slice E).
+//! Moving a computer's live runs to an agent's active account (decision 306, Slice E; decision 311).
 //!
 //! Choosing an account (`ActivateAccount`) marks every live run of that agent switching. A marked run moves at its
 //! next idle point, its turn over, no card waiting and no message of the person's still unread by the agent: ccd
-//! ends its process, files that end with its own reason, and starts it again at once, with no message, on the
-//! agent's ACTIVE account, resuming its session with its model, mode and effort. It reads live throughout. A run
-//! already on the active account when its idle point comes only loses its mark, so choosing again, or choosing back,
-//! is never a lock: each run moves once, to the latest choice, or not at all.
+//! ends its process and files that end typed as a switch (`switched_to`). The run reads live and `moved` from then
+//! on, and its next message relaunches it, as a message relaunches any ended run, on the agent's ACTIVE account as of
+//! that message, resuming its session with its model, its mode (Bypass and Full Access included, decision 308) and
+//! its effort, with no effort notice. That relaunch going live ends the switch; one that does not go through leaves
+//! the run ended and relaunchable, its own line saying why, `failed`. A run already on the active account when its
+//! idle point comes only loses its mark, so choosing again, or choosing back, is never a lock.
 //!
-//! A choice made while a run is still starting again moves it once more as it settles; a Codex run with no link when
-//! the choice is made moves when its link attaches. Accepted miss: a message queued inside Codex itself
-//! (`codex queue`) does not survive the app-server's restart.
+//! A Codex run with no link when the choice is made moves when its link attaches. A second message sent while the
+//! first one's relaunch is starting is refused, as for any ended run. Accepted misses: a message queued inside Codex
+//! itself (`codex queue`) does not survive the app-server's end; a command or helper an agent left running in the
+//! background is stopped when its session moves (ccd sees no background shell, background subagent or Codex
+//! terminal).
 
 use std::sync::Arc;
 
@@ -77,45 +81,47 @@ pub(crate) async fn at_idle(daemon: &Arc<Daemon>, uid: &str) {
     if !idle(daemon, uid, &row.agent).await {
         return;
     }
-    // The run's own link stops it as an End run would, the run left live; its end, filed as switched, starts it
-    // again (`relaunch`).
+    // The run's own link stops it as an End run would, the run left live; its end is filed as switched.
     daemon.stop_through_link(uid).await;
 }
 
-/// The run `uid`'s switch is over (started again, or not): its mark goes, and when the active account changed
-/// meanwhile, it moves again, as a choice made now would move it.
-pub(crate) async fn settled(daemon: &Arc<Daemon>, uid: &str) {
-    if let Err(err) = daemon.db.clear_switching(uid.to_string()).await {
-        crate::log_error!("{uid}: could not clear its switch: {err:#}");
-        return;
-    }
-    let Ok(Some(row)) = daemon.db.get_session(uid.to_string()).await else {
-        return;
+/// The relaunch by the next message of the run `uid`, marked switching, went live on the new account (`Ok`), or
+/// did not go through (`Err`, why): its mark goes, or becomes `failed` with a line of its own saying why.
+pub(crate) async fn relaunched(daemon: &Arc<Daemon>, uid: &str, outcome: Result<(), String>) {
+    let why = match outcome {
+        Ok(()) => {
+            if let Err(err) = daemon.db.clear_switching(uid.to_string()).await {
+                crate::log_error!("{uid}: could not clear its switch: {err:#}");
+            }
+            return;
+        }
+        Err(why) => why,
     };
-    let active = daemon
+    if let Err(err) = daemon.db.fail_switching(uid.to_string()).await {
+        crate::log_error!("{uid}: could not mark its switch failed: {err:#}");
+    }
+    let agent = match daemon.db.get_session(uid.to_string()).await {
+        Ok(Some(row)) => row.agent,
+        _ => return,
+    };
+    let label = daemon
         .store
-        .active_account(row.agent.as_str())
+        .active_account(agent.as_str())
         .ok()
         .flatten()
-        .map(|account| account.id);
-    let current = daemon
-        .store
-        .run_account(uid)
-        .ok()
-        .flatten()
-        .map(|account| account.id);
-    if active != current {
-        begin(daemon, &row.agent).await;
+        .map_or_else(|| "Default".to_string(), |account| account.label);
+    let notice = protocol::event::PendingEvent::new(
+        &protocol::event::SessionKey::new(uid, uid),
+        protocol::event::EventKind::Notification,
+        serde_json::json!({
+            "notification_type": protocol::event::notice::SWITCH_FAILED,
+            "message": format!("Couldn’t start on {label}: {why}"),
+        }),
+        protocol::event::Source::Daemon,
+    );
+    if let Err(err) = daemon.ingest(notice).await {
+        crate::log_error!("{uid}: could not file why its switch failed: {err:#}");
     }
-}
-
-/// The run `uid`, its end filed as switched, started again on its agent's active account with no message.
-pub(crate) fn relaunch(daemon: &Arc<Daemon>, uid: &str, agent: &AgentKind) {
-    let (daemon, uid) = (Arc::clone(daemon), uid.to_string());
-    match agent {
-        AgentKind::Claude => tokio::spawn(crate::claude_host::relaunch_switched(daemon, uid)),
-        _ => tokio::spawn(crate::codex_host::relaunch_switched(daemon, uid)),
-    };
 }
 
 /// No turn running, no card waiting, and no message of the person's the agent has not read yet. A Codex run's turn

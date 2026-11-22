@@ -266,6 +266,7 @@ pub(crate) fn listing(
                 label: account.label,
                 signed_in: None,
                 signing_in: false,
+                not_separate: false,
             })
             .collect(),
         active,
@@ -287,7 +288,8 @@ pub(crate) struct SignIns {
 pub(crate) const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// `reply`, an accounts listing, with each Codex account's `signed_in` as `codex login status` says with its home
-/// (`codex`, none when Codex is not here). Claude Code's accounts are not asked yet.
+/// (`codex`, none when Codex is not here), and `not_separate` when that sign-in is not in the home. Claude Code's
+/// accounts are not asked yet.
 pub(crate) async fn with_signed_in(
     environment: &HashMap<OsString, OsString>,
     codex: Option<&Path>,
@@ -311,10 +313,13 @@ pub(crate) async fn with_signed_in(
             let root = &root;
             async move {
                 if let Ok(Some(home)) = AccountEnv::for_account(root, &row) {
-                    account.signed_in = Some(
+                    let signed_in =
                         crate::start_session::codex_signed_in(environment, Some(&home), codex)
-                            .await,
-                    );
+                            .await;
+                    // Signed in with no credential in the account's own home: Codex keeps it in the computer's
+                    // credential store, shared, so this account is not separate.
+                    account.not_separate = signed_in && !home.folder().join("auth.json").exists();
+                    account.signed_in = Some(signed_in && !account.not_separate);
                 }
             }
         });
@@ -661,7 +666,8 @@ mod tests {
         let path = dir.join("codex");
         std::fs::write(
             &path,
-            "#!/bin/sh\nhere=$(dirname \"$0\")\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then [ -f \"$CODEX_HOME/auth.json\" ]; exit $?; fi\n\
+            "#!/bin/sh\nhere=$(dirname \"$0\")\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then [ -f \"$CODEX_HOME/auth.json\" ] || [ -f \"$here/keyring-login\" ]; exit $?; fi\n\
+             if [ \"$1\" = login ] && [ -e \"$here/keyring\" ]; then echo '{}' > \"$here/keyring-login\"; exit 0; fi\n\
              if [ \"$1\" = login ]; then if [ -e \"$here/hang\" ]; then sleep 30 & kid=$!; echo $kid > \"$here/kid\"; echo $$ > \"$here/pid\"; trap 'kill -TERM $kid; exit 0' TERM; wait; fi; echo '{}' > \"$CODEX_HOME/auth.json\"; fi\n\
              if [ \"$1\" = logout ]; then echo \"$CODEX_HOME\" >> \"$here/logouts\"; [ -e \"$here/keep\" ] || rm -f \"$CODEX_HOME/auth.json\"; fi\n",
         )
@@ -808,6 +814,62 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(folder(&a.id));
         let _ = std::fs::remove_dir_all(folder(&b.id));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A sign-in Codex keeps in the computer's credential store is not separate** (306): with Codex storing its
+    /// credential outside the account's home (the keyring), a sign-in that ends signed in leaves no auth.json in
+    /// the home: the listing says `not_separate`, and not signed in.
+    #[tokio::test]
+    async fn a_sign_in_kept_outside_the_accounts_home_is_not_separate() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-keyring.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let codex = stand_in_codex(&root);
+        std::fs::write(root.join("keyring"), "").unwrap();
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.clone().into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-keyring");
+        let _db = store.temp_db();
+        let a = store.add_account("codex", "A").unwrap();
+        let sign_ins = Arc::new(super::SignIns::default());
+        let (_, running) = super::sign_in(
+            &store,
+            &sign_ins,
+            || {},
+            &environment,
+            Some(&codex),
+            "s1".into(),
+            a.id.clone(),
+            std::time::Duration::from_secs(20),
+        )
+        .await;
+        running.unwrap().await.unwrap();
+        let reply = serde_json::to_value(
+            super::with_signed_in(&environment, Some(&codex), super::listing(&store, None)).await,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                reply["accounts"][0]["signed_in"].as_bool(),
+                reply["accounts"][0]["not_separate"].as_bool()
+            ),
+            (Some(false), Some(true)),
+            "{reply}"
+        );
+        let _ = std::fs::remove_dir_all(
+            protocol::root_dir()
+                .join("accounts")
+                .join("codex")
+                .join(&a.id),
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

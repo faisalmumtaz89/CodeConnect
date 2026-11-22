@@ -868,8 +868,11 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     listing pushed, with no request id, whenever it changes. To paired devices only, behind
 ///     [`ws::Capabilities::accounts`]. An account is a folder of the computer's own that a start on it is given, its
 ///     agent's credential its own and the rest of the person's home shared; an agent's Default is the agent as it is.
-///     Choosing one moves the agent's running sessions to it between turns, each marked
-///     [`event::SessionSummary::switching`] meanwhile. A daemon below 48 answers them `bad_request` and advertises no
+///     Choosing one moves the agent's running sessions to it: each is ended when idle, its end typed
+///     [`event::SWITCHED_TO`], and its next message starts it on the account active then; it reads live meanwhile,
+///     [`event::SessionSummary::switching`] saying where its move stands, and a start that did not go through files
+///     [`event::notice::SWITCH_FAILED`]. An account whose Codex sign-in is kept outside its home reads
+///     [`ws::AgentAccount::not_separate`]. A daemon below 48 answers them `bad_request` and advertises no
 ///     `accounts`.
 pub const PROTOCOL_MINOR: u32 = 48;
 

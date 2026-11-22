@@ -9,9 +9,10 @@ A Codex session on Codex's **Default** account runs as **you**. It uses your own
 — `~/.codex` unless you set that variable — which is where your Codex sign-in lives. A session
 on another Codex account you added in CodeConnect uses that account's own sign-in instead, with
 the rest of your Codex home (its settings, trust, skills and sessions) shared. Choosing another
-account moves each running session to it between turns: its app server is started again on the
-same thread with the new sign-in. A message queued in Codex itself (`codex queue`) is not kept
-across that restart.
+account moves each running session to it between turns: once a session is idle its app server
+is ended, and your next message to it starts it again on the same thread with the new sign-in.
+A message queued in Codex itself (`codex queue`) is not kept across that, and a command or
+helper an agent left running in the background is stopped when its session moves.
 
 So: **turns your phone starts are your turns.** Saying something from the phone spends the
 same account allowance as a turn you start in Codex yourself. There is no CodeConnect

@@ -113,6 +113,9 @@ pub mod notice {
     /// A Stop cancelled the person's message `request_id` before claude ran it
     /// (`reason: "stopped"`): it was never sent to the model.
     pub const SEND_NOT_SENT: &str = "send_not_sent";
+    /// A run moving to another account could not start there (`{message}`, minor 47): it is ended and
+    /// relaunchable ([`super::Switching::Failed`]).
+    pub const SWITCH_FAILED: &str = "switch_failed";
 }
 
 /// Item kinds, following the thread -> turn -> item model.
@@ -528,10 +531,23 @@ pub struct SessionSummary {
     /// Omitted when false, and from an older daemon, whose ended runs stay ended.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub relaunchable: bool,
-    /// The run is moving to its agent's active account (minor 47): it reads live throughout, its process ended
-    /// between turns and started again on the new account. Omitted when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub switching: bool,
+    /// The run's move to its agent's active account (minor 47); absent when it has none. A moving run reads live
+    /// throughout, its `lifecycle` aside, until its next message is running on the new account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switching: Option<Switching>,
+}
+
+/// Where a run's move to its agent's active account stands ([`SessionSummary::switching`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Switching {
+    /// Its turn, a card or a message unread by the agent is still going; it moves once idle.
+    Waiting,
+    /// Its process has ended at an idle point: its next message starts it on the new account.
+    Moved,
+    /// Its start on the new account did not go through (that account signed out, a refusal): it reads as the
+    /// relaunchable end it is, its own line says why, and the person's attention is needed.
+    Failed,
 }
 
 /// How much a working tree has changed, in lines. See [`SessionSummary::diff_stat`].
@@ -760,7 +776,7 @@ mod tests {
             git_branch: None,
             diff_stat: None,
             relaunchable: false,
-            switching: false,
+            switching: None,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);

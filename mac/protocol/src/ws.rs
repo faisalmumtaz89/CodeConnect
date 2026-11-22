@@ -409,9 +409,10 @@ pub enum ClientMessage {
     },
     /// **Makes `account_id` the account `agent`'s starts use**, or its Default (the agent as it is on the computer)
     /// for none. An id that is not one of `agent`'s accounts is refused. Each of `agent`'s sessions running then moves
-    /// to it once it is idle (its turn over, no card waiting, no message unread by the agent): it reads live and
-    /// [`crate::event::SessionSummary::switching`] until it is going again, on the same session, on the new account.
-    /// Answered with one [`ServerMessage::Accounts`].
+    /// to it: once idle (its turn over, no card waiting, no message unread by the agent) its process is ended, and its
+    /// next message starts it again on the account active then, in the same session. It reads live meanwhile, with
+    /// [`crate::event::SessionSummary::switching`] saying where its move stands. Answered with one
+    /// [`ServerMessage::Accounts`].
     ActivateAccount {
         request_id: String,
         agent: crate::agent::AgentKind,
@@ -927,6 +928,11 @@ pub struct AgentAccount {
     /// A sign-in for it is going on this computer, waiting on the browser. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub signing_in: bool,
+    /// Its agent says it is signed in, but the sign-in is not this account's own: Codex keeps its credential in the
+    /// computer's credential store (`cli_auth_credentials_store`), not in the account's home, so the account is not
+    /// separate. `signed_in` then reads false. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_separate: bool,
 }
 
 /// The account an agent's starts use now.
@@ -3116,6 +3122,7 @@ mod tests {
                 label: "Work".into(),
                 signed_in: None,
                 signing_in: false,
+                not_separate: false,
             }],
             active: vec![ActiveAccount {
                 agent: crate::agent::AgentKind::Codex,
@@ -3144,6 +3151,7 @@ mod tests {
             label: "Work".into(),
             signed_in: Some(true),
             signing_in: true,
+            not_separate: false,
         };
         assert_eq!(
             serde_json::to_value(&known).unwrap(),
@@ -3159,6 +3167,20 @@ mod tests {
             "a listing without it reads not known"
         );
         assert!(!older.signing_in, "nor signing in");
+        assert!(!older.not_separate, "nor not separate");
+        let shared = AgentAccount {
+            id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+            agent: crate::agent::AgentKind::Codex,
+            label: "Work".into(),
+            signed_in: Some(false),
+            signing_in: false,
+            not_separate: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&shared).unwrap(),
+            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work",
+                "signed_in": false, "not_separate": true})
+        );
         // Pushed, a listing names no request.
         let pushed = ServerMessage::Accounts {
             request_id: None,
