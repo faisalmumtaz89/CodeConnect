@@ -3,6 +3,12 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.17, with the iPhone app 1.1.34
+
+- When you have not chosen an effort for a Claude Code session, the reply row says Default and no level is marked:
+  Claude Code decides it, from your own settings or the model's default. Choosing a level sets it. Codex is unchanged:
+  it names its default.
+
 ## CodeConnect 0.19.16, with the iPhone app 1.1.33
 
 - On the Mac, words are now set in Inter and code in Menlo, the face code editors on a Mac use; a reply's bold and
