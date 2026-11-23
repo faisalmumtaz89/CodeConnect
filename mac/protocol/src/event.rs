@@ -635,8 +635,9 @@ pub struct MenuModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model: Option<String>,
     /// The effort this entry runs at when none is chosen (minor 47), so an app names and marks it while the run
-    /// reports no effort: Codex's own `defaultReasoningEffort`; for Claude, the default Claude Code's documentation
-    /// names for the model the entry resolves to. Absent when neither names one.
+    /// reports no effort: Codex's own `defaultReasoningEffort`. Absent when the agent names none, and always for a
+    /// Claude entry: Claude Code reports no default, and a person's own settings can set another level. A daemon of
+    /// 0.19.13 to 0.19.16 sent, for a Claude entry, the default Claude Code's documentation names for its model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_effort: Option<String>,
 }

@@ -1402,21 +1402,6 @@ fn relaunch_mode(kept: Option<String>, switched: bool) -> Option<String> {
     })
 }
 
-/// The effort Claude Code's documentation says the model `resolved` (an entry's `resolvedModel`) runs at when none
-/// is chosen, for only the models its sentence names (decision 313). Shown, never sent to claude. From
-/// <https://code.claude.com/docs/en/model-config>, read 2026-11-22: "Fable 5.2, Opus 5.5, Sonnet 5.5, and Haiku 5.5
-/// default to medium, and Opus 4.7 defaults to xhigh". A model it does not name has none here: "other models default
-/// to high" is not used, so an unnamed model is never guessed.
-fn documented_default_effort(resolved: &str) -> Option<&'static str> {
-    match resolved {
-        "claude-fable-5-2" | "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-haiku-5-5" => {
-            Some("medium")
-        }
-        "claude-opus-4-7" => Some("xhigh"),
-        _ => None,
-    }
-}
-
 /// An app's change of a hosted run's settings.
 pub(crate) enum Setting {
     /// A model, an effort, or both.
@@ -1446,10 +1431,7 @@ pub(crate) fn menus(models: &[serde_json::Value]) -> RunMenus {
                 Some(MenuModel {
                     label: text(model, "displayName").unwrap_or_else(|| value.clone()),
                     detail: text(model, "description"),
-                    // Claude Code's list names no default effort: the documentation's, for the models it names.
-                    default_effort: text(model, "resolvedModel")
-                        .and_then(|resolved| documented_default_effort(&resolved))
-                        .map(str::to_string),
+                    default_effort: None,
                     resolved_model: text(model, "resolvedModel"),
                     efforts: model
                         .get("supportedEffortLevels")
@@ -9726,7 +9708,7 @@ mod tests {
                             "Use the default model (currently Opus 5.5) · $4/$20 per Mtok".into()
                         ),
                         resolved_model: Some("claude-opus-5-5".into()),
-                        default_effort: Some("medium".into()),
+                        default_effort: None,
                         efforts: efforts.clone(),
                     },
                     MenuModel {
@@ -9736,7 +9718,7 @@ mod tests {
                             "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok".into()
                         ),
                         resolved_model: Some("claude-sonnet-5-5".into()),
-                        default_effort: Some("medium".into()),
+                        default_effort: None,
                         efforts,
                     },
                 ],
@@ -12862,28 +12844,24 @@ mod tests {
         stop(&played.dir);
     }
 
-    /// **A Claude menu entry carries the documented default effort for the models the documentation names, and
-    /// none for any other** (decision 313): Opus 5.5 and Sonnet 5.5 medium, Opus 4.7 xhigh; Fable 5.1, which the
-    /// sentence does not name, none, never "high" by guess.
+    /// **A Claude menu entry names no default effort** (decision 345): Claude Code reports none, and the level a run
+    /// takes when none is chosen comes from the person's own settings or the model's, which the daemon does not know.
+    /// So an app says "Default" and marks no level, for every model, the ones Claude Code's documentation names too.
     #[test]
-    fn a_claude_entry_carries_the_documented_default_effort_only_for_a_named_model() {
-        let entry = |resolved: &str| {
-            menus(&[
-                serde_json::json!({"value": "m", "displayName": "M", "resolvedModel": resolved,
-                "supportedEffortLevels": ["low", "medium", "high"]}),
-            ])
-            .models[0]
-                .default_effort
-                .clone()
-        };
-        assert_eq!(entry("claude-opus-5-5").as_deref(), Some("medium"));
-        assert_eq!(entry("claude-sonnet-5-5").as_deref(), Some("medium"));
-        assert_eq!(entry("claude-opus-4-7").as_deref(), Some("xhigh"));
-        assert_eq!(
-            entry("claude-fable-5-1"),
-            None,
-            "a model the documentation does not name"
-        );
+    fn a_claude_entry_names_no_default_effort() {
+        for resolved in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-2",
+            "claude-opus-4-7",
+            "claude-fable-5-1",
+        ] {
+            let entry = &menus(&[serde_json::json!({"value": "m", "displayName": "M",
+                "resolvedModel": resolved, "supportedEffortLevels": ["low", "medium", "high"]})])
+            .models[0];
+            assert_eq!(entry.default_effort, None, "{resolved}");
+        }
     }
 
     /// **A relaunch names the mode the run was in, but Bypass permissions** (decision 253): a

@@ -857,9 +857,10 @@ pub const PROTOCOL_MISMATCH: &str =
 ///
 ///     No message changes shape. Each [`event::MenuModel`] of a run's `menus` may carry
 ///     `default_effort`, the effort that model runs at when none is chosen, so an app names and marks it
-///     while the run reports no effort: a Codex entry Codex's own (`model/list`'s `defaultReasoningEffort`);
-///     a Claude entry the default Claude Code's documentation names for the model it resolves to, and none
-///     for a model it does not name. A daemon below 47 sends none.
+///     while the run reports no effort: a Codex entry Codex's own (`model/list`'s `defaultReasoningEffort`).
+///     A Claude entry carries none: Claude Code reports no default, and a person's own settings can set
+///     another level. A daemon of 0.19.13 to 0.19.16 sent, for a Claude entry, the default Claude Code's
+///     documentation names for the model it resolves to. A daemon below 47 sends none.
 ///   * `48` — **Several accounts per agent.**
 ///
 ///     [`ws::ClientMessage::ListAccounts`], [`ws::ClientMessage::AddAccount`], [`ws::ClientMessage::ActivateAccount`],

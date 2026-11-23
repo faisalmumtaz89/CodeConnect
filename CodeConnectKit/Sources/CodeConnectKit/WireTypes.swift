@@ -834,7 +834,8 @@ public struct MenuModel: Codable, Sendable, Hashable {
     /// Codex entry, whose `value` is the model, and from a daemon below 45.
     public let resolvedModel: String?
     /// The effort this model runs at when none is chosen, as the daemon names it (`default_effort`): Codex's own
-    /// `defaultReasoningEffort`, Claude Code's documented default (decision 313); absent when neither names one.
+    /// `defaultReasoningEffort`; absent when the agent names none, and for a Claude entry (decision 345: Claude Code
+    /// reports none; a daemon of 0.19.13 to 0.19.16 sent the default its documentation names).
     public let defaultEffort: String?
 
     enum CodingKeys: String, CodingKey {

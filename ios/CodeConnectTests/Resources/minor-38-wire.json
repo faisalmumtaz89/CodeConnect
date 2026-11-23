@@ -114,7 +114,6 @@
     "menus": {
       "models": [
         {
-          "default_effort": "medium",
           "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
           "efforts": [
             "low",
@@ -128,7 +127,6 @@
           "value": "default"
         },
         {
-          "default_effort": "medium",
           "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
           "efforts": [
             "low",
@@ -284,7 +282,6 @@
     "menus": {
       "models": [
         {
-          "default_effort": "medium",
           "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
           "efforts": [
             "low",
@@ -298,7 +295,6 @@
           "value": "default"
         },
         {
-          "default_effort": "medium",
           "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
           "efforts": [
             "low",
