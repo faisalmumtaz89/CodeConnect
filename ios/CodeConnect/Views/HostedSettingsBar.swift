@@ -43,23 +43,67 @@ struct HostedSettingsBar: View {
                 EmptyView()
             }
         case .hostedLive(let settings):
-            row {
-                Button(action: onOpen) {
-                    label(modelName: settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay,
-                          mono: settings.modelDisplayReported && !settings.modelDisplay.isEmpty,
-                          effort: effort, mode: settings.standingMode)
-                        .frame(minHeight: 44)
-                        .contentShape(Rectangle())
+            if let bar = usage {
+                // The first that fits whole: the figures, the fullest window's ring alone, or the line as it is
+                // without them. The line is measured whole, so its model's name is never cut to make room.
+                ViewThatFits(in: .horizontal) {
+                    figuresRow(settings, bar: bar, fullestOnly: false)
+                    if bar.context != nil, !bar.limits.isEmpty {
+                        figuresRow(settings, bar: bar, fullestOnly: true)
+                    }
+                    row { settingsButton(settings, usage: bar) { line(settings) } }
                 }
-                .foregroundStyle(CC.text.secondary)
-                .disabled(blocked)
-                .accessibilityIdentifier("session.composer.settings")
-                .accessibilityLabel(
-                    [settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay,
-                     effort.map { "\($0) effort" }, settings.standingMode?.label]
-                        .compactMap { $0 }.joined(separator: ", "))
+            } else {
+                row { settingsButton(settings, usage: nil) { line(settings) } }
             }
         }
+    }
+
+    /// What the run's usage shows beside the line (`ReplyBar`), when the app holds any of it. None at accessibility
+    /// sizes, where the line alone fills the row.
+    private var usage: ReplyBar? {
+        guard !typeSize.isAccessibilitySize, let bar = model.replyBar(for: key, now: Date()),
+            bar.context != nil || !bar.limits.isEmpty
+        else { return nil }
+        return bar
+    }
+
+    /// The figures at the row's leading edge and the line, whole, at its trailing edge, all one button.
+    private func figuresRow(_ settings: HostedSettings, bar: ReplyBar, fullestOnly: Bool) -> some View {
+        settingsButton(settings, usage: bar) {
+            HStack(spacing: 0) {
+                UsageFigures(bar: bar, fullestOnly: fullestOnly)
+                Spacer(minLength: CC.space.sm)
+                line(settings).fixedSize()
+            }
+        }
+        .padding(.horizontal, CC.space.md)
+        .padding(.top, CC.space.xs)
+    }
+
+    private func line(_ settings: HostedSettings) -> some View {
+        label(modelName: settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay,
+              mono: settings.modelDisplayReported && !settings.modelDisplay.isEmpty,
+              effort: effort, mode: settings.standingMode)
+    }
+
+    /// The one control: opens the sheet; its label is the line's words, its value the usage's.
+    private func settingsButton<Content: View>(
+        _ settings: HostedSettings, usage: ReplyBar?, @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        Button(action: onOpen) {
+            content()
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .foregroundStyle(CC.text.secondary)
+        .disabled(blocked)
+        .accessibilityIdentifier("session.composer.settings")
+        .accessibilityLabel(
+            [settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay,
+             effort.map { "\($0) effort" }, settings.standingMode?.label]
+                .compactMap { $0 }.joined(separator: ", "))
+        .accessibilityValue(usage?.spoken ?? "")
     }
 
     /// The control sits at the trailing edge, just above the composer.

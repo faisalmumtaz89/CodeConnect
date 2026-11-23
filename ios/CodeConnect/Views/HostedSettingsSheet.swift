@@ -68,6 +68,7 @@ struct HostedSettingsSheet: View {
 
     @ViewBuilder
     private func liveSections(_ live: HostedSettings) -> some View {
+        if Self.usageFirst { usage }
         CCSectionHeader("Model")
         card {
             ForEach(Array(live.models.enumerated()), id: \.element.value) { index, entry in
@@ -112,6 +113,47 @@ struct HostedSettingsSheet: View {
                 }
             }
         }
+        if !Self.usageFirst { usage }
+    }
+
+    // MARK: Usage
+
+    /// Where the Usage section stands: first, above Model, or last, after the last section.
+    private static let usageFirst = true
+
+    /// **What the run's usage is, in full** (`ReplyBar`, the Mac's card): the conversation's size against its
+    /// model's window, each window of its account with its share and when it resets, the words for an account with
+    /// no plan limits, and the account; each row only where the app holds it, the section only where it holds any.
+    /// It asks the computer nothing: drawn from what the app holds, again once a minute while the sheet is open, so
+    /// a reset's "resets in" stays current.
+    private var usage: some View {
+        TimelineView(.everyMinute) { context in
+            if let bar = model.replyBar(for: sessionKey, now: context.date) {
+                let rows = Self.usageRows(bar)
+                if !rows.isEmpty {
+                    VStack(alignment: .leading, spacing: CC.space.md) {
+                        CCSectionHeader("Usage")
+                        card {
+                            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                                CCFactRow(
+                                    row.label, value: row.value, age: row.resets,
+                                    separator: index < rows.count - 1)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The card's rows, in the Mac card's order: Context, each window, the no-limits words, Account.
+    private static func usageRows(_ bar: ReplyBar) -> [(label: String, value: String, resets: String?)] {
+        var rows: [(label: String, value: String, resets: String?)] = []
+        if let context = bar.context { rows.append(("Context", "\(context.used) of \(context.window)", nil)) }
+        rows += bar.limits.map { ($0.caption, "\($0.usedPercent)%", $0.resets) }
+        if let note = bar.limitsNote { rows.append((note, "", nil)) }
+        if let account = bar.account { rows.append(("Account", account, nil)) }
+        return rows
     }
 
     private func card<Content: View>(@ViewBuilder _ content: @escaping () -> Content) -> some View {
@@ -157,6 +199,7 @@ struct HostedSettingsSheet: View {
 
     @ViewBuilder
     private func readOnly(_ modelFact: RunModelName?) -> some View {
+        if Self.usageFirst { usage }
         CCSectionHeader("Model")
         card {
             if let modelFact, !modelFact.text.isEmpty {
@@ -179,6 +222,7 @@ struct HostedSettingsSheet: View {
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
             .fixedSize(horizontal: false, vertical: true)
+        if !Self.usageFirst { usage }
     }
 
     @ViewBuilder

@@ -48,8 +48,8 @@ enum CCFactLabelStyle {
 struct CCFactRow<Value: View, Detail: View>: View {
     let label: String
     var labelStyle: CCFactLabelStyle = .prose
-    /// How old this fact is. `monoSmall` `textTertiary`, hard against the
-    /// trailing edge, after the value.
+    /// The fact's time: how old it is, or when it next changes ("resets in 2 days"). `monoSmall` `textTertiary`,
+    /// hard against the trailing edge, after the value.
     var age: String?
     var separator: Bool = true
     /// What VoiceOver reads for the value, when the visible form is an
