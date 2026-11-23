@@ -207,6 +207,20 @@ public enum AccountSwitchWords {
     public static let notSeparate = "Uses this computer's own Codex sign-in, so it isn't a separate account"
 }
 
+/// What an account's row on Settings › Accounts offers in its "…": Sign In Again… where the account is signed out, and
+/// Remove… for every account added here. The Default is the agent as set up on the computer and offers neither.
+public enum AccountRowAct: Sendable, Hashable {
+    case signInAgain, remove
+
+    public var title: String { self == .signInAgain ? "Sign In Again…" : "Remove…" }
+
+    /// `account`'s acts, in the menu's order; none for the Default (nil).
+    public static func acts(for account: AgentAccount?) -> [AccountRowAct] {
+        guard let account else { return [] }
+        return account.signedOut ? [.signInAgain, .remove] : [.remove]
+    }
+}
+
 /// A switch in progress for one agent's sessions on a computer: the account the waiting and moved ones go to (its email
 /// where its agent says it, else its name), how many still finish a turn first, how many move with their next message,
 /// and the ones that couldn't switch, by their folder's name, whatever account they tried.

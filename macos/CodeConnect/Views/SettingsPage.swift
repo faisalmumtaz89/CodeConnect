@@ -485,13 +485,14 @@ private struct AgentAccounts: View {
                     AccountRow(
                         model: model, agent: agent, id: nil, facts: book.defaultFacts(for: agent), label: "Default",
                         signedOut: false, signingIn: false, note: nil, columns: columns, inUse: active == nil,
-                        choose: { await model.activateAccount(agent: agent, accountID: nil) }, remove: nil)
+                        choose: { await model.activateAccount(agent: agent, accountID: nil) }, acts: [], remove: {})
                     ForEach(book.accounts(for: agent)) { account in
                         AccountRow(
                             model: model, agent: agent, id: account.id, facts: account.facts, label: account.label,
                             signedOut: account.signedOut, signingIn: account.signingIn,
                             note: note(account, in: book), columns: columns, inUse: active == account.id,
-                            choose: { await model.choose(account) }, remove: { removing = account })
+                            choose: { await model.choose(account) }, acts: AccountRowAct.acts(for: account),
+                            remove: { removing = account })
                     }
                     Button { Task { await model.addAndSignIn(agent: agent) } } label: {
                         HStack(spacing: 10) {
@@ -557,7 +558,9 @@ private struct AgentAccounts: View {
 /// One account's row, the whole of it the choice: the email (else its name) and its plan, "Signed out" in amber, or
 /// its quiet note beneath; its figures under the group's columns, right-aligned, an empty cell where it names no such
 /// window. In use: the Settings selection fill and a leading check; a sign-in waiting on the browser: a spinner there.
-/// Under the pointer: the lighter hover fill, the pointing hand, and a "…" at the trailing edge.
+/// Under the pointer: the lighter hover fill, the pointing hand, and, for a row with acts, a "…" at the trailing edge
+/// opening the window's row menu (`RowMenu`), as a run's does (`RunMore`); a right-click on the row opens the same menu
+/// at the pointer. The "…" stands over the row's button, never inside it, so a click anywhere on it never chooses the row.
 private struct AccountRow: View {
     let model: AppModel
     let agent: StartAgent
@@ -571,15 +574,27 @@ private struct AccountRow: View {
     let inUse: Bool
     /// What a click does: use it, or sign a signed-out one in again (`AppModel.choose`).
     let choose: () async -> Void
-    let remove: (() -> Void)?
+    /// What its "…" offers (`AccountRowAct.acts`); none, no "…".
+    let acts: [AccountRowAct]
+    /// Remove…: asks first, by the page's card.
+    let remove: () -> Void
+    @Environment(RowMenu.self) private var menu
     @State private var hovered = false
+    @State private var moreFrame: CGRect = .zero
 
     static let lead: CGFloat = 16
     static let column: CGFloat = 76
     /// The "…"'s slot and its gap, kept on every row so nothing moves.
     static let trailing: CGFloat = 6 + 10 + 30
+    /// The "…"'s slot in the row, which its button stands centred over: as wide as the one it replaced, so the figures
+    /// keep their places under the captions.
+    private static let slot: CGFloat = 22
 
     private var rowID: String { "settings.accounts.\(agent.rawValue).\(id ?? "default")" }
+    private var moreID: String { "\(rowID).more" }
+    private var menuOpen: Bool { menu.shown?.owner == moreID }
+    /// Under the pointer, or drawn as if (a test launch's `-CC_HOVER <row id>`).
+    private var lit: Bool { hovered || HoverButtonStyle.forced(rowID) }
 
     var body: some View {
         Button {
@@ -621,22 +636,36 @@ private struct AccountRow: View {
                     Spacer(minLength: 12)
                     figures
                 }
-                menuButton.opacity(hovered ? 1 : 0)
+                Color.clear.frame(width: Self.slot, height: 1)
             }
             .padding(.horizontal, 10).padding(.vertical, 9)
             .background(
-                inUse ? Theme.selected : hovered ? Color.white.opacity(Theme.hoverLift) : .clear,
+                inUse ? Theme.selected : lit ? Color.white.opacity(Theme.hoverLift) : .clear,
                 in: RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
         }
         .accessibilityIdentifier(rowID)
         .buttonStyle(.plain)
         .disabled(model.accountsBusy)
+        // For VoiceOver, which does not hover: the "…"'s acts as the row's own.
+        .accessibilityActions {
+            ForEach(acts, id: \.self) { act in
+                Button(act.title) { perform(act) }.accessibilityIdentifier("\(rowID).\(Self.name(act))Action")
+            }
+        }
+        .overlay(alignment: .trailing) {
+            if !acts.isEmpty, lit || menuOpen || HoverButtonStyle.forced(moreID) {
+                more.padding(.trailing, 10 + (Self.slot - RunMore.width) / 2)
+            }
+        }
+        .onRightClick { point in
+            guard !acts.isEmpty, !model.accountsBusy else { return }
+            show(at: CGRect(origin: point, size: .zero))
+        }
         .onHover { inside in
             hovered = inside
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
-        .contextMenu { menuItems }
     }
 
     /// Its share used of each column's window, right-aligned, an empty cell where it names no such window; or, in
@@ -669,25 +698,56 @@ private struct AccountRow: View {
         return id == nil ? "As set up on this Mac" : ""
     }
 
-    @ViewBuilder private var menuItems: some View {
-        if signedOut, let id {
-            Button("Sign In Again…") { Task { await model.signInAccount(accountID: id) } }
-                .accessibilityIdentifier("\(rowID).signInAgain")
+    /// The row's "…", the app's row-menu button (`RunMore`'s size, hover and open state): it opens the menu below itself.
+    private var more: some View {
+        Button { show(at: moreFrame) } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.text2)
+                .frame(width: RunMore.width, height: 22)
+                .background(menuOpen ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
         }
-        if let remove {
-            Button("Remove…", role: .destructive, action: remove).accessibilityIdentifier("\(rowID).remove")
+        .buttonStyle(.hover(radius: 5, id: moreID))
+        .focusable(false)
+        .disabled(model.accountsBusy)
+        .help("More")
+        .accessibilityLabel("More")
+        .accessibilityIdentifier(moreID)
+        .accessibilityValue(menuOpen ? "open" : "closed")
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { moreFrame = $0 }
+        #if DEBUG
+            .task {
+                guard let id, RenderWindow.openAccountMenu == id else { return }
+                // After the render has sized and placed its window, as a click comes on a window at rest.
+                try? await Task.sleep(for: .seconds(1))
+                show(at: moreFrame)
+            }
+        #endif
+    }
+
+    /// The row's menu by `rect` (its "…", or a right-click's point as a zero-size rect).
+    private func show(at rect: CGRect) {
+        let items = acts.map { act in
+            RowMenu.Item(
+                id: "\(rowID).\(Self.name(act))", title: act.title,
+                symbol: act == .remove ? PanelSymbol.remove : PanelSymbol.signIn, destructive: act == .remove
+            ) { perform(act) }
+        }
+        menu.toggle(rect, owner: moreID, items: items)
+    }
+
+    private func perform(_ act: AccountRowAct) {
+        switch act {
+        case .signInAgain:
+            guard let id else { return }
+            Task { await model.signInAccount(accountID: id) }
+        case .remove:
+            remove()
         }
     }
 
-    private var menuButton: some View {
-        Menu { menuItems } label: {
-            Image(systemName: "ellipsis").font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.text3)
-                .frame(width: 22, height: 18)
-        }
-        .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
-        .accessibilityLabel("More")
-        .accessibilityIdentifier("\(rowID).more")
-    }
+    private static func name(_ act: AccountRowAct) -> String { act == .remove ? "remove" : "signInAgain" }
 }
 
 #if DEBUG

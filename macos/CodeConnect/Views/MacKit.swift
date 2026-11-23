@@ -533,6 +533,8 @@ enum PanelSymbol {
     static let comment = "text.bubble"
     /// iPhone: `copy`.
     static let copy = "doc.on.doc"
+    /// iPhone: `sign-in`.
+    static let signIn = "person.badge.key"
 }
 
 /// One act in a "…" panel, on the Model and Mode panels' row: a quiet icon, the 12.5 pt label 8 pt in, 4 pt above and

@@ -453,6 +453,18 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertFalse(notSeparate.signedOut)
     }
 
+    /// A row's "…" offers what can be done to that account and nothing else: Sign In Again… where it is signed out, and
+    /// Remove… for every account added here. The Default is the agent as set up on the computer: its row has no "…".
+    func testARowsMenuOffersOnlyWhatItsAccountTakes() throws {
+        XCTAssertEqual(AccountRowAct.acts(for: try account("C", in: answerThenPush(8))), [.signInAgain, .remove], "signed out")
+        XCTAssertEqual(AccountRowAct.acts(for: try account("C", in: answerThenPush(9))), [.remove], "signing in")
+        XCTAssertEqual(AccountRowAct.acts(for: try account("B", in: answerThenPush(15))), [.remove], "signed in")
+        XCTAssertEqual(AccountRowAct.acts(for: try account("B", in: answerThenPush(1))), [.remove], "not read yet")
+        XCTAssertEqual(AccountRowAct.acts(for: nil), [], "the Default")
+        XCTAssertEqual(AccountRowAct.signInAgain.title, "Sign In Again…")
+        XCTAssertEqual(AccountRowAct.remove.title, "Remove…")
+    }
+
     /// A window's caption is its own length, as the service names it: never a guess at "5-hour" or "Week".
     func testAWindowIsCaptionedByItsOwnLength() {
         XCTAssertEqual(AccountSwitchWords.caption(minutes: 300), "5-hour")
