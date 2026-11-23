@@ -427,18 +427,24 @@ impl Facts {
         false
     }
 
-    /// What is held for `key` goes (its sign-in changed, or it was removed).
+    /// What is held for `key`, its facts and its sign-in, goes (its sign-in changed, or it was removed).
     pub(crate) fn forget(&self, key: &str) {
         self.known.lock().unwrap().remove(key);
+        self.signed.lock().unwrap().remove(key);
         if self.reading.lock().unwrap().contains(key) {
             self.dropped.lock().unwrap().insert(key.to_string());
         }
     }
 
     /// What `listing` ([`with_signed_in`]'s, begun at `asked`, [`Facts::signed_stale`]) says of each account's sign-in,
-    /// kept for the answers that follow; fresh only if no call has asked for another read since it began.
+    /// kept for the answers that follow; nothing is kept if a call has asked for another read since it began.
     pub(crate) fn keep_signed(&self, listing: &protocol::ws::ServerMessage, asked: u64) {
         if let protocol::ws::ServerMessage::Accounts { accounts, .. } = listing {
+            let mut signed_at = self.signed_at.lock().unwrap();
+            // A call asked for another read since this one began: what it found may be older than that call.
+            if signed_at.1 != asked {
+                return;
+            }
             let mut signed = self.signed.lock().unwrap();
             for account in accounts {
                 signed.insert(
@@ -446,10 +452,7 @@ impl Facts {
                     (account.signed_in, account.not_separate),
                 );
             }
-            let mut signed_at = self.signed_at.lock().unwrap();
-            if signed_at.1 == asked {
-                signed_at.0 = Some(std::time::Instant::now());
-            }
+            signed_at.0 = Some(std::time::Instant::now());
         }
     }
 
@@ -1601,6 +1604,40 @@ pub(crate) mod tests {
         );
         let _ = std::fs::remove_dir_all(on_a.folder());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A sign-in read begun before a sign-in ended is never shown** (round 2): the read's answer, older than the
+    /// end, is not written, and the account's own held answer went with the end, so its row says nothing of its
+    /// sign-in until it is read again; no timing, the calls in the order the race makes them.
+    #[test]
+    fn a_sign_in_read_begun_before_a_sign_in_ended_is_never_shown() {
+        let store = crate::store::Store::open_temp("ccd-signed-race");
+        let _db = store.temp_db();
+        let x = store.add_account("codex", "X").unwrap();
+        let facts = super::Facts::default();
+        let read_as = |signed_in: bool| {
+            let mut listing = super::listing(&store, None);
+            if let protocol::ws::ServerMessage::Accounts { accounts, .. } = &mut listing {
+                accounts[0].signed_in = Some(signed_in);
+            }
+            listing
+        };
+        // An earlier round held X signed out.
+        let first = facts.signed_stale().unwrap();
+        facts.keep_signed(&read_as(false), first);
+        // A round begins its read; X's login ends meanwhile; the round's read, from before the end, comes in.
+        facts.forget_signed();
+        let begun = facts.signed_stale().unwrap();
+        facts.forget(&x.id);
+        facts.forget_signed();
+        facts.keep_signed(&read_as(false), begun);
+        let told = serde_json::to_value(facts.told(super::listing(&store, None))).unwrap();
+        assert_eq!(
+            told["accounts"][0].get("signed_in"),
+            None,
+            "not read yet: {told}"
+        );
+        assert!(facts.signed_stale().is_some(), "read again");
     }
 
     /// **A removed Claude Code account's folder that is a link is left**, and what it names untouched: only a real
