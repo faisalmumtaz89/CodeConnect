@@ -131,13 +131,14 @@ struct StartForm: View {
         if draft.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return StartWords.writeTheFirstMessage }
         if let name = newName?.trimmingCharacters(in: .whitespaces) {
             if name.isEmpty { return StartWords.nameTheWorktree }
-            if !StartPlace.isValidName(name) { return StartWords.nameBreaksTheRule }
+            // The rule is drawn in the branch menu, not above this line: the line says it.
+            if !StartPlace.isValidName(name) { return StartWords.worktreeNameBroken }
         }
         return nil
     }
 
-    /// The window has less room than the tallest form needs (a new worktree being named in a folder with changes, under
-    /// a notice): after the folder list, the heading goes, the first message starts at one line and the rows stand closer.
+    /// The window has less room than the tallest form needs (under a notice): after the folder list, the heading goes,
+    /// the first message starts at one line and the rows stand closer.
     private var short: Bool { room < 600 }
 
     /// The place Start sends: a new worktree by the name typed, else the one chosen.
@@ -247,7 +248,7 @@ struct StartForm: View {
     }
 
     /// The box: the first message, and in its bar the computer, the folder and where in the repository, the model and
-    /// Start. Under it, a new worktree being named, then why Start can't be pressed yet, or what it does.
+    /// Start. Under it, why Start can't be pressed yet, or what it does.
     private var form: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let context {
@@ -255,9 +256,6 @@ struct StartForm: View {
                 composer(context)
                     // Its menus open over what is above and below it: the last modifier, so they draw over the rest.
                     .zIndex(folderOpen || computerMenuOpen || branchMenuOpen || menuOpen ? 1 : 0)
-                if let folder, newName != nil, let answer = context.git(folder.path), let git = answer {
-                    BranchNaming(folder: folder, agent: pick?.agent, git: git, newName: choice(\.newName))
-                }
                 if let note = blocked ?? pick.map(StartContext.starts) {
                     Text(note).font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1)
                         .accessibilityIdentifier("start.note")
@@ -573,7 +571,12 @@ struct StartForm: View {
                 BranchRow(
                     context: context, folder: folder, agent: pick?.agent, place: choice(\.place),
                     newName: choice(\.newName), open: $branchMenuOpen, top: 0
-                )
+                ) {
+                    // A turn after the menu closes, as `takeKeyboard`'s, so AppKit's settling doesn't take it back.
+                    DispatchQueue.main.async {
+                        giveKeyboard($messageFocused, caret: $messageSelection, endOf: draft.message)
+                    }
+                }
             }
         } trailing: {
             ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }

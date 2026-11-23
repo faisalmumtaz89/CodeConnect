@@ -240,11 +240,16 @@ extension View {
     /// A control that opens a panel, and toggles it itself. While the panel is open, a click anywhere in the window
     /// outside the control and the panel closes it, and the click still does what it does there (another control's
     /// opens that control's panel); Esc closes it and goes no further, so a second Esc does what Esc did before; a
-    /// scroll or a window's resize closes it too.
+    /// scroll or a window's resize closes it too. While a field of the panel's own (`panelField`) has the keyboard,
+    /// every key is the field's.
     func closesPanel(_ open: Binding<Bool>) -> some View { modifier(ClosesPanel(open: open, measuresControl: true)) }
 
     /// The panel a `closesPanel` control opens: a click on it keeps it open.
     func openPanel() -> some View { modifier(OpenPanel()) }
+
+    /// A field of an open panel that takes the panel's keys while `focused`: Esc, Return and the arrows are its own,
+    /// not the panel's light's or its closing's. Every other panel's keys are as `closesPanel` says.
+    func panelField(_ focused: FocusState<Bool>.Binding) -> some View { modifier(PanelField(focused: focused)) }
 
     /// A field that appears because of a choice just made takes the keyboard as it appears, so what is typed next
     /// goes into it and not into the field that had the keyboard before.
@@ -323,6 +328,8 @@ private struct ClosesPanel: ViewModifier {
             }
             if event.type == .keyDown {
                 guard event.window === window else { return event }
+                // While a field of the panel's own (`panelField`) has the keyboard, every key is the field's.
+                if MainActor.assumeIsolated({ light.fieldHasKeyboard }) { return event }
                 if event.keyCode == 53 {  // Esc
                     close.wrappedValue = false
                     return nil
@@ -367,6 +374,17 @@ private struct ClosesPanel: ViewModifier {
     }
 }
 
+private struct PanelField: ViewModifier {
+    let focused: FocusState<Bool>.Binding
+    @Environment(\.panelLight) private var light
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: focused.wrappedValue, initial: true) { _, has in light?.fieldHasKeyboard = has }
+            .onDisappear { light?.fieldHasKeyboard = false }
+    }
+}
+
 private struct TakesKeyboardWhenShown: ViewModifier {
     @FocusState private var focused: Bool
 
@@ -405,6 +423,8 @@ extension EnvironmentValues {
     /// The row the keys last lit, which a panel that scrolls brings into sight (`PanelScroll`).
     private(set) var keyed: Int?
     @ObservationIgnored private var rows: [Int: Row] = [:]
+    /// A field of the panel's own (`panelField`) has the keyboard.
+    @ObservationIgnored var fieldHasKeyboard = false
 
     private struct Row {
         let id: String
@@ -412,10 +432,11 @@ extension EnvironmentValues {
         let choose: () -> Void
     }
 
-    /// The panel opened: nothing is lit.
+    /// The panel opened: nothing is lit, and no field of it has the keyboard.
     func opened() {
         light = MenuLight()
         keyed = nil
+        fieldHasKeyboard = false
     }
 
     func register(_ index: Int, id: String, enabled: Bool, choose: @escaping () -> Void) {

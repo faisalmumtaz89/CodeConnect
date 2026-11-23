@@ -8,6 +8,7 @@ User-facing changes, newest first. Mac releases are cut per
 - When you have not chosen an effort for a Claude Code session, the reply row says Default and no level is marked:
   Claude Code decides it, from your own settings or the model's default. Choosing a level sets it. Codex is unchanged:
   it names its default.
+- On the Mac, a new worktree is named in the branch menu, under New branch…: Return keeps the name and closes the menu.
 
 ## CodeConnect 0.19.16, with the iPhone app 1.1.33
 
