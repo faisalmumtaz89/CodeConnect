@@ -104,8 +104,9 @@ struct HoverButtonStyle: ButtonStyle {
                 .background(lit && !over ? Theme.hover : .clear, in: plate)
                 .brightness(lit && over ? lift : 0)
                 .opacity(off ? Theme.disabledOpacity : configuration.isPressed || forcedState("pressed") ? 0.7 : 1)
-                // What lights is what a click takes, the label's clear gaps included.
-                .contentShape(plate)
+                // What lights is what a click takes, the label's clear gaps and the plate's rounded-off corners
+                // included: a corner that lit and did not press would leave a click to whatever lies under it.
+                .contentShape(Plate(radius: 0, bleed: bleed, flush: flush))
                 // The keyboard's focus ring takes the hover's shape too: square on a row that fills its list edge to
                 // edge, never a rounded pill against the list's straight sides.
                 .contentShape(.focusEffect, plate)
