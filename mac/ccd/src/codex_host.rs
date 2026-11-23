@@ -10413,7 +10413,7 @@ mod tests {
                 .map_or(serde_json::Value::Null, |default| default["facts"].clone())
         };
         let (_uid, mut ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
-        // The keys and types real codex 0.170.0 sent signed in (app-qa's k307 sitting, 2026-11-23; values made up):
+        // The keys and types codex 0.170.0 sends signed in (values made up):
         // one window, the secondary null.
         let limits = json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
             "limitId": "codex", "limitName": null, "planType": "plus",
