@@ -1,218 +1,16 @@
 [
   {
     "event": {
-      "kind": "codex_settings",
-      "payload": {
-        "approval_policy": "on-request",
-        "collaboration_mode": "default",
-        "effort": "high",
-        "model": "gpt-6.1-sol",
-        "sandbox": "workspaceWrite"
-      },
-      "seq": 3,
-      "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "source": "codex",
-      "source_event_id": "thr-x6:settings:2b96aad4-6fdd-4bc7-9320-146b4ed5b299",
-      "ts": "2026-11-23T01:16:25.741Z"
-    },
-    "type": "event"
-  },
-  {
-    "sessions": [
-      {
-        "account": {
-          "id": null,
-          "label": "Default"
-        },
-        "agent": "codex",
-        "blocked_on": [],
-        "codex_link": "subscribed",
-        "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T01:16:25.365Z",
-        "cwd": "/tmp/ccx3.6RHBKENHHF/project",
-        "effort": {
-          "seq": 3,
-          "value": "high"
-        },
-        "last_seq": 3,
-        "lifecycle": "live",
-        "link": "attached",
-        "menus": {
-          "models": [
-            {
-              "default_effort": "low",
-              "detail": "Latest workhorse model for coding and everyday work.",
-              "efforts": [
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "ultra"
-              ],
-              "label": "GPT-6.1-Sol",
-              "value": "gpt-6.1-sol"
-            },
-            {
-              "default_effort": "low",
-              "detail": "Frontier intelligence for the most demanding work.",
-              "efforts": [
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "ultra"
-              ],
-              "label": "GPT-6-Astra",
-              "value": "gpt-6-astra"
-            },
-            {
-              "default_effort": "medium",
-              "detail": "Previous generation workhorse model.",
-              "efforts": [
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "ultra"
-              ],
-              "label": "GPT-6-Sol",
-              "value": "gpt-6-sol"
-            },
-            {
-              "default_effort": "medium",
-              "detail": "Fast and affordable model for easier tasks.",
-              "efforts": [
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max"
-              ],
-              "label": "GPT-6-Luna",
-              "value": "gpt-6-luna"
-            },
-            {
-              "default_effort": "low",
-              "detail": "Older generation workhorse model.",
-              "efforts": [
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "ultra"
-              ],
-              "label": "GPT-5.6-Sol",
-              "value": "gpt-5.6-sol"
-            },
-            {
-              "default_effort": "low",
-              "detail": "GPT-6.1 Terra Codex model.",
-              "efforts": [
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "ultra"
-              ],
-              "label": "GPT-6.1 Terra",
-              "value": "gpt-6.1-terra"
-            },
-            {
-              "default_effort": "medium",
-              "detail": "Older balanced model for straightforward work.",
-              "efforts": [
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "ultra"
-              ],
-              "label": "GPT-5.6-Terra",
-              "value": "gpt-5.6-terra"
-            },
-            {
-              "default_effort": "medium",
-              "detail": "Older fast and efficient model.",
-              "efforts": [
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max"
-              ],
-              "label": "GPT-5.6-Luna",
-              "value": "gpt-5.6-luna"
-            },
-            {
-              "default_effort": "medium",
-              "detail": "Legacy coding model.",
-              "efforts": [
-                "low",
-                "medium",
-                "high",
-                "xhigh"
-              ],
-              "label": "GPT-5.5",
-              "value": "gpt-5.5"
-            }
-          ],
-          "modes": [
-            {
-              "label": "Default",
-              "value": "auto"
-            },
-            {
-              "label": "Read Only",
-              "value": "read-only"
-            },
-            {
-              "label": "Plan",
-              "value": "plan"
-            },
-            {
-              "confirm": true,
-              "label": "Full Access",
-              "value": "full-access"
-            }
-          ],
-          "selected_model": "gpt-6.1-sol"
-        },
-        "model": {
-          "seq": 3,
-          "value": "gpt-6.1-sol"
-        },
-        "permission_mode": {
-          "seq": 3,
-          "value": "auto"
-        },
-        "project_label": "project",
-        "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "switching": "waiting",
-        "updated_at": "2026-11-23T01:16:25.689Z"
-      }
-    ],
-    "type": "sessions"
-  },
-  {
-    "event": {
       "kind": "link_state",
       "payload": {
         "link": "detached",
         "reason": "agent host disconnected"
       },
-      "seq": 4,
-      "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
+      "seq": 6,
+      "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+      "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
       "source": "daemon",
-      "ts": "2026-11-23T01:16:25.794Z"
+      "ts": "2026-11-23T01:34:46.366Z"
     },
     "type": "event"
   },
@@ -227,9 +25,9 @@
         "blocked_on": [],
         "codex_link": "none",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T01:16:25.365Z",
-        "cwd": "/tmp/ccx3.6RHBKENHHF/project",
-        "last_seq": 4,
+        "created_at": "2026-11-23T01:34:45.937Z",
+        "cwd": "/tmp/ccx3.WHC48CDJ2M/project",
+        "last_seq": 6,
         "lifecycle": "live",
         "link": "detached",
         "menus": {
@@ -387,10 +185,10 @@
           "value": "auto"
         },
         "project_label": "project",
-        "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
+        "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+        "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
         "switching": "waiting",
-        "updated_at": "2026-11-23T01:16:25.689Z"
+        "updated_at": "2026-11-23T01:34:46.206Z"
       }
     ],
     "type": "sessions"
@@ -402,16 +200,16 @@
         "exit_code": null,
         "reason": "Switched to B",
         "switched_to": {
-          "account_id": "01M82ZKJ8DGVCHH5ZBQ5VE0NGV",
+          "account_id": "01M830N4ZN4HVR06QJR8C4XDRQ",
           "label": "B"
         }
       },
-      "seq": 5,
-      "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
+      "seq": 7,
+      "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+      "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
       "source": "daemon",
-      "source_event_id": "exit:01M82ZKHWNXTBB0QFH0WM1YYA7:8002",
-      "ts": "2026-11-23T01:16:25.796Z"
+      "source_event_id": "exit:01M830N4NHCWHA55C31CE5QNXF:50019",
+      "ts": "2026-11-23T01:34:46.367Z"
     },
     "type": "event"
   },
@@ -426,63 +224,12 @@
         "blocked_on": [],
         "codex_link": "bound_not_started",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T01:16:25.365Z",
-        "cwd": "/tmp/ccx3.6RHBKENHHF/project",
+        "created_at": "2026-11-23T01:34:45.937Z",
+        "cwd": "/tmp/ccx3.WHC48CDJ2M/project",
         "effort": {
           "seq": 3,
           "value": "high"
         },
-        "last_seq": 5,
-        "lifecycle": "live",
-        "link": "detached",
-        "model": {
-          "seq": 3,
-          "value": "gpt-6.1-sol"
-        },
-        "permission_mode": {
-          "seq": 3,
-          "value": "auto"
-        },
-        "project_label": "project",
-        "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "switching": "moved",
-        "updated_at": "2026-11-23T01:16:25.796Z"
-      }
-    ],
-    "type": "sessions"
-  },
-  {
-    "event": {
-      "kind": "session_start",
-      "payload": {
-        "cli_version": "0.164.0",
-        "cwd": "/work/proj",
-        "rollout_path": "/tmp/cch.x/rollout-thr-x6.jsonl",
-        "thread_id": "thr-x6"
-      },
-      "seq": 6,
-      "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "source": "codex",
-      "source_event_id": "thr-x6:thread_started",
-      "ts": "2026-11-23T01:16:25.964Z"
-    },
-    "type": "event"
-  },
-  {
-    "sessions": [
-      {
-        "account": {
-          "id": null,
-          "label": "Default"
-        },
-        "agent": "codex",
-        "blocked_on": [],
-        "codex_link": "none",
-        "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T01:16:25.365Z",
-        "cwd": "/tmp/ccx3.6RHBKENHHF/project",
         "last_seq": 7,
         "lifecycle": "live",
         "link": "detached",
@@ -495,63 +242,10 @@
           "value": "auto"
         },
         "project_label": "project",
-        "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
+        "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+        "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
         "switching": "moved",
-        "updated_at": "2026-11-23T01:16:25.850Z"
-      }
-    ],
-    "type": "sessions"
-  },
-  {
-    "event": {
-      "kind": "turn_complete",
-      "payload": {
-        "completed_at": 1792962047,
-        "duration_ms": 6812,
-        "error": null,
-        "started_at": 1792962040,
-        "status": "completed"
-      },
-      "seq": 7,
-      "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "source": "codex",
-      "source_event_id": "thr-x6:turn:turn-1",
-      "ts": "2026-11-23T01:16:25.964Z",
-      "turn_id": "turn-1"
-    },
-    "type": "event"
-  },
-  {
-    "sessions": [
-      {
-        "account": {
-          "id": null,
-          "label": "Default"
-        },
-        "agent": "codex",
-        "blocked_on": [],
-        "codex_link": "none",
-        "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T01:16:25.365Z",
-        "cwd": "/tmp/ccx3.6RHBKENHHF/project",
-        "last_seq": 8,
-        "lifecycle": "live",
-        "link": "detached",
-        "model": {
-          "seq": 8,
-          "value": "gpt-6-luna"
-        },
-        "permission_mode": {
-          "seq": 8,
-          "value": "read-only"
-        },
-        "project_label": "project",
-        "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "switching": "moved",
-        "updated_at": "2026-11-23T01:16:25.850Z"
+        "updated_at": "2026-11-23T01:34:46.367Z"
       }
     ],
     "type": "sessions"
@@ -567,11 +261,11 @@
         "sandbox": "readOnly"
       },
       "seq": 8,
-      "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
+      "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+      "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
       "source": "codex",
-      "source_event_id": "thr-x6:settings:192279bd-81c4-4110-97ba-fcc1225e6099",
-      "ts": "2026-11-23T01:16:25.965Z"
+      "source_event_id": "thr-x6:settings:5e162c31-12cc-4966-a8f5-3f12daf15f78",
+      "ts": "2026-11-23T01:34:46.536Z"
     },
     "type": "event"
   },
@@ -586,8 +280,8 @@
         "blocked_on": [],
         "codex_link": "none",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T01:16:25.365Z",
-        "cwd": "/tmp/ccx3.6RHBKENHHF/project",
+        "created_at": "2026-11-23T01:34:45.937Z",
+        "cwd": "/tmp/ccx3.WHC48CDJ2M/project",
         "last_seq": 9,
         "lifecycle": "live",
         "link": "detached",
@@ -600,10 +294,10 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
+        "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+        "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
         "switching": "moved",
-        "updated_at": "2026-11-23T01:16:25.850Z"
+        "updated_at": "2026-11-23T01:34:46.422Z"
       }
     ],
     "type": "sessions"
@@ -613,7 +307,7 @@
       "kind": "notification",
       "payload": {
         "account": {
-          "id": "01M82ZKJ8DGVCHH5ZBQ5VE0NGV",
+          "id": "01M830N4ZN4HVR06QJR8C4XDRQ",
           "label": "B"
         },
         "from_label": "GPT-6.1-Sol",
@@ -624,10 +318,10 @@
         "to_model": "gpt-6-luna"
       },
       "seq": 9,
-      "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
+      "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+      "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
       "source": "daemon",
-      "ts": "2026-11-23T01:16:25.966Z"
+      "ts": "2026-11-23T01:34:46.536Z"
     },
     "type": "event"
   },
@@ -635,18 +329,18 @@
     "sessions": [
       {
         "account": {
-          "id": "01M82ZKJ8DGVCHH5ZBQ5VE0NGV",
-          "label": "B"
+          "id": null,
+          "label": "Default"
         },
         "agent": "codex",
         "blocked_on": [],
-        "codex_link": "subscribed",
+        "codex_link": "none",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T01:16:25.365Z",
-        "cwd": "/tmp/ccx3.6RHBKENHHF/project",
+        "created_at": "2026-11-23T01:34:45.937Z",
+        "cwd": "/tmp/ccx3.WHC48CDJ2M/project",
         "last_seq": 9,
         "lifecycle": "live",
-        "link": "attached",
+        "link": "detached",
         "menus": {
           "models": [
             {
@@ -690,10 +384,10 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
+        "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+        "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
         "switching": "waiting",
-        "updated_at": "2026-11-23T01:16:25.966Z"
+        "updated_at": "2026-11-23T01:34:46.536Z"
       }
     ],
     "type": "sessions"
@@ -705,11 +399,11 @@
         "source": "resume"
       },
       "seq": 10,
-      "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
+      "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+      "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
       "source": "daemon",
-      "source_event_id": "start:01M82ZKHWNXTBB0QFH0WM1YYA7:8015",
-      "ts": "2026-11-23T01:16:25.966Z"
+      "source_event_id": "start:01M830N4NHCWHA55C31CE5QNXF:50040",
+      "ts": "2026-11-23T01:34:46.536Z"
     },
     "type": "event"
   },
@@ -717,15 +411,15 @@
     "sessions": [
       {
         "account": {
-          "id": "01M82ZKJ8DGVCHH5ZBQ5VE0NGV",
+          "id": "01M830N4ZN4HVR06QJR8C4XDRQ",
           "label": "B"
         },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T01:16:25.365Z",
-        "cwd": "/tmp/ccx3.6RHBKENHHF/project",
+        "created_at": "2026-11-23T01:34:45.937Z",
+        "cwd": "/tmp/ccx3.WHC48CDJ2M/project",
         "last_seq": 11,
         "lifecycle": "live",
         "link": "attached",
@@ -772,9 +466,9 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "updated_at": "2026-11-23T01:16:25.966Z"
+        "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+        "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
+        "updated_at": "2026-11-23T01:34:46.536Z"
       }
     ],
     "type": "sessions"
@@ -787,10 +481,10 @@
         "reason": "agent host linked"
       },
       "seq": 11,
-      "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
+      "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+      "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
       "source": "daemon",
-      "ts": "2026-11-23T01:16:25.966Z"
+      "ts": "2026-11-23T01:34:46.537Z"
     },
     "type": "event"
   },
@@ -798,15 +492,15 @@
     "sessions": [
       {
         "account": {
-          "id": "01M82ZKJ8DGVCHH5ZBQ5VE0NGV",
+          "id": "01M830N4ZN4HVR06QJR8C4XDRQ",
           "label": "B"
         },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T01:16:25.365Z",
-        "cwd": "/tmp/ccx3.6RHBKENHHF/project",
+        "created_at": "2026-11-23T01:34:45.937Z",
+        "cwd": "/tmp/ccx3.WHC48CDJ2M/project",
         "last_seq": 11,
         "lifecycle": "live",
         "link": "attached",
@@ -853,9 +547,9 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "updated_at": "2026-11-23T01:16:25.966Z"
+        "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+        "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
+        "updated_at": "2026-11-23T01:34:46.536Z"
       }
     ],
     "type": "sessions"
@@ -868,11 +562,11 @@
         "text": "go on"
       },
       "seq": 12,
-      "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-      "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
+      "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+      "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
       "source": "daemon",
-      "source_event_id": "say:6884c769-4631-8645-a1ba-483c884547f2",
-      "ts": "2026-11-23T01:16:25.968Z",
+      "source_event_id": "say:9efc8a6d-3419-862b-b69d-27608f6551e8",
+      "ts": "2026-11-23T01:34:46.538Z",
       "turn_id": "turn-2"
     },
     "type": "event"
@@ -881,15 +575,15 @@
     "sessions": [
       {
         "account": {
-          "id": "01M82ZKJ8DGVCHH5ZBQ5VE0NGV",
+          "id": "01M830N4ZN4HVR06QJR8C4XDRQ",
           "label": "B"
         },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T01:16:25.365Z",
-        "cwd": "/tmp/ccx3.6RHBKENHHF/project",
+        "created_at": "2026-11-23T01:34:45.937Z",
+        "cwd": "/tmp/ccx3.WHC48CDJ2M/project",
         "last_seq": 12,
         "lifecycle": "live",
         "link": "attached",
@@ -936,9 +630,9 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "session_uid": "01M82ZKHWNXTBB0QFH0WM1YYA7",
-        "updated_at": "2026-11-23T01:16:25.966Z"
+        "session_id": "01M830N4NHCWHA55C31CE5QNXF",
+        "session_uid": "01M830N4NHCWHA55C31CE5QNXF",
+        "updated_at": "2026-11-23T01:34:46.536Z"
       }
     ],
     "type": "sessions"

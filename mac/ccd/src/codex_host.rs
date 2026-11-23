@@ -8808,6 +8808,38 @@ mod tests {
             .store
             .activate_account("codex", Some(&b.id))
             .unwrap());
+        // Its thread as codex announces it (its identity: cwd, rollout path, version), and its first turn running
+        // and ending, as codex tells them.
+        tell(
+            &mut ws,
+            &json!({"method": "thread/started", "params": {"thread": {"id": "thr-x6", "cwd": "/work/proj",
+                "path": "/tmp/cch.x/rollout-thr-x6.jsonl", "cliVersion": "0.170.0"}}}),
+        )
+        .await;
+        for method in ["turn/started", "turn/completed"] {
+            tell(
+                &mut ws,
+                &json!({"method": method, "params": {"threadId": "thr-x6",
+                    "turn": {"id": "turn-1", "status": if method == "turn/started" { "inProgress" } else { "completed" }, "items": []}}}),
+            )
+            .await;
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !rig
+            .daemon
+            .db
+            .events_after(uid.clone(), 0, 10_000)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == EventKind::TurnComplete)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "its first turn's end was not filed"
+            );
+            tokio::time::sleep(POLL).await;
+        }
         // Moved by the switch (from its typed end on, as a device is sent it): idle, so at once.
         let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
         crate::switch::begin(&rig.daemon, &AgentKind::Codex).await;
