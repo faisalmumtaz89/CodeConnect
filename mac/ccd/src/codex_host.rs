@@ -10396,9 +10396,10 @@ mod tests {
     }
 
     /// **A Codex run's own word that its account's limits changed updates them, with no process started**: its
-    /// app-server's `account/rateLimits/updated` (sent on the connection ccd holds, before a turn's end) replaces the
-    /// held usage windows of the account the run is on, read as `account/rateLimits/read`'s are, the rest of what is
-    /// held kept; an account with nothing held is left to its read, and a word that names no window changes nothing.
+    /// app-server's `account/rateLimits/updated` (sent on the connection ccd holds, before a turn's end), a sparse
+    /// update, replaces each held usage window of the account the run is on that it names (by length), read as
+    /// `account/rateLimits/read`'s are; a window it does not name, and the rest of what is held, kept; an account with
+    /// nothing held is left to its read, and a word that names no window changes nothing.
     #[tokio::test]
     async fn a_codex_runs_rate_limits_update_its_accounts_windows() {
         let _env = crate::ProcessEnvRead::take();
@@ -10434,16 +10435,25 @@ mod tests {
                 limits_available: None,
                 email: Some("default@example.test".into()),
                 plan: Some("plus".into()),
-                windows: Vec::new(),
+                // A read naming both windows.
+                windows: vec![
+                    protocol::ws::UsageWindow {
+                        used_percent: 10,
+                        window_minutes: 300,
+                        resets_at: 1_795_920_000,
+                    },
+                    protocol::ws::UsageWindow {
+                        used_percent: 7,
+                        window_minutes: 10080,
+                        resets_at: 1_796_428_800,
+                    },
+                ],
                 read_at: protocol::time::now_rfc3339(),
             }),
         );
         tell(&mut ws, &limits).await;
         let deadline = Instant::now() + Duration::from_secs(10);
-        while held(&rig.daemon)["windows"]
-            .as_array()
-            .is_none_or(Vec::is_empty)
-        {
+        while held(&rig.daemon)["windows"][0]["used_percent"] != 42 {
             assert!(
                 Instant::now() < deadline,
                 "never updated: {}",
@@ -10455,9 +10465,11 @@ mod tests {
         assert_eq!(facts["email"], "default@example.test", "{facts}");
         assert_eq!(
             facts["windows"],
-            json!([{"used_percent": 42, "window_minutes": 300, "resets_at": 1795928400}]),
-            "{facts}"
+            json!([{"used_percent": 42, "window_minutes": 300, "resets_at": 1795928400},
+                {"used_percent": 7, "window_minutes": 10080, "resets_at": 1796428800}]),
+            "the window the word names replaced, the one it does not name kept: {facts}"
         );
+        assert_eq!(facts["email"], "default@example.test", "{facts}");
         // A word that names no window (an API key's, every recording's) changes nothing.
         let mut none = limits.clone();
         none["params"]["rateLimits"]["primary"] = serde_json::Value::Null;

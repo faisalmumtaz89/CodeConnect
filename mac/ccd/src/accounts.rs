@@ -438,8 +438,10 @@ impl Facts {
         }
     }
 
-    /// `key`'s held usage windows are `windows`, as its agent has just said them; the rest of what is held, and when it
-    /// was read, kept. Whether anything was held to update: an account with nothing held is left to its read.
+    /// `key`'s held usage windows as its agent has just said some of them (Codex's sparse rolling update): each window
+    /// `windows` names replaces the held one of its length, one it does not name is kept, and the rest of what is held,
+    /// and when it was read, kept. Whether anything was held to update: an account with nothing held is left to its
+    /// read.
     pub(crate) fn update_windows(
         &self,
         key: &str,
@@ -449,7 +451,13 @@ impl Facts {
         let Some((Some(facts), _)) = known.get_mut(key) else {
             return false;
         };
-        facts.windows = windows;
+        facts.windows.retain(|held| {
+            !windows
+                .iter()
+                .any(|said| said.window_minutes == held.window_minutes)
+        });
+        facts.windows.extend(windows);
+        facts.windows.sort_by_key(|window| window.window_minutes);
         facts.read_at = protocol::time::now_rfc3339();
         true
     }
