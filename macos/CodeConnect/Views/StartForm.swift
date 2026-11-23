@@ -424,18 +424,9 @@ struct StartForm: View {
             }
             // A folder from elsewhere, whatever the list holds: this Mac's from the standard folder panel, another
             // computer's by browsing it.
-            if !browsing {
-                if isThisMac(context) {
-                    HStack {
-                        Spacer()
-                        chooseButton
-                    }
-                } else if context.browses {
-                    HStack {
-                        Spacer()
-                        browseButton
-                    }
-                }
+            if !browsing && (isThisMac(context) || context.browses) {
+                MenuDivider()
+                if isThisMac(context) { chooseButton } else { browseButton }
             }
         }
     }
@@ -471,9 +462,9 @@ struct StartForm: View {
     /// Any folder on this Mac, from the standard folder panel.
     private var chooseButton: some View {
         Button(action: chooseFolder) {
-            Text("Choose a folder\u{2026}").font(Theme.ui(11.5)).foregroundStyle(Theme.text2).contentShape(Rectangle())
+            MenuRow { Text("Choose a folder\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
         }
-        .buttonStyle(.hover(bare: true, flush: .trailing, id: "start.choose"))
+        .buttonStyle(.hover(radius: 8, id: "start.choose"))
         .accessibilityIdentifier("start.choose")
     }
 
@@ -484,9 +475,9 @@ struct StartForm: View {
             branchMenuOpen = false
             browsing = true
         } label: {
-            Text("Browse\u{2026}").font(Theme.ui(11.5)).foregroundStyle(Theme.text2).contentShape(Rectangle())
+            MenuRow { Text("Browse\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
         }
-        .buttonStyle(.hover(bare: true, flush: .trailing, id: "start.browse"))
+        .buttonStyle(.hover(radius: 8, id: "start.browse"))
         .accessibilityIdentifier("start.browse")
     }
 
@@ -878,6 +869,7 @@ private struct ComputerButton: View {
                 open = false
                 add()
             }
+            MenuDivider().padding(.vertical, 5)
             Button(action: adding) {
                 MenuRow {
                     Image(systemName: "plus").font(.system(size: 9.5, weight: .bold)).frame(width: 12)
