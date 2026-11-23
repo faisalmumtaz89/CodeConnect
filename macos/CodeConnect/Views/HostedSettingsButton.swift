@@ -52,8 +52,8 @@ struct HostedSettingsButton: View {
             if let open {
                 panel(open)
                     .openPanel()
-                    // Clear of the 24 pt controls by the panels' one gap.
-                    .offset(x: reach, y: -(24 + Theme.panelGap))
+                    // Clear of the bar's chips by the panels' one gap.
+                    .offset(x: reach, y: -(InputBoxChip.height + Theme.panelGap))
             }
         }
         .closesPanel(Binding(get: { open != nil }, set: { if !$0 { open = nil } }))
@@ -71,7 +71,7 @@ struct HostedSettingsButton: View {
             HStack(spacing: 5) {
                 AgentMark(agent: agent)
                 // The agent's own report of the model (an id) in code type; a menu row's label in the app's.
-                Text(name).font(settings.modelDisplayReported ? Theme.mono(11.5) : Theme.ui(12))
+                Text(name).font(settings.modelDisplayReported ? Theme.mono(11.5) : InputBoxChip.font)
                     .foregroundStyle(Theme.text)
                 if let effort { Text("· \(effort)").foregroundStyle(Theme.text2) }
                 if settings.inFlight {
@@ -114,14 +114,11 @@ struct HostedSettingsButton: View {
             open = isOpen ? nil : which
         } label: {
             content()
-                .font(Theme.ui(12))
+                .font(InputBoxChip.font)
                 .foregroundStyle(Theme.text2)
-                .padding(.horizontal, 6)
-                .frame(height: 24)
-                .background(isOpen ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
-                .contentShape(Rectangle())
+                .inputBoxChip(open: isOpen)
         }
-        .buttonStyle(.hover(radius: 5, id: id))
+        .buttonStyle(.hover(radius: 8, id: id))
         .help(blocked ?? help)
         .accessibilityLabel(label)
         .accessibilityIdentifier(id)
@@ -294,13 +291,12 @@ struct ModelFactLabel: View {
         HStack(spacing: 5) {
             AgentMark(agent: agent)
             // By its menu's name, or as the run reported it in code type; "Model" while it has reported none.
-            Text(fact?.text ?? "Model").font(fact?.reported == true ? Theme.mono(11.5) : Theme.ui(12))
+            Text(fact?.text ?? "Model").font(fact?.reported == true ? Theme.mono(11.5) : InputBoxChip.font)
                 .foregroundStyle(Theme.text)
             if let effort { Text("· \(effort)").foregroundStyle(Theme.text2) }
         }
-        .font(Theme.ui(12))
-        .padding(.horizontal, 6)
-        .frame(height: 24)
+        .font(InputBoxChip.font)
+        .inputBoxChip(open: false)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("session.composer.model")
     }

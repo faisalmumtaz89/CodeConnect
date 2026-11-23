@@ -23,7 +23,7 @@ struct InputBox<Field: View, Leading: View, Trailing: View>: View {
                 Spacer(minLength: 8)
                 trailing
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, InputBoxLayout.barInset)
             .frame(height: barHeight)
         }
         // Drawn behind the contents: a menu opened from the bar may sit over the box's edge.
@@ -90,4 +90,31 @@ struct InputBoxSubmit: View {
         .accessibilityLabel(label)
         .accessibilityIdentifier(id)
     }
+}
+
+extension View {
+    /// A chip in the box's bar, drawn around its label: 8 pt in at the sides, `InputBox.chipHeight` tall, corners of 8,
+    /// filled while its menu is `open`; `bordered`, the model chip's fine border. Its whole frame takes a click.
+    func inputBoxChip(open: Bool, bordered: Bool = false) -> some View {
+        padding(.horizontal, 8)
+            .frame(height: InputBoxChip.height)
+            .background(open ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                if bordered { RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.08)) }
+            }
+            .contentShape(Rectangle())
+    }
+}
+
+/// The box's measures its places share: the bar's side inset, and the message's line spacing (its text at 15 pt
+/// stands 1.55 lines apart).
+enum InputBoxLayout {
+    static let barInset: CGFloat = 12
+    static let lineSpacing: CGFloat = 5
+}
+
+/// The bar's chips' one size: their words 12.5 pt medium, 6 pt above and below.
+enum InputBoxChip {
+    static let height: CGFloat = 28
+    static let font = Theme.ui(12.5, .medium)
 }
