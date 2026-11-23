@@ -518,6 +518,47 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertEqual(after.count { if case .sessions = $0 { true } else { false } }, 1, "\(after)")
     }
 
+    /// Add account… waits while one of its agent's accounts is signing in (the daemon's recording: B from the sign-in's
+    /// answer to its end), so a second click can't end the first sign-in for another account.
+    func testAddingWaitsWhileASignInIsGoing() async throws {
+        let (model, sent) = try model()
+        async let loaded: Void = model.loadAccounts()
+        await waitUntil({ sent.sent.count == 1 }, "the list to be sent")
+        model.connection.injectForTesting(.accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: try answerThenPush(7)))
+        await loaded
+        XCTAssertFalse(model.canAddAccount(agent: .codex), "B is signing in")
+        XCTAssertTrue(model.canAddAccount(agent: .claude), "another agent's sign-in doesn't hold this one")
+        model.connection.injectForTesting(.accounts(requestID: nil, book: try answerThenPush(8)))
+        await waitUntil({ model.canAddAccount(agent: .codex) }, "B's sign-in to end")
+    }
+
+    /// A click on a signed-out row signs it in again, as its menu's Sign In Again… does: it never becomes the account in
+    /// use, so no session moves onto an account that can't start. A row not read yet is chosen as any other.
+    func testChoosingASignedOutAccountSignsItInAgain() async throws {
+        let (model, sent) = try model()
+        async let loaded: Void = model.loadAccounts()
+        await waitUntil({ sent.sent.count == 1 }, "the list to be sent")
+        let book = try answerThenPush(8)
+        model.connection.injectForTesting(.accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: book))
+        await loaded
+        let signedOut = try account("C", in: book)
+        XCTAssertTrue(signedOut.signedOut)
+        async let chosen = model.choose(signedOut)
+        await waitUntil({ sent.sent.count == 2 }, "the click to send")
+        guard case .signInAccount(_, let id)? = sent.sent.last else { return XCTFail("\(String(describing: sent.sent.last))") }
+        XCTAssertEqual(id, signedOut.id)
+        model.connection.injectForTesting(.accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: try answerThenPush(9)))
+        _ = await chosen
+
+        let unread = try account("B", in: try answerThenPush(1))
+        async let used = model.choose(unread)
+        await waitUntil({ sent.sent.count == 3 }, "the second click to send")
+        guard case .activateAccount(_, _, let picked)? = sent.sent.last else { return XCTFail("\(String(describing: sent.sent.last))") }
+        XCTAssertEqual(picked, unread.id)
+        model.connection.injectForTesting(.accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: book))
+        _ = await used
+    }
+
     /// Whether plan limits apply, as the agent says (`limits_available`, machine's 39685ca2): false is a sign-in with
     /// none, "No plan limits"; absent is not reported yet. Never inferred from an empty list of windows.
     func testWhetherPlanLimitsApplyIsTheAgentsOwnWord() throws {
