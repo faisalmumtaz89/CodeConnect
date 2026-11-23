@@ -888,8 +888,9 @@ system face, `Menlo-Regular` and, for a heavier run of code (it has no semibold)
 `@ScaledMetric` has already scaled and capped, and measure leading and cap height
 from the same face. The diff grid draws `Menlo-Regular` at its pinch-set size and
 counts its columns in Menlo's advance. `FontFacesTests` holds each face to its
-weight on the device. What iOS draws itself keeps the system face: the system
-menus, switches and the SF Symbols beside text.
+weight on the device. A bar title is drawn by the app (`ccNavigationTitle`):
+iOS sets a `.navigationTitle` in its own face. What iOS draws itself keeps the
+system face: the system menus, switches and the SF Symbols beside text.
 
 **Three 11pt roles, not one token doing seven jobs.** `micro` shipped carrying
 section headers, row statuses, badge labels, card statuses, chips, field labels

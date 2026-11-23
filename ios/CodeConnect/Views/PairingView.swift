@@ -414,7 +414,7 @@ struct PairingView: View {
             // On scroll, `bg` fades in over the first 24pt of travel, expressed
             // in the platform's own terms — see `ccNavigationChrome`.
             .ccNavigationChrome()
-            .navigationTitle("Settings")
+            .ccNavigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { doneItem }
             // The machine is fixed by its id when its row is tapped, so its
@@ -851,7 +851,7 @@ struct MachineScreen: View {
         }
         .background(CC.color.bg)
         .ccNavigationChrome()
-        .navigationTitle(model.machineName ?? "Computer")
+        .ccNavigationTitle(model.machineName ?? "Computer")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showLinkHealth) {
             LinkHealthSheet().environment(model)
@@ -1043,7 +1043,7 @@ struct FoldersView: View {
         }
         .background(CC.color.bg)
         .ccNavigationChrome()
-        .navigationTitle(FolderWords.paneTitle)
+        .ccNavigationTitle(FolderWords.paneTitle)
         .navigationBarTitleDisplayMode(.inline)
     }
 }

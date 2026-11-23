@@ -209,6 +209,26 @@ extension View {
     func ccNavigationChrome() -> some View {
         modifier(CCNavigationChrome())
     }
+
+    /// A bar title in the app's headline face. iOS draws a `.navigationTitle`
+    /// in its own face, so the bar's principal item draws the words instead;
+    /// `.navigationTitle` stays as the bar's name, for the back button, for
+    /// VoiceOver and for the tests that find the bar by it. The title stops
+    /// growing at xxxLarge, where the app's other bar titles stop.
+    func ccNavigationTitle(_ title: String) -> some View {
+        navigationTitle(title)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Text(verbatim: title)
+                        .ccType(CC.type.headline)
+                        .foregroundStyle(CC.text.primary)
+                        .lineLimit(1)
+                        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+                        .accessibilityAddTraits(.isHeader)
+                }
+                .ccPlainToolbarItem()
+            }
+    }
 }
 
 private struct CCNavigationChrome: ViewModifier {
