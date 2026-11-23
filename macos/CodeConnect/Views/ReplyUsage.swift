@@ -57,7 +57,7 @@ struct ReplyUsage: View {
         VStack(alignment: .leading, spacing: 0) {
             if let context = bar.context { row("Context", "\(context.used) of \(context.window)") }
             ForEach(bar.limits, id: \.caption) { limit in
-                row(limit.caption, "\(limit.usedPercent)%", limit.resets)
+                row(limit.caption, "\(limit.usedPercent)%" + (limit.resets.map { " · \($0)" } ?? ""))
             }
             if let note = bar.limitsNote { row(note, "") }
             if let account = bar.account { row("Account", account) }
@@ -65,11 +65,10 @@ struct ReplyUsage: View {
         .menuCard()
     }
 
-    private func row(_ caption: String, _ value: String, _ detail: String? = nil) -> some View {
+    private func row(_ caption: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
             Text(caption).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
             Spacer(minLength: 0)
-            if let detail { Text(detail).font(Theme.ui(11.5)).foregroundStyle(Theme.text3) }
             Text(value).font(Theme.ui(12.5)).monospacedDigit().foregroundStyle(Theme.text)
         }
         .padding(.horizontal, 10)
