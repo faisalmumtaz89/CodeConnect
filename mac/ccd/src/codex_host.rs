@@ -8624,7 +8624,11 @@ mod tests {
             .map(|event| event.payload["message"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(why.len(), 1, "{why:?}");
-        assert!(why[0].starts_with("Couldn’t start on B: "), "{why:?}");
+        assert_eq!(
+            why,
+            ["The session could not be started on the new account. Try again, or choose the account it ran on."],
+            "{why:?}"
+        );
     }
 
     /// **A run that has had a message is never silently given a new thread** (306; terminal's rehearsal): a run
@@ -8761,8 +8765,8 @@ mod tests {
             .collect();
         assert_eq!(
             why,
-            ["This conversation could not be continued on B: its record was not found. Choose the account it ran on \
-              to continue it."],
+            ["This conversation could not be continued on the new account: its record was not found. Choose the account \
+              it ran on to continue it."],
             "in the person's words"
         );
         drop(ws);
