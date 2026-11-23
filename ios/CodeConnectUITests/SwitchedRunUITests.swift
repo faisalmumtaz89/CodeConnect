@@ -9,7 +9,7 @@ final class SwitchedRunUITests: XCTestCase {
 
     private static let claude = "01M8299ZGSRFFX29Z8KF3Q5Q2V"
     private static let codex = "01M8299ZJQXMP43MZH8JY9VYMD"
-    private static let failed = "01M82B4K7A2XN1X22R98H2XB80"
+    private static let failed = "01M831X70BPJ4V41GRANPBPB4T"
     private static let ended = "01M82B4K7A2XN1X22R98H2XB7Z"
     private static let planLacksModel = "01M830N4NHCWHA55C31CE5QNXF"
     private static let withBook = "01M82X1ASERF7DPA32E16243H9"

@@ -896,7 +896,7 @@ enum RenderCatalog {
             purpose: "a move that could not start: Ended, one warning row, its reply box kept",
             arguments: [
                 "-CC_SWITCH", "switch-failed-then-recovered-claude", "-CC_SWITCH_STEP", "4",
-                "-CC_DEEPLINK", "codeconnect://session/01M82B4K7A2XN1X22R98H2XB80",
+                "-CC_DEEPLINK", "codeconnect://session/01M831X70BPJ4V41GRANPBPB4T",
             ],
             reach: { app, driver in
                 try driver.requireExists(driver.text(containing: "Couldn", in: app), "the warning row")
@@ -906,7 +906,7 @@ enum RenderCatalog {
             purpose: "the failed move's run after its next message started it on the new account",
             arguments: [
                 "-CC_SWITCH", "switch-failed-then-recovered-claude",
-                "-CC_DEEPLINK", "codeconnect://session/01M82B4K7A2XN1X22R98H2XB80",
+                "-CC_DEEPLINK", "codeconnect://session/01M831X70BPJ4V41GRANPBPB4T",
             ],
             reach: { app, driver in
                 try driver.requireExists(driver.text(containing: "on B now?", in: app), "the message that started it")
