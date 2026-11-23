@@ -389,10 +389,10 @@ final class AccountsWireTests: XCTestCase {
     func testAFailedMoveIsNamed() {
         XCTAssertEqual(
             AccountSwitchWords.failure(sessions: ["query-parser"]),
-            "query-parser couldn't switch accounts. Its conversation says why.")
+            "query-parser couldn't switch accounts. Its conversation says what to do.")
         XCTAssertEqual(
             AccountSwitchWords.failure(sessions: ["query-parser", "docs-site"]),
-            "2 sessions couldn't switch accounts. Their conversations say why.")
+            "2 sessions couldn't switch accounts. Their conversations say what to do.")
         XCTAssertNil(AccountSwitchWords.failure(sessions: []))
     }
 
@@ -436,7 +436,7 @@ final class AccountsWireTests: XCTestCase {
         await waitUntil({ model.accountSwitch(for: .claude)?.failure != nil }, "the failed listing to be read")
         XCTAssertEqual(
             model.accountSwitch(for: .claude)?.failure,
-            "cch2.D8GXVZ8M48 couldn't switch accounts. Its conversation says why.")
+            "cch2.D8GXVZ8M48 couldn't switch accounts. Its conversation says what to do.")
     }
 
     /// An account signing in is not signed out: the service says `signed_in: false` with `signing_in: true` while the
