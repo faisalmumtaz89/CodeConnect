@@ -93,11 +93,11 @@ private struct Composer: View {
     @State private var quiet: Task<Void, Never>?
     /// The settings panel open above the reply row, if any.
     @State private var panel: SettingsPanel?
-    /// The reply row's width, the box's content width: no panel is wider.
+    /// The box's content width, between its bar's insets: no panel is wider.
     @State private var rowWidth: CGFloat = 0
-    /// The reply row's spacing and the send button's side: an open panel's trailing edge is the send button's.
-    private static let rowSpacing: CGFloat = 10
-    private static let sendSize: CGFloat = 24
+    /// Where the run's settings controls end in the box: an open panel's trailing edge is the box's content edge.
+    @State private var controlsEnd: CGFloat = 0
+    private nonisolated static let space = "composer.box"
     @State private var compacting = false
     @State private var instructions = ""
     @State private var clearing = false
@@ -147,10 +147,10 @@ private struct Composer: View {
             if let line { note(line) }
             box
         }
-        // On the pane's one content column: the conversation's rows and the heading stand 28 pt in.
-        .padding(.horizontal, 28)
+        // Docked under the conversation, 20 pt in from the pane's sides and its foot.
+        .padding(.horizontal, 20)
         .padding(.top, 4)
-        .padding(.bottom, 16)
+        .padding(.bottom, 20)
         .onChange(of: kept.reply) { old, new in
             // If the draft has moved off the words it held — the same normalisation the send's mutation key uses, so a
             // whitespace-only edit is not a move — the send kept under those words is no longer this draft's retry: drop
@@ -252,13 +252,14 @@ private struct Composer: View {
 
     private var box: some View {
         let agent = summary?.agent.displayName ?? "the agent"
-        return VStack(alignment: .leading, spacing: 10) {
+        return InputBox(barHeight: 46) {
             TextField(
                 "", text: $kept.reply, selection: $selection,
                 prompt: Text(SessionWords.replyPrompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
             )
                 .textFieldStyle(.plain)
-                .font(Theme.ui(13))
+                .font(Theme.ui(15))
+                .lineSpacing(InputBoxLayout.lineSpacing)
                 .foregroundStyle(Theme.text)
                 .lineLimit(1...5)
                 .accessibilityLabel(SessionWords.replyPrompt(agent))
@@ -286,52 +287,50 @@ private struct Composer: View {
                 .sendsOnReturn(submit)
                 .focused($fieldFocused)
                 .onExitCommand { if panel != nil { panel = nil } else { fieldFocused = false } }
-            HStack(spacing: Self.rowSpacing) {
-                if isCodex, let counter = ComposeDraft(text: kept.reply).counterText {
-                    Text(counter)
-                        .font(Theme.mono(11))
-                        .foregroundStyle(ComposeDraft(text: kept.reply).isOverCeiling ? Theme.red : Theme.text3)
-                        .accessibilityIdentifier("session.composer.count")
+        } leading: {
+            // Which model control this run has is Kit's to say: a run started from the app gets its own menus, or
+            // its model as a fact when it has none; a run these controls do not own draws none.
+            switch model.runSettings(for: key) {
+            case .deferToOtherPath:
+                EmptyView()
+            case .hostedReadOnly(let fact):
+                ModelFactLabel(
+                    agent: summary?.agent ?? .claude, fact: fact, effort: summary.flatMap(RunSettings.effortName))
+            case .hostedLive(let settings):
+                HostedSettingsButton(
+                    model: model, key: key, agent: summary?.agent ?? .claude, settings: settings,
+                    blocked: blocked, open: $panel, chose: takeOpener, compact: { compact(prefill: "") },
+                    clear: {
+                        opener = nil
+                        clearing = true
+                    },
+                    confirmMode: { confirmingMode = $0 }, reach: InputBoxLayout.barInset + rowWidth - controlsEnd,
+                    room: rowWidth)
+                .disabled(blocked != nil || busy)
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).maxX } action: {
+                    controlsEnd = $0
                 }
-                Spacer()
-                // Which model control this run has is Kit's to say: a run started from the app gets its own menus, or
-                // its model as a fact when it has none; a run these controls do not own draws none.
-                switch model.runSettings(for: key) {
-                case .deferToOtherPath:
-                    EmptyView()
-                case .hostedReadOnly(let fact):
-                    ModelFactLabel(agent: summary?.agent ?? .claude, fact: fact, effort: summary.flatMap(RunSettings.effortName))
-                case .hostedLive(let settings):
-                    HostedSettingsButton(
-                        model: model, key: key, agent: summary?.agent ?? .claude, settings: settings,
-                        blocked: blocked, open: $panel, chose: takeOpener, compact: { compact(prefill: "") },
-                        clear: {
-                            opener = nil
-                            clearing = true
-                        },
-                        confirmMode: { confirmingMode = $0 }, reach: Self.rowSpacing + Self.sendSize, room: rowWidth)
-                    .disabled(blocked != nil || busy)
-                    #if DEBUG
-                        .task {
-                            switch RenderWindow.confirm {
-                            case "clear": clearing = true
-                            case "mode": confirmingMode = settings.modes.first(where: \.confirm)
-                            default: break
-                            }
+                #if DEBUG
+                    .task {
+                        switch RenderWindow.confirm {
+                        case "clear": clearing = true
+                        case "mode": confirmingMode = settings.modes.first(where: \.confirm)
+                        default: break
                         }
-                    #endif
-                }
-                sendButton
+                    }
+                #endif
             }
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
+            if isCodex, let counter = ComposeDraft(text: kept.reply).counterText {
+                Text(counter)
+                    .font(Theme.mono(11))
+                    .foregroundStyle(ComposeDraft(text: kept.reply).isOverCeiling ? Theme.red : Theme.text3)
+                    .accessibilityIdentifier("session.composer.count")
+            }
+        } trailing: {
+            sendButton
         }
-        .padding(12)
-        // The outline is drawn under the box's contents, not over them: a settings panel opens out of the box and
-        // nothing of the box may cross it.
-        .background {
-            RoundedRectangle(cornerRadius: 10).fill(Theme.raised)
-            RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.09))
-        }
+        .coordinateSpace(.named(Self.space))
+        .onGeometryChange(for: CGFloat.self) { $0.size.width - 2 * InputBoxLayout.barInset } action: { rowWidth = $0 }
         // The slash palette above the box, clear of it by the panels' one gap, as wide as the reply row.
         .overlay(alignment: .topLeading) {
             if let slash {
@@ -362,18 +361,9 @@ private struct Composer: View {
     }
 
     private var plainSendButton: some View {
-        Button(action: submit) {
-            Image(systemName: "arrow.up")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(canSend ? Color.black : Theme.text3)
-                .frame(width: Self.sendSize, height: Self.sendSize)
-                .background(Circle().fill(canSend ? Theme.text : Theme.window))
-        }
-        .buttonStyle(.hover(radius: 12, over: true, id: "session.composer.send"))
-        .disabled(!canSend)
-        .help(blocked ?? (sending ? "Sending…" : "Send"))
-        .accessibilityLabel("Send")
-        .accessibilityIdentifier("session.composer.send")
+        InputBoxSubmit(
+            enabled: canSend, id: "session.composer.send", label: "Send",
+            help: blocked ?? (sending ? "Sending…" : "Send"), action: submit)
     }
 
     // MARK: The line above

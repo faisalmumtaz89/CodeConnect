@@ -87,20 +87,23 @@ extension EnvironmentValues {
     @Entry var sheetRoom: CGFloat = .infinity
     /// How tall the start form's pane stands, in `StartForm.space`.
     @Entry var startHeight: CGFloat = 0
-    /// How wide the start form's pane stands, in `StartForm.space`: no panel of the form reaches past it.
-    @Entry var startWidth: CGFloat = 0
+    /// Where the start form's box stands, in `StartForm.space`: no panel of the form reaches past its sides.
+    @Entry var startBox: CGRect = .zero
 }
 
-/// Where a panel of the start form stands across its pane: as wide as `widest` where the pane has the room, 8 pt
-/// clear of each of its sides, and its leading edge at `leading` moved only as far as it must to stay inside.
+/// Where a panel of the start form stands across its box: as wide as `widest` where the box has the room, never past
+/// either of its sides, and its leading edge at `leading` moved only as far as it must to stay inside.
 enum StartPanel {
+    /// The least a panel keeps from the pane's top.
     static let margin: CGFloat = 8
 
-    static func place(widest: CGFloat, leading: CGFloat, pane: CGFloat) -> (x: CGFloat, width: CGFloat) {
-        // Before the pane is measured, the panel as it is drawn.
-        guard pane > 0 else { return (leading, widest) }
-        let width = min(widest, pane - 2 * margin)
-        return (min(max(leading, margin), pane - margin - width), width)
+    /// A panel `widest` wide that would start at `leading`: as wide as the box allows, at `leading` where it fits,
+    /// else moved toward the box's leading side just enough to end at its trailing side.
+    static func place(widest: CGFloat, leading: CGFloat, box: CGRect) -> (x: CGFloat, width: CGFloat) {
+        // Before the box is measured, the panel as it is drawn.
+        guard box.width > 0 else { return (leading, widest) }
+        let width = min(widest, box.width)
+        return (min(max(leading, box.minX), box.maxX - width), width)
     }
 }
 

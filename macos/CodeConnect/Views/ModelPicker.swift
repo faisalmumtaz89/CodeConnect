@@ -10,12 +10,12 @@ struct ModelButton: View {
     @Binding var open: Bool
     let choose: (StartModelChoice) -> Void
 
-    @Environment(\.startWidth) private var startWidth
+    @Environment(\.startBox) private var startBox
     /// The button's top leading corner, in `StartForm.space`.
     @State private var minX: CGFloat = 0
     @State private var minY: CGFloat = 0
     private var placed: (x: CGFloat, width: CGFloat) {
-        StartPanel.place(widest: 440, leading: minX - 3, pane: startWidth)
+        StartPanel.place(widest: 440, leading: minX, box: startBox)
     }
 
     private var checking: Bool { StartAgent.allCases.contains { context.models($0) == .checking } }
@@ -25,28 +25,26 @@ struct ModelButton: View {
             open.toggle()
         } label: {
             HStack(spacing: 5) {
-                Text(label).font(Theme.ui(12, .medium))
+                if let pick { AgentMark(agent: pick.agent == .claude ? .claude : .codex) }
+                Text(label).font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(pick == nil ? Theme.text3 : Theme.text2)
-            .padding(.horizontal, 7)
-            .frame(height: 22)
-            .background(open ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
-            .contentShape(Rectangle())
+            .inputBoxChip(open: open, bordered: true)
         }
-        .buttonStyle(.hover(radius: 5, id: "start.model"))
+        .buttonStyle(.hover(radius: 8, id: "start.model"))
+        .help(label)
         .disabled(checking)
         .accessibilityIdentifier("start.model")
         .accessibilityValue(open ? "open" : "closed")
-        // Above the button, clear of it by the panels' one gap, its leading edge on the composer box's (the button
-        // stands 3 pt in from that edge: the box's 10 pt inset, less the button's own 7), inside the pane by the start
-        // form's one rule (`StartPanel`).
+        // Above the button, clear of it by the panels' one gap, inside the pane by the start form's one rule
+        // (`StartPanel`).
         .onGeometryChange(for: CGPoint.self) { $0.frame(in: .named(StartForm.space)).origin } action: {
             minX = $0.x
             minY = $0.y
         }
         .overlay(alignment: .bottomLeading) {
-            if open { menu.openPanel().offset(x: placed.x - minX, y: -(22 + Theme.panelGap)) }
+            if open { menu.openPanel().offset(x: placed.x - minX, y: -(InputBoxChip.height + Theme.panelGap)) }
         }
         .closesPanel($open)
     }

@@ -15,7 +15,7 @@ struct StartForm: View {
     @Environment(Setup.self) private var setup
     /// The run is in the list, by its id: the window opens it.
     let started: (String) -> Void
-    /// Add a computer, from under the box.
+    /// Add a computer, from the computer menu.
     let addComputer: () -> Void
     /// Why no computer can start one now, said in the form while its computer's link is down.
     let whyNone: String
@@ -32,8 +32,10 @@ struct StartForm: View {
     @Environment(\.sheetRoom) private var room
     /// The folder button's panel is open.
     @State private var folderOpen = false
-    /// The form's width, which the folder panel keeps within.
-    @State private var formWidth: CGFloat = 0
+    /// Where the box stands in `StartForm.space`, which its panels stay inside.
+    @State private var box: CGRect = .zero
+    /// The folder chip's leading edge in `StartForm.space`, where its panel starts when it fits.
+    @State private var folderChipX: CGFloat = 0
     /// The first message has the keyboard: as the form appears, and when New Agent asks for it.
     @FocusState private var messageFocused: Bool
     /// The first message's caret, which the form sets when New Agent gives it the keyboard (`giveKeyboard`).
@@ -240,35 +242,20 @@ struct StartForm: View {
         }
     }
 
-    /// The folder and the computer above the box, the model and where in the repository inside it, beside Start; under
-    /// it, a folder from elsewhere and another computer; under those, why Start can't be pressed yet, or what it does.
+    /// The box: the first message, and in its bar the computer, the folder and where in the repository, the model and
+    /// Start. Under it, a new worktree being named, then why Start can't be pressed yet, or what it does.
     private var form: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let context {
-                HStack(spacing: 4) {
-                    folderButton(context)
-                    computerChip(context)
-                    Spacer(minLength: 0)
-                }
-                // Its panels open below it, over the box: the last modifier, so the stack draws them over what follows.
-                .zIndex(folderOpen || computerMenuOpen ? 2 : 0)
                 AgentNotice(context: context, elsewhere: !isThisMac(context))
                 composer(context)
-                    .zIndex(branchMenuOpen || menuOpen ? 1 : 0)
-                HStack(spacing: 8) {
-                    if isThisMac(context) {
-                        outlined("Choose a folder\u{2026}", symbol: "folder.badge.plus", id: "start.choose", perform: chooseFolder)
-                    } else if context.browses {
-                        outlined("Browse\u{2026}", symbol: "folder", id: "start.browse") {
-                            browsing = true
-                            folderOpen = true
-                        }
-                    }
-                    outlined(AddKind.computer.title, symbol: "desktopcomputer", id: "start.addComputer", perform: addComputer)
-                    Spacer(minLength: 0)
+                    // Its menus open over what is above and below it: the last modifier, so they draw over the rest.
+                    .zIndex(folderOpen || computerMenuOpen || branchMenuOpen || menuOpen ? 1 : 0)
+                if let folder, newName != nil, let answer = context.git(folder.path), let git = answer {
+                    BranchNaming(folder: folder, agent: pick?.agent, git: git, newName: choice(\.newName))
                 }
                 if let note = blocked ?? pick.map(StartContext.starts) {
-                    Text(note).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
+                    Text(note).font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1)
                         .accessibilityIdentifier("start.note")
                 }
             } else {
@@ -282,7 +269,6 @@ struct StartForm: View {
             }
         }
         .frame(maxWidth: Self.column, alignment: .leading)
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { formWidth = $0 }
     }
 
     /// New Agent's request for the keyboard, taken once: the panels close and the first message has it a turn later.
@@ -301,23 +287,6 @@ struct StartForm: View {
 
     /// The column the form stands in, as wide as a run's reply box reads.
     static let column: CGFloat = 720
-
-    /// A button with an outline, for what is under the box.
-    private func outlined(_ title: String, symbol: String, id: String, perform: @escaping () -> Void) -> some View {
-        Button(action: perform) {
-            HStack(spacing: 6) {
-                Image(systemName: symbol).font(.system(size: 11)).accessibilityHidden(true)
-                Text(title).font(Theme.ui(12))
-            }
-            .foregroundStyle(Theme.text2)
-            .padding(.horizontal, 10)
-            .frame(height: 26)
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.white.opacity(0.1)))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.hover(radius: 7, id: id))
-        .accessibilityIdentifier(id)
-    }
 
     /// Start: the withdrawn start again under its own id when the form asks exactly what it asked, else a new start
     /// (`StartDraft.send`), so one ask never runs twice.
@@ -349,17 +318,13 @@ struct StartForm: View {
 
     // MARK: Computer
 
-    /// The computer it starts on: a picker when there are more than one, its name when there is one; green while it
-    /// answers, as every computer the form offers does.
-    @ViewBuilder private func computerChip(_ context: StartContext) -> some View {
-        if contexts.count > 1 {
-            ComputerButton(contexts: contexts, chosen: context, open: $computerMenuOpen) { draft.computerID = $0 }
-                .help(Self.summary(context, now: .now))
-        } else {
-            ComputerName(name: context.machineName)
-                .help(Self.summary(context, now: .now))
-                .accessibilityIdentifier("start.computer")
+    /// The computer it starts on, green while it answers, as every computer the form offers does: a picker, which also
+    /// adds a computer.
+    private func computerChip(_ context: StartContext) -> some View {
+        ComputerButton(contexts: contexts, chosen: context, open: $computerMenuOpen, add: addComputer) {
+            draft.computerID = $0
         }
+        .help("\(context.machineName) · \(Self.summary(context, now: .now))")
     }
 
     /// `12 recent folders · last used 4m ago`, as the iPhone says it.
@@ -377,33 +342,33 @@ struct StartForm: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "folder").font(.system(size: 11)).accessibilityHidden(true)
-                Text(folder?.name ?? "Choose a folder").font(Theme.ui(12, .medium)).lineLimit(1).truncationMode(.middle)
+                Text(folder?.name ?? "Choose a folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(folder == nil ? Theme.text2 : Theme.text)
-            .padding(.horizontal, 7)
-            .frame(height: 24)
-            .background(folderOpen ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
-            .contentShape(Rectangle())
+            .inputBoxChip(open: folderOpen)
         }
-        .buttonStyle(.hover(radius: 5, id: "start.folder"))
-        .padding(.leading, -7)
+        .buttonStyle(.hover(radius: 8, id: "start.folder"))
+        .help(folder?.path ?? "Choose a folder")
         .accessibilityIdentifier("start.folder")
         .accessibilityValue(folderOpen ? "open" : "closed")
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).minX } action: { folderChipX = $0 }
         .overlay(alignment: .topLeading) {
             if folderOpen {
-                folderPanel(context).openPanel().offset(x: -7, y: 24 + Theme.panelGap)
+                let placed = StartPanel.place(widest: 520, leading: folderChipX, box: box)
+                folderPanel(context, width: placed.width).openPanel()
+                    .offset(x: placed.x - folderChipX, y: InputBoxChip.height + Theme.panelGap)
             }
         }
         .closesPanel($folderOpen)
         .onChange(of: folderOpen) { _, open in if !open { browsing = false } }
     }
 
-    /// As wide as the form's column, up to 520 pt: never past the window's edge.
-    private func folderPanel(_ context: StartContext) -> some View {
+    /// Up to 520 pt wide, inside the box (`StartPanel.place`).
+    private func folderPanel(_ context: StartContext, width: CGFloat) -> some View {
         folderRows(context)
             .padding(8)
-            .frame(width: min(520, max(formWidth, 300)))
+            .frame(width: width)
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
             .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
@@ -468,7 +433,16 @@ struct StartForm: View {
                 .clipShape(RoundedRectangle(cornerRadius: Theme.boxRadius))
                 .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
                 .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
-                if !isThisMac(context), context.browses {
+            }
+            // A folder from elsewhere, whatever the list holds: this Mac's from the standard folder panel, another
+            // computer's by browsing it.
+            if !browsing {
+                if isThisMac(context) {
+                    HStack {
+                        Spacer()
+                        chooseButton
+                    }
+                } else if context.browses {
                     HStack {
                         Spacer()
                         browseButton
@@ -587,10 +561,10 @@ struct StartForm: View {
 
     // MARK: First message and model
 
-    /// The first message, and inside the box's foot the model and where in the repository, beside Start (↩): its
-    /// menus open upward, over what is above the box.
+    /// The first message, and in the box's bar the computer, the folder and where in the repository, then the model and
+    /// Start (↩). The folder's and the computer's menus open below the bar, the model's and the branch's above it.
     private func composer(_ context: StartContext) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        InputBox(barHeight: 50, trailingOpen: menuOpen) {
             TextField(
                 "", text: $draft.message, selection: $messageSelection,
                 prompt: Text("First message").foregroundStyle(Theme.text3), axis: .vertical
@@ -598,54 +572,39 @@ struct StartForm: View {
                 .accessibilityLabel("First message")
                 .accessibilityIdentifier("start.message")
                 .textFieldStyle(.plain)
-                .font(Theme.ui(13.5))
+                .font(Theme.ui(15))
+                .lineSpacing(InputBoxLayout.lineSpacing)
                 .lineLimit(short ? 1...6 : 3...8)
                 .focused($messageFocused)
                 // A chat box, as the reply box is: Return starts (`start` keeps the one rule, `startable`), ⇧ or ⌥ Return
                 // adds a line. Without it Return fell to the field's own end of editing, which selected all its text.
                 .sendsOnReturn(start)
-                .padding(.horizontal, 4)
-            HStack(alignment: .bottom, spacing: 2) {
-                ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }
-                    // Its name whole before the branch row, which stretches, takes the rest: cut only when the row has none.
-                    .layoutPriority(1)
-                if let folder, context.branchAhead(folder) {
-                    BranchRow(
-                        context: context, folder: folder, agent: pick?.agent, place: choice(\.place), newName: choice(\.newName),
-                        open: $branchMenuOpen, top: 0
-                    )
-                }
-                Spacer(minLength: 8)
-                startButton
+                // The message area stands at least 96 pt, its insets included.
+                .frame(minHeight: 96 - 28, alignment: .topLeading)
+        } leading: {
+            computerChip(context)
+            folderButton(context)
+            if let folder, context.branchAhead(folder) {
+                BranchRow(
+                    context: context, folder: folder, agent: pick?.agent, place: choice(\.place),
+                    newName: choice(\.newName), open: $branchMenuOpen, top: 0
+                )
             }
+        } trailing: {
+            ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }
+            startButton
         }
-        .padding(.horizontal, 10)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
-        // Drawn behind: a menu sits over the box's edge. The reply box's surface, so a run's box and this are one kind.
-        .background {
-            RoundedRectangle(cornerRadius: 10).fill(Theme.raised)
-            RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.09))
-        }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { box = $0 }
+        .environment(\.startBox, box)
     }
 
     /// Start: filled once it can be pressed; Return in the first message starts too, and ⌘↩ (the owner's word, 2026-11-22,
     /// over decision 289 for this form). One rule for all three, `startable`:
     /// while an ask or a panel of the form is up, its keys are that ask's or panel's.
     private var startButton: some View {
-        Button(action: start) {
-            Image(systemName: "arrow.up")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(startable ? Color.black : Theme.text3)
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(startable ? Theme.text : Theme.window))
-        }
-        .buttonStyle(.hover(radius: 12, over: true, id: "start.start"))
-        .keyboardShortcut(startable ? KeyboardShortcut(.return, modifiers: .command) : nil)
-        .disabled(!startable)
-        .help(blocked ?? "Start (↩)")
-        .accessibilityLabel("Start")
-        .accessibilityIdentifier("start.start")
+        InputBoxSubmit(
+            enabled: startable, id: "start.start", label: "Start", help: blocked ?? "Start (↩)", action: start)
+            .keyboardShortcut(startable ? KeyboardShortcut(.return, modifiers: .command) : nil)
     }
 }
 
@@ -885,29 +844,20 @@ private struct FolderStep: View {
 }
 
 /// The one computer a start can go to, by name, green while it answers.
-private struct ComputerName: View {
-    let name: String
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "desktopcomputer").font(.system(size: 11)).accessibilityHidden(true)
-            Text(name).font(Theme.ui(12, .medium)).lineLimit(1)
-            Circle().fill(Theme.green).frame(width: 6, height: 6).accessibilityHidden(true)
-        }
-        .foregroundStyle(Theme.text2)
-        .padding(.horizontal, 7)
-        .frame(height: 24)
-        .accessibilityElement(children: .combine)
-    }
-}
-
 /// The computer a start goes to: a button and its panel, the model button's kind, so one form has one kind of menu.
 /// The chosen computer carries the check; the lit row, by the pointer or the keys, is filled (`panelRow`).
 private struct ComputerButton: View {
     let contexts: [StartContext]
     let chosen: StartContext
     @Binding var open: Bool
+    /// Add a computer, the panel's last row.
+    let add: () -> Void
     let choose: (String) -> Void
+
+    @Environment(\.startBox) private var startBox
+    /// The chip's leading edge in `StartForm.space`, where its panel starts when it fits.
+    @State private var minX: CGFloat = 0
+    private var placed: (x: CGFloat, width: CGFloat) { StartPanel.place(widest: 260, leading: minX, box: startBox) }
 
     var body: some View {
         Button {
@@ -915,22 +865,19 @@ private struct ComputerButton: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "desktopcomputer").font(.system(size: 11)).accessibilityHidden(true)
-                Text(chosen.machineName).font(Theme.ui(12, .medium)).lineLimit(1)
+                Text(chosen.machineName).font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
                 Circle().fill(Theme.green).frame(width: 6, height: 6).accessibilityHidden(true)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(Theme.text2)
-            .padding(.horizontal, 7)
-            .frame(height: 24)
-            .background(open ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
-            .contentShape(Rectangle())
+            .inputBoxChip(open: open)
         }
-        // Its plate on the column's edge, as the panel under it is.
-        .buttonStyle(.hover(radius: 5, id: "start.computer"))
+        .buttonStyle(.hover(radius: 8, id: "start.computer"))
         .accessibilityIdentifier("start.computer")
         .accessibilityValue(open ? "open" : "closed")
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(StartForm.space)).minX } action: { minX = $0 }
         .overlay(alignment: .topLeading) {
-            if open { panel.openPanel().offset(y: 24 + Theme.panelGap) }
+            if open { panel.openPanel().offset(x: placed.x - minX, y: InputBoxChip.height + Theme.panelGap) }
         }
         .closesPanel($open)
     }
@@ -962,9 +909,28 @@ private struct ComputerButton: View {
                 .accessibilityIdentifier("start.computer.\(context.id)")
                 .accessibilityAddTraits(context.id == chosen.id ? .isSelected : [])
             }
+            let adding = {
+                open = false
+                add()
+            }
+            Button(action: adding) {
+                HStack(spacing: 8) {
+                    Image(systemName: "plus").font(.system(size: 9.5, weight: .bold)).frame(width: 12)
+                        .accessibilityHidden(true)
+                    Text("Add a computer\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 24)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.panelRow)
+            .panelRow(contexts.count, id: "start.addComputer", choose: adding)
+            .padding(.horizontal, 4)
+            .accessibilityIdentifier("start.addComputer")
         }
         .padding(.vertical, 5)
-        .frame(width: 260)
+        .frame(width: placed.width)
         .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
         .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
