@@ -78,6 +78,7 @@ struct ReplyUsage: View {
     private static func spoken(_ bar: ReplyBar) -> String {
         var parts = bar.context.map { ["Context \($0.used) of \($0.window)"] } ?? []
         parts += bar.limits.map { "\($0.caption) \($0.usedPercent)%" + ($0.resets.map { ", \($0)" } ?? "") }
+        parts += [bar.limitsNote, bar.account.map { "Account \($0)" }].compactMap { $0 }
         return parts.joined(separator: "; ")
     }
 }
