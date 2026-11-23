@@ -11,7 +11,7 @@ final class SwitchedRunUITests: XCTestCase {
     private static let codex = "01M8299ZJQXMP43MZH8JY9VYMD"
     private static let failed = "01M82B4K7A2XN1X22R98H2XB80"
     private static let ended = "01M82B4K7A2XN1X22R98H2XB7Z"
-    private static let planLacksModel = "01M82HYZB0MPQRNE27QH73Q0JQ"
+    private static let planLacksModel = "01M830N4NHCWHA55C31CE5QNXF"
     private static let withBook = "01M82X1ASERF7DPA32E16243H9"
 
     override func setUpWithError() throws {
@@ -106,6 +106,8 @@ final class SwitchedRunUITests: XCTestCase {
         XCTAssertTrue(row.firstMatch.waitForExistence(timeout: 25), "the model-changed row")
         XCTAssertEqual(rows(app, beginningWith: "Now on"), 1, "one row")
         XCTAssertTrue(row.firstMatch.label.contains("isn’t in"), row.firstMatch.label)
+        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 1, "the move")
+        XCTAssertFalse(texts(app, beginningWith: "Run resumed").firstMatch.exists, "a switch's relaunch draws nothing")
         XCTAssertTrue(replyBox(app), "its reply box")
     }
 

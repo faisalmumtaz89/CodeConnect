@@ -916,7 +916,7 @@ enum RenderCatalog {
             purpose: "a Codex run moved onto a plan without its model: one quiet row names the model it is now on",
             arguments: [
                 "-CC_SWITCH", "relaunch-plan-default-codex",
-                "-CC_DEEPLINK", "codeconnect://session/01M82HYZB0MPQRNE27QH73Q0JQ",
+                "-CC_DEEPLINK", "codeconnect://session/01M830N4NHCWHA55C31CE5QNXF",
             ],
             reach: { app, driver in
                 try driver.requireExists(driver.text(containing: "Now on", in: app), "the model-changed row")
