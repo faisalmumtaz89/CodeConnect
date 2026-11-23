@@ -37,7 +37,7 @@ struct ModelButton: View {
         .disabled(checking)
         .accessibilityIdentifier("start.model")
         .accessibilityValue(open ? "open" : "closed")
-        // Above the button, clear of it by the panels' one gap, inside the pane by the start form's one rule
+        // Above the button, clear of it by the panels' one gap, inside the box by the start form's one rule
         // (`StartPanel`).
         .onGeometryChange(for: CGPoint.self) { $0.frame(in: .named(StartForm.space)).origin } action: {
             minX = $0.x

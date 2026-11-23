@@ -22,8 +22,9 @@ struct ComposerBar: View {
     }
 }
 
-/// In an ended run's reply box's place: the pane's foot band, its hairline and height the run list's footer's, so the
-/// panes end on one line; the mark and words on the conversation's notice columns.
+/// In an ended run's reply box's place: the pane's foot band, its hairline and 34 pt the sidebar's foot's, so the two
+/// end on one line (the run list has a foot only while runs are being chosen); the mark and words on the
+/// conversation's notice columns.
 private struct EndedLine: View {
     var body: some View {
         VStack(spacing: 0) {
@@ -91,7 +92,7 @@ private struct Composer: View {
     /// The Compact command typed last, and where it stands.
     @State private var running: Running?
     @State private var quiet: Task<Void, Never>?
-    /// The settings panel open above the reply row, if any.
+    /// The settings panel open above the box's bar, if any.
     @State private var panel: SettingsPanel?
     /// The box's content width, between its bar's insets: no panel is wider.
     @State private var rowWidth: CGFloat = 0
@@ -334,7 +335,7 @@ private struct Composer: View {
         }
         .coordinateSpace(.named(Self.space))
         .onGeometryChange(for: CGFloat.self) { $0.size.width - 2 * InputBoxLayout.barInset } action: { rowWidth = $0 }
-        // The slash palette above the box, clear of it by the panels' one gap, as wide as the reply row.
+        // The slash palette above the box, clear of it by the panels' one gap, as wide as the box.
         .overlay(alignment: .topLeading) {
             if let slash {
                 SlashPanel(

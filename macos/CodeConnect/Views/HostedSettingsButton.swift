@@ -105,7 +105,7 @@ struct HostedSettingsButton: View {
         Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
     }
 
-    /// One control of the reply row, which opens its panel.
+    /// One control of the reply box's bar, which opens its panel.
     private func control<Label: View>(
         _ which: SettingsPanel, id: String, label: String, help: String, @ViewBuilder content: () -> Label
     ) -> some View {
@@ -200,7 +200,7 @@ struct HostedSettingsButton: View {
         }
     }
 
-    /// A panel: the app's raised card.
+    /// A panel: the menus' one card (`menuCard`).
     private func card<Content: View>(width: CGFloat, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) { content() }
             .disabled(settings.inFlight)
