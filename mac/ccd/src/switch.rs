@@ -136,6 +136,7 @@ pub(crate) async fn relaunched(daemon: &Arc<Daemon>, uid: &str, outcome: Result<
         Err(why) => why,
     };
     set(daemon, uid, Some(Store::SWITCH_FAILED)).await;
+    crate::log_warn!("{uid}: its switch's start failed: {why}");
     let agent = match daemon.db.get_session(uid.to_string()).await {
         Ok(Some(row)) => row.agent,
         _ => return,
@@ -149,14 +150,13 @@ pub(crate) async fn relaunched(daemon: &Arc<Daemon>, uid: &str, outcome: Result<
         protocol::event::EventKind::Notification,
         serde_json::json!({
             "notification_type": protocol::event::notice::SWITCH_FAILED,
+            // Drawn under a row that names the account: the sentence names none, and the reason is the log's.
             "message": if why.starts_with(crate::codex_host::NO_ROLLOUT_AFTER_A_MESSAGE) {
                 // Its conversation's record is not where the account's home can see it; the account it ran on can.
-                format!(
-                    "This conversation could not be continued on {label}: its record was not found. Choose the \
-                     account it ran on to continue it."
-                )
+                "This conversation could not be continued on the new account: its record was not found. Choose the \
+                 account it ran on to continue it."
             } else {
-                format!("Couldn’t start on {label}: {why}")
+                "The session could not be started on the new account. Try again, or choose the account it ran on."
             },
             protocol::event::SWITCHED_TO: {
                 "account_id": active.as_ref().map(|account| account.id.clone()),

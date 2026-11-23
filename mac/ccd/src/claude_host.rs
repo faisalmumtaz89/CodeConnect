@@ -12409,7 +12409,9 @@ mod tests {
         assert_eq!(
             why,
             [(
-                serde_json::json!("Couldn’t start on B: B is signed out"),
+                serde_json::json!(
+                    "The session could not be started on the new account. Try again, or choose the account it ran on."
+                ),
                 serde_json::json!("B")
             )],
             "said, and the account typed"
