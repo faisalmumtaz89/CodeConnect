@@ -423,7 +423,8 @@ pub enum ClientMessage {
     /// browser here. Answered at once with one [`ServerMessage::Accounts`] in which that account is `signing_in`; when
     /// the login ends (finished in the browser, replaced by a newer sign-in, or after ten minutes) the list is pushed
     /// with its `signed_in` as it then is and `signing_in` gone. One sign-in at a time per computer: a new one
-    /// replaces the one going. Codex only, for now.
+    /// replaces the one going. Codex runs `codex login` in the account's home; Claude Code runs `claude auth login` with
+    /// its storage and config directories the account's folder.
     SignInAccount {
         request_id: String,
         account_id: String,
@@ -431,7 +432,8 @@ pub enum ClientMessage {
     /// **Removes `account_id`**: its agent's own logout in its home, then the account is gone from the list; an agent
     /// whose active account it was goes back to its Default. A thread started on it still resumes on another account.
     /// Answered with one [`ServerMessage::Accounts`], or [`ServerMessage::AccountsRefused`] when the agent could not
-    /// sign it out (nothing is removed then). Codex only, for now.
+    /// sign it out (nothing is removed then). Codex runs `codex logout`, Claude Code `claude auth logout`, each in the
+    /// account's own folder.
     RemoveAccount {
         request_id: String,
         account_id: String,
