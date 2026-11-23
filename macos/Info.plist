@@ -29,5 +29,10 @@
 	<string>$(SPARKLE_PUBLIC_KEY)</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
+	<!-- Inter, the app's words face (Theme.wordsFace), upright and italic: registered from Contents/Resources, where
+	     the build copies the Fonts folder's files, before any view draws. Its OFL licence ships beside them
+	     (Inter-LICENSE.txt). -->
+	<key>ATSApplicationFontsPath</key>
+	<string>.</string>
 </dict>
 </plist>

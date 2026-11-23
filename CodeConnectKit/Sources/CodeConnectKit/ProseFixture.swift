@@ -51,7 +51,7 @@ import Foundation
             grep cache_dir "$HOME/.config/tool/config.toml"   # expected: the old path, found: nothing
             ```
 
-            > The upgrade path is the only one users never test by hand, so it is the one most worth a test.
+            > The upgrade path is the only one users never test by hand, so it is the one *most* worth a test.
 
             Left to do:
 

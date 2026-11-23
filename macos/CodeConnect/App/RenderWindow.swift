@@ -443,8 +443,44 @@
             FileHandle.standardError.write(Data("fault: \(what)\n".utf8))
         }
 
+        /// The faces Theme's fonts resolve to, as the views and AppKit's measurements build them, at every weight the
+        /// app draws in: Inter regular, medium and semibold, a reply's bold, italic and bold italic, and Menlo. Each is
+        /// printed (`face: …`); any other is a fault, so a missing font file or a weight that falls back fails every
+        /// render.
+        @MainActor static func checkFaces() {
+            let context = EnvironmentValues().fontResolutionContext
+            func resolved(_ font: Font) -> CTFont { font.resolve(in: context).ctFont }
+            let wanted: [(face: CTFont, is: String)] = [
+                (resolved(Theme.ui(13)), "Inter Variable 400"), (resolved(Theme.ui(13, .medium)), "Inter Variable 500"),
+                (resolved(Theme.ui(13, .semibold)), "Inter Variable 600"), (Theme.uiFont(13, .semibold), "Inter Variable 600"),
+                (resolved(Theme.ui(Prose.size).bold()), "Inter Variable 700"),
+                (resolved(Theme.ui(Prose.size).italic()), "Inter Variable 400 italic"),
+                (resolved(Theme.ui(Prose.size).bold().italic()), "Inter Variable 700 italic"),
+                (resolved(Theme.mono(12)), "Menlo-Regular"), (Theme.monoFont(12), "Menlo-Regular"),
+            ]
+            for want in wanted {
+                let face = described(want.face)
+                print("face: \(face)")
+                if face != want.is { fault("a Theme font resolves to \(face), not \(want.is)") }
+            }
+        }
+
+        /// A variable face by its family and weight (`wght`, its default where none is set), and "italic" where it is
+        /// one; any other by its name.
+        private static func described(_ face: CTFont) -> String {
+            let wght = NSNumber(value: 0x7767_6874)
+            guard let axes = CTFontCopyVariationAxes(face) as? [[String: Any]],
+                let axis = axes.first(where: { ($0[kCTFontVariationAxisIdentifierKey as String] as? NSNumber) == wght })
+            else { return CTFontCopyPostScriptName(face) as String }
+            let set = (CTFontCopyVariation(face) as? [NSNumber: NSNumber])?[wght]
+            let weight = set ?? (axis[kCTFontVariationAxisDefaultValueKey as String] as? NSNumber) ?? 0
+            let italic = CTFontGetSymbolicTraits(face).contains(.traitItalic) ? " italic" : ""
+            return "\(CTFontCopyFamilyName(face) as String) \(weight.intValue)\(italic)"
+        }
+
         @MainActor static func renderAndQuit(_ window: NSWindow, over: NSWindow? = nil, still: Bool = true) {
             guard let path = UserDefaults.standard.string(forKey: "CC_RENDER_WINDOW") else { return }
+            checkFaces()
             Task { @MainActor in
                 // `-CC_RENDER_DELAY <seconds>`: what a screen shows a while after it is ready.
                 try? await Task.sleep(for: .seconds(UserDefaults.standard.double(forKey: "CC_RENDER_DELAY")))

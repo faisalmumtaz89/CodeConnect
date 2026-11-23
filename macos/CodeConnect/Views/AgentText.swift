@@ -183,8 +183,8 @@ private struct TableBlock: View {
     /// so the estimate errs wide.
     private static func width(_ cell: String) -> CGFloat {
         let text = Prose.inline(cell, size: size)
-        let words = NSFont.systemFont(ofSize: size, weight: .semibold)
-        let code = NSFont.monospacedSystemFont(ofSize: size - 1.5, weight: .regular)
+        let words = Theme.uiFont(size, .semibold)
+        let code = Theme.monoFont(size - 1.5)
         return ceil(
             text.runs.reduce(0) { sum, run in
                 let isCode = run[AttributeScopes.FoundationAttributes.InlinePresentationIntentAttribute.self]?
@@ -274,18 +274,18 @@ private struct PanningTable<Content: View>: NSViewRepresentable {
         scroll.verticalScrollElasticity = .none
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
-        scroll.documentView = NSHostingView(rootView: content)
+        scroll.documentView = NSHostingView(rootView: ThemeRoot(content: content))
         return scroll
     }
 
     func updateNSView(_ scroll: WheelPassingScrollView, context: Context) {
-        guard let host = scroll.documentView as? NSHostingView<Content> else { return }
-        host.rootView = content
+        guard let host = scroll.documentView as? NSHostingView<ThemeRoot<Content>> else { return }
+        host.rootView = ThemeRoot(content: content)
         host.setFrameSize(host.fittingSize)
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView scroll: WheelPassingScrollView, context: Context) -> CGSize? {
-        guard let host = scroll.documentView as? NSHostingView<Content> else { return nil }
+        guard let host = scroll.documentView as? NSHostingView<ThemeRoot<Content>> else { return nil }
         let table = host.fittingSize
         let bar = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
         return CGSize(width: min(proposal.width ?? table.width, table.width), height: table.height + bar)

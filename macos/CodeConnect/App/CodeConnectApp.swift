@@ -48,9 +48,9 @@ struct CodeConnectApp: App {
     var body: some Scene {
         // The app's one window: no New Window, and no window tabs.
         Window("CodeConnect", id: "main") {
-            RootView(
+            ThemeRoot(content: RootView(
                 scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd, settings: $settings,
-                startDraft: startDraft)
+                startDraft: startDraft))
                 .environment(machines)
                 .environment(setup)
                 .preferredColorScheme(.dark)

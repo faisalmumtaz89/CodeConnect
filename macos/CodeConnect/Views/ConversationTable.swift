@@ -240,7 +240,7 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     private func measure(_ entry: Entry) -> CGFloat {
-        sizer.rootView = view(entry)
+        sizer.rootView = AnyView(ThemeRoot(content: view(entry)))
         measured.insert(entry.place)
         return ceil(sizer.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude)).height)
     }
@@ -469,7 +469,7 @@ private final class RowCell: NSView {
     func show(_ content: AnyView) {
         let report = self.report
         host.rootView = AnyView(
-            content
+            ThemeRoot(content: content)
                 .fixedSize(horizontal: false, vertical: true)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { report($0) }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading))

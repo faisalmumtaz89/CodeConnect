@@ -142,7 +142,7 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
     /// The steps' window: the sheet's look, with no title bar of its own, sized by what it shows. It closes by a choice.
     private func makeWindow() -> NSWindow {
         let content = NSHostingController(
-            rootView: UpdateSheet(updates: self).preferredColorScheme(.dark).tint(CC.color.accent))
+            rootView: ThemeRoot(content: UpdateSheet(updates: self)).preferredColorScheme(.dark).tint(CC.color.accent))
         // The window takes each step's own size: the notes' step is tall, the others are not. Under the transparent
         // title bar, as a sheet has none: no safe area, so the content starts at its own top padding and the window is
         // exactly its height.
