@@ -341,7 +341,7 @@ struct StartForm: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "folder").font(.system(size: 11)).accessibilityHidden(true)
-                Text(folder?.name ?? "Choose a folder").font(InputBoxChip.font).lineLimit(1)
+                Text(folder?.name ?? "Choose a folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(folder == nil ? Theme.text2 : Theme.text)
@@ -854,7 +854,7 @@ private struct ComputerButton: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "desktopcomputer").font(.system(size: 11)).accessibilityHidden(true)
-                Text(chosen.machineName).font(InputBoxChip.font).lineLimit(1)
+                Text(chosen.machineName).font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
                 Circle().fill(Theme.green).frame(width: 6, height: 6).accessibilityHidden(true)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }

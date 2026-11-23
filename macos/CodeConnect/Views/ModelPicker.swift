@@ -26,7 +26,7 @@ struct ModelButton: View {
         } label: {
             HStack(spacing: 5) {
                 if let pick { AgentMark(agent: pick.agent == .claude ? .claude : .codex) }
-                Text(label).font(InputBoxChip.font).lineLimit(1)
+                Text(label).font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(pick == nil ? Theme.text3 : Theme.text2)
