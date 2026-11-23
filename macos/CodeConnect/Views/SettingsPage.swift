@@ -671,9 +671,9 @@ private struct AccountRow: View {
     }
 
     /// Its share used of each column's window, right-aligned, on the name's line, and beneath it, on the plan's, how long
-    /// until that window resets (`AccountSwitchWords.resets`, kept current each minute while the page is shown), the
-    /// exact time as its tooltip; an empty cell where it names no such window. Or, in their place, "No plan limits"
-    /// where its agent says none apply (`limitsAvailable` false), else "Not reported yet".
+    /// until that window resets (`AccountSwitchWords.resets`, kept current each minute while the page is shown); an
+    /// empty cell where it names no such window. Or, in their place, "No plan limits" where its agent says none apply
+    /// (`limitsAvailable` false), else "Not reported yet".
     @ViewBuilder private var figures: some View {
         if let facts, !facts.windows.isEmpty {
             // Redrawn each minute while shown; each countdown is from the time of that drawing, since the schedule's own
@@ -683,16 +683,13 @@ private struct AccountRow: View {
                 HStack(spacing: 0) {
                     ForEach(columns, id: \.self) { minutes in
                         let window = facts.windows.first { $0.windowMinutes == minutes }
-                        // Once its time has come, a window says nothing of it: no line, no tooltip.
-                        let resets = window.flatMap { AccountSwitchWords.resets($0, now: now) }
                         VStack(alignment: .trailing, spacing: 2) {
                             Text(window.map { "\($0.usedPercent)%" } ?? " ").font(Theme.ui(13)).monospacedDigit()
                                 .foregroundStyle((window?.usedPercent ?? 0) >= 90 ? Theme.amber : Theme.text2)
-                            Text(resets ?? " ")
+                            Text(window.flatMap { AccountSwitchWords.resets($0, now: now) } ?? " ")
                                 .font(Theme.ui(11.5)).monospacedDigit().foregroundStyle(Theme.text3).lineLimit(1)
                         }
                         .frame(width: Self.column, alignment: .trailing)
-                        .help(resets == nil ? "" : window.map { Self.resetTime($0) } ?? "")
                     }
                 }
             }
@@ -702,12 +699,6 @@ private struct AccountRow: View {
                 .font(Theme.ui(12)).foregroundStyle(Theme.text3)
                 .accessibilityIdentifier("\(rowID).usage")
         }
-    }
-
-    /// "Resets Thursday at 9:00 AM", in the person's own calendar and clock.
-    private static func resetTime(_ window: UsageWindow) -> String {
-        let date = Date(timeIntervalSince1970: TimeInterval(window.resetsAt))
-        return "Resets \(date.formatted(.dateTime.weekday(.wide))) at \(date.formatted(date: .omitted, time: .shortened))"
     }
 
     /// The plan in the agent's own word, capitalized; "Signed out"; or the row's note; "As set up on this Mac" for a
