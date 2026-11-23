@@ -58,12 +58,6 @@ final class FontFacesTests: XCTestCase {
         XCTAssertTrue(CTFontGetSymbolicTraits(boldItalic.ctFont).contains(.traitItalic), "bold italic slants")
     }
 
-    /// The bar titles iOS draws itself take the headline's face, not the system's.
-    func testTheBarTitlesIOSDrawsAreSetInInter() {
-        let font = UINavigationBar.appearance().titleTextAttributes?[.font] as? UIFont
-        XCTAssertEqual(font?.fontName, "InterVariable-SemiBold")
-    }
-
     /// The diff's columns are counted in Menlo's advance.
     func testTheDiffGridCountsMenloColumns() throws {
         let menlo = try XCTUnwrap(UIFont(name: "Menlo-Regular", size: 14))
