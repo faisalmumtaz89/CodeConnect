@@ -57,12 +57,9 @@ struct FolderBrowser: View {
                 }
                 .task(id: selected) { list.scrollTo(selected) }
             }
-            // One height whatever the folder holds, so the sheet stays still while you browse: the recent folders'
-            // box at its tallest, 170 pt, giving way first in a short window. A short folder's rows sit at its top.
+            // One height whatever the folder holds, so the panel stays still while you browse: 170 pt, giving way first
+            // in a short window. A short folder's rows sit at its top.
             .frame(minHeight: 44, idealHeight: 170, maxHeight: 170)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.boxRadius))
-            .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.boxRadius))
-            .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
             .focusable()
             .focusEffectDisabled()
             .focused($focused)
@@ -140,14 +137,12 @@ struct FolderBrowser: View {
             selected = target
             focused = true
         } label: {
-            Text(verbatim: name).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(selected == target ? Theme.selected : .clear, in: Rectangle())
-                .contentShape(Rectangle())
+            MenuRow(chosen: selected == target) {
+                Text(verbatim: name).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1)
+                    .truncationMode(.middle)
+            }
         }
-        .buttonStyle(.hover(radius: 0, id: "start.browse.folder.\(name)"))
+        .buttonStyle(.hover(radius: 8, id: "start.browse.folder.\(name)"))
         .simultaneousGesture(TapGesture(count: 2).onEnded { go(target) })
         .focusable(false)
         .accessibilityIdentifier("start.browse.folder.\(name)")
