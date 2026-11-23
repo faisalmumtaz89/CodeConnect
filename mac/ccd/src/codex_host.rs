@@ -8840,15 +8840,34 @@ mod tests {
             resume["params"]["model"], "gpt-6-luna",
             "resumed on the plan's default: {resume}"
         );
-        answer(
-            &mut ws,
-            &resume,
-            json!({"thread": {"id": "thr-x6"}, "model": "gpt-6-luna"}),
-        )
-        .await;
+        // Real codex's answer for a thread that has run (0.164.0's, recorded), on this thread and B's plan's model.
+        let mut real: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/codex/resume-interrupted-command-0.164.0.json"
+        ))
+        .unwrap();
+        let mut resumed = real["answerAfterTheCommandEnded"].take();
+        let resumed = resumed
+            .get_mut("result")
+            .map(serde_json::Value::take)
+            .unwrap_or(resumed);
+        let mut resumed = resumed;
+        resumed["thread"]["id"] = "thr-x6".into();
+        resumed["thread"]["sessionId"] = "thr-x6".into();
+        resumed["model"] = "gpt-6-luna".into();
+        answer(&mut ws, &resume, resumed).await;
         let sent = asked(&mut ws, "turn/start").await;
         answer(&mut ws, &sent, json!({"turn": {"id": "turn-2"}})).await;
         said.await.unwrap();
+        // The run's model, as the apps read it, is the one it now runs on.
+        assert_eq!(
+            summary_of(&rig.daemon, &uid)
+                .await
+                .model
+                .map(|fact| fact.value)
+                .as_deref(),
+            Some("gpt-6-luna"),
+            "the run's model fact"
+        );
         // One typed line says so (decision 316), and the menu is B's plan's.
         let lines: Vec<serde_json::Value> = rig
             .daemon
