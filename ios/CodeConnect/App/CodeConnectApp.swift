@@ -14,8 +14,7 @@ struct CodeConnectApp: App {
 
     /// The bar titles iOS draws itself (`.navigationTitle`: Waiting for you, Settings, a computer, Folders) are set in
     /// the app's headline face, growing with Dynamic Type as the system's own title does and stopping where the app's
-    /// other bar titles stop, at xxxLarge. The size is set once, at launch: a Text Size change made while the app is
-    /// open shows in these four titles at the next launch.
+    /// other bar titles stop, at xxxLarge.
     init() {
         let headline = CC.type.headline
         let metrics = UIFontMetrics(forTextStyle: .headline)
