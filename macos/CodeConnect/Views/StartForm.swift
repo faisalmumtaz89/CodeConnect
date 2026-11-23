@@ -570,7 +570,12 @@ struct StartForm: View {
                 BranchRow(
                     context: context, folder: folder, agent: pick?.agent, place: choice(\.place),
                     newName: choice(\.newName), open: $branchMenuOpen, top: 0
-                )
+                ) {
+                    // A turn after the menu closes, as `takeKeyboard`'s, so AppKit's settling doesn't take it back.
+                    DispatchQueue.main.async {
+                        giveKeyboard($messageFocused, caret: $messageSelection, endOf: draft.message)
+                    }
+                }
             }
         } trailing: {
             ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }

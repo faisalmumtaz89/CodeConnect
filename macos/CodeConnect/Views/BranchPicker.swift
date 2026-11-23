@@ -15,6 +15,8 @@ struct BranchRow: View {
     @Binding var open: Bool
     /// The highest the menu may reach in the form's coordinates (`StartForm.space`).
     let top: CGFloat
+    /// A new worktree's name was kept with Return: the menu has closed, and the keyboard goes back to the form.
+    let named: () -> Void
 
     @Environment(\.startHeight) private var startHeight
     @Environment(\.startBox) private var startBox
@@ -74,7 +76,10 @@ struct BranchRow: View {
             // be cut that need not be.
             shownRows: shown, width: placed.width,
             naming: newName == nil
-                ? nil : BranchNaming(folder: folder, agent: agent, git: git, newName: $newName) { open = false },
+                ? nil : BranchNaming(folder: folder, agent: agent, git: git, newName: $newName) {
+                    open = false
+                    named()
+                },
             namingHeight: $namingHeight
         ) { chosen in
             if let chosen {
@@ -123,6 +128,7 @@ struct BranchNaming: View {
     let git: StartGit
     @Binding var newName: String?
     let done: () -> Void
+    @FocusState private var focused: Bool
 
     var body: some View {
         let trimmed = (newName ?? "").trimmingCharacters(in: .whitespaces)
@@ -142,7 +148,9 @@ struct BranchNaming: View {
             .onSubmit(done)
             .onExitCommand { newName = nil }
             // It appears because "New branch…" was just chosen: what is typed next is its name.
-            .takesKeyboardWhenShown()
+            .takesKeyboardWhenShown($focused)
+            // Return, Esc and the arrows are the name's, not the menu's.
+            .panelField($focused)
             Text(trimmed.isEmpty || valid ? StartWords.worktreeNameRule : StartWords.worktreeNameBroken)
                 .font(Theme.ui(11))
                 .foregroundStyle(trimmed.isEmpty || valid ? Theme.text3 : Theme.red)
