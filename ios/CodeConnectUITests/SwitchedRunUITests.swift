@@ -3,13 +3,15 @@ import XCTest
 /// A run moved to another account on the Mac, as the phone shows it, from the daemon's own recordings of the switch
 /// (`-CC_SWITCH`, `SwitchFixtures`): a waiting or moved run stays in the live list with its reply box and reads one
 /// quiet "Switched to" row, never "Run ended"; a move that could not start reads Ended with one warning row and keeps
-/// its box; End run after a move ends the run, with no box; a moved run's settings line is read only.
+/// its box; End run after a move ends the run, with no box; a moved run's settings line is read only; a move onto a
+/// plan without the run's model says, in one quiet row, which model it is now on.
 final class SwitchedRunUITests: XCTestCase {
 
     private static let claude = "01M8299ZGSRFFX29Z8KF3Q5Q2V"
     private static let codex = "01M8299ZJQXMP43MZH8JY9VYMD"
     private static let failed = "01M82B4K7A2XN1X22R98H2XB80"
     private static let ended = "01M82B4K7A2XN1X22R98H2XB7Z"
+    private static let planLacksModel = "01M82HYZB0MPQRNE27QH73Q0JQ"
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -78,6 +80,15 @@ final class SwitchedRunUITests: XCTestCase {
         app.navigationBars.buttons.firstMatch.tap()
         let ended = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'ended'")).firstMatch
         XCTAssertTrue(ended.waitForExistence(timeout: 10), "on the fleet, it reads Ended")
+    }
+
+    func testAMoveOntoAPlanWithoutTheModelNamesTheModelItIsNowOn() {
+        let app = open("relaunch-plan-default-codex", session: Self.planLacksModel)
+        let row = texts(app, beginningWith: "Now on")
+        XCTAssertTrue(row.firstMatch.waitForExistence(timeout: 25), "the model-changed row")
+        XCTAssertEqual(row.count, 1, "one row")
+        XCTAssertTrue(row.firstMatch.label.contains("isn’t in"), row.firstMatch.label)
+        XCTAssertTrue(replyBox(app), "its reply box")
     }
 
     func testEndRunAfterAMoveEndsTheRunWithNoReplyBox() {

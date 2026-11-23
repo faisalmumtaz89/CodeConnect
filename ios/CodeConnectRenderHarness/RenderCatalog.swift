@@ -902,6 +902,16 @@ enum RenderCatalog {
                 try driver.requireExists(driver.text(containing: "on B now?", in: app), "the message that started it")
             }),
         RenderScenario(
+            name: "switch-model-unavailable-session",
+            purpose: "a Codex run moved onto a plan without its model: one quiet row names the model it is now on",
+            arguments: [
+                "-CC_SWITCH", "relaunch-plan-default-codex",
+                "-CC_DEEPLINK", "codeconnect://session/01M82HYZB0MPQRNE27QH73Q0JQ",
+            ],
+            reach: { app, driver in
+                try driver.requireExists(driver.text(containing: "Now on", in: app), "the model-changed row")
+            }),
+        RenderScenario(
             name: "switch-then-end-session",
             purpose: "End run after a move: Switched to, then Run ended, and no reply box",
             arguments: [
