@@ -17,7 +17,7 @@ struct BranchRow: View {
     let top: CGFloat
 
     @Environment(\.startHeight) private var startHeight
-    @Environment(\.startWidth) private var startWidth
+    @Environment(\.startBox) private var startBox
     /// The row, label to last line, in the form's coordinates.
     @State private var frame: CGRect = .zero
     /// The button's bottom edge, in the row's coordinates.
@@ -64,7 +64,7 @@ struct BranchRow: View {
         let opensAbove = BranchMenu.height(rows: rows) <= above || above > below
         let shown = BranchMenu.rows(fitting: opensAbove ? above : below, of: rows)
         let cut = shown < min(rows, BranchMenu.mostRows)
-        let placed = StartPanel.place(widest: BranchMenu.width, leading: frame.minX, pane: startWidth)
+        let placed = StartPanel.place(widest: BranchMenu.width, leading: frame.minX, box: startBox)
         return BranchMenu(
             git: git, folder: folder, running: context.runningFolders, place: newName == nil ? place : nil,
             // Inside the pane by the start form's one rule (`StartPanel`), not as narrow as its row: beside the model

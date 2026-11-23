@@ -33,7 +33,10 @@ struct StartForm: View {
     /// The folder button's panel is open.
     @State private var folderOpen = false
     /// The form's width, which the folder panel keeps within.
-    @State private var formWidth: CGFloat = 0
+    /// Where the box stands in `StartForm.space`, which its panels stay inside.
+    @State private var box: CGRect = .zero
+    /// The folder chip's leading edge in `StartForm.space`, where its panel starts when it fits.
+    @State private var folderChipX: CGFloat = 0
     /// The first message has the keyboard: as the form appears, and when New Agent asks for it.
     @FocusState private var messageFocused: Bool
     /// The first message's caret, which the form sets when New Agent gives it the keyboard (`giveKeyboard`).
@@ -267,7 +270,6 @@ struct StartForm: View {
             }
         }
         .frame(maxWidth: Self.column, alignment: .leading)
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { formWidth = $0 }
     }
 
     /// New Agent's request for the keyboard, taken once: the panels close and the first message has it a turn later.
@@ -351,20 +353,23 @@ struct StartForm: View {
         .help(folder?.path ?? "Choose a folder")
         .accessibilityIdentifier("start.folder")
         .accessibilityValue(folderOpen ? "open" : "closed")
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).minX } action: { folderChipX = $0 }
         .overlay(alignment: .topLeading) {
             if folderOpen {
-                folderPanel(context).openPanel().offset(y: InputBoxChip.height + Theme.panelGap)
+                let placed = StartPanel.place(widest: 520, leading: folderChipX, box: box)
+                folderPanel(context, width: placed.width).openPanel()
+                    .offset(x: placed.x - folderChipX, y: InputBoxChip.height + Theme.panelGap)
             }
         }
         .closesPanel($folderOpen)
         .onChange(of: folderOpen) { _, open in if !open { browsing = false } }
     }
 
-    /// As wide as the form's column, up to 520 pt: never past the window's edge.
-    private func folderPanel(_ context: StartContext) -> some View {
+    /// Up to 520 pt wide, inside the box (`StartPanel.place`).
+    private func folderPanel(_ context: StartContext, width: CGFloat) -> some View {
         folderRows(context)
             .padding(8)
-            .frame(width: min(520, max(formWidth, 300)))
+            .frame(width: width)
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
             .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
@@ -590,6 +595,8 @@ struct StartForm: View {
             ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }
             startButton
         }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { box = $0 }
+        .environment(\.startBox, box)
     }
 
     /// Start: filled once it can be pressed; Return in the first message starts too, and ⌘↩ (the owner's word, 2026-11-22,
@@ -848,6 +855,11 @@ private struct ComputerButton: View {
     let add: () -> Void
     let choose: (String) -> Void
 
+    @Environment(\.startBox) private var startBox
+    /// The chip's leading edge in `StartForm.space`, where its panel starts when it fits.
+    @State private var minX: CGFloat = 0
+    private var placed: (x: CGFloat, width: CGFloat) { StartPanel.place(widest: 260, leading: minX, box: startBox) }
+
     var body: some View {
         Button {
             open.toggle()
@@ -864,8 +876,9 @@ private struct ComputerButton: View {
         .buttonStyle(.hover(radius: 8, id: "start.computer"))
         .accessibilityIdentifier("start.computer")
         .accessibilityValue(open ? "open" : "closed")
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(StartForm.space)).minX } action: { minX = $0 }
         .overlay(alignment: .topLeading) {
-            if open { panel.openPanel().offset(y: InputBoxChip.height + Theme.panelGap) }
+            if open { panel.openPanel().offset(x: placed.x - minX, y: InputBoxChip.height + Theme.panelGap) }
         }
         .closesPanel($open)
     }
@@ -918,7 +931,7 @@ private struct ComputerButton: View {
             .accessibilityIdentifier("start.addComputer")
         }
         .padding(.vertical, 5)
-        .frame(width: 260)
+        .frame(width: placed.width)
         .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
         .shadow(color: .black.opacity(0.5), radius: 18, y: 8)

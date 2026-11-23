@@ -15,7 +15,6 @@ struct StartPane: View {
     /// so what was typed and chosen is there when the link is back.
     @State private var formShown = false
     @State private var height: CGFloat = 0
-    @State private var width: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,16 +37,12 @@ struct StartPane: View {
         .background(Theme.window, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.hairline))
         .coordinateSpace(.named(StartForm.space))
-        .onGeometryChange(for: CGSize.self) { $0.size } action: {
-            height = $0.height
-            width = $0.width
-        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .padding(.horizontal, 10)
         .padding(.top, 44)
         .padding(.bottom, 10)
         .background(Theme.pane)
         .environment(\.startHeight, height)
-        .environment(\.startWidth, width)
         // A start this Mac sent with no answer yet, from before the app last quit: the form opens on it.
         .onAppear {
             guard let start = machines.outstandingStart,

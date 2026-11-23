@@ -10,12 +10,12 @@ struct ModelButton: View {
     @Binding var open: Bool
     let choose: (StartModelChoice) -> Void
 
-    @Environment(\.startWidth) private var startWidth
+    @Environment(\.startBox) private var startBox
     /// The button's top leading corner, in `StartForm.space`.
     @State private var minX: CGFloat = 0
     @State private var minY: CGFloat = 0
     private var placed: (x: CGFloat, width: CGFloat) {
-        StartPanel.place(widest: 440, leading: minX, pane: startWidth)
+        StartPanel.place(widest: 440, leading: minX, box: startBox)
     }
 
     private var checking: Bool { StartAgent.allCases.contains { context.models($0) == .checking } }
