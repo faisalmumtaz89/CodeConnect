@@ -3,6 +3,10 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.17, with the iPhone app 1.1.34
+
+- On the Mac, a new worktree is named in the branch menu, under New branch…: Return keeps the name and closes the menu.
+
 ## CodeConnect 0.19.16, with the iPhone app 1.1.33
 
 - On the Mac, words are now set in Inter and code in Menlo, the face code editors on a Mac use; a reply's bold and
