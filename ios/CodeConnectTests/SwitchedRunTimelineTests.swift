@@ -188,4 +188,32 @@ final class SwitchedRunTimelineTests: XCTestCase {
             XCTAssertFalse(summary.takesNoReply)
         }
     }
+
+    /// **A moved run is answered from its reply box** (decision 306): its next message is what starts it on the new
+    /// account. A moved Codex run's link is detached from its idle end until then, and that is not a lost link: no
+    /// "Observe only" on its reply box, and its fleet row's badge is control. A run still waiting keeps the link's own
+    /// word. From the daemon's `switch-codex-wire.json`: its listing after the typed end (live, detached, moved).
+    func testAMovedRunIsAnsweredNotObserved() async throws {
+        let capabilities = try JSONDecoder().decode(
+            Capabilities.self, from: Data(#"{"can_approve_reliably": true, "codex_compose": true, "supported_agents": ["claude", "codex"]}"#.utf8))
+        var moved: SessionSummary?
+        for frame in try frames("switch-codex-wire") {
+            if case .sessions(let sessions) = frame, let run = sessions.first, run.switching == .moved { moved = run }
+        }
+        let run = try XCTUnwrap(moved, "the recording lists the run as moved")
+        XCTAssertEqual(run.link, .detached, "precondition: a moved Codex run's link is detached")
+        XCTAssertEqual(FleetStatusRule.capability(summary: run, capabilities: capabilities), .control, "the fleet row's badge")
+
+        let model = AppModel(
+            cache: EventCache(root: FileManager.default.temporaryDirectory.appendingPathComponent("moved-\(UUID().uuidString)")),
+            codexSpentLedger: CodexSpentLedger(defaults: UserDefaults(suiteName: "cc.tests.\(UUID().uuidString)")!))
+        model.connection.simulateConnectedForTesting()
+        model.connection.simulateCapabilitiesForTesting(capabilities, minor: 48)
+        model.connection.injectForTesting(.sessions([run]))
+        addTeardownBlock { @MainActor in model.scenePhaseChanged(to: .background) }
+        // The send was never blocked: its message is what restarts the run.
+        XCTAssertNil(model.sendBlockedReason(for: run.sessionKey, draft: "go on"), "a moved run's message can be sent")
+        let note = model.standingNote(for: run.sessionKey, draft: "")
+        XCTAssertFalse(note?.text.hasPrefix("Observe only") ?? false, "the standing note: \(note?.text ?? "none")")
+    }
 }
