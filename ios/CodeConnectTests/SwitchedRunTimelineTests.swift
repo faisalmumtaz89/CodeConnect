@@ -181,12 +181,16 @@ final class SwitchedRunTimelineTests: XCTestCase {
         XCTAssertEqual(
             drawn.timeline.filter { $0.seq == notice.seq }.map(\.content),
             [.notice(NoticeItem(
-                kind: .other, symbol: "arrows-clockwise", title: "Now on gpt-6-luna: GPT-6.1-Sol isn’t in B’s plan.",
+                kind: .other, symbol: "arrows-clockwise", title: "Now on GPT-6 Luna: GPT-6.1-Sol isn’t in B’s plan.",
                 detail: nil, severity: .info))])
         for (summary, status) in try await listings("relaunch-plan-default-codex-wire") {
             XCTAssertFalse(status == .ended || status == .failed, "\(status)")
             XCTAssertFalse(summary.takesNoReply)
         }
+        // On the new plan's default from the relaunch on (the listing's switching mark at the notice is not pinned: the
+        // daemon emitted it in a window of a few milliseconds).
+        let last = try await listings("relaunch-plan-default-codex-wire").last
+        XCTAssertEqual(last?.summary.model?.value, "gpt-6-luna")
     }
 
     /// **A moved run is answered from its reply box** (decision 306): its next message is what starts it on the new

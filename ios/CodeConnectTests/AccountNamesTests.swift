@@ -44,9 +44,9 @@ final class AccountNamesTests: XCTestCase {
         let plan = try events("relaunch-plan-default-codex-wire")
         XCTAssertTrue(
             titles(TimelineBuilder.build(plan, accountName: byEmail))
-                .contains("Now on gpt-6-luna: GPT-6.1-Sol isn’t in work@example.test’s plan."))
+                .contains("Now on GPT-6 Luna: GPT-6.1-Sol isn’t in work@example.test’s plan."))
         XCTAssertTrue(
-            titles(TimelineBuilder.build(plan)).contains("Now on gpt-6-luna: GPT-6.1-Sol isn’t in B’s plan."))
+            titles(TimelineBuilder.build(plan)).contains("Now on GPT-6 Luna: GPT-6.1-Sol isn’t in B’s plan."))
     }
 
     /// The lookup is asked with the event's own account id: the recorded switch's `switched_to.account_id`.
