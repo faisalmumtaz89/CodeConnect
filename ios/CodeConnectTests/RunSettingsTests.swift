@@ -384,23 +384,23 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(s.models.first { $0.value == "sonnet" }?.detail, sonnet.detail)
     }
 
-    /// **The effort in use, named beside the model** (decisions 303 and 313): the effort the agent named, by its label;
-    /// while none is named, or the one named is not the chosen model's (left from the model before a switch), the
-    /// chosen model's own default (Sonnet's Medium in `minor-39-wire.json`); nothing for a run whose menus are gone and
-    /// whose agent named none.
-    func testTheEffortInUseIsNamedAndUnnamedReadsTheModelsDefault() throws {
+    /// **The effort in use, named beside the model** (decisions 303 and 345): the effort the agent named, by its label;
+    /// while none is named, or the one named is not the chosen model's (left from the model before a switch), "Default",
+    /// since a Claude entry names no default (`minor-39-wire.json`); nothing for a run whose menus are gone and whose
+    /// agent named none.
+    func testTheEffortInUseIsNamedAndUnnamedReadsDefault() throws {
         let live = try summary("session_hosted_live")
         XCTAssertEqual(RunSettings.effortName(summary: live), "High")
         var unnamed = try XCTUnwrap(try wire()["session_hosted_live"]?.objectValue)
         unnamed["effort"] = nil
         let none = try JSONDecoder().decode(
             SessionSummary.self, from: Data(JSONValue.object(unnamed).canonicalJSONString.utf8))
-        XCTAssertEqual(RunSettings.effortName(summary: none), "Medium")
-        // A fact the chosen model does not offer (left from the model before a switch) gives way to its default.
+        XCTAssertEqual(RunSettings.effortName(summary: none), "Default")
+        // A fact the chosen model does not offer (left from the model before a switch) gives way to "Default".
         unnamed["effort"] = .object(["seq": .int(7), "value": .string("ultra")])
         let stale = try JSONDecoder().decode(
             SessionSummary.self, from: Data(JSONValue.object(unnamed).canonicalJSONString.utf8))
-        XCTAssertEqual(RunSettings.effortName(summary: stale), "Medium")
+        XCTAssertEqual(RunSettings.effortName(summary: stale), "Default")
         XCTAssertNil(RunSettings.effortName(summary: try summary("session_hosted_starting")))
     }
 
@@ -417,15 +417,12 @@ final class RunSettingsTests: XCTestCase {
         return try JSONDecoder().decode(SessionSummary.self, from: Data(JSONValue.object(run).canonicalJSONString.utf8))
     }
 
-    /// **With no effort chosen, a run names and marks its model's own default effort** (decisions 312 and 313), as the
-    /// daemon names it on the menu's entry (`default_effort`, minor 47): the level by its name, never "Default". Codex's
-    /// gpt-6.1-sol is Low (its own `defaultReasoningEffort`); Claude Code's Default entry is Medium (its documented
-    /// default). A chosen effort still wins, and a fact the chosen model does not offer gives way to the default.
+    /// **With no effort chosen, a Codex run names and marks its model's own default effort** (decisions 312 and 313),
+    /// as the daemon names it on the menu's entry (`default_effort`, minor 47): the level by its name, never "Default".
+    /// Codex's gpt-6.1-sol is Low (its own `defaultReasoningEffort`). A chosen effort still wins, and a fact the chosen
+    /// model does not offer gives way to the default.
     func testWithNoEffortChosenARunNamesAndMarksItsModelsDefault() throws {
-        for (key, name, value, label) in [
-            ("session_codex_live", "codex-settings-wire", "low", "Low"),
-            ("session_hosted_live", "minor-46-wire", "medium", "Medium"),
-        ] {
+        for (key, name, value, label) in [("session_codex_live", "codex-settings-wire", "low", "Low")] {
             let run = try summary(key, in: name, effort: nil)
             XCTAssertEqual(RunSettings.effortName(summary: run), label, name)
             guard case .hostedLive(let s) = RunSettings.of(summary: run) else { return XCTFail("\(name): a live run") }
@@ -451,20 +448,26 @@ final class RunSettingsTests: XCTestCase {
         XCTAssertEqual(s.selectedEffort?.value, "medium")
     }
 
-    /// An entry that names no default keeps today's reading: "Default", nothing marked (decision 313: a model the
-    /// documentation does not name stays unmarked). Claude Code's Fable entry names none in the daemon's menu.
-    func testAnEntryWithNoDefaultReadsDefaultWithNothingMarked() throws {
-        let run = try summary("session_hosted_live", in: "minor-46-wire", effort: nil, selected: "fable")
-        XCTAssertNil(run.menus?.models.first { $0.value == "fable" }?.defaultEffort)
-        XCTAssertEqual(RunSettings.effortName(summary: run), "Default")
-        guard case .hostedLive(let s) = RunSettings.of(summary: run) else { return XCTFail("a live Claude run") }
-        XCTAssertNil(s.selectedEffort)
+    /// **A Claude run with no effort chosen reads "Default", nothing marked, every level offered** (decision 345):
+    /// Claude Code names no default, so no Claude entry in the daemon's menu carries one, the Default entry and the
+    /// others alike.
+    func testAClaudeRunWithNoEffortChosenReadsDefaultWithNothingMarked() throws {
+        let menu = try XCTUnwrap(try summary("session_hosted_live", in: "minor-46-wire", effort: nil).menus)
+        XCTAssertFalse(menu.models.isEmpty)
+        XCTAssertTrue(menu.models.allSatisfy { $0.defaultEffort == nil }, "no Claude entry names a default")
+        for model in menu.models where !model.efforts.isEmpty {
+            let run = try summary("session_hosted_live", in: "minor-46-wire", effort: nil, selected: model.value)
+            XCTAssertEqual(RunSettings.effortName(summary: run), "Default", model.value)
+            guard case .hostedLive(let s) = RunSettings.of(summary: run) else { return XCTFail("a live Claude run") }
+            XCTAssertNil(s.selectedEffort, model.value)
+            XCTAssertTrue(s.efforts.allSatisfy(s.offers), "\(model.value): every level is offered")
+        }
     }
 
     /// **A default marked is named as the default** (decision 318): while the mark is the entry's own default, the
     /// panel says so; once an effort is chosen, it does not.
     func testTheMarkSaysWhenItIsTheModelsDefault() throws {
-        for (key, name) in [("session_codex_live", "codex-settings-wire"), ("session_hosted_live", "minor-46-wire")] {
+        for (key, name) in [("session_codex_live", "codex-settings-wire")] {
             guard case .hostedLive(let unset) = RunSettings.of(summary: try summary(key, in: name, effort: nil))
             else { return XCTFail("\(name): a live run") }
             XCTAssertNotNil(unset.selectedEffort, name)
@@ -477,11 +480,11 @@ final class RunSettingsTests: XCTestCase {
             else { return XCTFail("\(name): a live run") }
             XCTAssertFalse(chosen.effortIsDefault, "\(name): a chosen effort is no default")
         }
-        // Nothing marked (an entry that names no default) is no default marked either.
-        guard case .hostedLive(let fable) = RunSettings.of(
-            summary: try summary("session_hosted_live", in: "minor-46-wire", effort: nil, selected: "fable"))
+        // Nothing marked (a Claude entry, which names no default) is no default marked either.
+        guard case .hostedLive(let claude) = RunSettings.of(
+            summary: try summary("session_hosted_live", in: "minor-46-wire", effort: nil))
         else { return XCTFail("a live Claude run") }
-        XCTAssertFalse(fable.effortIsDefault)
+        XCTAssertFalse(claude.effortIsDefault)
     }
 
     /// **The marked default can be chosen** (decision 318): choosing it sends that level as the person's own; a level
