@@ -6831,6 +6831,37 @@ mod tests {
             before,
             "a list right after a fresh read started an agent"
         );
+
+        // Removed: answered once its own logout is done, not after the other accounts' sign-ins are asked again.
+        phone
+            .send(send(ClientMessage::AddAccount {
+                request_id: "p4".into(),
+                agent: AgentKind::Codex,
+                label: "X".into(),
+            }))
+            .await
+            .unwrap();
+        let added = until(&mut phone, Some("p4"), |_| true).await;
+        let x = added["accounts"][1]["id"].as_str().unwrap().to_string();
+        let started = std::time::Instant::now();
+        phone
+            .send(send(ClientMessage::RemoveAccount {
+                request_id: "p5".into(),
+                account_id: x,
+            }))
+            .await
+            .unwrap();
+        let removed = until(&mut phone, Some("p5"), |_| true).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "removed in {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            removed["accounts"].as_array().unwrap().len(),
+            1,
+            "{removed}"
+        );
         let _ = std::fs::remove_dir_all(&agents);
     }
 

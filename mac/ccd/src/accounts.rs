@@ -983,8 +983,8 @@ pub(crate) async fn remove_with(
     if let Err(err) = store.remove_account(&account.id) {
         return unavailable(request_id, "remove the account", err);
     }
-    let listing = listing(store, Some(request_id));
-    with_signed_in(environment, agents, listing).await
+    // The remaining accounts' sign-ins are what is held; the read behind the answer asks again.
+    listing(store, Some(request_id))
 }
 
 fn refused_as(request_id: String, code: &str, message: String) -> protocol::ws::ServerMessage {
