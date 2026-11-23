@@ -583,8 +583,9 @@ private struct AccountRow: View {
     @State private var moreFrame: CGRect = .zero
 
     static let lead: CGFloat = 16
-    /// A figure's column: as wide as its longest countdown line ("resets in 47h 59m", 99 pt at 11.5 pt).
-    static let column: CGFloat = 104
+    /// A figure's column: its longest countdown line ("resets in 47h 59m", 99 pt at 11.5 pt) and a 16 pt gap before
+    /// the next, so two long lines side by side never read as one.
+    static let column: CGFloat = 116
     /// The "…"'s slot and its gap, kept on every row so nothing moves.
     static let trailing: CGFloat = 6 + 10 + 30
     /// The "…"'s slot in the row, which its button stands centred over: as wide as the one it replaced, so the figures
