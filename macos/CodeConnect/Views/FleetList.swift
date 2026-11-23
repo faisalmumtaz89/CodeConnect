@@ -246,19 +246,20 @@ struct FleetList: View {
                 }
             }
 
-            Rectangle().fill(Theme.hairline).frame(height: 1)
-            HStack(spacing: 14) {
-                Spacer()
-                if selecting {
+            // The list's foot, only while choosing runs: what is chosen is removed from it.
+            if selecting {
+                Rectangle().fill(Theme.hairline).frame(height: 1)
+                HStack(spacing: 14) {
+                    Spacer()
                     ActionButton(
                         title: batchRunning ? "Removing…" : "Remove \(picked.count)…", key: nil, prominent: false,
                         destructive: true, id: "fleet.removeChosen"
                     ) { removingMany = picked }
                     .disabled(picked.isEmpty || batchRunning)
                 }
+                .padding(.horizontal, 16)
+                .frame(height: 34)
             }
-            .padding(.horizontal, 16)
-            .frame(height: 34)
         }
         .background(Theme.window)
         // Leaving the Ended runs leaves the choosing.

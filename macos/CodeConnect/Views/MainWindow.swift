@@ -960,9 +960,6 @@ private struct EmptyFleet: View {
                 .padding(.top, 6)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            Rectangle().fill(Theme.hairline).frame(height: 1)
-            Color.clear.frame(height: 34)
         }
         .background(Theme.window)
     }
