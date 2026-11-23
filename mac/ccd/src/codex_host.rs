@@ -10341,6 +10341,46 @@ mod tests {
         end_run(&rig, &uid).await;
     }
 
+    /// **A Codex run that is not live names its model as its menu did** (minor 46, for Codex too): live, its summary
+    /// carries `menus` and no `model_label`; ended, moved by a switch, or failed in one, it carries no `menus`, and
+    /// `model_label` is the name its model's entry had (Codex's `displayName`). A model whose entry has no name of its
+    /// own (one Codex started on that its check did not list) carries none, and the apps show the id.
+    #[tokio::test]
+    async fn a_codex_run_not_live_names_its_model_as_its_menu_did() {
+        let _env = crate::ProcessEnvRead::take();
+        for (model, label) in [("gpt-6.1-sol", Some("GPT-6.1-Sol")), ("stub-model", None)] {
+            let rig = rig();
+            let (uid, mut ws) = engine_run_offering(&rig, &recorded_models(), model).await;
+            tell(
+                &mut ws,
+                &settings_report(model, "high", "on-request", "workspaceWrite", "default"),
+            )
+            .await;
+            let live = settings_as_sent(&rig.daemon, &uid, "auto").await;
+            assert!(live.get("menus").is_some(), "{live}");
+            assert_eq!(live.get("model_label"), None, "{live}");
+            drop(ws);
+            end_run(&rig, &uid).await;
+            row_once(&rig, &uid, Lifecycle::Exited).await;
+            for (state, switching) in [
+                (None, None),
+                (Some(crate::store::Store::SWITCH_MOVED), Some("moved")),
+                (Some(crate::store::Store::SWITCH_FAILED), Some("failed")),
+            ] {
+                rig.daemon.store.set_switch_state(&uid, state).unwrap();
+                let shown = serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap();
+                assert_eq!(shown["switching"].as_str(), switching, "{shown}");
+                assert_eq!(shown.get("menus"), None, "{shown}");
+                assert_eq!(shown["model"]["value"], model, "{shown}");
+                assert_eq!(
+                    shown["model_label"].as_str(),
+                    label,
+                    "{model} {switching:?}: {shown}"
+                );
+            }
+        }
+    }
+
     /// **A Codex run offers the model it started on, and can go back to it.** A start's answer
     /// naming a model its start's check did not list (P12a's `stub-model`, which the person's
     /// config names; or, signed in, Codex's default from its catalog online) puts it first among
