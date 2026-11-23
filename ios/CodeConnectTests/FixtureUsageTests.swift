@@ -28,7 +28,10 @@ final class FixtureUsageTests: XCTestCase {
     }
 
     private func runs(_ frames: [ServerMessage]) -> [SessionSummary] {
-        frames.flatMap { if case .sessions(let runs) = $0 { runs } else { [] } }
+        frames.flatMap { frame -> [SessionSummary] in
+            guard case .sessions(let runs) = frame else { return [] }
+            return runs
+        }
     }
 
     private func bar(_ frames: [ServerMessage], _ key: String, book: AccountBook?) throws -> ReplyBar {
