@@ -586,8 +586,9 @@ private struct AccountRow: View {
     static let column: CGFloat = 76
     /// The "…"'s slot and its gap, kept on every row so nothing moves.
     static let trailing: CGFloat = 6 + 10 + 30
-    /// The "…"'s slot in the row, which its button stands centred over.
-    private static let slot: CGFloat = 30
+    /// The "…"'s slot in the row, which its button stands centred over: as wide as the one it replaced, so the figures
+    /// keep their places under the captions.
+    private static let slot: CGFloat = 22
 
     private var rowID: String { "settings.accounts.\(agent.rawValue).\(id ?? "default")" }
     private var moreID: String { "\(rowID).more" }
