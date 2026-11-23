@@ -675,18 +675,18 @@ private struct AccountRow: View {
     /// empty cell where it names no such window. Or, in their place, "No plan limits" where its agent says none apply
     /// (`limitsAvailable` false), else "Not reported yet".
     @ViewBuilder private var figures: some View {
-        if let facts, !facts.windows.isEmpty {
+        if let facts, !ReplyBar.limits(facts, now: .now).isEmpty {
             // Redrawn each minute while shown; each countdown is from the time of that drawing, since the schedule's own
-            // date is the minute's start, up to 59 s earlier.
+            // date is the minute's start, up to 59 s earlier. The figures are the reply bar's (`ReplyBar.limits`).
             TimelineView(.everyMinute) { _ in
-                let now = Date.now
+                let limits = ReplyBar.limits(facts, now: .now)
                 HStack(spacing: 0) {
                     ForEach(columns, id: \.self) { minutes in
-                        let window = facts.windows.first { $0.windowMinutes == minutes }
+                        let window = limits.first { $0.caption == AccountSwitchWords.caption(minutes: minutes) }
                         VStack(alignment: .trailing, spacing: 2) {
                             Text(window.map { "\($0.usedPercent)%" } ?? " ").font(Theme.ui(13)).monospacedDigit()
                                 .foregroundStyle((window?.usedPercent ?? 0) >= 90 ? Theme.amber : Theme.text2)
-                            Text(window.flatMap { AccountSwitchWords.resets($0, now: now) } ?? " ")
+                            Text(window?.resets ?? " ")
                                 .font(Theme.ui(11.5)).monospacedDigit().foregroundStyle(Theme.text3).lineLimit(1)
                         }
                         .frame(width: Self.column, alignment: .trailing)

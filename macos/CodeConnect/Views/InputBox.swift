@@ -7,8 +7,8 @@ import SwiftUI
 struct InputBox<Field: View, Leading: View, Trailing: View>: View {
     /// 50 before a run, 46 in one.
     let barHeight: CGFloat
-    /// A trailing control's panel is open: on two rows, the trailing one is drawn over the leading one and takes the
-    /// pointer first; else the leading one over the trailing one. An open panel is never under the other row.
+    /// A trailing control's panel or card is open: on two rows, the trailing one is drawn over the leading one and
+    /// takes the pointer first; else the leading one over the trailing one. An open panel is never under the other row.
     var trailingOpen = false
     @ViewBuilder let field: Field
     @ViewBuilder let leading: Leading

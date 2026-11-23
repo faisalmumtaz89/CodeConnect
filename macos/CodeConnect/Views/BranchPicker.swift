@@ -67,8 +67,8 @@ struct BranchRow: View {
         let placed = StartPanel.place(widest: BranchMenu.width, leading: frame.minX, box: startBox)
         return BranchMenu(
             git: git, folder: folder, running: context.runningFolders, place: newName == nil ? place : nil,
-            // Inside the pane by the start form's one rule (`StartPanel`), not as narrow as its row: beside the model
-            // button the row is narrow, and its names would be cut that need not be.
+            // Inside the box by the start form's one rule (`StartPanel`), not as narrow as its chip, whose names would
+            // be cut that need not be.
             shownRows: shown, width: placed.width
         ) { chosen in
             if let chosen {
