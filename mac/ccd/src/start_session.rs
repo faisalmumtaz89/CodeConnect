@@ -50,13 +50,31 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// no request; a sign-in's end is pushed when its login ends.
 async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessage {
     let environment = phone_environment();
-    let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
-    let claude = claude_path(&environment, daemon.config.claude_bin.as_deref()).await;
+    // Only a sign-in and a removal run their agent; every other call is answered from the store and what is held.
+    let runs_agent = matches!(
+        message,
+        ClientMessage::SignInAccount { .. } | ClientMessage::RemoveAccount { .. }
+    );
+    let (codex, claude) = if runs_agent {
+        (
+            codex_path(&environment, daemon.config.codex_bin.as_deref()).await,
+            claude_path(&environment, daemon.config.claude_bin.as_deref()).await,
+        )
+    } else {
+        (None, None)
+    };
     let agents = crate::accounts::Agents {
         codex: codex.as_deref(),
         claude: claude.as_deref(),
     };
     let changes = !matches!(message, ClientMessage::ListAccounts { .. });
+    // An account added or removed: the sign-ins are read again behind the answer.
+    if matches!(
+        message,
+        ClientMessage::AddAccount { .. } | ClientMessage::RemoveAccount { .. }
+    ) {
+        daemon.account_facts.forget_signed();
+    }
     let chosen = match &message {
         ClientMessage::ActivateAccount { agent, .. } => Some(agent.clone()),
         _ => None,
@@ -72,9 +90,10 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                 &daemon.store,
                 &daemon.sign_ins,
                 move || {
-                    // What the account said of itself was its old sign-in's.
+                    // What the account said of itself was its old sign-in's: read again, with its sign-in.
                     ended.account_facts.forget(&signed);
-                    tokio::spawn(async move { push_accounts(&ended).await });
+                    ended.account_facts.forget_signed();
+                    tokio::spawn(async move { refresh_facts(&ended).await });
                 },
                 &environment,
                 agents,
@@ -109,12 +128,12 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                     .unwrap_or_else(|err| {
                         crate::accounts::unavailable(request_id, "answer", anyhow::anyhow!("{err}"))
                     });
-            crate::accounts::with_signed_in(&environment, agents, reply).await
+            reply
         }
     };
     let reply = daemon.account_facts.told(daemon.sign_ins.marked(reply));
-    // A device asking for the listing is what reads the accounts' own facts again, when they are old.
-    if !changes && matches!(reply, ServerMessage::Accounts { .. }) {
+    // Behind every answer, each account's sign-in is read again, and its facts when they are old, then pushed.
+    if matches!(reply, ServerMessage::Accounts { .. }) {
         let daemon = Arc::clone(daemon);
         tokio::spawn(async move { refresh_facts(&daemon).await });
     }
@@ -143,15 +162,8 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
     reply
 }
 
-/// The accounts listing, read once and pushed to every connection that reads accounts.
+/// The accounts listing, with what is held, pushed to every connection that reads accounts.
 async fn push_accounts(daemon: &Arc<Daemon>) {
-    let environment = phone_environment();
-    let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
-    let claude = claude_path(&environment, daemon.config.claude_bin.as_deref()).await;
-    let agents = crate::accounts::Agents {
-        codex: codex.as_deref(),
-        claude: claude.as_deref(),
-    };
     let store = daemon.store.clone();
     let Ok(listing) =
         tokio::task::spawn_blocking(move || crate::accounts::listing(&store, None)).await
@@ -159,31 +171,36 @@ async fn push_accounts(daemon: &Arc<Daemon>) {
         return;
     };
     if matches!(listing, ServerMessage::Accounts { .. }) {
-        let listing = crate::accounts::with_signed_in(&environment, agents, listing).await;
         let _ = daemon
             .accounts_tx
             .send(daemon.account_facts.told(daemon.sign_ins.marked(listing)));
     }
 }
 
-/// Each account, and each agent's Default, whose facts are old or missing and not being read, read again (one read
-/// at a time per account, all at once), then the listing pushed once.
+/// The accounts' sign-ins and facts read again where they are old ([`crate::accounts::Facts`]), then pushed once.
+/// One refresh at a time: a call during one has it go round once more, so what that call changed is read too.
 pub(crate) async fn refresh_facts(daemon: &Arc<Daemon>) {
-    let environment = phone_environment();
-    let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
-    let claude = claude_path(&environment, daemon.config.claude_bin.as_deref()).await;
+    if !daemon.account_facts.begin_refresh() {
+        return;
+    }
+    loop {
+        refresh_once(daemon).await;
+        if !daemon.account_facts.end_refresh() {
+            break;
+        }
+    }
+}
+
+/// One round of [`refresh_facts`]: when the sign-ins are old, every account's read again at once; each account, and
+/// each agent's Default, whose facts are old or missing and not being read, read again (one read at a time per
+/// account, all at once); then the listing pushed. Nothing old, nothing is started and nothing pushed. Every read is
+/// bounded, so one agent that does not answer holds no other account's.
+async fn refresh_once(daemon: &Arc<Daemon>) {
     let Ok(accounts) = daemon.store.accounts() else {
         return;
     };
-    // Each account and Default of an agent on this computer, by its key.
     let mut wanted: Vec<(String, AgentKind, Option<crate::store::Account>)> = Vec::new();
-    for (agent, present) in [
-        (AgentKind::Codex, codex.is_some()),
-        (AgentKind::Claude, claude.is_some()),
-    ] {
-        if !present {
-            continue;
-        }
+    for agent in [AgentKind::Codex, AgentKind::Claude] {
         wanted.push((crate::accounts::default_key(&agent), agent.clone(), None));
         for account in accounts
             .iter()
@@ -194,8 +211,25 @@ pub(crate) async fn refresh_facts(daemon: &Arc<Daemon>) {
     }
     let keys: Vec<String> = wanted.iter().map(|(key, _, _)| key.clone()).collect();
     let claimed = daemon.account_facts.claim_stale(&keys);
-    if claimed.is_empty() {
+    let signed = daemon.account_facts.signed_stale();
+    if claimed.is_empty() && !signed {
         return;
+    }
+    let environment = phone_environment();
+    let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
+    let claude = claude_path(&environment, daemon.config.claude_bin.as_deref()).await;
+    if signed {
+        let agents = crate::accounts::Agents {
+            codex: codex.as_deref(),
+            claude: claude.as_deref(),
+        };
+        let store = daemon.store.clone();
+        if let Ok(listing) =
+            tokio::task::spawn_blocking(move || crate::accounts::listing(&store, None)).await
+        {
+            let listing = crate::accounts::with_signed_in(&environment, agents, listing).await;
+            daemon.account_facts.keep_signed(&listing);
+        }
     }
     let root = protocol::root_dir();
     let reads = wanted

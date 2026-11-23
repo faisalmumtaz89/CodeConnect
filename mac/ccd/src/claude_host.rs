@@ -7162,6 +7162,7 @@ mod tests {
     /// `rate_limit_event` on a Default run leaves the Default's facts to be read anew, and is acknowledged.
     #[tokio::test]
     async fn a_rate_limit_event_reads_the_runs_account_again() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = rig();
         let mut played = live_run(&rig).await;
         let key = crate::accounts::default_key(&AgentKind::Claude);
@@ -7175,13 +7176,13 @@ mod tests {
                 read_at: protocol::time::now_rfc3339(),
             }),
         );
-        assert!(
-            rig.daemon
-                .account_facts
-                .claim_stale(std::slice::from_ref(&key))
-                .is_empty(),
-            "fresh before"
-        );
+        let held = |daemon: &Daemon| {
+            let listing = crate::accounts::listing(&daemon.store, None);
+            serde_json::to_string(&daemon.account_facts.told(listing))
+                .unwrap()
+                .contains("default@example.test")
+        };
+        assert!(held(&rig.daemon), "held before");
         sdk(
             &mut played.write,
             3,
@@ -7190,13 +7191,14 @@ mod tests {
         )
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
-        assert_eq!(
-            rig.daemon
-                .account_facts
-                .claim_stale(std::slice::from_ref(&key)),
-            [key],
-            "read again"
-        );
+        // Read again: this rig's claude is none, so what is held now is nothing found.
+        for _ in 0..200 {
+            if !held(&rig.daemon) {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        assert!(!held(&rig.daemon), "read again");
         stop(&played.dir);
     }
 

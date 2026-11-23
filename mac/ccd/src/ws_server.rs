@@ -6716,6 +6716,124 @@ mod tests {
         );
     }
 
+    /// **Every accounts call answers at once, and what the agents say follows by push** (0e's rule, 2026-11-23): an
+    /// add answers within a bound while its agent takes 3 s to say whether it is signed in, which then arrives pushed;
+    /// a sign-in answers at once and, at the login's end, its sign-in and its own facts are pushed with no list; and a
+    /// list right after a fresh read answers from what is held and starts no agent.
+    #[tokio::test]
+    async fn an_accounts_call_answers_at_once_and_what_its_agent_says_follows_by_push() {
+        let _env = crate::ProcessEnvRead::take();
+        use protocol::agent::AgentKind;
+        let agents =
+            std::env::temp_dir().join(format!("ccw-push.{}", &protocol::uid::new().unwrap()[20..]));
+        std::fs::create_dir_all(&agents).unwrap();
+        let codex = crate::accounts::tests::stand_in_codex(&agents);
+        std::fs::write(agents.join("slowstatus"), "").unwrap();
+        let claude = agents.join("signed-out");
+        std::fs::write(&claude, "#!/bin/sh\nexit 1\n").unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&claude)
+            .status()
+            .unwrap();
+        let (server, _) = live_server(protocol::config::Config {
+            codex_bin: Some(codex.display().to_string()),
+            claude_bin: Some(claude.display().to_string()),
+            ..protocol::config::Config::default()
+        })
+        .await;
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let send = |message: ClientMessage| Message::Text(serde_json::to_string(&message).unwrap());
+        // The next frame of `type` naming `request` (a pushed listing names none) that `wanted` accepts, within 20 s.
+        async fn until(
+            phone: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+            request: Option<&str>,
+            wanted: impl Fn(&serde_json::Value) -> bool,
+        ) -> serde_json::Value {
+            let started = std::time::Instant::now();
+            while started.elapsed() < Duration::from_secs(20) {
+                if let Frame::Json(frame) = next_frame(phone, Duration::from_secs(1)).await {
+                    if frame["type"] == "accounts"
+                        && frame["request_id"].as_str() == request
+                        && wanted(&frame)
+                    {
+                        return frame;
+                    }
+                }
+            }
+            panic!("no such frame within 20 s");
+        }
+        let runs = || std::fs::read_to_string(agents.join("runs")).unwrap_or_default();
+
+        // Added: answered at once, though its agent takes 3 s to say whether it is signed in; that follows by push.
+        let started = std::time::Instant::now();
+        phone
+            .send(send(ClientMessage::AddAccount {
+                request_id: "p1".into(),
+                agent: AgentKind::Codex,
+                label: "B".into(),
+            }))
+            .await
+            .unwrap();
+        let added = until(&mut phone, Some("p1"), |_| true).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "answered in {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            added["accounts"][0].get("signed_in"),
+            None,
+            "not read yet: {added}"
+        );
+        let b = added["accounts"][0]["id"].as_str().unwrap().to_string();
+        until(&mut phone, None, |frame| {
+            frame["accounts"][0]["signed_in"] == false
+        })
+        .await;
+
+        // Signed in: answered at once; at the login's end its sign-in and its own facts are pushed, with no list.
+        phone
+            .send(send(ClientMessage::SignInAccount {
+                request_id: "p2".into(),
+                account_id: b.clone(),
+            }))
+            .await
+            .unwrap();
+        let signing = until(&mut phone, Some("p2"), |_| true).await;
+        assert_eq!(signing["accounts"][0]["signing_in"], true, "{signing}");
+        let read = until(&mut phone, None, |frame| {
+            frame["accounts"][0]["signed_in"] == true
+                && frame["accounts"][0]["facts"]["email"].is_string()
+        })
+        .await;
+        assert_eq!(
+            read["accounts"][0]["facts"]["email"],
+            format!("{b}@example.test"),
+            "{read}"
+        );
+
+        // Listed right after: answered from what is held, and no agent started.
+        let before = runs();
+        phone
+            .send(send(ClientMessage::ListAccounts {
+                request_id: "p3".into(),
+            }))
+            .await
+            .unwrap();
+        let listed = until(&mut phone, Some("p3"), |_| true).await;
+        assert_eq!(listed["accounts"][0]["signed_in"], true, "{listed}");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            runs(),
+            before,
+            "a list right after a fresh read started an agent"
+        );
+        let _ = std::fs::remove_dir_all(&agents);
+    }
+
     /// **Accounts are kept and chosen by a paired device only** (minor 48): advertised to it and not to the bootstrap
     /// token, which is refused all three asks. An account is added for its agent, made active, and set back to
     /// Default; another agent's id is refused and nothing changes.
@@ -6875,7 +6993,12 @@ mod tests {
 
         // One label per agent: the same label again is the account it made, not a twin; a name is 1 to 64 characters.
         let again = ask(&mut phone, add("a7", AgentKind::Codex, "  Work "), "a7").await;
-        assert_eq!(again["accounts"], added["accounts"], "{again}");
+        // The same account, its row as held now (its sign-in read since the add).
+        assert_eq!(again["accounts"].as_array().unwrap().len(), 1, "{again}");
+        assert_eq!(
+            again["accounts"][0]["id"], added["accounts"][0]["id"],
+            "{again}"
+        );
         for label in ["   ", &"x".repeat(65)] {
             let refused = ask(&mut phone, add("a8", AgentKind::Codex, label), "a8").await;
             assert_eq!(

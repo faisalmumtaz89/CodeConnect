@@ -331,12 +331,21 @@ pub(crate) fn listing(
     }
 }
 
-/// What each account (and each agent's Default, keyed [`default_key`]) says of itself, read on demand and kept in memory
-/// only: never stored, never logged. A read happens only when a device asks for the listing and what is held for
-/// that account is older than [`FACTS_FRESH`] (or missing), one at a time per account.
+/// What each account (and each agent's Default, keyed [`default_key`]) says of itself, and each account's sign-in, read
+/// behind the accounts calls and kept in memory only: never stored, never logged. A read, found or not, is held for
+/// [`FACTS_FRESH`]; the sign-ins are read again once that long has passed, or when a call may have changed one.
+/// One refresh runs at a time; a call during one asks it to go round once more.
 #[derive(Default)]
 pub(crate) struct Facts {
-    known: std::sync::Mutex<HashMap<String, (protocol::ws::AccountFacts, std::time::Instant)>>,
+    known:
+        std::sync::Mutex<HashMap<String, (Option<protocol::ws::AccountFacts>, std::time::Instant)>>,
+    /// Each account's `signed_in` and `not_separate` as its agent last said ([`with_signed_in`]), read behind every
+    /// accounts call; an account not read yet has none, so its row says nothing of its sign-in.
+    signed: std::sync::Mutex<HashMap<String, (Option<bool>, bool)>>,
+    /// When the sign-ins were last read; none when a call may have changed one since.
+    signed_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// A refresh is running, and whether a call asked for another after it.
+    refreshing: std::sync::Mutex<(bool, bool)>,
     reading: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
@@ -370,13 +379,46 @@ impl Facts {
 
     /// The read of `key` is over: what it found, if anything, is kept.
     pub(crate) fn read(&self, key: &str, facts: Option<protocol::ws::AccountFacts>) {
-        if let Some(facts) = facts {
-            self.known
-                .lock()
-                .unwrap()
-                .insert(key.to_string(), (facts, std::time::Instant::now()));
-        }
+        self.known
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), (facts, std::time::Instant::now()));
         self.reading.lock().unwrap().remove(key);
+    }
+
+    /// Whether the sign-ins are to be read again: never read, read [`FACTS_FRESH`] ago, or a call may have changed one.
+    pub(crate) fn signed_stale(&self) -> bool {
+        self.signed_at
+            .lock()
+            .unwrap()
+            .is_none_or(|at| at.elapsed() >= FACTS_FRESH)
+    }
+
+    /// A call may have changed a sign-in (an account added, removed, or a sign-in ended): the next refresh reads them.
+    pub(crate) fn forget_signed(&self) {
+        *self.signed_at.lock().unwrap() = None;
+    }
+
+    /// Whether this caller runs the refresh: false while one runs, which then goes round once more.
+    pub(crate) fn begin_refresh(&self) -> bool {
+        let mut refreshing = self.refreshing.lock().unwrap();
+        if refreshing.0 {
+            refreshing.1 = true;
+            return false;
+        }
+        *refreshing = (true, false);
+        true
+    }
+
+    /// The refresh's round is over: whether a call asked for another, which the caller then runs.
+    pub(crate) fn end_refresh(&self) -> bool {
+        let mut refreshing = self.refreshing.lock().unwrap();
+        if refreshing.1 {
+            refreshing.1 = false;
+            return true;
+        }
+        refreshing.0 = false;
+        false
     }
 
     /// What is held for `key` goes (its sign-in changed, or it was removed).
@@ -384,8 +426,23 @@ impl Facts {
         self.known.lock().unwrap().remove(key);
     }
 
-    /// `reply`, an accounts listing, with what is held: each Codex account's facts, the Codex Default's, and an
-    /// account marked `same_as_another` when another account of its agent, or its Default, has its email.
+    /// What `listing` ([`with_signed_in`]'s) says of each account's sign-in, kept for the answers that follow.
+    pub(crate) fn keep_signed(&self, listing: &protocol::ws::ServerMessage) {
+        if let protocol::ws::ServerMessage::Accounts { accounts, .. } = listing {
+            let mut signed = self.signed.lock().unwrap();
+            for account in accounts {
+                signed.insert(
+                    account.id.clone(),
+                    (account.signed_in, account.not_separate),
+                );
+            }
+            *self.signed_at.lock().unwrap() = Some(std::time::Instant::now());
+        }
+    }
+
+    /// `reply`, an accounts listing, with what is held: each account's sign-in as last read, each account's facts,
+    /// each agent's Default's, and an account marked `same_as_another` when another account of its agent, or its
+    /// Default, has its email.
     pub(crate) fn told(
         &self,
         mut reply: protocol::ws::ServerMessage,
@@ -396,14 +453,18 @@ impl Facts {
         else {
             return reply;
         };
+        let signed = self.signed.lock().unwrap();
         let known = self.known.lock().unwrap();
         for account in accounts.iter_mut() {
-            account.facts = known.get(&account.id).map(|(facts, _)| facts.clone());
+            if let Some(&(signed_in, not_separate)) = signed.get(&account.id) {
+                (account.signed_in, account.not_separate) = (signed_in, not_separate);
+            }
+            account.facts = known.get(&account.id).and_then(|(facts, _)| facts.clone());
         }
         for agent in [AgentKind::Codex, AgentKind::Claude] {
             let default = known
                 .get(&default_key(&agent))
-                .map(|(facts, _)| facts.clone());
+                .and_then(|(facts, _)| facts.clone());
             // Two of one agent's accounts, its Default among them, signed in as one email are one account.
             let emails: Vec<String> = accounts
                 .iter()
@@ -741,13 +802,7 @@ pub(crate) async fn sign_in(
     }
     // The answer is read before the login starts, so it says this account is signing in, and the push at the
     // login's end is the newer.
-    let reply = with_signed_in(
-        environment,
-        agents,
-        listing(store, Some(request_id.clone())),
-    )
-    .await;
-    let reply = sign_ins.marked(reply);
+    let reply = sign_ins.marked(listing(store, Some(request_id.clone())));
     let mut child = match login.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -949,7 +1004,7 @@ pub(crate) fn unavailable(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::path::Path;
@@ -957,12 +1012,13 @@ mod tests {
 
     /// A stand-in codex in `dir`: `login` writes `auth.json` into its `CODEX_HOME`, or, while `dir/hang` exists, waits
     /// as the npm launcher does: its native login a child (pid in `dir/kid`), passed SIGTERM and nothing else (its own
-    /// pid in `dir/pid`); `login status` succeeds once that home has one.
-    fn stand_in_codex(dir: &Path) -> std::path::PathBuf {
+    /// pid in `dir/pid`); `login status` succeeds once that home has one, after 3 s while `dir/slowstatus` exists.
+    /// Each run's first two words go into `dir/runs`.
+    pub(crate) fn stand_in_codex(dir: &Path) -> std::path::PathBuf {
         let path = dir.join("codex");
         std::fs::write(
             &path,
-            "#!/bin/sh\nhere=$(dirname \"$0\")\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then [ -f \"$CODEX_HOME/auth.json\" ] || [ -f \"$here/keyring-login\" ]; exit $?; fi\n\
+            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$1 $2\" >> \"$here/runs\"\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then [ -e \"$here/slowstatus\" ] && sleep 3; [ -f \"$CODEX_HOME/auth.json\" ] || [ -f \"$here/keyring-login\" ]; exit $?; fi\n\
              if [ \"$1\" = login ] && [ -e \"$here/keyring\" ]; then echo '{}' > \"$here/keyring-login\"; exit 0; fi\n\
              if [ \"$1\" = login ]; then if [ -e \"$here/hang\" ]; then sleep 30 & kid=$!; echo $kid > \"$here/kid\"; echo $$ > \"$here/pid\"; trap 'kill -TERM $kid; exit 0' TERM; wait; fi; echo '{}' > \"$CODEX_HOME/auth.json\"; fi\n\
              if [ \"$1\" = app-server ] && [ -e \"$here/hangfacts\" ]; then sleep 120 & kid=$!; echo $kid > \"$here/kid\"; wait; fi\n\
