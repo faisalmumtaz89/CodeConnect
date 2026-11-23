@@ -322,6 +322,7 @@ public final class DaemonConnection {
     private var deleteWaiters: [String: [Waiter<DeleteSessionResult>]] = [:]
     private var testPushWaiters: [String: [Waiter<TestPushResult>]] = [:]
     private var folderTrustWaiters: [String: [Waiter<[FolderAnswer]>]] = [:]
+    private var accountsWaiters: [String: [Waiter<AccountBook>]] = [:]
     private var diffWaiters: [String: [Waiter<SessionDiff>]] = [:]
     /// Keyed by the phone's own `request_id`, not by session: the reply echoes
     /// it back, and a phone may hold a stop and a message in flight on one run.
@@ -1117,6 +1118,41 @@ public final class DaemonConnection {
             send: .forgetFolderTrust(requestID: requestID, path: path))
     }
 
+    /// Each agent's accounts on the computer and the one its starts use (minor 48).
+    public func listAccounts() async throws -> AccountBook {
+        try await accountsRequest { .listAccounts(requestID: $0) }
+    }
+
+    /// Adds an account for `agent` named `label`; every account, once added. Not made the one its starts use.
+    public func addAccount(agent: StartAgent, label: String) async throws -> AccountBook {
+        try await accountsRequest { .addAccount(requestID: $0, agent: agent.rawValue, label: label) }
+    }
+
+    /// Makes `accountID` the account `agent`'s next starts use, nil its Default; every account, once made.
+    public func activateAccount(agent: StartAgent, accountID: String?) async throws -> AccountBook {
+        try await accountsRequest { .activateAccount(requestID: $0, agent: agent.rawValue, accountID: accountID) }
+    }
+
+    /// Removes `accountID` after its agent's own sign-out; every account, once removed.
+    public func removeAccount(accountID: String) async throws -> AccountBook {
+        try await accountsRequest { .removeAccount(requestID: $0, accountID: accountID) }
+    }
+
+    /// Starts `accountID`'s sign-in with its agent's own login in a browser on the computer; every account, that one
+    /// signing in. Its end comes in a pushed listing.
+    public func signInAccount(accountID: String) async throws -> AccountBook {
+        try await accountsRequest { .signInAccount(requestID: $0, accountID: accountID) }
+    }
+
+    /// One accounts request at a time: a change is never sent while another is still unanswered.
+    private func accountsRequest(_ message: (String) -> ClientMessage) async throws -> AccountBook {
+        if accountsWaiters.values.contains(where: { $0.contains { $0.continuation != nil } }) {
+            throw ConnectionError.transport("A request for this is already in flight")
+        }
+        let requestID = "ac-" + UUID().uuidString
+        return try await request(key: requestID, store: \.accountsWaiters, send: message(requestID))
+    }
+
     /// On-demand `git diff` for one run. Correlated by the reference like the
     /// other single-keyed replies, so the same one-in-flight-per-key rule holds.
     public func diff(session: String) async throws -> SessionDiff {
@@ -1363,6 +1399,10 @@ public final class DaemonConnection {
         folderTrustWaiters = [:]
         for queue in folderAnswers.values { for w in queue { w.continuation?.resume(throwing: error) } }
 
+        let accounts = accountsWaiters
+        accountsWaiters = [:]
+        for queue in accounts.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
         let interrupts = interruptWaiters
         interruptWaiters = [:]
         for queue in interrupts.values { for w in queue { w.continuation?.resume(throwing: error) } }
@@ -1476,6 +1516,14 @@ public final class DaemonConnection {
             deliver(store: \.testPushWaiters, key: requestID, value: result)
         case .folderTrust(let requestID, let folders):
             deliver(store: \.folderTrustWaiters, key: requestID, value: folders)
+        case .accounts(let requestID, let book):
+            // A pushed listing names no request: the model keeps it (AppModel's own handling).
+            if let requestID { deliver(store: \.accountsWaiters, key: requestID, value: book) }
+        case .accountsRefused(let requestID, _, let message):
+            guard let waiter = accountsWaiters[requestID]?.first(where: { $0.continuation != nil }) else { break }
+            abandon(
+                store: \.accountsWaiters, key: requestID, ticket: waiter.ticket, with: AccountsRefusal(message: message),
+                keepTombstone: false)
         case .diff(let diff):
             deliver(store: \.diffWaiters, key: diff.sessionID, value: diff)
         // **The echoed session is checked, not ignored.** Correlation is by

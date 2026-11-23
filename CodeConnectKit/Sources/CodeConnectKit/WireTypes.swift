@@ -83,6 +83,11 @@ public enum EngineNotice {
     public static let modeSet = "mode_set"
     /// Claude compacted the conversation (`/compact`, or on its own).
     public static let compacted = "compacted"
+    /// A run moving to another account could not start there (`{message, switched_to}`, minor 48).
+    public static let switchFailed = "switch_failed"
+    /// A run moved onto an account whose plan lacks its model, going on with that plan's default (`{from_model,
+    /// from_label, to_model, to_label, account}`, minor 48).
+    public static let modelUnavailable = "model_unavailable"
 }
 
 /// The two lines ccd sends to wake an idle Codex agent for its mail
@@ -614,6 +619,13 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// no `menus` (it is not live): the label of the entry the run's model is, by the rule `RunSettings.modelName`
     /// names a live run's by. `nil` for any other run, for a model no entry runs, and from an older daemon.
     public let modelLabel: String?
+    /// The account the run's process runs on (minor 48), as recorded at its start or newest relaunch: a moved run names
+    /// the old one until its next message starts it on the new one. `nil` for a run CodeConnect did not start, for an
+    /// account since removed, and from an older daemon: not known, never Default.
+    public let account: RunAccount?
+    /// A move to another account under way (minor 48): its agent's active account changed and this run has not yet
+    /// started on it. `nil` when none is pending, from an older daemon, and for a value this build does not know.
+    public let switching: RunSwitching?
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
     /// last ended. `nil` outside a repository, on a detached head, before the
     /// first read, and from an older daemon.
@@ -646,6 +658,8 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case effort
         case menus
         case modelLabel = "model_label"
+        case account
+        case switching
         case gitBranch = "git_branch"
         case diffStat = "diff_stat"
     }
@@ -674,6 +688,8 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         effort = try c.decodeIfPresent(SessionFact.self, forKey: .effort)
         menus = try c.decodeIfPresent(RunMenus.self, forKey: .menus)
         modelLabel = try c.decodeIfPresent(String.self, forKey: .modelLabel)
+        account = try c.decodeIfPresent(RunAccount.self, forKey: .account)
+        switching = try c.decodeIfPresent(String.self, forKey: .switching).flatMap(RunSwitching.init(rawValue:))
         gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
         diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
     }
@@ -782,6 +798,27 @@ public struct RunMenus: Codable, Sendable, Hashable {
         case models, modes
         case selectedModel = "selected_model"
     }
+}
+
+/// Where a run's move to another account stands (`SessionSummary.switching`, minor 48).
+public enum RunSwitching: String, Codable, Sendable, Hashable {
+    /// A turn, a card or a message the agent has not read is still going; it moves once idle.
+    case waiting
+    /// Its process ended at an idle point; its next message starts it on the new account.
+    case moved
+    /// Its start on the new account was refused: it reads as the relaunchable end it is, its own line says why.
+    case failed
+}
+
+/// An account a run runs on, as the daemon names it (`SessionSummary.account`, minor 48).
+public struct RunAccount: Codable, Sendable, Hashable {
+    /// The computer's id for it; `nil` for Default, the agent as it is on the computer.
+    public let id: String?
+    /// Its name as the person gave it, or "Default".
+    public let label: String
+
+    /// Default is told by its id alone: a person may name an account "Default".
+    public var isDefault: Bool { id == nil }
 }
 
 /// One model of a run's menu: the agent's own `value` (what a `set_model` carries), its label and its
@@ -945,6 +982,8 @@ public struct Capabilities: Codable, Sendable, Hashable {
     var servesCommandCatalog: Bool { advertises(["command_catalog"]) }
     /// `list_projects` and `start_session` are answerable.
     public var startsSessions: Bool { advertises(["start_session"]) }
+    /// `list_accounts`, `add_account` and `activate_account` are answerable (minor 48, paired devices only).
+    public var keepsAccounts: Bool { advertises(["accounts"]) }
     /// `get_project_git` is answerable, and `start_session` takes a
     /// `worktree` (minor 29). Without it a `worktree` is ignored and the start
     /// runs in the folder, so none is sent.
@@ -2029,6 +2068,21 @@ public enum ClientMessage: Sendable {
     /// Forget one folder's answer, so the next start there asks again; answered
     /// `folderTrust`.
     case forgetFolderTrust(requestID: String, path: String)
+    /// Each agent's accounts on the computer and the one its starts use, answered `accounts` or `accounts_refused`.
+    /// Minor 48, sent only when `Capabilities.keepsAccounts`.
+    case listAccounts(requestID: String)
+    /// Adds an account for `agent` named `label` (1 to 64 characters); it is not made the one its starts use.
+    /// Answered `accounts` or `accounts_refused`.
+    case addAccount(requestID: String, agent: String, label: String)
+    /// Makes `accountID` the account `agent`'s next starts use, or its Default for nil. Answered `accounts` or
+    /// `accounts_refused`.
+    case activateAccount(requestID: String, agent: String, accountID: String?)
+    /// Signs `accountID` in with its agent's own login in a browser on the computer. Answered at once with `accounts`,
+    /// that account `signing_in`; its end (finished, replaced, or after ten minutes) comes in a pushed `accounts`.
+    case signInAccount(requestID: String, accountID: String)
+    /// Removes `accountID` after its agent's own sign-out. Answered `accounts`, or `accounts_refused`
+    /// (`accounts_in_use` while a session runs on it, `accounts_unavailable` when it could not be signed out).
+    case removeAccount(requestID: String, accountID: String)
     /// One folder's repository: its checkouts and free branches. Minor 29,
     /// sent only when `Capabilities.startsInWorktrees`.
     case getProjectGit(path: String)
@@ -2077,6 +2131,8 @@ extension ClientMessage: Encodable {
         case submit
         case turnID = "turn_id"
         case trust
+        case label
+        case accountID = "account_id"
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -2222,6 +2278,28 @@ extension ClientMessage: Encodable {
             try c.encode("forget_folder_trust", forKey: .type)
             try c.encode(requestID, forKey: .requestID)
             try c.encode(path, forKey: .path)
+        case .listAccounts(let requestID):
+            try c.encode("list_accounts", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+        case .addAccount(let requestID, let agent, let label):
+            try c.encode("add_account", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(agent, forKey: .agent)
+            try c.encode(label, forKey: .label)
+        case .activateAccount(let requestID, let agent, let accountID):
+            try c.encode("activate_account", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(agent, forKey: .agent)
+            // Null names the Default, as the daemon reads an absent or null id.
+            try c.encode(accountID, forKey: .accountID)
+        case .signInAccount(let requestID, let accountID):
+            try c.encode("sign_in_account", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(accountID, forKey: .accountID)
+        case .removeAccount(let requestID, let accountID):
+            try c.encode("remove_account", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(accountID, forKey: .accountID)
         case .getProjectGit(let path):
             try c.encode("get_project_git", forKey: .type)
             try c.encode(path, forKey: .path)
@@ -2495,6 +2573,12 @@ public enum ServerMessage: Sendable {
     /// `forget_folder_trust`: every answer the computer keeps, newest first, once
     /// the request's change is made.
     case folderTrust(requestID: String, folders: [FolderAnswer])
+    /// Every account and the one each agent's starts use: the answer to an accounts request once its change is made,
+    /// naming it; or, with no `requestID`, pushed whenever the list changes on the computer. The latest is kept.
+    case accounts(requestID: String?, book: AccountBook)
+    /// A refused `list_accounts`, `add_account` or `activate_account`, naming the request: nothing changed. `code` is
+    /// `bad_request` or `accounts_unavailable`; `message` says why, in the computer's words.
+    case accountsRefused(requestID: String, code: String, message: String)
     /// The answer to `get_project_git`: nil when the folder is not a repository.
     case projectGit(path: String, git: StartGit?)
     /// The answer to `list_folder`.
@@ -2545,6 +2629,9 @@ extension ServerMessage: Decodable {
         case git
         case folders
         case truncated
+        case accounts
+        case active
+        case defaults
     }
 
     public init(from decoder: Decoder) throws {
@@ -2636,6 +2723,18 @@ extension ServerMessage: Decodable {
             self = .folderTrust(
                 requestID: try c.decode(String.self, forKey: .requestID),
                 folders: try c.decode([FolderAnswer].self, forKey: .folders))
+        case "accounts":
+            self = .accounts(
+                requestID: try c.decodeIfPresent(String.self, forKey: .requestID),
+                book: AccountBook(
+                    accounts: try c.decode([AgentAccount].self, forKey: .accounts),
+                    active: try c.decode([ActiveAccount].self, forKey: .active),
+                    defaults: try c.decodeIfPresent([DefaultAccount].self, forKey: .defaults) ?? []))
+        case "accounts_refused":
+            self = .accountsRefused(
+                requestID: try c.decode(String.self, forKey: .requestID),
+                code: try c.decode(String.self, forKey: .code),
+                message: try c.decode(String.self, forKey: .message))
         case "project_git":
             self = .projectGit(
                 path: try c.decode(String.self, forKey: .path),

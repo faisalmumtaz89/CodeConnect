@@ -240,6 +240,11 @@ extension Event {
     }
 
     public var exitCode: Int? { payload["exit_code"]?.intValue }
+    /// The account a run was moved to, by its name (`switched_to`, minor 48): on the end ccd files for a switch, and
+    /// on its `switch_failed` notice when the start there was refused.
+    var switchedToLabel: String? { payload["switched_to"]?["label"]?.stringValue }
+    /// The id of that account (nil: the agent's Default), for the name this app's account book knows it by.
+    var switchedToID: String? { payload["switched_to"]?["account_id"]?.stringValue }
     var lastAssistantMessage: String? { payload["last_assistant_message"]?.stringValue }
 
     public var linkStateFact: (link: String, reason: String?)? {

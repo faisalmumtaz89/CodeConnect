@@ -388,6 +388,9 @@ public final class AppModel {
             // foreground check, and this is where its prerequisites arrive.
             // Debounced, so it is at most a daily status GET.
             self.foregroundRelayRefresh()
+            // The account book, so a switch's rows name an account by its email; kept current by the computer's
+            // pushes from then on. Asked only of a computer that keeps accounts.
+            Task { await self.loadAccounts() }
         }
         connection.onDeviceToken = { [weak self] token in self?.adopt(deviceToken: token) }
         connection.onTransportSettled = { [weak self] useTLS in
@@ -966,6 +969,18 @@ public final class AppModel {
                 keepFixtureLinkFresh()
                 return
             }
+            // `-CC_SWITCH <recording>` replays the daemon's recording of a run moved to another account, to the step
+            // `-CC_SWITCH_STEP` names (`SwitchFixtures`).
+            if let recording = SwitchFixtures.recording {
+                fixturesActive = true
+                connection.fixtureAnswers = true
+                connection.simulateConnectedForTesting()
+                for message in SwitchFixtures.frames(recording: recording) {
+                    connection.injectForTesting(message)
+                }
+                keepFixtureLinkFresh()
+                return
+            }
             // `-CC_FIXTURE stacked` is the same fleet with one agent holding two
             // decisions — the state where "count the agents" and "count the
             // cards" stop agreeing.
@@ -1185,6 +1200,158 @@ public final class AppModel {
 
     /// This computer's projects, and the sessions this phone started on it.
     public let starter = SessionStarter()
+
+    // MARK: Accounts (minor 48)
+
+    /// This computer's accounts per agent and the one each agent's starts use, once asked; nil before.
+    /// Held in memory only: no account's email is written to the cache or the store.
+    public private(set) var accountBook: AccountBook? {
+        didSet {
+            guard accountBook != oldValue else { return }
+            for state in states.values { state.accountNamesChanged() }
+        }
+    }
+
+    /// An account's email as this computer's account book knows it, for a switch's rows on run `key`: by its id (nil:
+    /// the agent's Default), under the run's agent. Nil while the book is not in, or for an account it no longer lists.
+    private func accountEmail(run key: String, id: String?) -> String? {
+        guard let agent = summary(for: key).flatMap({ StartAgent(rawValue: $0.agent.rawValue) }) else { return nil }
+        return accountBook?.facts(for: agent, accountID: id)?.email
+    }
+    /// What the computer said when it refused, or could not answer, the last accounts request; cleared as the next
+    /// one starts.
+    public private(set) var accountsProblem: String?
+    /// An accounts request is in flight; one at a time.
+    public private(set) var accountsBusy = false
+
+    /// This computer keeps accounts per agent: it advertises `accounts`. A computer that does not shows none.
+    public var keepsAccounts: Bool {
+        #if DEBUG
+            if fixtureAccountBook != nil { return true }
+        #endif
+        return connection.capabilities?.keepsAccounts == true
+    }
+
+    /// Asks this computer for its accounts.
+    public func loadAccounts() async {
+        #if DEBUG
+            if let fixture = fixtureAccountBook {
+                accountBook = fixture
+                // `-CC_ACCOUNTS_PROBLEM <words>`: the page as it stands after the computer refused a change.
+                accountsProblem = UserDefaults.standard.string(forKey: "CC_ACCOUNTS_PROBLEM")
+                return
+            }
+        #endif
+        _ = await accountsRequest { try await $0.listAccounts() }
+    }
+
+    /// Adds an account for `agent` named `label`; true once the computer has it.
+    @discardableResult
+    public func addAccount(agent: StartAgent, label: String) async -> Bool {
+        await accountsRequest { try await $0.addAccount(agent: agent, label: label) }
+    }
+
+    /// Makes `accountID` (nil: Default) the account `agent`'s next starts use; true once the computer has made it. Then
+    /// its sessions are asked for once, so the switch's sentence counts them now: the computer lists them only when
+    /// asked.
+    @discardableResult
+    public func activateAccount(agent: StartAgent, accountID: String?) async -> Bool {
+        guard await accountsRequest({ try await $0.activateAccount(agent: agent, accountID: accountID) }) else { return false }
+        refreshFleet()
+        return true
+    }
+
+    /// Whether an account can be added for `agent` now: not while an accounts request is out, nor while one of its
+    /// accounts is signing in (its row's line says so), so a second click never ends that sign-in for another account.
+    public func canAddAccount(agent: StartAgent) -> Bool {
+        !accountsBusy && !(accountBook?.accounts(for: agent).contains(where: \.signingIn) ?? false)
+    }
+
+    /// A click on `account`'s row: a signed-out one is signed in again, as its menu's Sign In Again… does, and never
+    /// becomes the account in use, so no session moves onto an account that can't start; any other is chosen.
+    @discardableResult
+    public func choose(_ account: AgentAccount) async -> Bool {
+        if account.signedOut { return await signInAccount(accountID: account.id) }
+        guard let agent = StartAgent(rawValue: account.agent) else { return false }
+        return await activateAccount(agent: agent, accountID: account.id)
+    }
+
+    /// The switch `agent`'s sessions on this computer are in (their summaries' `switching`), toward the account its
+    /// new starts now use; nil while none is moving.
+    public func accountSwitch(for agent: StartAgent) -> AccountSwitch? {
+        let moving = summaries.filter { summary in
+            guard summary.switching != nil else { return false }
+            switch (summary.agent, agent) {
+            case (.claude, .claude), (.codex, .codex): return true
+            default: return false
+            }
+        }
+        guard !moving.isEmpty else { return nil }
+        let active = accountBook?.activeID(for: agent)
+        let target = accountBook?.facts(for: agent, accountID: active)?.email
+            ?? active.flatMap { id in accountBook?.accounts(for: agent).first { $0.id == id }?.label }
+            ?? "Default"
+        return AccountSwitch(
+            target: target,
+            waiting: moving.count { $0.switching == .waiting },
+            moved: moving.count { $0.switching == .moved },
+            failed: moving.filter { $0.switching == .failed }.map(\.projectLabel))
+    }
+
+    /// Adds an account for `agent` and starts its sign-in in the browser at once; no name is asked of the person (an
+    /// account reads as its email once signed in). The name the computer keeps is composed: the agent's own name and the
+    /// next number no account of it bears, "Codex 2", within the computer's rule (1 to 64 characters, one per name).
+    @discardableResult
+    public func addAndSignIn(agent: StartAgent) async -> Bool {
+        let taken = Set(accountBook?.accounts(for: agent).map(\.label) ?? [])
+        let label = (2...).lazy.map { "\(agent.displayName) \($0)" }.first { !taken.contains($0) }!
+        guard await addAccount(agent: agent, label: label),
+            let added = accountBook?.accounts(for: agent).first(where: { $0.label == label })
+        else { return false }
+        return await signInAccount(accountID: added.id)
+    }
+
+    /// Removes `accountID` (its agent signs it out first); true once the computer has removed it.
+    @discardableResult
+    public func removeAccount(accountID: String) async -> Bool {
+        await accountsRequest { try await $0.removeAccount(accountID: accountID) }
+    }
+
+    /// Starts `accountID`'s sign-in in a browser on the computer; true once the computer has it going (that account
+    /// `signingIn` in the book). Its end arrives as a pushed listing.
+    @discardableResult
+    public func signInAccount(accountID: String) async -> Bool {
+        await accountsRequest { try await $0.signInAccount(accountID: accountID) }
+    }
+
+    private func accountsRequest(_ ask: (DaemonConnection) async throws -> AccountBook) async -> Bool {
+        guard keepsAccounts, !accountsBusy else { return false }
+        accountsProblem = nil
+        accountsBusy = true
+        defer { accountsBusy = false }
+        do {
+            accountBook = try await ask(connection)
+            accountsProblem = nil
+            return true
+        } catch {
+            accountsProblem = error.localizedDescription
+            return false
+        }
+    }
+
+    #if DEBUG
+        /// `-CC_ACCOUNTS_WIRE <frame>`: a recorded `accounts` reply (fixtures/accounts/minor-48-wire.json) this computer
+        /// is taken to answer with, read from the arguments as given, so a fixture launch draws its accounts.
+        private var fixtureAccountBook: AccountBook? {
+            guard fixturesActive else { return nil }
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let flag = arguments.firstIndex(of: "-CC_ACCOUNTS_WIRE"), flag + 1 < arguments.count,
+                case .accounts(_, let book)? = try? JSONDecoder().decode(
+                    ServerMessage.self, from: Data(arguments[flag + 1].utf8))
+            else { return nil }
+            return book
+        }
+    #endif
 
     /// Ask this computer for its projects. Only a computer that advertises
     /// `start_session` is asked; the answer arrives as `projects`.
@@ -1957,6 +2124,7 @@ public final class AppModel {
             self.fillWindow(of: key)
             if !self.launchSettled { self.settleLaunchIfCaughtUp() }
         }
+        fresh.accountName = { [weak self] id in self?.accountEmail(run: key, id: id) }
         fresh.codexTurns = { [weak self] in
             guard let controls = self?.codexControlsByKey[key] else { return ([], []) }
             return (controls.observedTurns, controls.retiredTurns)
@@ -2211,9 +2379,13 @@ public final class AppModel {
         case .testPushResult:
             // Same shape: the sheet's own request awaits the reply by id.
             break
-        case .folderTrust:
+        case .accounts(nil, let book):
+            // Pushed when the list changes on the computer (from any device, or a sign-in's end): the latest is kept.
+            accountBook = book
+        case .folderTrust, .accounts, .accountsRefused:
             // The same again: `listFolderTrust`, `setFolderTrust` and
-            // `forgetFolderTrust` each await their reply by id.
+            // `forgetFolderTrust`, and the accounts requests (answered or refused), each await
+            // their reply by id.
             break
         case .projects(let projects, let agents):
             starter.receive(projects: projects, agents: agents)

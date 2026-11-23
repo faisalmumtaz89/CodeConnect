@@ -1,0 +1,61 @@
+[
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "same@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-22T20:43:28.243Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        },
+        "id": "01M82FZRDH6Y8FMF274QGZ64CJ",
+        "label": "A",
+        "same_as_another": true
+      },
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "same@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-22T20:43:28.260Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        },
+        "id": "01M82FZRK3J7NV6QFE5Z7K31MM",
+        "label": "B",
+        "same_as_another": true
+      }
+    ],
+    "active": [],
+    "defaults": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "default@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-22T20:43:28.226Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        }
+      }
+    ],
+    "type": "accounts"
+  }
+]

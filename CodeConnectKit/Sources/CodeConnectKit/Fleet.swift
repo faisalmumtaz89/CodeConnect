@@ -464,6 +464,9 @@ public enum FleetStatusRule {
             return .observe(
                 reason: "\(HostDevice.current.computer("The computer")) can’t promise an answer will reach the agent.")
         }
+        // A run moved to another account is answered from its reply box: its next message starts it there. Until
+        // then its link is let go on purpose, so a detached link says nothing about whether it can be answered.
+        if summary.switching == .moved { return .control }
         switch summary.link {
         case .attached:
             return .control
