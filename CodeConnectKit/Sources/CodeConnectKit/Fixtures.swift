@@ -248,7 +248,20 @@ enum Fixtures {
 
     // MARK: Frames
 
-    static func frames(now: Date = Date(), variant: Variant = .deck) -> [ServerMessage] {
+    /// The fixtures' clock: the device's, or in a debug build `-CC_FIXTURE_NOW <rfc3339>`, so a render's clock times
+    /// read before its status bar's. Ages are drawn against the device's clock, so a scene showing one passes none.
+    static var now: Date {
+        #if DEBUG
+            if let value = UserDefaults.standard.string(forKey: "CC_FIXTURE_NOW"),
+                let date = ISO8601DateFormatter().date(from: value)
+            {
+                return date
+            }
+        #endif
+        return Date()
+    }
+
+    static func frames(now: Date = Fixtures.now, variant: Variant = .deck) -> [ServerMessage] {
         let cards = variant.cards
         let held = variant.heldCard.map { [$0] } ?? []
         var messages: [ServerMessage] = []
@@ -985,7 +998,7 @@ enum Fixtures {
                 + "\"is_error\":false,\"content\":\(quoted(output))}]}}"
         }
         let stop = "{\"hook_event_name\":\"Stop\"}"
-        return [
+        let events = [
             event("fx-6", 1, 70, "user_message", "transcript", said("hi")),
             event("fx-6", 2, 68, "agent_message", "transcript", reply("Hi! What can I help you with?")),
             event("fx-6", 3, 68, "turn_complete", "hook", stop),
@@ -1022,6 +1035,12 @@ enum Fixtures {
                   "{\"notification_type\":\"send_not_sent\",\"request_id\":\"fx-stop-1\","
                       + "\"reason\":\"stopped\",\"message\":\"Not sent: stopped\"}"),
         ]
+        #if DEBUG
+            // `-CC_FIXTURE_PLAIN_CONVERSATION YES`: `fx-7` ends on its last finished turn, without the stopped
+            // follow-up, for the website's picture of a conversation.
+            if UserDefaults.standard.bool(forKey: "CC_FIXTURE_PLAIN_CONVERSATION") { return Array(events.dropLast(2)) }
+        #endif
+        return events
     }
 
     private static func turnCompleteJSON(now: Date) -> String {
