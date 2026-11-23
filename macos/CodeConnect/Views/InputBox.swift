@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// The one box a message is written in, the start form's and a run's reply box alike: the message on top, and under it
-/// one bar, its controls on the leading side and Submit (or what stands in its place) on the trailing side. It draws
-/// only the box: each place hands in its own field and controls, with their actions, keys and identifiers.
+/// one bar, its controls on the leading side and Submit (or what stands in its place) on the trailing side, or, where
+/// they do not fit at their full names, two rows of them. It draws only the box: each place hands in its own field and
+/// controls, with their actions, keys and identifiers.
 struct InputBox<Field: View, Leading: View, Trailing: View>: View {
     /// 50 before a run, 46 in one.
     let barHeight: CGFloat
@@ -18,13 +19,30 @@ struct InputBox<Field: View, Leading: View, Trailing: View>: View {
                 .padding(.top, 18)
                 .padding(.horizontal, 20)
                 .padding(.bottom, 10)
-            HStack(spacing: 6) {
-                leading
-                Spacer(minLength: 8)
-                trailing
+            // One row while every control fits at its full name; else the leading ones on a row of their own and the
+            // trailing ones under them, at the trailing side. Names cut only in the second form, when even a row of
+            // their own is too narrow for them.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) {
+                    leading
+                    Spacer(minLength: 8)
+                    trailing
+                }
+                .frame(height: barHeight)
+                VStack(spacing: 0) {
+                    HStack(spacing: 6) {
+                        leading
+                        Spacer(minLength: 0)
+                    }
+                    .frame(height: barHeight)
+                    HStack(spacing: 6) {
+                        Spacer(minLength: 0)
+                        trailing
+                    }
+                    .frame(height: barHeight)
+                }
             }
             .padding(.horizontal, InputBoxLayout.barInset)
-            .frame(height: barHeight)
         }
         // Drawn behind the contents: a menu opened from the bar may sit over the box's edge.
         .background { surface }
