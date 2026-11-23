@@ -422,6 +422,17 @@ final class AccountsWireTests: XCTestCase {
             "cch2.D8GXVZ8M48 couldn't switch accounts. Its conversation says why.")
     }
 
+    /// An account signing in is not signed out: the service says `signed_in: false` with `signing_in: true` while the
+    /// person is in the browser (terminal's probe, push 3 of one Add), and the row says the sign-in, not "Signed out".
+    /// Signed out is false only, never unread, never not separate.
+    func testAnAccountSigningInIsNotSignedOut() throws {
+        let decode = { (json: String) in try JSONDecoder().decode(AgentAccount.self, from: Data(json.utf8)) }
+        XCTAssertFalse(try decode(#"{"id": "C6", "agent": "codex", "label": "Codex 6", "signed_in": false, "signing_in": true}"#).signedOut)
+        XCTAssertTrue(try decode(#"{"id": "C2", "agent": "codex", "label": "Codex 2", "signed_in": false}"#).signedOut)
+        XCTAssertFalse(try decode(#"{"id": "C7", "agent": "codex", "label": "Codex 7"}"#).signedOut, "not read yet")
+        XCTAssertFalse(try decode(#"{"id": "C8", "agent": "codex", "label": "Codex 8", "signed_in": false, "not_separate": true}"#).signedOut)
+    }
+
     /// A window's caption is its own length, as the service names it: never a guess at "5-hour" or "Week".
     func testAWindowIsCaptionedByItsOwnLength() {
         XCTAssertEqual(AccountSwitchWords.caption(minutes: 300), "5-hour")
