@@ -438,6 +438,22 @@ impl Facts {
         }
     }
 
+    /// `key`'s held usage windows are `windows`, as its agent has just said them; the rest of what is held, and when it
+    /// was read, kept. Whether anything was held to update: an account with nothing held is left to its read.
+    pub(crate) fn update_windows(
+        &self,
+        key: &str,
+        windows: Vec<protocol::ws::UsageWindow>,
+    ) -> bool {
+        let mut known = self.known.lock().unwrap();
+        let Some((Some(facts), _)) = known.get_mut(key) else {
+            return false;
+        };
+        facts.windows = windows;
+        facts.read_at = protocol::time::now_rfc3339();
+        true
+    }
+
     /// What is held for `key`, its facts and its sign-in, goes (its sign-in changed, or it was removed).
     pub(crate) fn forget(&self, key: &str) {
         self.known.lock().unwrap().remove(key);
@@ -660,21 +676,11 @@ pub(crate) async fn read_facts(
         }
         drop(stdin);
         let (account, limits) = (said_account?, said_limits?);
-        let window = |window: &serde_json::Value| {
-            Some(protocol::ws::UsageWindow {
-                used_percent: u32::try_from(window["usedPercent"].as_u64()?).ok()?,
-                window_minutes: window["windowDurationMins"].as_u64()?,
-                resets_at: window["resetsAt"].as_i64()?,
-            })
-        };
         Some(protocol::ws::AccountFacts {
             limits_available: None,
             email: account["account"]["email"].as_str().map(str::to_string),
             plan: account["account"]["planType"].as_str().map(str::to_string),
-            windows: ["primary", "secondary"]
-                .iter()
-                .filter_map(|which| window(&limits["rateLimits"][which]))
-                .collect(),
+            windows: codex_windows(&limits["rateLimits"]),
             read_at: protocol::time::now_rfc3339(),
         })
     };
@@ -682,6 +688,22 @@ pub(crate) async fn read_facts(
     // A signed-in app-server keeps running: it is ended, with what it started, answered or not.
     crate::start_session::end_agent(&mut child).await;
     facts
+}
+
+/// The usage windows Codex's `rateLimits` names (`account/rateLimits/read`'s answer, `account/rateLimits/updated`'s
+/// word): its primary and secondary, each that it gives.
+pub(crate) fn codex_windows(limits: &serde_json::Value) -> Vec<protocol::ws::UsageWindow> {
+    let window = |window: &serde_json::Value| {
+        Some(protocol::ws::UsageWindow {
+            used_percent: u32::try_from(window["usedPercent"].as_u64()?).ok()?,
+            window_minutes: window["windowDurationMins"].as_u64()?,
+            resets_at: window["resetsAt"].as_i64()?,
+        })
+    };
+    ["primary", "secondary"]
+        .iter()
+        .filter_map(|which| window(&limits[which]))
+        .collect()
 }
 
 /// How a sign-in going is ended: it is sent where to say its login's group is gone.

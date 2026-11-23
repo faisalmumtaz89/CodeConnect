@@ -790,6 +790,19 @@ async fn link(
                         running = Some((thread.to_string(), turn.to_string()));
                         daemon.note_turn_running(&uid);
                     }
+                    // Its own word that its account's limits changed, on this connection: no process started.
+                    (Some("account/rateLimits/updated"), _, _) => {
+                        if let Ok(account) = daemon.store.run_account(&uid) {
+                            let key = account.map_or_else(
+                                || crate::accounts::default_key(&AgentKind::Codex),
+                                |account| account.id,
+                            );
+                            let windows = crate::accounts::codex_windows(&frame["params"]["rateLimits"]);
+                            if daemon.account_facts.update_windows(&key, windows) {
+                                crate::start_session::push_accounts(&daemon).await;
+                            }
+                        }
+                    }
                     (Some("turn/completed"), _, Some(turn)) => {
                         record_tools(host.as_ref(), &mut tools);
                         if running.as_ref().is_some_and(|(_, on)| on == turn) {
@@ -10379,6 +10392,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A Codex run's own word that its account's limits changed updates them, with no process started**: its
+    /// app-server's `account/rateLimits/updated` (sent on the connection ccd holds, before a turn's end) replaces the
+    /// held usage windows of the account the run is on, read as `account/rateLimits/read`'s are, the rest of what is
+    /// held kept; an account with nothing held is left to its read.
+    #[tokio::test]
+    async fn a_codex_runs_rate_limits_update_its_accounts_windows() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let key = crate::accounts::default_key(&AgentKind::Codex);
+        let held = |daemon: &Daemon| {
+            let listing = crate::accounts::listing(&daemon.store, None);
+            serde_json::to_value(daemon.account_facts.told(listing)).unwrap()["defaults"]
+                .as_array()
+                .and_then(|defaults| defaults.iter().find(|default| default["agent"] == "codex"))
+                .map_or(serde_json::Value::Null, |default| default["facts"].clone())
+        };
+        let (_uid, mut ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
+        let limits = json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+            "limitId": "codex", "limitName": null, "planType": "plus",
+            "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1795928400},
+            "secondary": {"usedPercent": 7, "windowDurationMins": 10080, "resetsAt": 1796428800},
+            "credits": null, "individualLimit": null, "spendControlReached": null, "rateLimitReachedType": null}}});
+        tell(&mut ws, &limits).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            held(&rig.daemon),
+            serde_json::Value::Null,
+            "nothing held: left to its read"
+        );
+        rig.daemon.account_facts.read(
+            &key,
+            Some(protocol::ws::AccountFacts {
+                limits_available: None,
+                email: Some("default@example.test".into()),
+                plan: Some("plus".into()),
+                windows: Vec::new(),
+                read_at: protocol::time::now_rfc3339(),
+            }),
+        );
+        tell(&mut ws, &limits).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while held(&rig.daemon)["windows"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "never updated: {}",
+                held(&rig.daemon)
+            );
+            tokio::time::sleep(POLL).await;
+        }
+        let facts = held(&rig.daemon);
+        assert_eq!(facts["email"], "default@example.test", "{facts}");
+        assert_eq!(
+            facts["windows"],
+            json!([{"used_percent": 42, "window_minutes": 300, "resets_at": 1795928400},
+                {"used_percent": 7, "window_minutes": 10080, "resets_at": 1796428800}]),
+            "{facts}"
+        );
+        assert_eq!(launches(&rig), 1, "no process started");
     }
 
     /// **A Codex run offers the model it started on, and can go back to it.** A start's answer
