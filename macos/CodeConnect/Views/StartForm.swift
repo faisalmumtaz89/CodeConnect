@@ -564,7 +564,7 @@ struct StartForm: View {
     /// The first message, and in the box's bar the computer, the folder and where in the repository, then the model and
     /// Start (↩). The folder's and the computer's menus open below the bar, the model's and the branch's above it.
     private func composer(_ context: StartContext) -> some View {
-        InputBox(barHeight: 50) {
+        InputBox(barHeight: 50, trailingOpen: menuOpen) {
             TextField(
                 "", text: $draft.message, selection: $messageSelection,
                 prompt: Text("First message").foregroundStyle(Theme.text3), axis: .vertical
