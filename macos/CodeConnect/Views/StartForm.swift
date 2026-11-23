@@ -34,8 +34,12 @@ struct StartForm: View {
     @State private var folderOpen = false
     /// Where the box stands in `StartForm.space`, which its panels stay inside.
     @State private var box: CGRect = .zero
-    /// The folder chip's leading edge in `StartForm.space`, where its panel starts when it fits.
-    @State private var folderChipX: CGFloat = 0
+    /// The folder chip in `StartForm.space`: its panel starts at its leading edge when it fits, and under it.
+    @State private var folderChip: CGRect = .zero
+    /// How tall the folder panel stands, and its list in it, as drawn.
+    @State private var folderPanelHeight: CGFloat = 0
+    @State private var listShown: CGFloat = 0
+    @Environment(\.startHeight) private var startHeight
     /// The first message has the keyboard: as the form appears, and when New Agent asks for it.
     @FocusState private var messageFocused: Bool
     /// The first message's caret, which the form sets when New Agent gives it the keyboard (`giveKeyboard`).
@@ -47,7 +51,7 @@ struct StartForm: View {
     @State private var thisMac: String?
     /// The search field has the keyboard, and with it the folders under it.
     @FocusState private var searchFocused: Bool
-    /// The folder list's rows, measured: the box is as tall as they are, up to its most.
+    /// The folder list's rows, measured: the list is as tall as they are, up to its most (`listMost`).
     @State private var listHeight: CGFloat = 0
 
     private var contexts: [StartContext] { machines.startContexts }
@@ -352,16 +356,26 @@ struct StartForm: View {
         .help(folder?.path ?? "Choose a folder")
         .accessibilityIdentifier("start.folder")
         .accessibilityValue(folderOpen ? "open" : "closed")
-        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).minX } action: { folderChipX = $0 }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { folderChip = $0 }
         .overlay(alignment: .topLeading) {
             if folderOpen {
-                let placed = StartPanel.place(widest: 520, leading: folderChipX, box: box)
+                let placed = StartPanel.place(widest: 520, leading: folderChip.minX, box: box)
                 folderPanel(context, width: placed.width).openPanel()
-                    .offset(x: placed.x - folderChipX, y: InputBoxChip.height + Theme.panelGap)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { folderPanelHeight = $0 }
+                    .offset(x: placed.x - folderChip.minX, y: InputBoxChip.height + Theme.panelGap)
             }
         }
         .closesPanel($folderOpen)
         .onChange(of: folderOpen) { _, open in if !open { browsing = false } }
+    }
+
+    /// The most the folder list stands: 260 pt, or less where the pane ends sooner, so the whole panel, its foot rows
+    /// included, stays inside the pane; at least one folder's row. Before the panel is measured, 260.
+    private var listMost: CGFloat {
+        guard folderPanelHeight > 0 else { return 260 }
+        let others = folderPanelHeight - listShown
+        let room = startHeight - StartPanel.margin - folderChip.maxY - Theme.panelGap - others
+        return min(260, max(room, 44))
     }
 
     /// Up to 520 pt wide, inside the box (`StartPanel.place`).
@@ -421,9 +435,11 @@ struct StartForm: View {
                     // or the choice or the list changes, so a click on a row in view moves nothing.
                     .task(id: [folderPath ?? "", "\(context.projects.count)"]) { list.scrollTo(folderPath) }
                 }
-                // As tall as its rows, up to 260 pt, then it scrolls. An exact height: a panel is drawn over its button,
-                // which offers it only the button's own height, so a range would collapse the list to its least.
-                .frame(height: min(max(listHeight, 1), 260))
+                // As tall as its rows, up to 260 pt or the room the pane has under the panel, then it scrolls. An exact
+                // height: a panel is drawn over its button, which offers it only the button's own height, so a range
+                // would collapse the list to its least.
+                .frame(height: min(max(listHeight, 1), listMost))
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listShown = $0 }
             }
             // A folder from elsewhere, whatever the list holds: this Mac's from the standard folder panel, another
             // computer's by browsing it.

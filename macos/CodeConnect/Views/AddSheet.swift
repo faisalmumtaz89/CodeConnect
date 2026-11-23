@@ -94,7 +94,7 @@ extension EnvironmentValues {
 /// Where a panel of the start form stands across its box: as wide as `widest` where the box has the room, never past
 /// either of its sides, and its leading edge at `leading` moved only as far as it must to stay inside.
 enum StartPanel {
-    /// The least a panel keeps from the pane's top.
+    /// The least a panel keeps from the pane's top and bottom.
     static let margin: CGFloat = 8
 
     /// A panel `widest` wide that would start at `leading`: as wide as the box allows, at `leading` where it fits,
