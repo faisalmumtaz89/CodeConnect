@@ -62,20 +62,28 @@ struct ReplyUsage: View {
             if let note = bar.limitsNote { row(note) }
             if let account = bar.account { row("Account", rest: account) }
         }
-        .menuCard()
+        // A tip, not a menu: 250 wide, its own fill, border, corners and room, under the box's shadows.
+        .frame(width: 250 - 26)
+        .padding(.vertical, 9)
+        .padding(.horizontal, 13)
+        .background {
+            BoxShadow(radius: 12)
+            RoundedRectangle(cornerRadius: 12).fill(Color(themeHex: 0x141418))
+        }
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.09)))
     }
 
-    /// A card row: its label muted at the leading side; at the trailing side its value bright in Menlo, then the rest
-    /// muted.
+    /// A card row, 12 pt throughout: its label muted at the leading side; at least 24 pt on, its value bright in Menlo,
+    /// then the rest muted.
     private func row(_ label: String, value: String? = nil, rest: String? = nil) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(label).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
-            Spacer(minLength: 16)
+        let muted = Color(themeHex: 0x8A8A93)
+        return HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label).font(Theme.ui(12)).foregroundStyle(muted)
+            Spacer(minLength: 24)
             if let value { Text(value).font(Theme.mono(12)).foregroundStyle(Color(themeHex: 0xE4E4E7)) }
-            if let rest { Text(rest).font(Theme.ui(12)).foregroundStyle(Theme.text3) }
+            if let rest { Text(rest).font(Theme.ui(12)).foregroundStyle(muted) }
         }
-        .padding(.horizontal, 10)
-        .frame(minHeight: 28)
+        .padding(.vertical, 4)
     }
 
     private static func spoken(_ bar: ReplyBar) -> String {
