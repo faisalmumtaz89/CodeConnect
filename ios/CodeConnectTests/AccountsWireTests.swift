@@ -499,6 +499,25 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertTrue(wasAdded)
     }
 
+    /// Choosing an account asks the computer for its sessions once its answer is in: the computer sends no listing of
+    /// its own when a session is marked to move, and the person is reading the switch sentence at that moment.
+    func testChoosingAnAccountAsksForTheSessionsOnce() async throws {
+        let (model, sent) = try model()
+        async let loaded: Void = model.loadAccounts()
+        await waitUntil({ sent.sent.count == 1 }, "the list to be sent")
+        model.connection.injectForTesting(.accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: try book("list_after")))
+        await loaded
+        let before = sent.sent.count
+        async let chosen = model.activateAccount(agent: .codex, accountID: nil)
+        await waitUntil({ sent.sent.count == before + 1 }, "the choice to be sent")
+        guard case .activateAccount? = sent.sent.last else { return XCTFail("\(String(describing: sent.sent.last))") }
+        model.connection.injectForTesting(.accounts(requestID: try XCTUnwrap(requestID(sent.sent.last)), book: try book("list_after")))
+        let made = await chosen
+        XCTAssertTrue(made)
+        let after = sent.sent.dropFirst(before + 1)
+        XCTAssertEqual(after.count { if case .sessions = $0 { true } else { false } }, 1, "\(after)")
+    }
+
     /// Whether plan limits apply, as the agent says (`limits_available`, machine's 39685ca2): false is a sign-in with
     /// none, "No plan limits"; absent is not reported yet. Never inferred from an empty list of windows.
     func testWhetherPlanLimitsApplyIsTheAgentsOwnWord() throws {
