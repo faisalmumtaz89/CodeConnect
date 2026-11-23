@@ -62,15 +62,18 @@ enum Theme {
         .custom(codeFace, fixedSize: size)
     }
 
-    /// The same faces for AppKit's measurements, so a width measured is the width drawn.
+    /// The same faces for AppKit's measurements, so a width measured is the width drawn. A face that did not register
+    /// gives the system's of that size, so a broken install draws the wrong type rather than not opening; a render's
+    /// launch check (`RenderWindow.checkFaces`) still fails on it.
     static func uiFont(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
-        let family = NSFont(name: wordsFace, size: size)!.familyName!
-        let face = NSFontDescriptor(fontAttributes: [.family: family, .traits: [NSFontDescriptor.TraitKey.weight: weight]])
-        return NSFont(descriptor: face, size: size)!
+        let face = NSFont(name: wordsFace, size: size)?.familyName.map {
+            NSFontDescriptor(fontAttributes: [.family: $0, .traits: [NSFontDescriptor.TraitKey.weight: weight]])
+        }
+        return face.flatMap { NSFont(descriptor: $0, size: size) } ?? .systemFont(ofSize: size, weight: weight)
     }
 
     static func monoFont(_ size: CGFloat) -> NSFont {
-        NSFont(name: codeFace, size: size)!
+        NSFont(name: codeFace, size: size) ?? .monospacedSystemFont(ofSize: size, weight: .regular)
     }
 }
 
