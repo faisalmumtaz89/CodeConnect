@@ -23,6 +23,23 @@ final class AccountsWireTests: XCTestCase {
         return try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: data).objectValue)
     }
 
+    /// Frame `index` of the daemon's recording of three adds answered at once and filled in by pushes (machine's
+    /// fixtures/accounts/accounts-answer-then-push-wire.json), decoded as the app reads it.
+    private func answerThenPush(_ index: Int) throws -> AccountBook {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: repoRoot.appendingPathComponent("fixtures/accounts/accounts-answer-then-push-wire.json"))
+        let frames = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: data).arrayValue)
+        guard case .accounts(_, let book) = try JSONDecoder().decode(
+            ServerMessage.self, from: Data(frames[index].canonicalJSONString.utf8))
+        else { throw XCTSkip("frame \(index) is not an accounts frame") }
+        return book
+    }
+
+    private func account(_ label: String, in book: AccountBook) throws -> AgentAccount {
+        try XCTUnwrap(book.accounts.first { $0.label == label }, label)
+    }
+
     private func step(_ key: String) throws -> (request: JSONValue, reply: JSONValue) {
         let step = try XCTUnwrap(try wire()[key]?.objectValue, "no \(key) in minor-48-wire.json")
         return (try XCTUnwrap(step["request"]), try XCTUnwrap(step["reply"]))
@@ -426,11 +443,14 @@ final class AccountsWireTests: XCTestCase {
     /// person is in the browser (terminal's probe, push 3 of one Add), and the row says the sign-in, not "Signed out".
     /// Signed out is false only, never unread, never not separate.
     func testAnAccountSigningInIsNotSignedOut() throws {
-        let decode = { (json: String) in try JSONDecoder().decode(AgentAccount.self, from: Data(json.utf8)) }
-        XCTAssertFalse(try decode(#"{"id": "C6", "agent": "codex", "label": "Codex 6", "signed_in": false, "signing_in": true}"#).signedOut)
-        XCTAssertTrue(try decode(#"{"id": "C2", "agent": "codex", "label": "Codex 2", "signed_in": false}"#).signedOut)
-        XCTAssertFalse(try decode(#"{"id": "C7", "agent": "codex", "label": "Codex 7"}"#).signedOut, "not read yet")
-        XCTAssertFalse(try decode(#"{"id": "C8", "agent": "codex", "label": "Codex 8", "signed_in": false, "not_separate": true}"#).signedOut)
+        XCTAssertFalse(try account("C", in: answerThenPush(9)).signedOut, "signed_in false while signing in")
+        XCTAssertTrue(try account("C", in: answerThenPush(9)).signingIn)
+        XCTAssertTrue(try account("C", in: answerThenPush(8)).signedOut, "signed_in false, no sign-in going")
+        XCTAssertFalse(try account("B", in: answerThenPush(1)).signedOut, "not read yet")
+        let notSeparate = try JSONDecoder().decode(
+            AgentAccount.self,
+            from: Data(#"{"id": "C8", "agent": "codex", "label": "Codex 8", "signed_in": false, "not_separate": true}"#.utf8))
+        XCTAssertFalse(notSeparate.signedOut)
     }
 
     /// A window's caption is its own length, as the service names it: never a guess at "5-hour" or "Week".
@@ -482,9 +502,12 @@ final class AccountsWireTests: XCTestCase {
     /// Whether plan limits apply, as the agent says (`limits_available`, machine's 39685ca2): false is a sign-in with
     /// none, "No plan limits"; absent is not reported yet. Never inferred from an empty list of windows.
     func testWhetherPlanLimitsApplyIsTheAgentsOwnWord() throws {
-        let decode = { (json: String) in try JSONDecoder().decode(AccountFacts.self, from: Data(json.utf8)) }
-        XCTAssertEqual(try decode(#"{"read_at": "2026-11-23T03:00:00Z", "limits_available": false}"#).limitsAvailable, false)
-        XCTAssertEqual(try decode(#"{"read_at": "2026-11-23T03:00:00Z", "limits_available": true}"#).limitsAvailable, true)
-        XCTAssertNil(try decode(#"{"read_at": "2026-11-23T03:00:00Z"}"#).limitsAvailable, "not reported yet")
+        XCTAssertNil(try account("B", in: answerThenPush(1)).facts, "the add's answer: nothing read yet")
+        let filled = try answerThenPush(15)
+        XCTAssertEqual(try account("C", in: filled).facts?.limitsAvailable, false, "a sign-in with no plan limits")
+        XCTAssertEqual(try account("C", in: filled).facts?.windows, [])
+        XCTAssertEqual(try account("D", in: filled).facts?.limitsAvailable, true)
+        XCTAssertEqual(try account("D", in: filled).facts?.windows.count, 2)
+        XCTAssertNil(try account("B", in: filled).facts?.limitsAvailable, "not reported: one window, no word on limits")
     }
 }
