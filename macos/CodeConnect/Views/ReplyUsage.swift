@@ -17,12 +17,13 @@ struct ReplyUsage: View {
                 figures(bar)
                     .contentShape(Rectangle())
                     .onHover { hovered = $0 }
-                    // Above the figures, its trailing edge on theirs, clear of them by the panels' one gap.
-                    .overlay(alignment: .topTrailing) {
+                    // Above the figures, its trailing edge on theirs, clear of them by the panels' one gap: its foot on
+                    // theirs, then raised by their height and the gap.
+                    .overlay(alignment: .bottomTrailing) {
                         if hovered {
                             card(bar)
                                 .fixedSize()
-                                .alignmentGuide(.top) { $0[.bottom] + Theme.panelGap }
+                                .offset(y: -(Self.figuresHeight + Theme.panelGap))
                         }
                     }
                     .accessibilityElement(children: .ignore)
@@ -48,8 +49,10 @@ struct ReplyUsage: View {
                 }
             }
         }
-        .frame(height: 30)
+        .frame(height: Self.figuresHeight)
     }
+
+    private static let figuresHeight: CGFloat = 30
 
     /// Context, each window with its share and reset, then the account: the rows the Kit holds, in that order.
     private func card(_ bar: ReplyBar) -> some View {
