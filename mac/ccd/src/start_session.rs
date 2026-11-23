@@ -255,11 +255,8 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
                     None => None,
                 };
                 let facts = match (agent, codex, claude) {
-                    // Codex's reader gives none only when it was not answered; a signed-out account answers.
                     (AgentKind::Codex, Some(codex), _) => {
-                        crate::accounts::read_facts(environment, home.as_ref(), codex)
-                            .await
-                            .map(Some)
+                        crate::accounts::read_facts(environment, home.as_ref(), codex).await
                     }
                     (AgentKind::Claude, _, Some(claude)) => {
                         let facts =
