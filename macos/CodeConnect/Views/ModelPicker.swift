@@ -87,9 +87,7 @@ struct ModelButton: View {
         // Its top 8 pt inside the pane (before the button is measured, its tallest).
         .frame(maxHeight: minY > 0 ? min(360, minY - Theme.panelGap - StartPanel.margin) : 360)
         .fixedSize(horizontal: false, vertical: true)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+        .menuCard()
     }
 
     private func header(_ text: String) -> some View {

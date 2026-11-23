@@ -367,11 +367,8 @@ struct StartForm: View {
     /// Up to 520 pt wide, inside the box (`StartPanel.place`).
     private func folderPanel(_ context: StartContext, width: CGFloat) -> some View {
         folderRows(context)
-            .padding(8)
-            .frame(width: width)
-            .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-            .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+            .frame(width: width - 12)
+            .menuCard()
     }
 
     @ViewBuilder private func folderRows(_ context: StartContext) -> some View {
@@ -929,10 +926,7 @@ private struct ComputerButton: View {
             .padding(.horizontal, 4)
             .accessibilityIdentifier("start.addComputer")
         }
-        .padding(.vertical, 5)
-        .frame(width: placed.width)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+        .frame(width: placed.width - 12)
+        .menuCard()
     }
 }

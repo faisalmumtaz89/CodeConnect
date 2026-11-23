@@ -191,7 +191,8 @@ struct BranchMenu: View {
     static let width: CGFloat = 440
     static let rowHeight: CGFloat = 24
     static let mostRows = 12
-    private static let inset: CGFloat = 5
+    /// The card's padding (`menuCard`), above and below the rows.
+    private static let inset: CGFloat = 6
 
     /// The menu's lines for this folder: each section's heading and entries.
     static func rows(git: StartGit, folder: StartProject) -> Int {
@@ -256,11 +257,8 @@ struct BranchMenu: View {
             }
             .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 1) }
         }
-        .padding(.vertical, Self.inset)
-        .frame(width: width, alignment: .leading)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+        .frame(width: width - 12, alignment: .leading)
+        .menuCard()
     }
 
     /// A section's heading, a hairline over it after the first.

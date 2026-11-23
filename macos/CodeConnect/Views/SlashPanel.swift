@@ -42,10 +42,7 @@ struct SlashPanel: View {
                     .padding(.bottom, 2)
             }
         }
-        .padding(.vertical, 5)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+        .menuCard()
     }
 
     /// Each native command's mark, the iPhone's icon in SF Symbols.

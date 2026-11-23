@@ -486,6 +486,19 @@ private struct PanelRow: ViewModifier {
     private func register() { light?.register(index, id: id, enabled: choosable && isEnabled, choose: choose) }
 }
 
+extension View {
+    /// Every menu's card, whatever it holds: a near-black fill, a fine border, corners of 14, 6 pt in from its edge,
+    /// and the input box's shadows.
+    func menuCard() -> some View {
+        padding(6)
+            .background {
+                BoxShadow(radius: 14)
+                RoundedRectangle(cornerRadius: 14).fill(Color(themeHex: 0x141418))
+            }
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.09)))
+    }
+}
+
 /// A panel row's button: the panel's light is its only plate (`panelRow`); disabled it dims, pressed it fades.
 struct PanelRowStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { Label(configuration: configuration) }
@@ -684,11 +697,9 @@ private struct RowMenuHost: ViewModifier {
                             }
                         }
                         .padding(.vertical, 5)
-                        .frame(minWidth: Self.minWidth)
+                        .frame(minWidth: Self.minWidth - 12)
                         .fixedSize()
-                        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-                        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+                        .menuCard()
                         .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
                         .modifier(ControlRect(rect: shown.rect, window: bounds))
                         .openPanel()

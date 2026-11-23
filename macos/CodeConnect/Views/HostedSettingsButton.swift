@@ -204,18 +204,13 @@ struct HostedSettingsButton: View {
     private func card<Content: View>(width: CGFloat, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) { content() }
             .disabled(settings.inFlight)
-            .padding(.vertical, 5)
-            .frame(width: room > 0 ? min(width, room) : width)
+            .frame(width: (room > 0 ? min(width, room) : width) - 12)
             .fixedSize(horizontal: false, vertical: true)
+            .menuCard()
             // The card takes every click inside it: one on its checked or disabled rows, a header or a gap does
             // nothing, rather than reaching the reply box or the conversation under it.
-            .background {
-                RoundedRectangle(cornerRadius: 8).fill(Theme.raised)
-                    .contentShape(RoundedRectangle(cornerRadius: 8))
-                    .onTapGesture {}
-            }
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-            .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+            .contentShape(RoundedRectangle(cornerRadius: 14))
+            .onTapGesture {}
     }
 
     private func header(_ text: String) -> some View {
