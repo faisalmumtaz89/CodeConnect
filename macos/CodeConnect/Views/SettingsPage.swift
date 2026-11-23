@@ -583,7 +583,8 @@ private struct AccountRow: View {
     @State private var moreFrame: CGRect = .zero
 
     static let lead: CGFloat = 16
-    static let column: CGFloat = 76
+    /// A figure's column: as wide as its longest countdown line ("resets in 47h 59m", 99 pt at 11.5 pt).
+    static let column: CGFloat = 104
     /// The "…"'s slot and its gap, kept on every row so nothing moves.
     static let trailing: CGFloat = 6 + 10 + 30
     /// The "…"'s slot in the row, which its button stands centred over: as wide as the one it replaced, so the figures
@@ -668,16 +669,25 @@ private struct AccountRow: View {
         }
     }
 
-    /// Its share used of each column's window, right-aligned, an empty cell where it names no such window; or, in
-    /// their place, "No plan limits" where its agent says none apply (`limitsAvailable` false), else "Not reported yet".
+    /// Its share used of each column's window, right-aligned, on the name's line, and beneath it, on the plan's, how long
+    /// until that window resets (`AccountSwitchWords.resets`, kept current each minute while the page is shown), the
+    /// exact time as its tooltip; an empty cell where it names no such window. Or, in their place, "No plan limits"
+    /// where its agent says none apply (`limitsAvailable` false), else "Not reported yet".
     @ViewBuilder private var figures: some View {
         if let facts, !facts.windows.isEmpty {
-            HStack(spacing: 0) {
-                ForEach(columns, id: \.self) { minutes in
-                    let used = facts.windows.first { $0.windowMinutes == minutes }?.usedPercent
-                    Text(used.map { "\($0)%" } ?? "").font(Theme.ui(13)).monospacedDigit()
-                        .foregroundStyle((used ?? 0) >= 90 ? Theme.amber : Theme.text2)
-                        .frame(minWidth: Self.column, alignment: .trailing)
+            TimelineView(.everyMinute) { context in
+                HStack(spacing: 0) {
+                    ForEach(columns, id: \.self) { minutes in
+                        let window = facts.windows.first { $0.windowMinutes == minutes }
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(window.map { "\($0.usedPercent)%" } ?? " ").font(Theme.ui(13)).monospacedDigit()
+                                .foregroundStyle((window?.usedPercent ?? 0) >= 90 ? Theme.amber : Theme.text2)
+                            Text(window.flatMap { AccountSwitchWords.resets($0, now: context.date) } ?? " ")
+                                .font(Theme.ui(11.5)).monospacedDigit().foregroundStyle(Theme.text3).lineLimit(1)
+                        }
+                        .frame(width: Self.column, alignment: .trailing)
+                        .help(window.map { Self.resetTime($0) } ?? "")
+                    }
                 }
             }
             .accessibilityIdentifier("\(rowID).usage")
@@ -686,6 +696,12 @@ private struct AccountRow: View {
                 .font(Theme.ui(12)).foregroundStyle(Theme.text3)
                 .accessibilityIdentifier("\(rowID).usage")
         }
+    }
+
+    /// "Resets Thursday at 9:00 AM", in the person's own calendar and clock.
+    private static func resetTime(_ window: UsageWindow) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(window.resetsAt))
+        return "Resets \(date.formatted(.dateTime.weekday(.wide))) at \(date.formatted(date: .omitted, time: .shortened))"
     }
 
     /// The plan in the agent's own word, capitalized; "Signed out"; or the row's note; "As set up on this Mac" for a
