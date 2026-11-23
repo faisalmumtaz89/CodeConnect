@@ -3436,11 +3436,10 @@ impl Daemon {
         // fact is named by the chosen entry's id, never by claude's receipt of a change.
         let mut choosing: Vec<(String, Vec<serde_json::Value>, Option<String>)> = Vec::new();
         let mut codex_menus: Vec<String> = Vec::new();
+        // A Codex run that is not live keeps its menu only to name its model by.
+        let mut codex_ended: Vec<(String, protocol::event::RunMenus)> = Vec::new();
         for row in &rows {
             let live = row.lifecycle == Lifecycle::Live;
-            if !live && row.agent != protocol::agent::AgentKind::Claude {
-                continue;
-            }
             let Some(models) = self.db.hosted_models(row.session_uid.clone()).await? else {
                 continue;
             };
@@ -3455,9 +3454,12 @@ impl Daemon {
                         .await?;
                     choosing.push((row.session_uid.clone(), models, receipt));
                 }
-                protocol::agent::AgentKind::Codex => {
+                protocol::agent::AgentKind::Codex if live => {
                     menus.insert(row.session_uid.clone(), crate::codex_host::menus(&models));
                     codex_menus.push(row.session_uid.clone());
+                }
+                protocol::agent::AgentKind::Codex => {
+                    codex_ended.push((row.session_uid.clone(), crate::codex_host::menus(&models)));
                 }
                 protocol::agent::AgentKind::Unsupported(_) => {}
             }
@@ -3508,6 +3510,20 @@ impl Daemon {
                     .iter()
                     .any(|model| model.value == fact.value)
                     .then(|| fact.value.clone());
+            }
+        }
+        // A Codex entry's label is its model's name, else the model itself: only a name is given.
+        for (uid, menu) in &codex_ended {
+            let fact = inner
+                .session_facts
+                .get(uid)
+                .and_then(|facts| facts.model.as_ref());
+            if let Some(entry) = fact.and_then(|fact| {
+                menu.models
+                    .iter()
+                    .find(|model| model.value == fact.value && model.label != model.value)
+            }) {
+                model_labels.insert(uid.clone(), entry.label.clone());
             }
         }
         let mut sessions =
