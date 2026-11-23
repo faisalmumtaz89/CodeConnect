@@ -628,7 +628,10 @@ mod tests {
             agent: protocol::agent::AgentKind::Codex,
             codex_thread_id: None,
         };
-        assert_eq!(daemon.store.begin_run(&run, &uid, None).unwrap(), None);
+        assert_eq!(
+            daemon.store.begin_run(&run, &uid, None, None).unwrap(),
+            None
+        );
         daemon.mail_run_live(&uid).await;
         daemon
             .store

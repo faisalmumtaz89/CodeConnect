@@ -395,6 +395,49 @@ pub enum ClientMessage {
         request_id: String,
         path: String,
     },
+    /// **Each agent's accounts on this computer, and the one its starts use** (minor 48, `accounts`),
+    /// answered with one [`ServerMessage::Accounts`] carrying the same `request_id`. Paired devices only.
+    ListAccounts {
+        request_id: String,
+    },
+    /// **Adds an account for `agent`**, labelled `label`, with an id the computer makes; it is not made the active
+    /// one. Answered with one [`ServerMessage::Accounts`].
+    AddAccount {
+        request_id: String,
+        agent: crate::agent::AgentKind,
+        label: String,
+    },
+    /// **Makes `account_id` the account `agent`'s starts use**, or its Default (the agent as it is on the computer)
+    /// for none. An id that is not one of `agent`'s accounts is refused. Each of `agent`'s sessions running then moves
+    /// to it: once idle (its turn over, no card waiting, no message unread by the agent) its process is ended, and its
+    /// next message starts it again on the account active then, in the same session. It reads live meanwhile, with
+    /// [`crate::event::SessionSummary::switching`] saying where its move stands. Answered with one
+    /// [`ServerMessage::Accounts`].
+    ActivateAccount {
+        request_id: String,
+        agent: crate::agent::AgentKind,
+        #[serde(default)]
+        account_id: Option<String>,
+    },
+    /// **Signs `account_id` in with its agent's own login, on this computer**: the agent opens the sign-in in a
+    /// browser here. Answered at once with one [`ServerMessage::Accounts`] in which that account is `signing_in`; when
+    /// the login ends (finished in the browser, replaced by a newer sign-in, or after ten minutes) the list is pushed
+    /// with its `signed_in` as it then is and `signing_in` gone. One sign-in at a time per computer: a new one
+    /// replaces the one going. Codex runs `codex login` in the account's home; Claude Code runs `claude auth login` with
+    /// its storage and config directories the account's folder.
+    SignInAccount {
+        request_id: String,
+        account_id: String,
+    },
+    /// **Removes `account_id`**: its agent's own logout in its home, then the account is gone from the list; an agent
+    /// whose active account it was goes back to its Default. A thread started on it still resumes on another account.
+    /// Answered with one [`ServerMessage::Accounts`], or [`ServerMessage::AccountsRefused`] when the agent could not
+    /// sign it out (nothing is removed then). Codex runs `codex logout`, Claude Code `claude auth logout`, each in the
+    /// account's own folder.
+    RemoveAccount {
+        request_id: String,
+        account_id: String,
+    },
     /// **The git worktrees and branches of one folder** (minor 29,
     /// `start_worktree`), answered with one [`ServerMessage::ProjectGit`]. Read
     /// only: nothing is fetched, written or run. `path` is absolute.
@@ -602,6 +645,33 @@ pub enum ServerMessage {
     FolderTrust {
         request_id: String,
         folders: Vec<FolderAnswer>,
+    },
+    /// Every account, oldest first, and the one each agent's starts use. The answer to
+    /// [`ClientMessage::ListAccounts`], [`ClientMessage::AddAccount`], [`ClientMessage::ActivateAccount`],
+    /// [`ClientMessage::SignInAccount`] and [`ClientMessage::RemoveAccount`] once the request's change is made, naming
+    /// its `request_id`; and pushed, with no `request_id`, to every paired device whenever the list changes (an
+    /// account added, chosen or removed from any device, a sign-in started or ended). A reader keeps the latest. An
+    /// agent missing from `active` uses its Default.
+    Accounts {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        accounts: Vec<AgentAccount>,
+        active: Vec<ActiveAccount>,
+        /// Each agent's Default with what it says of it, once read; omitted when none is.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        defaults: Vec<DefaultAccount>,
+    },
+    /// A refused account request (any of [`ClientMessage::ListAccounts`], [`ClientMessage::AddAccount`],
+    /// [`ClientMessage::ActivateAccount`], [`ClientMessage::SignInAccount`], [`ClientMessage::RemoveAccount`]), naming
+    /// the request, as a refused start or folder names its own: nothing changed. `code` is `bad_request` (an agent with
+    /// no accounts, an id not the agent's or not one of the computer's, a name outside 1 to 64 characters, an agent
+    /// whose sign-in or removal is not offered here yet, Codex not installed), `accounts_in_use` (a removal while a
+    /// session runs on the account) or `accounts_unavailable` (the computer could not read or keep its accounts, or
+    /// the agent could not sign the account out); `message` says which, in words.
+    AccountsRefused {
+        request_id: String,
+        code: String,
+        message: String,
     },
     /// The answer to [`ClientMessage::GetProjectGit`]; `git` is absent when
     /// `path` is not in a git repository.
@@ -848,6 +918,81 @@ pub enum StartSessionResult {
     /// Nothing ran: this computer keeps no answer to "trust this folder?" for
     /// `path`, the folder's real path, and the start gave none.
     NeedsTrust { path: String },
+}
+
+/// One of an agent's accounts on a computer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAccount {
+    /// The computer's own id for it.
+    pub id: String,
+    pub agent: crate::agent::AgentKind,
+    pub label: String,
+    /// Whether its agent says it is signed in, asked with the account's home; absent when not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+    /// A sign-in for it is going on this computer, waiting on the browser. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signing_in: bool,
+    /// Its agent says it is signed in, but the sign-in is not this account's own: Codex keeps its credential in the
+    /// computer's credential store (`cli_auth_credentials_store`), not in the account's home, so the account is not
+    /// separate. `signed_in` then reads false. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_separate: bool,
+    /// What its agent says of the account, read on demand ([`AccountFacts`]); absent until read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<AccountFacts>,
+    /// Another of its agent's accounts on this computer, its Default included, is signed in as the same email: the
+    /// two are one account. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub same_as_another: bool,
+}
+
+/// What an agent says of one of its accounts, read from it on demand (Codex: `account/read` and
+/// `account/rateLimits/read` in that account's home) and kept in the computer's memory only: never stored, never
+/// logged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountFacts {
+    /// The address it is signed in as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Its plan, in the agent's own word (Codex's `planType`: `plus`, `pro`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Each usage window the agent names, as it names it; a window it does not name is absent, so an app labels a
+    /// figure from its own `window_minutes`, never from a guess.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<UsageWindow>,
+    /// Whether plan limits apply to this sign-in, where the agent says (Claude Code's `rate_limits_available`): false
+    /// for a sign-in with none (an API key's), so an app says "no plan limits"; absent while not reported yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits_available: Option<bool>,
+    /// When the computer read these (RFC 3339), so an app says "as of".
+    pub read_at: String,
+}
+
+/// One usage window, as the agent reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    /// The share of the window used, in percent.
+    pub used_percent: u32,
+    /// The window's length, in minutes.
+    pub window_minutes: u64,
+    /// When the window resets (Unix seconds).
+    pub resets_at: i64,
+}
+
+/// An agent's Default account (the agent as it is on the computer), with what it says of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultAccount {
+    pub agent: crate::agent::AgentKind,
+    pub facts: AccountFacts,
+}
+
+/// The account an agent's starts use now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveAccount {
+    pub agent: crate::agent::AgentKind,
+    pub account_id: String,
 }
 
 /// One folder's answer to "trust this folder?", kept by the computer.
@@ -1138,6 +1283,13 @@ pub struct Capabilities {
     /// [`Self::codex_interrupt`]'s twin for the other engine.
     #[serde(default)]
     pub claude_interrupt: bool,
+    /// **This daemon keeps several accounts per agent** ([`ClientMessage::ListAccounts`],
+    /// [`ClientMessage::AddAccount`], [`ClientMessage::ActivateAccount`], [`ClientMessage::SignInAccount`],
+    /// [`ClientMessage::RemoveAccount`], and the pushed [`ServerMessage::Accounts`], minor 48), to paired devices only. Absent
+    /// decodes `false`: an older daemon answers them with `bad_request`, so a client asks only when this is
+    /// advertised.
+    #[serde(default)]
+    pub accounts: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -2074,9 +2226,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 47,
             "a menu entry naming its model's default effort (`default_effort`) is minor 47"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 48,
+            "several accounts per agent (`list_accounts`, `add_account`, `activate_account`) is minor 48"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 47);
+        assert_eq!(crate::PROTOCOL_MINOR, 48);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2606,6 +2762,7 @@ mod tests {
             machine_stats: true,
             stop_run: true,
             claude_interrupt: true,
+            accounts: true,
         }
     }
 
@@ -2952,6 +3109,225 @@ mod tests {
             }
             other => panic!("wrong message: {other:?}"),
         }
+    }
+
+    /// **The accounts wire, pinned as the apps will match it** (minor 48). Each frame encodes to exactly this JSON
+    /// and decodes back to it; Default is an explicit null; an older daemon's capabilities decode `accounts` false.
+    #[test]
+    fn the_accounts_wire_is_pinned() {
+        fn round_trip_client(message: ClientMessage, expected: serde_json::Value) {
+            assert_eq!(serde_json::to_value(&message).unwrap(), expected);
+            let decoded: ClientMessage = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        }
+        round_trip_client(
+            ClientMessage::ListAccounts {
+                request_id: "a1".into(),
+            },
+            serde_json::json!({"type": "list_accounts", "request_id": "a1"}),
+        );
+        round_trip_client(
+            ClientMessage::AddAccount {
+                request_id: "a2".into(),
+                agent: crate::agent::AgentKind::Codex,
+                label: "Work".into(),
+            },
+            serde_json::json!({"type": "add_account", "request_id": "a2", "agent": "codex", "label": "Work"}),
+        );
+        round_trip_client(
+            ClientMessage::ActivateAccount {
+                request_id: "a3".into(),
+                agent: crate::agent::AgentKind::Claude,
+                account_id: Some("01M80QGTWR9RCHBSJWR169GXCN".into()),
+            },
+            serde_json::json!({"type": "activate_account", "request_id": "a3", "agent": "claude",
+                "account_id": "01M80QGTWR9RCHBSJWR169GXCN"}),
+        );
+        round_trip_client(
+            ClientMessage::ActivateAccount {
+                request_id: "a4".into(),
+                agent: crate::agent::AgentKind::Claude,
+                account_id: None,
+            },
+            serde_json::json!({"type": "activate_account", "request_id": "a4", "agent": "claude",
+                "account_id": null}),
+        );
+        // A Default asked for with the field left out reads the same.
+        let bare: ClientMessage = serde_json::from_value(
+            serde_json::json!({"type": "activate_account", "request_id": "a5", "agent": "codex"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            bare,
+            ClientMessage::ActivateAccount {
+                account_id: None,
+                ..
+            }
+        ));
+
+        // An id ccd made (a store's `add_account` in a test run), as every account id is.
+        assert!(crate::uid::is_well_formed("01M80QGTWR9RCHBSJWR169GXCN"));
+        let reply = ServerMessage::Accounts {
+            request_id: Some("a2".into()),
+            accounts: vec![AgentAccount {
+                id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+                agent: crate::agent::AgentKind::Codex,
+                label: "Work".into(),
+                signed_in: None,
+                signing_in: false,
+                not_separate: false,
+                facts: None,
+                same_as_another: false,
+            }],
+            active: vec![ActiveAccount {
+                agent: crate::agent::AgentKind::Codex,
+                account_id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+            }],
+            defaults: Vec::new(),
+        };
+        let expected = serde_json::json!({"type": "accounts", "request_id": "a2",
+            "accounts": [{"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work"}],
+            "active": [{"agent": "codex", "account_id": "01M80QGTWR9RCHBSJWR169GXCN"}]});
+        assert_eq!(serde_json::to_value(&reply).unwrap(), expected);
+        let decoded: ServerMessage = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+
+        // A sign-in names the account; a listed account says whether it is signed in, when that is known.
+        round_trip_client(
+            ClientMessage::SignInAccount {
+                request_id: "a7".into(),
+                account_id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+            },
+            serde_json::json!({"type": "sign_in_account", "request_id": "a7",
+                "account_id": "01M80QGTWR9RCHBSJWR169GXCN"}),
+        );
+        let known = AgentAccount {
+            id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+            agent: crate::agent::AgentKind::Codex,
+            label: "Work".into(),
+            signed_in: Some(true),
+            signing_in: true,
+            not_separate: false,
+            facts: None,
+            same_as_another: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&known).unwrap(),
+            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work", "signed_in": true,
+                "signing_in": true})
+        );
+        let older: AgentAccount = serde_json::from_value(
+            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work"}),
+        )
+        .unwrap();
+        assert_eq!(
+            older.signed_in, None,
+            "a listing without it reads not known"
+        );
+        assert!(!older.signing_in, "nor signing in");
+        assert!(!older.not_separate, "nor not separate");
+        // What the agent says of an account, and of its Default, made-up values in the agent's shapes: each window
+        // the agent names, an unnamed one absent.
+        let facts = AccountFacts {
+            limits_available: None,
+            email: Some("work@example.test".into()),
+            plan: Some("plus".into()),
+            windows: vec![UsageWindow {
+                used_percent: 42,
+                window_minutes: 300,
+                resets_at: 1_800_000_000,
+            }],
+            read_at: "2026-11-22T21:00:00.000Z".into(),
+        };
+        let told = ServerMessage::Accounts {
+            request_id: None,
+            accounts: vec![AgentAccount {
+                id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+                agent: crate::agent::AgentKind::Codex,
+                label: "Work".into(),
+                signed_in: Some(true),
+                signing_in: false,
+                not_separate: false,
+                facts: Some(facts.clone()),
+                same_as_another: true,
+            }],
+            active: Vec::new(),
+            defaults: vec![DefaultAccount {
+                agent: crate::agent::AgentKind::Codex,
+                facts: AccountFacts {
+                    windows: Vec::new(),
+                    ..facts
+                },
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&told).unwrap(),
+            serde_json::json!({"type": "accounts", "active": [],
+                "accounts": [{"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work",
+                    "signed_in": true, "same_as_another": true,
+                    "facts": {"email": "work@example.test", "plan": "plus", "read_at": "2026-11-22T21:00:00.000Z",
+                        "windows": [{"used_percent": 42, "window_minutes": 300, "resets_at": 1800000000}]}}],
+                "defaults": [{"agent": "codex",
+                    "facts": {"email": "work@example.test", "plan": "plus", "read_at": "2026-11-22T21:00:00.000Z"}}]})
+        );
+        let shared = AgentAccount {
+            id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+            agent: crate::agent::AgentKind::Codex,
+            label: "Work".into(),
+            signed_in: Some(false),
+            signing_in: false,
+            not_separate: true,
+            facts: None,
+            same_as_another: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&shared).unwrap(),
+            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work",
+                "signed_in": false, "not_separate": true})
+        );
+        // Pushed, a listing names no request.
+        let pushed = ServerMessage::Accounts {
+            request_id: None,
+            accounts: Vec::new(),
+            active: Vec::new(),
+            defaults: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&pushed).unwrap(),
+            serde_json::json!({"type": "accounts", "accounts": [], "active": []})
+        );
+        // A removal names the account.
+        round_trip_client(
+            ClientMessage::RemoveAccount {
+                request_id: "a8".into(),
+                account_id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
+            },
+            serde_json::json!({"type": "remove_account", "request_id": "a8",
+                "account_id": "01M80QGTWR9RCHBSJWR169GXCN"}),
+        );
+
+        // A refusal names the request it answers.
+        let refused = ServerMessage::AccountsRefused {
+            request_id: "a6".into(),
+            code: "bad_request".into(),
+            message: "an account's name is 1 to 64 characters".into(),
+        };
+        let expected = serde_json::json!({"type": "accounts_refused", "request_id": "a6",
+            "code": "bad_request", "message": "an account's name is 1 to 64 characters"});
+        assert_eq!(serde_json::to_value(&refused).unwrap(), expected);
+        let decoded: ServerMessage = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+
+        let older = serde_json::json!({
+            "can_approve_reliably": true, "fail_mode": "fail_open",
+            "answer_path": "hook_return", "hold_secs": 0, "send_text": true,
+            "capture": true, "push": false, "tls": true
+        });
+        let caps: Capabilities = serde_json::from_value(older).expect("decodes");
+        assert!(
+            !caps.accounts,
+            "a daemon that does not say keeps no accounts"
+        );
     }
 
     /// **The start-session wire, pinned as the phone matches it** (minor 28).

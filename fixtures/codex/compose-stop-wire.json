@@ -4,6 +4,10 @@
       "events": [],
       "step": "started",
       "summary": {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "none",
@@ -36,6 +40,10 @@
       ],
       "step": "first message taken",
       "summary": {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "subscribed",
@@ -83,6 +91,10 @@
       "events": [],
       "step": "ccd restarted, before its reconnect",
       "summary": {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "none",
@@ -191,6 +203,10 @@
       ],
       "step": "reconnected",
       "summary": {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "subscribed",
@@ -246,6 +262,10 @@
       "events": [],
       "step": "End run",
       "summary": {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "none",
@@ -280,6 +300,10 @@
       ],
       "step": "ended",
       "summary": {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "none",
@@ -305,6 +329,7 @@
     }
   ],
   "hello_ack_capabilities": {
+    "accounts": true,
     "browse_folders": true,
     "can_approve_reliably": true,
     "claude_interrupt": true,
@@ -343,6 +368,10 @@
     "request_id": "send-1"
   },
   "session_summary": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "codex",
     "blocked_on": [],
     "codex_link": "subscribed",
@@ -386,6 +415,10 @@
     "updated_at": "2026-11-15T00:00:00Z"
   },
   "session_summary_ended_by_end_run": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "codex",
     "blocked_on": [],
     "codex_link": "none",
@@ -401,6 +434,10 @@
     "updated_at": "2026-11-15T00:00:00Z"
   },
   "session_summary_relaunchable": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "codex",
     "blocked_on": [],
     "codex_link": "bound_not_started",
@@ -417,6 +454,10 @@
     "updated_at": "2026-11-15T00:00:00Z"
   },
   "session_summary_stopping": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "codex",
     "blocked_on": [],
     "codex_link": "none",

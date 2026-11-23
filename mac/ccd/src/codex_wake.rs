@@ -88,7 +88,7 @@ fn through_login_shell(
     let args = queue_args(as_sock, thread_id, nudge);
     let mut argv: Vec<&OsStr> = vec![codex.as_os_str()];
     argv.extend(args.iter().map(OsString::as_os_str));
-    crate::start_session::login_shell_command(environment, &argv)
+    crate::start_session::agent_command(environment, None, &argv)
 }
 
 /// The arguments of `codex queue` that put `nudge` on `thread_id` through `as_sock`.
@@ -107,16 +107,16 @@ fn queue_args(as_sock: &Path, thread_id: &str, nudge: &str) -> Vec<OsString> {
 
 /// Run a `codex queue` `command` within `deadline`; its stderr's tail is the error.
 async fn run(mut command: tokio::process::Command, codex: &Path, deadline: Duration) -> Result<()> {
-    let output = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        // The deadline drops the future; this makes that a kill rather than a leak.
-        .kill_on_drop(true)
-        .output();
-    let output = match tokio::time::timeout(deadline, output).await {
-        Ok(output) => output.with_context(|| format!("running {} queue", codex.display()))?,
-        Err(_) => bail!("codex queue did not answer within {deadline:?}"),
+        .stderr(Stdio::piped());
+    // Past the deadline its group is ended, what it started with it.
+    let Some(output) = crate::start_session::agent_output(command, deadline).await else {
+        bail!(
+            "{} queue did not answer within {deadline:?}",
+            codex.display()
+        );
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -263,12 +263,12 @@ mod tests {
     fn an_engine_runs_wake_runs_codex_queue_through_the_login_shell() {
         let environment = HashMap::from([
             (OsString::from("SHELL"), OsString::from("/bin/zsh")),
-            (OsString::from("HOME"), OsString::from("/Users/person")),
+            (OsString::from("HOME"), OsString::from("/tmp/cch.x/home")),
             (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
         ]);
         let command = through_login_shell(
             &environment,
-            Path::new("/Users/person/.local/bin/codex"),
+            Path::new("/tmp/cch.x/home/.local/bin/codex"),
             Path::new("/tmp/cch.x/runs/01K1B3XQ8ZC0DE5FGH7JKMNPQR/as.sock"),
             "01a197a7-7ac3-7ed1-ac9e-888bf77b95a4",
             protocol::ipc::MAIL_NUDGE_ACT,
@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(args.first(), Some(&OsStr::new("-lic")), "{args:?}");
         assert!(
             args.ends_with(&[
-                OsStr::new("/Users/person/.local/bin/codex"),
+                OsStr::new("/tmp/cch.x/home/.local/bin/codex"),
                 OsStr::new("queue"),
                 OsStr::new("--remote"),
                 OsStr::new("unix:///tmp/cch.x/runs/01K1B3XQ8ZC0DE5FGH7JKMNPQR/as.sock"),

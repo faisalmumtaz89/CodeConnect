@@ -200,6 +200,12 @@ pub struct Daemon {
     pub(crate) starts: crate::start_session::Starts,
     /// Which agents could start, as last checked.
     pub(crate) agents: crate::start_session::KnownAgents,
+    /// The account sign-in this computer is running, if any ([`crate::accounts::sign_in`]).
+    pub(crate) sign_ins: Arc<crate::accounts::SignIns>,
+    /// What each account says of itself (email, plan, usage), held in memory only ([`crate::accounts::Facts`]).
+    pub(crate) account_facts: crate::accounts::Facts,
+    /// The accounts listing, sent once whenever it changes, for each connection that reads accounts to push.
+    pub(crate) accounts_tx: broadcast::Sender<protocol::ws::ServerMessage>,
 }
 
 /// **What the Claude-only gate found** — see [`Daemon::refuse_unless_claude`].
@@ -532,6 +538,9 @@ impl Daemon {
             actuation_gates: Mutex::new(HashMap::new()),
             starts: crate::start_session::Starts::default(),
             agents: crate::start_session::KnownAgents::default(),
+            sign_ins: Arc::default(),
+            account_facts: crate::accounts::Facts::default(),
+            accounts_tx: broadcast::channel(16).0,
         })
     }
 
@@ -3381,6 +3390,11 @@ impl Daemon {
     /// before. This is a *display*: it is re-read continuously, it resolves itself on the
     /// next listing, and nothing is actuated from it.
     pub async fn sessions(&self) -> Result<Vec<SessionSummary>> {
+        // A run moving to another account reads live throughout (306 Slice E, S1). Its mark is read before its row:
+        // the mark goes only once the run is live again, so a row read after it is never an earlier one unmarked.
+        let switching: HashMap<String, i64> = self.db.switching_runs().await?.into_iter().collect();
+        let accounts: HashMap<String, crate::store::RecordedAccount> =
+            self.db.run_accounts().await?.into_iter().collect();
         let rows = self.db.list_sessions().await?;
         // Read up front, before the lock is taken, one query per row.
         let mut last_seqs: HashMap<String, u64> = HashMap::with_capacity(rows.len());
@@ -3505,6 +3519,35 @@ impl Daemon {
                 fact.value = id.clone();
             }
             session.model_label = model_labels.remove(&session.session_uid);
+            // The account its process runs on: Default, or an account still kept; one since removed is not known.
+            session.account = match accounts.get(&session.session_uid) {
+                Some(None) => Some(protocol::event::RunAccount {
+                    id: None,
+                    label: "Default".to_string(),
+                }),
+                Some(Some((id, Some(label)))) => Some(protocol::event::RunAccount {
+                    id: Some(id.clone()),
+                    label: label.clone(),
+                }),
+                _ => None,
+            };
+            match switching.get(&session.session_uid).copied() {
+                Some(crate::store::Store::SWITCH_FAILED) => {
+                    session.switching = Some(protocol::event::Switching::Failed)
+                }
+                // Moved once its process has ended; until then, whatever stopped it, it is waiting.
+                Some(_) => {
+                    session.switching = Some(match session.lifecycle {
+                        Lifecycle::Live | Lifecycle::Stopping => {
+                            protocol::event::Switching::Waiting
+                        }
+                        _ => protocol::event::Switching::Moved,
+                    });
+                    session.lifecycle = Lifecycle::Live;
+                    session.relaunchable = false;
+                }
+                None => {}
+            }
         }
         Ok(sessions)
     }
@@ -3534,6 +3577,16 @@ impl Daemon {
         if let Err(err) = self.ingest(pending).await {
             crate::log_error!("{session_uid}: could not record its link {link}: {err:#}");
         }
+    }
+
+    /// Whether a card of the run `session_uid` waits on an answer.
+    pub(crate) async fn has_pending_card(&self, session_uid: &str) -> bool {
+        self.inner
+            .lock()
+            .await
+            .pending
+            .keys()
+            .any(|(uid, _)| uid == session_uid)
     }
 
     /// Send the run `session_uid`'s agent host `command` through its link. Whether a Claude
@@ -3567,6 +3620,18 @@ impl Daemon {
                 commands.send(crate::codex_host::LinkCommand::Stop).is_ok()
             }
             None => false,
+        }
+    }
+
+    /// The Codex run `session_uid`'s link asked whether it may switch account now
+    /// ([`crate::codex_host::LinkCommand::SwitchIfIdle`]). Whether a link took it.
+    pub(crate) async fn switch_through_link(&self, session_uid: &str) -> bool {
+        let inner = self.inner.lock().await;
+        match inner.host_links.get(session_uid) {
+            Some(HostLink::Codex(_, commands)) => commands
+                .send(crate::codex_host::LinkCommand::SwitchIfIdle)
+                .is_ok(),
+            _ => false,
         }
     }
 
@@ -3614,6 +3679,26 @@ impl Daemon {
                 return refuse("This computer could not read its sessions.");
             }
         };
+        // A run its switch ended has no process to change; its settings are the ended run's until its next message.
+        if row.lifecycle != Lifecycle::Live
+            && self
+                .db
+                .switch_state(row.session_uid.clone())
+                .await
+                .ok()
+                .flatten()
+                == Some(crate::store::Store::SWITCH_MOVED)
+        {
+            let label = self
+                .store
+                .active_account(row.agent.as_str())
+                .ok()
+                .flatten()
+                .map_or_else(|| "Default".to_string(), |account| account.label);
+            return refuse(&format!(
+                "This session starts on {label} with your next message; its settings can be changed then."
+            ));
+        }
         if row.agent == protocol::agent::AgentKind::Codex {
             let commands = match self.inner.lock().await.host_links.get(&row.session_uid) {
                 Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
@@ -4611,6 +4696,8 @@ impl Daemon {
                 git_branch: tree.and_then(|tree| tree.branch.clone()),
                 diff_stat: tree.and_then(|tree| tree.diff_stat),
                 relaunchable: relaunchable.contains(&row.session_uid),
+                switching: None,
+                account: None,
             });
         }
         out
@@ -7115,7 +7202,10 @@ mod tests {
             codex_thread_id: None,
         };
         let request = format!("seed-{uid}");
-        assert_eq!(daemon.store.begin_run(&row, &request, None).unwrap(), None);
+        assert_eq!(
+            daemon.store.begin_run(&row, &request, None, None).unwrap(),
+            None
+        );
     }
 
     /// A live Codex run's hosted row, with no host attached and no events.
@@ -7134,7 +7224,10 @@ mod tests {
             codex_thread_id: None,
         };
         let request = format!("seed-{uid}");
-        assert_eq!(daemon.store.begin_run(&row, &request, None).unwrap(), None);
+        assert_eq!(
+            daemon.store.begin_run(&row, &request, None, None).unwrap(),
+            None
+        );
     }
 
     fn lifecycle_of(daemon: &Arc<Daemon>, uid: &str) -> Lifecycle {
@@ -7716,7 +7809,10 @@ mod tests {
             codex_thread_id: None,
         };
         let request = format!("start-{uid}");
-        assert_eq!(daemon.store.begin_run(&row, &request, None).unwrap(), None);
+        assert_eq!(
+            daemon.store.begin_run(&row, &request, None, None).unwrap(),
+            None
+        );
         daemon.store.record_host(uid, &HOST, None).unwrap();
     }
 

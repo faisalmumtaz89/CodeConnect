@@ -860,7 +860,25 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     while the run reports no effort: a Codex entry Codex's own (`model/list`'s `defaultReasoningEffort`);
 ///     a Claude entry the default Claude Code's documentation names for the model it resolves to, and none
 ///     for a model it does not name. A daemon below 47 sends none.
-pub const PROTOCOL_MINOR: u32 = 47;
+///   * `48` — **Several accounts per agent.**
+///
+///     [`ws::ClientMessage::ListAccounts`], [`ws::ClientMessage::AddAccount`], [`ws::ClientMessage::ActivateAccount`],
+///     [`ws::ClientMessage::SignInAccount`] and [`ws::ClientMessage::RemoveAccount`], each answered with one
+///     [`ws::ServerMessage::Accounts`] naming its request, or [`ws::ServerMessage::AccountsRefused`]; the same
+///     listing pushed, with no request id, whenever it changes. To paired devices only, behind
+///     [`ws::Capabilities::accounts`]. An account is a folder of the computer's own that a start on it is given, its
+///     agent's credential its own and the rest of the person's home shared; an agent's Default is the agent as it is.
+///     Choosing one moves the agent's running sessions to it: each is ended when idle, its end typed
+///     [`event::SWITCHED_TO`], and its next message starts it on the account active then; it reads live meanwhile,
+///     [`event::SessionSummary::switching`] saying where its move stands, and a start that did not go through files
+///     [`event::notice::SWITCH_FAILED`]; one on a plan without its model runs on the plan's default, filing
+///     [`event::notice::MODEL_UNAVAILABLE`], its menu then the plan's. Each run CodeConnect started names the account its process runs on
+///     ([`event::SessionSummary::account`]; Default is `id` null). A listing carries what each Codex account and the
+///     Default say of themselves ([`ws::AccountFacts`]: email, plan, usage windows, read on demand and held in the
+///     computer's memory only), and marks two signed in as one email. An account whose Codex sign-in is kept outside its home reads
+///     [`ws::AgentAccount::not_separate`]. A daemon below 48 answers them `bad_request` and advertises no
+///     `accounts`.
+pub const PROTOCOL_MINOR: u32 = 48;
 
 #[cfg(test)]
 mod ledger_tests {

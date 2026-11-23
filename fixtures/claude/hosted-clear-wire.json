@@ -1,5 +1,9 @@
 {
   "session_hosted_live": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "claude",
     "blocked_on": [],
     "claude_session_id": "23412b6b-2af7-41d0-bbc4-0679c536ae99",

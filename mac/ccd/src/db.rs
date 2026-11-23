@@ -227,9 +227,12 @@ impl Db {
         row: SessionRow,
         request_id: String,
         start: Option<String>,
+        account: Option<String>,
     ) -> Result<Option<crate::store::HostedRun>> {
-        self.run(move |store| store.begin_run(&row, &request_id, start.as_deref()))
-            .await
+        self.run(move |store| {
+            store.begin_run(&row, &request_id, start.as_deref(), account.as_deref())
+        })
+        .await
     }
 
     pub async fn record_host(
@@ -821,6 +824,37 @@ impl Db {
             .await
     }
 
+    pub async fn set_run_account(
+        &self,
+        session_uid: String,
+        account: Option<String>,
+    ) -> Result<()> {
+        self.run(move |store| store.set_run_account(&session_uid, account.as_deref()))
+            .await
+    }
+
+    pub async fn run_accounts(&self) -> Result<Vec<(String, crate::store::RecordedAccount)>> {
+        self.run(move |store| store.run_accounts()).await
+    }
+
+    pub async fn switching_runs(&self) -> Result<Vec<(String, i64)>> {
+        self.run(move |store| store.switching_runs()).await
+    }
+
+    pub async fn switch_state(&self, session_uid: String) -> Result<Option<i64>> {
+        self.run(move |store| store.switch_state(&session_uid))
+            .await
+    }
+
+    pub async fn set_switch_state(&self, session_uid: String, state: Option<i64>) -> Result<()> {
+        self.run(move |store| store.set_switch_state(&session_uid, state))
+            .await
+    }
+
+    pub async fn mark_switching(&self, agent: String) -> Result<Vec<String>> {
+        self.run(move |store| store.mark_switching(&agent)).await
+    }
+
     pub async fn host_sends(&self, session_uid: String) -> Result<Vec<(String, String)>> {
         self.run(move |store| store.host_sends(&session_uid)).await
     }
@@ -1090,7 +1124,7 @@ mod tests {
             codex_thread_id: None,
         };
         let store = db.blocking();
-        assert_eq!(store.begin_run(&row, &key.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &key.uid, None, None).unwrap(), None);
         store.record_host(&key.uid, &HOST, None).unwrap();
         key
     }

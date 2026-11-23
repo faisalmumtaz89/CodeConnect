@@ -1,0 +1,95 @@
+[
+  {
+    "event": {
+      "kind": "session_end",
+      "payload": {
+        "exit_code": null,
+        "reason": "Switched to B",
+        "switched_to": {
+          "account_id": "01M82B4K7A2XN1X22R98H2XB7X",
+          "label": "B"
+        }
+      },
+      "seq": 6,
+      "session_id": "01M82B4K7A2XN1X22R98H2XB7Z",
+      "session_uid": "01M82B4K7A2XN1X22R98H2XB7Z",
+      "source": "daemon",
+      "source_event_id": "exit:01M82B4K7A2XN1X22R98H2XB7Z:47722",
+      "ts": "2026-11-22T19:18:43.868Z"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-22T19:18:43.691Z",
+        "cwd": "/tmp/cch2.D8GXVZ8M46",
+        "last_seq": 6,
+        "lifecycle": "live",
+        "link": "attached",
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 3,
+          "value": "default"
+        },
+        "project_label": "cch2.D8GXVZ8M46",
+        "session_id": "01M82B4K7A2XN1X22R98H2XB7Z",
+        "session_uid": "01M82B4K7A2XN1X22R98H2XB7Z",
+        "switching": "moved",
+        "updated_at": "2026-11-22T19:18:43.868Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  {
+    "event": {
+      "kind": "session_end",
+      "payload": {
+        "exit_code": null,
+        "reason": "Stopped"
+      },
+      "seq": 7,
+      "session_id": "01M82B4K7A2XN1X22R98H2XB7Z",
+      "session_uid": "01M82B4K7A2XN1X22R98H2XB7Z",
+      "source": "daemon",
+      "source_event_id": "switch-end:545d5b13-6255-4ca2-8620-c4d91cf3c954",
+      "ts": "2026-11-22T19:18:43.921Z"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-22T19:18:43.691Z",
+        "cwd": "/tmp/cch2.D8GXVZ8M46",
+        "last_seq": 7,
+        "lifecycle": "exited",
+        "link": "detached",
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 3,
+          "value": "default"
+        },
+        "project_label": "cch2.D8GXVZ8M46",
+        "session_id": "01M82B4K7A2XN1X22R98H2XB7Z",
+        "session_uid": "01M82B4K7A2XN1X22R98H2XB7Z",
+        "updated_at": "2026-11-22T19:18:43.868Z"
+      }
+    ],
+    "type": "sessions"
+  }
+]

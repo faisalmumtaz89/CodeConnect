@@ -392,6 +392,10 @@ where
     // message is already queued on this receiver when the id arrives, and the
     // authentication path re-checks `revoked` itself.
     let mut revocations = daemon.revocations_tx.subscribe();
+    // The accounts listing, pushed whenever it changes (minor 48), once this connection has itself sent an accounts
+    // request: an app too old to read the frame never asks, and an iPhone's warns of every frame it can't read.
+    // Subscribed at that first request, so nothing older than its answer follows it.
+    let mut accounts_pushed: Option<broadcast::Receiver<ServerMessage>> = None;
     let mut watermarks: HashMap<String, u64> = HashMap::new();
     let mut authed = false;
     // Which device this connection belongs to, if any.
@@ -673,6 +677,11 @@ where
                         | ClientMessage::ListFolderTrust { .. }
                         | ClientMessage::SetFolderTrust { .. }
                         | ClientMessage::ForgetFolderTrust { .. }
+                        | ClientMessage::ListAccounts { .. }
+                        | ClientMessage::AddAccount { .. }
+                        | ClientMessage::ActivateAccount { .. }
+                        | ClientMessage::SignInAccount { .. }
+                        | ClientMessage::RemoveAccount { .. }
                 ) {
                     if device_id.is_none() {
                         send(&mut sink, &ServerMessage::Error {
@@ -680,6 +689,16 @@ where
                             message: "only a paired device may start sessions".into(),
                         }).await?;
                         continue;
+                    }
+                    if accounts_pushed.is_none() && matches!(
+                        parsed,
+                        ClientMessage::ListAccounts { .. }
+                            | ClientMessage::AddAccount { .. }
+                            | ClientMessage::ActivateAccount { .. }
+                            | ClientMessage::SignInAccount { .. }
+                            | ClientMessage::RemoveAccount { .. }
+                    ) {
+                        accounts_pushed = Some(daemon.accounts_tx.subscribe());
                     }
                     let daemon = daemon.clone();
                     let replies = replies_tx.clone();
@@ -868,6 +887,20 @@ where
                 }
             }
 
+            pushed = async {
+                match accounts_pushed.as_mut() {
+                    Some(listing) => listing.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match pushed {
+                    Ok(listing) => send(&mut sink, &listing).await?,
+                    // Those missed are older than the ones still queued, which follow.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                }
+            }
+
             Some(reply) = replies.recv() => send(&mut sink, &reply).await?,
 
             _ = peers_refresh.tick(), if device_id.is_some() => {
@@ -996,6 +1029,11 @@ where
         | ClientMessage::ListFolderTrust { .. }
         | ClientMessage::SetFolderTrust { .. }
         | ClientMessage::ForgetFolderTrust { .. }
+        | ClientMessage::ListAccounts { .. }
+        | ClientMessage::AddAccount { .. }
+        | ClientMessage::ActivateAccount { .. }
+        | ClientMessage::SignInAccount { .. }
+        | ClientMessage::RemoveAccount { .. }
         | ClientMessage::GetMachineStats => {}
         ClientMessage::RegisterPush {
             token,
@@ -2079,6 +2117,8 @@ pub(crate) fn capabilities(
         // Stop reaches a Claude run CodeConnect started through its agent host; any other
         // Claude session is refused by the agent branch inside.
         claude_interrupt: true,
+        // Each agent's accounts: kept and chosen by a paired device, as starting is.
+        accounts: paired,
     }
 }
 
@@ -2215,7 +2255,7 @@ mod tests {
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
         };
-        assert_eq!(daemon.store.begin_run(&row, uid, None).unwrap(), None);
+        assert_eq!(daemon.store.begin_run(&row, uid, None, None).unwrap(), None);
     }
 
     /// A daemon with a private store holding exactly one paired device.
@@ -2607,7 +2647,7 @@ mod tests {
             agent: protocol::agent::AgentKind::Codex,
             codex_thread_id: None,
         };
-        assert_eq!(daemon.store.begin_run(&row, uid, None).unwrap(), None);
+        assert_eq!(daemon.store.begin_run(&row, uid, None, None).unwrap(), None);
         daemon.mail_run_live(uid).await;
     }
 
@@ -4163,7 +4203,10 @@ mod tests {
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
         };
-        assert_eq!(daemon.store.begin_run(&row, &uid, None).unwrap(), None);
+        assert_eq!(
+            daemon.store.begin_run(&row, &uid, None, None).unwrap(),
+            None
+        );
         let pendings: Vec<PendingEvent> = (0..events)
             .map(|n| PendingEvent {
                 session_uid: uid.clone(),
@@ -5164,7 +5207,10 @@ mod tests {
                 agent: protocol::agent::AgentKind::Claude,
                 codex_thread_id: None,
             };
-            assert_eq!(server.store.begin_run(&row, &uid, None).unwrap(), None);
+            assert_eq!(
+                server.store.begin_run(&row, &uid, None, None).unwrap(),
+                None
+            );
         }
         let list = Message::Text(r#"{"type":"list_projects"}"#.into());
 
@@ -5329,7 +5375,10 @@ mod tests {
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
         };
-        assert_eq!(store.begin_run(&row, &row.session_uid, None).unwrap(), None);
+        assert_eq!(
+            store.begin_run(&row, &row.session_uid, None, None).unwrap(),
+            None
+        );
     }
 
     /// **The start-session wire a minor-28 daemon sent, still in what this build
@@ -5555,6 +5604,8 @@ mod tests {
             git_branch: None,
             diff_stat: None,
             relaunchable: false,
+            switching: None,
+            account: None,
         };
         serde_json::json!({
             "hello_ack_capabilities": ack["capabilities"],
@@ -5620,6 +5671,8 @@ mod tests {
                     .map(|(_, added, removed)| protocol::event::DiffStat { added, removed }),
 
                 relaunchable: false,
+                switching: None,
+                account: None,
             }
         };
         serde_json::json!({
@@ -5859,7 +5912,7 @@ mod tests {
             assert_eq!(
                 server
                     .store
-                    .begin_run(&row, &row.session_uid, None)
+                    .begin_run(&row, &row.session_uid, None, None)
                     .unwrap(),
                 None
             );
@@ -6013,27 +6066,30 @@ mod tests {
             assert_eq!(
                 server
                     .store
-                    .begin_run(&row, &row.session_uid, None)
+                    .begin_run(&row, &row.session_uid, None, None)
                     .unwrap(),
                 None
             );
         }
-        server.daemon.agents.set(vec![
-            AgentAvailability {
-                agent: AgentKind::Claude,
-                available: true,
-                detail: None,
-                models: Vec::new(),
-                signed_in: None,
-            },
-            AgentAvailability {
-                agent: AgentKind::Codex,
-                available: false,
-                detail: Some("could not find the codex binary: install Codex".into()),
-                models: Vec::new(),
-                signed_in: None,
-            },
-        ]);
+        server.daemon.agents.set(
+            vec![None, None],
+            vec![
+                AgentAvailability {
+                    agent: AgentKind::Claude,
+                    available: true,
+                    detail: None,
+                    models: Vec::new(),
+                    signed_in: None,
+                },
+                AgentAvailability {
+                    agent: AgentKind::Codex,
+                    available: false,
+                    detail: Some("could not find the codex binary: install Codex".into()),
+                    models: Vec::new(),
+                    signed_in: None,
+                },
+            ],
+        );
 
         register_stub_session(&server.store, app.display().to_string());
         let (mut phone, ack) = server
@@ -6657,6 +6713,510 @@ mod tests {
         assert_eq!(
             ask(&mut phone, list("t6"), "t6").await,
             serde_json::json!([["/srv/b", "not_trusted"]])
+        );
+    }
+
+    /// **Every accounts call answers at once, and what the agents say follows by push** (0e's rule, 2026-11-23): an
+    /// add answers within a bound while its agent takes 3 s to say whether it is signed in, which then arrives pushed;
+    /// a sign-in answers at once and, at the login's end, its sign-in and its own facts are pushed with no list; and a
+    /// list right after a fresh read answers from what is held and starts no agent.
+    #[tokio::test]
+    async fn an_accounts_call_answers_at_once_and_what_its_agent_says_follows_by_push() {
+        let _env = crate::ProcessEnvRead::take();
+        use protocol::agent::AgentKind;
+        let agents =
+            std::env::temp_dir().join(format!("ccw-push.{}", &protocol::uid::new().unwrap()[20..]));
+        std::fs::create_dir_all(&agents).unwrap();
+        let codex = crate::accounts::tests::stand_in_codex(&agents);
+        std::fs::write(agents.join("slowstatus"), "").unwrap();
+        let claude = agents.join("signed-out");
+        std::fs::write(&claude, "#!/bin/sh\nexit 1\n").unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&claude)
+            .status()
+            .unwrap();
+        let (server, _) = live_server(protocol::config::Config {
+            codex_bin: Some(codex.display().to_string()),
+            claude_bin: Some(claude.display().to_string()),
+            ..protocol::config::Config::default()
+        })
+        .await;
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let send = |message: ClientMessage| Message::Text(serde_json::to_string(&message).unwrap());
+        // The next frame of `type` naming `request` (a pushed listing names none) that `wanted` accepts, within 20 s.
+        async fn until(
+            phone: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+            request: Option<&str>,
+            wanted: impl Fn(&serde_json::Value) -> bool,
+        ) -> serde_json::Value {
+            let started = std::time::Instant::now();
+            while started.elapsed() < Duration::from_secs(20) {
+                if let Frame::Json(frame) = next_frame(phone, Duration::from_secs(1)).await {
+                    if frame["type"] == "accounts"
+                        && frame["request_id"].as_str() == request
+                        && wanted(&frame)
+                    {
+                        return frame;
+                    }
+                }
+            }
+            panic!("no such frame within 20 s");
+        }
+        let runs = || std::fs::read_to_string(agents.join("runs")).unwrap_or_default();
+
+        // Added: answered at once, though its agent takes 3 s to say whether it is signed in; that follows by push.
+        let started = std::time::Instant::now();
+        phone
+            .send(send(ClientMessage::AddAccount {
+                request_id: "p1".into(),
+                agent: AgentKind::Codex,
+                label: "B".into(),
+            }))
+            .await
+            .unwrap();
+        let added = until(&mut phone, Some("p1"), |_| true).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "answered in {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            added["accounts"][0].get("signed_in"),
+            None,
+            "not read yet: {added}"
+        );
+        let b = added["accounts"][0]["id"].as_str().unwrap().to_string();
+        until(&mut phone, None, |frame| {
+            frame["accounts"][0]["signed_in"] == false
+        })
+        .await;
+
+        // Signed in: answered at once; at the login's end its sign-in and its own facts are pushed, with no list.
+        phone
+            .send(send(ClientMessage::SignInAccount {
+                request_id: "p2".into(),
+                account_id: b.clone(),
+            }))
+            .await
+            .unwrap();
+        let signing = until(&mut phone, Some("p2"), |_| true).await;
+        assert_eq!(signing["accounts"][0]["signing_in"], true, "{signing}");
+        let read = until(&mut phone, None, |frame| {
+            frame["accounts"][0]["signed_in"] == true
+                && frame["accounts"][0]["facts"]["email"].is_string()
+        })
+        .await;
+        assert_eq!(
+            read["accounts"][0]["facts"]["email"],
+            format!("{b}@example.test"),
+            "{read}"
+        );
+
+        // Listed right after: answered from what is held, and no agent started.
+        let before = runs();
+        phone
+            .send(send(ClientMessage::ListAccounts {
+                request_id: "p3".into(),
+            }))
+            .await
+            .unwrap();
+        let listed = until(&mut phone, Some("p3"), |_| true).await;
+        assert_eq!(listed["accounts"][0]["signed_in"], true, "{listed}");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            runs(),
+            before,
+            "a list right after a fresh read started an agent"
+        );
+
+        // Removed: answered once its own logout is done, not after the other accounts' sign-ins are asked again.
+        phone
+            .send(send(ClientMessage::AddAccount {
+                request_id: "p4".into(),
+                agent: AgentKind::Codex,
+                label: "X".into(),
+            }))
+            .await
+            .unwrap();
+        let added = until(&mut phone, Some("p4"), |_| true).await;
+        let x = added["accounts"][1]["id"].as_str().unwrap().to_string();
+        let started = std::time::Instant::now();
+        phone
+            .send(send(ClientMessage::RemoveAccount {
+                request_id: "p5".into(),
+                account_id: x,
+            }))
+            .await
+            .unwrap();
+        let removed = until(&mut phone, Some("p5"), |_| true).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "removed in {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            removed["accounts"].as_array().unwrap().len(),
+            1,
+            "{removed}"
+        );
+        let _ = std::fs::remove_dir_all(&agents);
+    }
+
+    /// **The frames the accounts page reads, in their real order** (recorded for the apps): each add's answer with its
+    /// sign-in and facts not read yet, each sign-in's answer, then the pushes that fill them in: a Codex account with
+    /// one usage window, a Claude Code account whose sign-in has no plan limits, and one with two windows.
+    #[tokio::test]
+    async fn the_accounts_pages_frames_arrive_answer_then_push() {
+        let _env = crate::ProcessEnvRead::take();
+        use protocol::agent::AgentKind;
+        let agents =
+            std::env::temp_dir().join(format!("ccw-page.{}", &protocol::uid::new().unwrap()[20..]));
+        std::fs::create_dir_all(&agents).unwrap();
+        let codex = crate::accounts::tests::stand_in_codex(&agents);
+        let claude = crate::accounts::tests::stand_in_claude(&agents);
+        // The host's usage launch: no plan limits for an account named in `nolimits-<id>`, else both windows.
+        let host = agents.join("cc-agent-host");
+        std::fs::write(
+            &host,
+            "#!/bin/sh\nif [ -e \"$(dirname \"$0\")/nolimits-$(basename \"$CLAUDE_CONFIG_DIR\")\" ]; then \
+             echo '{\"available\":false,\"plan\":null,\"windows\":[]}'; else \
+             echo '{\"available\":true,\"plan\":\"max\",\"windows\":[{\"name\":\"five_hour\",\"utilization\":12,\"resets_at\":1795900000},{\"name\":\"seven_day\",\"utilization\":42,\"resets_at\":1796400000}]}'; fi\n",
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&host)
+            .status()
+            .unwrap();
+        let (server, _) = live_server(protocol::config::Config {
+            codex_bin: Some(codex.display().to_string()),
+            claude_bin: Some(claude.display().to_string()),
+            agent_host_bin: Some(host.display().to_string()),
+            ..protocol::config::Config::default()
+        })
+        .await;
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let send = |message: ClientMessage| Message::Text(serde_json::to_string(&message).unwrap());
+        let mut frames: Vec<serde_json::Value> = Vec::new();
+        // Every accounts frame in the order it arrives, until one `done` accepts, within 30 s.
+        async fn read_until(
+            phone: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+            frames: &mut Vec<serde_json::Value>,
+            done: impl Fn(&serde_json::Value) -> bool,
+        ) -> serde_json::Value {
+            let started = std::time::Instant::now();
+            while started.elapsed() < Duration::from_secs(30) {
+                if let Frame::Json(frame) = next_frame(phone, Duration::from_secs(1)).await {
+                    if frame["type"] == "accounts" {
+                        frames.push(frame.clone());
+                        if done(&frame) {
+                            return frame;
+                        }
+                    }
+                }
+            }
+            panic!("not within 30 s: {frames:#?}");
+        }
+        let mut ids = Vec::new();
+        for (n, (agent, label)) in [
+            (AgentKind::Codex, "B"),
+            (AgentKind::Claude, "C"),
+            (AgentKind::Claude, "D"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request = format!("add-{n}");
+            phone
+                .send(send(ClientMessage::AddAccount {
+                    request_id: request.clone(),
+                    agent,
+                    label: label.into(),
+                }))
+                .await
+                .unwrap();
+            let added = read_until(&mut phone, &mut frames, |frame| {
+                frame["request_id"] == request.as_str()
+            })
+            .await;
+            let row = added["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["label"] == label)
+                .unwrap()
+                .clone();
+            assert_eq!(
+                (row.get("signed_in"), row.get("facts")),
+                (None, None),
+                "not read yet: {row}"
+            );
+            ids.push(row["id"].as_str().unwrap().to_string());
+        }
+        std::fs::write(agents.join(format!("nolimits-{}", ids[1])), "").unwrap();
+        let row = |frame: &serde_json::Value, id: &str| {
+            frame["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == id)
+                .cloned()
+                .unwrap_or_default()
+        };
+        for (n, id) in ids.iter().enumerate() {
+            let request = format!("sign-in-{n}");
+            phone
+                .send(send(ClientMessage::SignInAccount {
+                    request_id: request.clone(),
+                    account_id: id.clone(),
+                }))
+                .await
+                .unwrap();
+            read_until(&mut phone, &mut frames, |frame| {
+                frame["request_id"] == request.as_str()
+            })
+            .await;
+            // One sign-in at a time: a newer one replaces the one going, so each is let end first.
+            read_until(&mut phone, &mut frames, |frame| {
+                frame.get("request_id").is_none() && row(frame, id)["signed_in"] == true
+            })
+            .await;
+        }
+        let whole = |frame: &serde_json::Value| {
+            frame.get("request_id").is_none()
+                && ids.iter().all(|id| {
+                    row(frame, id)["signed_in"] == true
+                        && row(frame, id)["facts"]["email"].is_string()
+                })
+                && row(frame, &ids[2])["facts"]["windows"]
+                    .as_array()
+                    .is_some_and(|windows| windows.len() == 2)
+                && row(frame, &ids[1])["facts"]["limits_available"] == false
+        };
+        // The last sign-in's push may already be the whole one.
+        let filled = match frames.last().filter(|frame| whole(frame)) {
+            Some(frame) => frame.clone(),
+            None => read_until(&mut phone, &mut frames, whole).await,
+        };
+        assert_eq!(
+            row(&filled, &ids[0])["facts"]["windows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "{filled}"
+        );
+        assert_eq!(
+            row(&filled, &ids[1])["facts"].get("windows"),
+            None,
+            "no plan limits: no window: {filled}"
+        );
+        assert_eq!(
+            row(&filled, &ids[2])["facts"]["limits_available"],
+            true,
+            "{filled}"
+        );
+        crate::switch::window::keep(&frames, "accounts-answer-then-push-wire.json");
+        let _ = std::fs::remove_dir_all(&agents);
+    }
+
+    /// **Accounts are kept and chosen by a paired device only** (minor 48): advertised to it and not to the bootstrap
+    /// token, which is refused all three asks. An account is added for its agent, made active, and set back to
+    /// Default; another agent's id is refused and nothing changes.
+    #[tokio::test]
+    async fn accounts_are_kept_and_chosen_by_a_paired_device() {
+        // Every listing asks the agent, from the session's environment: here a stand-in for each, signed out.
+        let _env = crate::ProcessEnvRead::take();
+        use protocol::agent::AgentKind;
+        let agents = std::env::temp_dir().join(format!(
+            "ccw-agents.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        std::fs::create_dir_all(&agents).unwrap();
+        let stand_in = agents.join("signed-out");
+        std::fs::write(&stand_in, "#!/bin/sh\nexit 1\n").unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&stand_in)
+            .status()
+            .unwrap();
+        let (server, _) = live_server(protocol::config::Config {
+            codex_bin: Some(stand_in.display().to_string()),
+            claude_bin: Some(stand_in.display().to_string()),
+            ..protocol::config::Config::default()
+        })
+        .await;
+        let frame =
+            |message: ClientMessage| Message::Text(serde_json::to_string(&message).unwrap());
+        let list = |id: &str| {
+            frame(ClientMessage::ListAccounts {
+                request_id: id.into(),
+            })
+        };
+        let add = |id: &str, agent: AgentKind, label: &str| {
+            frame(ClientMessage::AddAccount {
+                request_id: id.into(),
+                agent,
+                label: label.into(),
+            })
+        };
+        let activate = |id: &str, agent: AgentKind, account: Option<&str>| {
+            frame(ClientMessage::ActivateAccount {
+                request_id: id.into(),
+                agent,
+                account_id: account.map(str::to_string),
+            })
+        };
+
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(ack["capabilities"]["accounts"], false, "{ack}");
+        for refused in [
+            list("b1"),
+            add("b2", AgentKind::Codex, "Work"),
+            activate("b3", AgentKind::Codex, None),
+        ] {
+            bootstrap.send(refused).await.unwrap();
+            let reply = next_json(&mut bootstrap).await.unwrap();
+            assert_eq!(reply["code"], "not_authorised", "{reply}");
+        }
+
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["accounts"], true, "{ack}");
+        // Kept with a made-up computer name: the one this daemon reads is the computer's own.
+        let mut kept = ack.clone();
+        kept["machine_name"] = "Example Mac".into();
+        crate::switch::window::keep(std::slice::from_ref(&kept), "minor-48-hello-wire.json");
+        async fn ask(
+            phone: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+            message: Message,
+            request_id: &str,
+        ) -> serde_json::Value {
+            phone.send(message).await.unwrap();
+            loop {
+                let reply = next_json(phone).await.expect("a reply");
+                // A pushed listing names no request; it is not the answer.
+                if reply["type"] == "accounts" && reply.get("request_id").is_none() {
+                    continue;
+                }
+                // Every answer to an accounts request names it, a refusal (`accounts_refused`) too.
+                if reply["type"] == "accounts"
+                    || reply["type"] == "accounts_refused"
+                    || reply["type"] == "error"
+                {
+                    assert_eq!(reply["request_id"], request_id, "{reply}");
+                    break reply;
+                }
+            }
+        }
+        // A change made by one paired device is pushed, naming no request, to each paired connection that has asked
+        // about accounts itself, and to no other: one that never asked may be an app that can't read the frame.
+        let (mut watcher, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let (mut silent, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        ask(&mut watcher, list("w1"), "w1").await;
+        let empty = ask(&mut phone, list("a1"), "a1").await;
+        assert_eq!(empty["accounts"], serde_json::json!([]), "{empty}");
+        assert_eq!(empty["active"], serde_json::json!([]), "{empty}");
+
+        let added = ask(&mut phone, add("a2", AgentKind::Codex, "Work"), "a2").await;
+        let pushed = loop {
+            let frame =
+                tokio::time::timeout(std::time::Duration::from_secs(10), next_json(&mut watcher))
+                    .await
+                    .expect("a push within 10 s")
+                    .expect("a frame");
+            if frame["type"] == "accounts" {
+                break frame;
+            }
+        };
+        assert_eq!(pushed.get("request_id"), None, "{pushed}");
+        assert_eq!(pushed["accounts"][0]["label"], "Work", "{pushed}");
+        while let Ok(frame) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), next_json(&mut silent)).await
+        {
+            let frame = frame.expect("a frame");
+            assert_ne!(
+                frame["type"], "accounts",
+                "pushed to a connection that never asked: {frame}"
+            );
+        }
+        let work = added["accounts"][0]["id"].as_str().unwrap().to_string();
+        assert!(protocol::uid::is_well_formed(&work), "{added}");
+        assert_eq!(added["accounts"][0]["agent"], "codex");
+        assert_eq!(
+            added["active"],
+            serde_json::json!([]),
+            "adding does not choose it: {added}"
+        );
+
+        let chosen = ask(
+            &mut phone,
+            activate("a3", AgentKind::Codex, Some(&work)),
+            "a3",
+        )
+        .await;
+        assert_eq!(
+            chosen["active"],
+            serde_json::json!([{"agent": "codex", "account_id": work}]),
+            "{chosen}"
+        );
+
+        // Codex's account is not Claude's.
+        let refused = ask(
+            &mut phone,
+            activate("a4", AgentKind::Claude, Some(&work)),
+            "a4",
+        )
+        .await;
+        assert_eq!(
+            (refused["type"].as_str(), refused["code"].as_str()),
+            (Some("accounts_refused"), Some("bad_request")),
+            "{refused}"
+        );
+        let unchanged = ask(&mut phone, list("a5"), "a5").await;
+        assert_eq!(unchanged["active"], chosen["active"], "{unchanged}");
+
+        // One label per agent: the same label again is the account it made, not a twin; a name is 1 to 64 characters.
+        let again = ask(&mut phone, add("a7", AgentKind::Codex, "  Work "), "a7").await;
+        // The same account, its row as held now (its sign-in read since the add).
+        assert_eq!(again["accounts"].as_array().unwrap().len(), 1, "{again}");
+        assert_eq!(
+            again["accounts"][0]["id"], added["accounts"][0]["id"],
+            "{again}"
+        );
+        for label in ["   ", &"x".repeat(65)] {
+            let refused = ask(&mut phone, add("a8", AgentKind::Codex, label), "a8").await;
+            assert_eq!(
+                (refused["type"].as_str(), refused["code"].as_str()),
+                (Some("accounts_refused"), Some("bad_request")),
+                "{refused}"
+            );
+        }
+        // An agent with no accounts here is refused, Default included.
+        let other = AgentKind::from_str_lossy("gemini");
+        let refused = ask(&mut phone, activate("a9", other, None), "a9").await;
+        assert_eq!(
+            (refused["type"].as_str(), refused["code"].as_str()),
+            (Some("accounts_refused"), Some("bad_request")),
+            "{refused}"
+        );
+
+        let default = ask(&mut phone, activate("a6", AgentKind::Codex, None), "a6").await;
+        assert_eq!(default["active"], serde_json::json!([]), "{default}");
+        assert_eq!(
+            default["accounts"].as_array().unwrap().len(),
+            1,
+            "Default keeps the account: {default}"
         );
     }
 }

@@ -1,0 +1,440 @@
+[
+  {
+    "event": {
+      "item_id": "r1",
+      "kind": "turn_complete",
+      "payload": {
+        "is_error": false,
+        "num_turns": 1,
+        "subtype": "success"
+      },
+      "seq": 5,
+      "session_id": "01M82X1ASERF7DPA32E16243H9",
+      "session_uid": "01M82X1ASERF7DPA32E16243H9",
+      "source": "sdk",
+      "source_event_id": "r1/turn_complete/0",
+      "ts": "2026-11-23T00:31:31.905Z",
+      "turn_id": "6c709817-3f36-490c-ae21-95df6cb4d9e5"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "account": {
+          "id": "01M82X1ASERF7DPA32E16243H7",
+          "label": "A"
+        },
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-23T00:31:31.119Z",
+        "cwd": "/tmp/cch2.FGYXMT1H26",
+        "last_seq": 6,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "default_effort": "medium",
+              "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "Default (recommended)",
+              "resolved_model": "claude-opus-5-5",
+              "value": "default"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "Sonnet",
+              "resolved_model": "claude-sonnet-5-5",
+              "value": "sonnet"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Ask before edits",
+              "value": "default"
+            },
+            {
+              "label": "Accept edits",
+              "value": "acceptEdits"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Bypass permissions",
+              "value": "bypassPermissions"
+            }
+          ],
+          "selected_model": "default"
+        },
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 4,
+          "value": "bypassPermissions"
+        },
+        "project_label": "cch2.FGYXMT1H26",
+        "session_id": "01M82X1ASERF7DPA32E16243H9",
+        "session_uid": "01M82X1ASERF7DPA32E16243H9",
+        "switching": "waiting",
+        "updated_at": "2026-11-23T00:31:31.385Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  {
+    "event": {
+      "item_id": "r1",
+      "kind": "usage",
+      "payload": {
+        "usage": {}
+      },
+      "seq": 6,
+      "session_id": "01M82X1ASERF7DPA32E16243H9",
+      "session_uid": "01M82X1ASERF7DPA32E16243H9",
+      "source": "sdk",
+      "source_event_id": "r1/usage/1",
+      "ts": "2026-11-23T00:31:31.905Z",
+      "turn_id": "6c709817-3f36-490c-ae21-95df6cb4d9e5"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "account": {
+          "id": "01M82X1ASERF7DPA32E16243H7",
+          "label": "A"
+        },
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-23T00:31:31.119Z",
+        "cwd": "/tmp/cch2.FGYXMT1H26",
+        "last_seq": 6,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "default_effort": "medium",
+              "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "Default (recommended)",
+              "resolved_model": "claude-opus-5-5",
+              "value": "default"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "Sonnet",
+              "resolved_model": "claude-sonnet-5-5",
+              "value": "sonnet"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Ask before edits",
+              "value": "default"
+            },
+            {
+              "label": "Accept edits",
+              "value": "acceptEdits"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Bypass permissions",
+              "value": "bypassPermissions"
+            }
+          ],
+          "selected_model": "default"
+        },
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 4,
+          "value": "bypassPermissions"
+        },
+        "project_label": "cch2.FGYXMT1H26",
+        "session_id": "01M82X1ASERF7DPA32E16243H9",
+        "session_uid": "01M82X1ASERF7DPA32E16243H9",
+        "switching": "waiting",
+        "updated_at": "2026-11-23T00:31:31.385Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  {
+    "event": {
+      "kind": "session_end",
+      "payload": {
+        "exit_code": null,
+        "reason": "Switched to B",
+        "switched_to": {
+          "account_id": "01M82X1ASERF7DPA32E16243H8",
+          "label": "B"
+        }
+      },
+      "seq": 7,
+      "session_id": "01M82X1ASERF7DPA32E16243H9",
+      "session_uid": "01M82X1ASERF7DPA32E16243H9",
+      "source": "daemon",
+      "source_event_id": "exit:01M82X1ASERF7DPA32E16243H9:24340",
+      "ts": "2026-11-23T00:31:31.907Z"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "account": {
+          "id": "01M82X1ASERF7DPA32E16243H7",
+          "label": "A"
+        },
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-23T00:31:31.119Z",
+        "cwd": "/tmp/cch2.FGYXMT1H26",
+        "last_seq": 7,
+        "lifecycle": "live",
+        "link": "attached",
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 4,
+          "value": "bypassPermissions"
+        },
+        "project_label": "cch2.FGYXMT1H26",
+        "session_id": "01M82X1ASERF7DPA32E16243H9",
+        "session_uid": "01M82X1ASERF7DPA32E16243H9",
+        "switching": "moved",
+        "updated_at": "2026-11-23T00:31:31.907Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  {
+    "event": {
+      "kind": "link_state",
+      "payload": {
+        "link": "attached",
+        "reason": "agent host linked"
+      },
+      "seq": 8,
+      "session_id": "01M82X1ASERF7DPA32E16243H9",
+      "session_uid": "01M82X1ASERF7DPA32E16243H9",
+      "source": "daemon",
+      "ts": "2026-11-23T00:31:32.405Z"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "account": {
+          "id": "01M82X1ASERF7DPA32E16243H7",
+          "label": "A"
+        },
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-23T00:31:31.119Z",
+        "cwd": "/tmp/cch2.FGYXMT1H26",
+        "last_seq": 8,
+        "lifecycle": "live",
+        "link": "attached",
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 4,
+          "value": "bypassPermissions"
+        },
+        "project_label": "cch2.FGYXMT1H26",
+        "session_id": "01M82X1ASERF7DPA32E16243H9",
+        "session_uid": "01M82X1ASERF7DPA32E16243H9",
+        "switching": "moved",
+        "updated_at": "2026-11-23T00:31:32.349Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  {
+    "event": {
+      "kind": "user_message",
+      "payload": {
+        "request_id": "r-on-b",
+        "text": "on B now?"
+      },
+      "seq": 9,
+      "session_id": "01M82X1ASERF7DPA32E16243H9",
+      "session_uid": "01M82X1ASERF7DPA32E16243H9",
+      "source": "daemon",
+      "source_event_id": "say:81ccea13-290a-8def-992a-2d916f38b665",
+      "ts": "2026-11-23T00:31:32.406Z"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "account": {
+          "id": "01M82X1ASERF7DPA32E16243H8",
+          "label": "B"
+        },
+        "agent": "claude",
+        "blocked_on": [],
+        "claude_session_id": "f91228c3-3636-4062-8ca0-e21f2aee18ad",
+        "codex_link": "none",
+        "created_at": "2026-11-23T00:31:31.119Z",
+        "cwd": "/tmp/cch2.FGYXMT1H26",
+        "last_seq": 9,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "default_effort": "medium",
+              "detail": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "Default (recommended)",
+              "resolved_model": "claude-opus-5-5",
+              "value": "default"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "Sonnet",
+              "resolved_model": "claude-sonnet-5-5",
+              "value": "sonnet"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Ask before edits",
+              "value": "default"
+            },
+            {
+              "label": "Accept edits",
+              "value": "acceptEdits"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Bypass permissions",
+              "value": "bypassPermissions"
+            }
+          ],
+          "selected_model": "default"
+        },
+        "model": {
+          "seq": 3,
+          "value": "claude-opus-5-5"
+        },
+        "permission_mode": {
+          "seq": 4,
+          "value": "bypassPermissions"
+        },
+        "project_label": "cch2.FGYXMT1H26",
+        "session_id": "01M82X1ASERF7DPA32E16243H9",
+        "session_uid": "01M82X1ASERF7DPA32E16243H9",
+        "updated_at": "2026-11-23T00:31:32.406Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "claude",
+        "facts": {
+          "email": "a@example.test",
+          "plan": "max",
+          "read_at": "2026-11-23T03:00:00.000Z"
+        },
+        "id": "01M82X1ASERF7DPA32E16243H7",
+        "label": "A"
+      },
+      {
+        "agent": "claude",
+        "facts": {
+          "email": "b@example.test",
+          "plan": "max",
+          "read_at": "2026-11-23T03:00:00.000Z"
+        },
+        "id": "01M82X1ASERF7DPA32E16243H8",
+        "label": "B"
+      }
+    ],
+    "active": [
+      {
+        "account_id": "01M82X1ASERF7DPA32E16243H8",
+        "agent": "claude"
+      }
+    ],
+    "type": "accounts"
+  }
+]

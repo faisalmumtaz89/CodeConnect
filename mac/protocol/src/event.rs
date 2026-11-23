@@ -97,6 +97,9 @@ pub fn sdk_event_id(message_uuid: &str, kind: &EventKind, block: usize) -> Strin
 
 /// The `notification_type` values of the [`EventKind::Notification`] events the
 /// engine files itself, beside the ones Claude's own notifications carry.
+/// The payload key of a [`EventKind::SessionEnd`] that is a switch of account.
+pub const SWITCHED_TO: &str = "switched_to";
+
 pub mod notice {
     /// `/clear` reset the conversation; the run's Claude session id changes.
     pub const CONVERSATION_CLEARED: &str = "conversation_cleared";
@@ -110,6 +113,13 @@ pub mod notice {
     /// A Stop cancelled the person's message `request_id` before claude ran it
     /// (`reason: "stopped"`): it was never sent to the model.
     pub const SEND_NOT_SENT: &str = "send_not_sent";
+    /// A run moving to another account could not start there (`{message}`, and the account typed as on the
+    /// switch's end, [`super::SWITCHED_TO`], minor 48): it is ended and relaunchable ([`super::Switching::Failed`]).
+    pub const SWITCH_FAILED: &str = "switch_failed";
+    /// A run moved to another account whose plan does not offer its model runs on the plan's default instead
+    /// (`{from_model, from_label, to_model, to_label, account: {id, label}}`, and `message` in words, minor 48):
+    /// decision 316.
+    pub const MODEL_UNAVAILABLE: &str = "model_unavailable";
 }
 
 /// Item kinds, following the thread -> turn -> item model.
@@ -124,6 +134,12 @@ pub enum EventKind {
     /// Reserved for that, and only that — a finished turn is
     /// [`EventKind::TurnComplete`]. Conflating them is what made the phone
     /// render "session ended" after every single reply.
+    ///
+    /// One whose payload carries [`SWITCHED_TO`] (`{"account_id": <id, or null for
+    /// Default>, "label": <the account's name>}`, minor 48) is a switch of account, not an
+    /// end: the process ended between turns and is started again at once on that account,
+    /// the run reading live throughout; the next [`EventKind::SessionStart`] is that
+    /// restart.
     SessionEnd,
     /// The agent finished a turn. For a hosted Claude run it is filed from the
     /// SDK's `result`, which the run's agent host relays as the turn ends (an
@@ -519,6 +535,37 @@ pub struct SessionSummary {
     /// Omitted when false, and from an older daemon, whose ended runs stay ended.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub relaunchable: bool,
+    /// The run's move to its agent's active account (minor 48); absent when it has none. A moving run reads live
+    /// throughout, its `lifecycle` aside, until its next message is running on the new account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switching: Option<Switching>,
+    /// The account the run's process runs on, as recorded at its start or its newest relaunch (minor 48): not its
+    /// agent's active choice, which a moving run takes only with its next message. On every run CodeConnect
+    /// started; absent on any other, and from a daemon below 48: absent is "not known", never Default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<RunAccount>,
+}
+
+/// The account a run runs on ([`SessionSummary::account`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunAccount {
+    /// The account's id; null for its agent's Default, the one mark of Default (a label can be anything).
+    pub id: Option<String>,
+    /// The account's name, or "Default".
+    pub label: String,
+}
+
+/// Where a run's move to its agent's active account stands ([`SessionSummary::switching`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Switching {
+    /// Its turn, a card or a message unread by the agent is still going; it moves once idle.
+    Waiting,
+    /// Its process has ended at an idle point: its next message starts it on the new account.
+    Moved,
+    /// Its start on the new account did not go through (that account signed out, a refusal): it reads as the
+    /// relaunchable end it is, its own line says why, and the person's attention is needed.
+    Failed,
 }
 
 /// How much a working tree has changed, in lines. See [`SessionSummary::diff_stat`].
@@ -606,6 +653,28 @@ pub struct MenuMode {
 
 #[cfg(test)]
 mod tests {
+    /// **A run's account, pinned as the apps read it** (minor 48): Default is `id` null, the one mark of it; an
+    /// account carries its id and name.
+    #[test]
+    fn a_runs_account_is_pinned() {
+        let default = RunAccount {
+            id: None,
+            label: "Default".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&default).unwrap(),
+            serde_json::json!({"id": null, "label": "Default"})
+        );
+        let work = RunAccount {
+            id: Some("01M80QGTWR9RCHBSJWR169GXCN".into()),
+            label: "Work".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&work).unwrap(),
+            serde_json::json!({"id": "01M80QGTWR9RCHBSJWR169GXCN", "label": "Work"})
+        );
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -747,6 +816,8 @@ mod tests {
             git_branch: None,
             diff_stat: None,
             relaunchable: false,
+            switching: None,
+            account: None,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);

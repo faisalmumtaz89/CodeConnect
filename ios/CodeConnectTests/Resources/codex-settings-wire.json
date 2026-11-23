@@ -45,6 +45,10 @@
     "type": "setting_result"
   },
   "session_codex_full_access": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "codex",
     "blocked_on": [],
     "codex_link": "subscribed",
@@ -218,6 +222,10 @@
     "updated_at": "2026-11-15T00:00:00Z"
   },
   "session_codex_live": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "codex",
     "blocked_on": [],
     "codex_link": "subscribed",
@@ -387,6 +395,10 @@
     "updated_at": "2026-11-15T00:00:00Z"
   },
   "session_codex_unlisted_default": {
+    "account": {
+      "id": null,
+      "label": "Default"
+    },
     "agent": "codex",
     "blocked_on": [],
     "codex_link": "subscribed",

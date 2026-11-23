@@ -7,6 +7,7 @@
 //! piece of session state either lives in SQLite or is re-derived when ccd
 //! attaches again.
 
+mod accounts;
 mod apns;
 mod apns_sender;
 mod claude_host;
@@ -35,6 +36,7 @@ mod secret;
 mod start_session;
 mod state;
 mod store;
+mod switch;
 mod tls;
 mod ws_server;
 
@@ -1998,7 +2000,7 @@ mod tests {
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
         };
-        assert_eq!(store.begin_run(&row, &key.uid, None).unwrap(), None);
+        assert_eq!(store.begin_run(&row, &key.uid, None, None).unwrap(), None);
         for i in 0..events {
             store
                 .append_event(

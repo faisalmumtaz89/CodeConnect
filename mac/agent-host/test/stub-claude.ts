@@ -3,7 +3,8 @@
 // own, from fixtures/claude/), after any lines its script has it write first, and after the first user message writes
 // its script's lines. A settings request (set_model, set_permission_mode, apply_flag_settings) is recorded and answered
 // success, or with its script's error, set_model after its script's delay. Every other control request is refused and
-// recorded, so a test sees any the SDK sends unasked.
+// recorded, so a test sees any the SDK sends unasked. A get_usage request is recorded and answered with its script's
+// `usage`.
 // It records its argv, its environment, its pid, and every line it read.
 //
 //   stub-claude.ts <script.json> <claude's own arguments...>
@@ -60,6 +61,9 @@ for await (const text of createInterface({ input: process.stdin })) {
     const delay = subtype === 'set_model' ? (script.settings?.delay_ms ?? 0) : 0;
     if (delay > 0) setTimeout(answer, delay);
     else answer();
+  } else if (message.type === 'control_request' && message.request?.subtype === 'get_usage' && script.usage) {
+    record({ usage: message.request });
+    write({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: script.usage } });
   } else if (message.type === 'control_request') {
     record({ unexpected: message.request?.subtype });
     write({ type: 'control_response', response: { subtype: 'error', request_id: message.request_id, error: 'not in the stand-in' } });
