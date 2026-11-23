@@ -43,27 +43,26 @@ struct HostedSettingsBar: View {
                 EmptyView()
             }
         case .hostedLive(let settings):
-            if let bar = usage {
+            if let bar = usage, !typeSize.isAccessibilitySize {
                 // The first that fits whole: the figures, the fullest window's ring alone, or the line as it is
                 // without them. The line is measured whole, so its model's name is never cut to make room.
                 ViewThatFits(in: .horizontal) {
                     figuresRow(settings, bar: bar, fullestOnly: false)
-                    if bar.context != nil, !bar.limits.isEmpty {
+                    if !bar.limits.isEmpty {
                         figuresRow(settings, bar: bar, fullestOnly: true)
                     }
                     row { settingsButton(settings, usage: bar) { line(settings) } }
                 }
             } else {
-                row { settingsButton(settings, usage: nil) { line(settings) } }
+                // At accessibility sizes the line alone fills the row; the usage is still the button's value.
+                row { settingsButton(settings, usage: usage) { line(settings) } }
             }
         }
     }
 
-    /// What the run's usage shows beside the line (`ReplyBar`), when the app holds any of it. None at accessibility
-    /// sizes, where the line alone fills the row.
+    /// The run's usage (`ReplyBar`), when the app holds its context or a window of its account.
     private var usage: ReplyBar? {
-        guard !typeSize.isAccessibilitySize, let bar = model.replyBar(for: key, now: Date()),
-            bar.context != nil || !bar.limits.isEmpty
+        guard let bar = model.replyBar(for: key, now: Date()), bar.context != nil || !bar.limits.isEmpty
         else { return nil }
         return bar
     }
