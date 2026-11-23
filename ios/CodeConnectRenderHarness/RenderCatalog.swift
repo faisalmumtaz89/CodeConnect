@@ -886,7 +886,7 @@ enum RenderCatalog {
             purpose: "a Codex run moved to another account: one Switched to row, its reply box kept",
             arguments: [
                 "-CC_SWITCH", "switch-codex", "-CC_SWITCH_STEP", "6",
-                "-CC_DEEPLINK", "codeconnect://session/01M8299ZJQXMP43MZH8JY9VYMD",
+                "-CC_DEEPLINK", "codeconnect://session/01M83Z938F675T5TMSSPQSCX19",
             ],
             reach: { app, driver in
                 try driver.requireExists(driver.text(containing: "Switched to", in: app), "the Switched to row")
@@ -916,7 +916,7 @@ enum RenderCatalog {
             purpose: "a Codex run moved onto a plan without its model: one quiet row names the model it is now on",
             arguments: [
                 "-CC_SWITCH", "relaunch-plan-default-codex",
-                "-CC_DEEPLINK", "codeconnect://session/01M830N4NHCWHA55C31CE5QNXF",
+                "-CC_DEEPLINK", "codeconnect://session/01M83Z9VF8JMX4SJ351YY2BJ2X",
             ],
             reach: { app, driver in
                 try driver.requireExists(driver.text(containing: "Now on", in: app), "the model-changed row")
