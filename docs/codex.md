@@ -17,11 +17,11 @@ session's settings can be changed once your next message has started it. When th
 plan doesn't offer the model the session was on, it carries on with that plan's default model, one
 line in the conversation says so, and its model menu offers that plan's models.
 
-For each Codex account, and the Default, the Accounts page shows the email and plan it is signed
-in as and its usage as Codex reports it, read from Codex when you open the page and again when a
+For each Codex account, and the Default, the Accounts page shows the email and plan it is signed in
+as and its usage as Codex reports it, read from Codex when you open the page and again when a
 sign-in finishes (at most once a minute per account otherwise), its usage also as a running
-session's Codex says it has changed, and kept in memory only, never written to disk or to the log. The page answers at once with what is already known, and fills in
-the rest as it arrives.
+session's Codex says it has changed, and kept in memory only, never written to disk or to the log.
+The page answers at once with what is already known, and fills in the rest as it arrives.
 
 So: **turns your phone starts are your turns.** Saying something from the phone spends the
 same account allowance as a turn you start in Codex yourself. There is no CodeConnect
