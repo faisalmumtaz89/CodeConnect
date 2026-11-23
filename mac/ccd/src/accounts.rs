@@ -380,13 +380,21 @@ impl Facts {
             .collect()
     }
 
-    /// The read of `key` is over: what it found, if anything, is kept.
-    pub(crate) fn read(&self, key: &str, facts: Option<protocol::ws::AccountFacts>) {
+    /// The read of `key` is over. `answered` is what the agent said (its facts, or none: not signed in), which
+    /// replaces what is held; None when it did not answer (the bound passed, the process failed), which keeps what is
+    /// held, as a whole, marked read all the same so it is not asked again at once.
+    pub(crate) fn read(&self, key: &str, answered: Option<Option<protocol::ws::AccountFacts>>) {
         if !self.dropped.lock().unwrap().remove(key) {
-            self.known
-                .lock()
-                .unwrap()
-                .insert(key.to_string(), (facts, std::time::Instant::now()));
+            let mut known = self.known.lock().unwrap();
+            let now = std::time::Instant::now();
+            match answered {
+                Some(facts) => {
+                    known.insert(key.to_string(), (facts, now));
+                }
+                None => {
+                    known.entry(key.to_string()).or_insert((None, now)).1 = now;
+                }
+            }
         }
         self.reading.lock().unwrap().remove(key);
     }
@@ -403,6 +411,14 @@ impl Facts {
     pub(crate) fn forget_signed(&self) {
         let mut signed_at = self.signed_at.lock().unwrap();
         *signed_at = (None, signed_at.1 + 1);
+    }
+
+    /// What is held for `key` made as old as [`FACTS_FRESH`], so the next refresh reads it again: a test's clock.
+    #[cfg(test)]
+    pub(crate) fn forget_stale_for_test(&self, key: &str) {
+        if let Some((_, at)) = self.known.lock().unwrap().get_mut(key) {
+            *at -= FACTS_FRESH;
+        }
     }
 
     /// Whether this caller runs the refresh: false while one runs, which then goes round once more.
@@ -505,13 +521,13 @@ impl Facts {
 
 /// What Claude Code at `claude` says of the account whose folder `account` gives (its Default, the person's own,
 /// for none): its email, and its plan when it names one, from `auth status` with the folder as its config directory
-/// (an account's sign-in keeps its identity there). None when it is not signed in, or did not answer within
-/// [`FACTS_WAIT`]. Its usage is not read here.
+/// (an account's sign-in keeps its identity there). Some(None) when it says it is not signed in; None when it did
+/// not answer within [`FACTS_WAIT`]. Its usage is not read here.
 pub(crate) async fn read_claude_facts(
     environment: &HashMap<OsString, OsString>,
     account: Option<&AccountEnv>,
     claude: &Path,
-) -> Option<protocol::ws::AccountFacts> {
+) -> Option<Option<protocol::ws::AccountFacts>> {
     let signing = account.map(AccountEnv::signing);
     let mut command = crate::start_session::agent_command(
         environment,
@@ -530,15 +546,15 @@ pub(crate) async fn read_claude_facts(
     let output = crate::start_session::agent_output(command, FACTS_WAIT).await?;
     let status = crate::start_session::auth_status_object(&output.stdout)?;
     if status["loggedIn"] != true {
-        return None;
+        return Some(None);
     }
-    Some(protocol::ws::AccountFacts {
+    Some(Some(protocol::ws::AccountFacts {
         limits_available: None,
         email: status["email"].as_str().map(str::to_string),
         plan: status["subscriptionType"].as_str().map(str::to_string),
         windows: Vec::new(),
         read_at: protocol::time::now_rfc3339(),
-    })
+    }))
 }
 
 /// What Claude Code at `claude` says of its plan's limits for the account whose folder `account` gives (its Default for
@@ -1292,11 +1308,15 @@ pub(crate) mod tests {
         );
         facts.read(
             &a.id,
-            super::read_facts(&environment, Some(&on_a), &codex).await,
+            super::read_facts(&environment, Some(&on_a), &codex)
+                .await
+                .map(Some),
         );
         facts.read(
             &super::default_key(&protocol::agent::AgentKind::Codex),
-            super::read_facts(&environment, None, &codex).await,
+            super::read_facts(&environment, None, &codex)
+                .await
+                .map(Some),
         );
         assert_eq!(
             facts.claim_stale(&keys),
@@ -1339,7 +1359,12 @@ pub(crate) mod tests {
             } else {
                 Some(&on_b)
             };
-            facts.read(&key, super::read_facts(&environment, home, &codex).await);
+            facts.read(
+                &key,
+                super::read_facts(&environment, home, &codex)
+                    .await
+                    .map(Some),
+            );
         }
         let told = serde_json::to_value(facts.told(super::listing(&store, None))).unwrap();
         assert_eq!(
@@ -1487,7 +1512,7 @@ pub(crate) mod tests {
         std::fs::write(root.join("item-default"), "").unwrap();
         let default = super::read_claude_facts(&environment, None, &claude).await;
         assert_eq!(
-            default.and_then(|facts| facts.email).as_deref(),
+            default.flatten().and_then(|facts| facts.email).as_deref(),
             Some("default@example.test")
         );
         // A link inside the folder to a place outside it, which its removal must not follow.
@@ -1638,6 +1663,84 @@ pub(crate) mod tests {
             "not read yet: {told}"
         );
         assert!(facts.signed_stale().is_some(), "read again");
+    }
+
+    /// **What was last read is shown until something newer is read**: a re-read the agent does not answer (it hangs
+    /// past the bound) keeps the held email, as a whole, still marked read; a signed-out answer clears it.
+    #[tokio::test]
+    async fn a_held_email_survives_a_re_read_that_does_not_answer() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-noanswer.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let codex = stand_in_codex(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), root.join("home").into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-noanswer");
+        let _db = store.temp_db();
+        let a = store.add_account("codex", "A").unwrap();
+        let on_a = super::AccountEnv::for_account(&protocol::root_dir(), &a)
+            .unwrap()
+            .unwrap();
+        std::fs::write(on_a.folder().join("auth.json"), "{}").unwrap();
+        let facts = super::Facts::default();
+        let key = vec![a.id.clone()];
+        let email = |facts: &super::Facts| {
+            serde_json::to_value(facts.told(super::listing(&store, None))).unwrap()["accounts"][0]
+                ["facts"]["email"]
+                .as_str()
+                .map(str::to_string)
+        };
+        assert_eq!(facts.claim_stale(&key), key);
+        facts.read(
+            &a.id,
+            super::read_facts(&environment, Some(&on_a), &codex)
+                .await
+                .map(Some),
+        );
+        assert_eq!(
+            email(&facts),
+            Some(format!("{}@example.test", a.id)),
+            "read"
+        );
+        // A re-read codex does not answer within the bound.
+        facts.forget_stale_for_test(&a.id);
+        std::fs::write(root.join("hangfacts"), "").unwrap();
+        assert_eq!(facts.claim_stale(&key), key);
+        facts.read(
+            &a.id,
+            super::read_facts(&environment, Some(&on_a), &codex)
+                .await
+                .map(Some),
+        );
+        assert_eq!(
+            email(&facts),
+            Some(format!("{}@example.test", a.id)),
+            "kept through a read that did not answer"
+        );
+        assert!(
+            facts.claim_stale(&key).is_empty(),
+            "still marked read: no retry at once"
+        );
+        // Signed out: codex answers with no account, and the email goes.
+        facts.forget_stale_for_test(&a.id);
+        std::fs::remove_file(root.join("hangfacts")).unwrap();
+        std::fs::remove_file(on_a.folder().join("auth.json")).unwrap();
+        assert_eq!(facts.claim_stale(&key), key);
+        facts.read(
+            &a.id,
+            super::read_facts(&environment, Some(&on_a), &codex)
+                .await
+                .map(Some),
+        );
+        assert_eq!(email(&facts), None, "a signed-out answer clears it");
+        let _ = std::fs::remove_dir_all(on_a.folder());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **A removed Claude Code account's folder that is a link is left**, and what it names untouched: only a real
