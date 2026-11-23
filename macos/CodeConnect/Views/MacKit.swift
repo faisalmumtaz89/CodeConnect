@@ -526,15 +526,25 @@ extension View {
     }
 }
 
-/// A menu card's row: what it says on one line, at least 32 pt tall and 10 pt in at its sides; the chosen one filled
-/// white 7%, with a check at its trailing end.
-struct MenuRow<Content: View>: View {
+/// A menu card's row: what it says on one line, and under it, where the row has one, a second line in 11.5 pt, muted;
+/// at least 32 pt tall and 10 pt in at its sides; the chosen one filled white 7%, with a check at its trailing end.
+struct MenuRow<Content: View, Second: View>: View {
     var chosen = false
-    @ViewBuilder let content: Content
+    let content: Content
+    let second: Second
+
+    init(chosen: Bool = false, @ViewBuilder content: () -> Content, @ViewBuilder second: () -> Second) {
+        self.chosen = chosen
+        self.content = content()
+        self.second = second()
+    }
 
     var body: some View {
         HStack(spacing: 8) {
-            content
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) { content }
+                second.font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
+            }
             Spacer(minLength: 0)
             if chosen {
                 Image(systemName: "checkmark").font(.system(size: 9.5, weight: .bold)).accessibilityHidden(true)
@@ -545,6 +555,12 @@ struct MenuRow<Content: View>: View {
         .frame(minHeight: 32)
         .background(chosen ? Color.white.opacity(0.07) : .clear, in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
+    }
+}
+
+extension MenuRow where Second == EmptyView {
+    init(chosen: Bool = false, @ViewBuilder content: () -> Content) {
+        self.init(chosen: chosen, content: content, second: { EmptyView() })
     }
 }
 

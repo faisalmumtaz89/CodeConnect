@@ -407,6 +407,7 @@ struct StartForm: View {
                     .textFieldStyle(.plain)
                     .font(Theme.ui(12.5))
                     .menuField()
+                MenuHeader(text: "Recent")
                 ScrollViewReader { list in
                     ScrollView {
                         // Not lazy: every folder is in the accessibility tree, scrolled to or not.
@@ -423,10 +424,6 @@ struct StartForm: View {
                 // As tall as its rows, up to 260 pt, then it scrolls. An exact height: a panel is drawn over its button,
                 // which offers it only the button's own height, so a range would collapse the list to its least.
                 .frame(height: min(max(listHeight, 1), 260))
-                // The rows' fills are square and run edge to edge; the box's corners cut a first or last row's.
-                .clipShape(RoundedRectangle(cornerRadius: Theme.boxRadius))
-                .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
-                .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
             }
             // A folder from elsewhere, whatever the list holds: this Mac's from the standard folder panel, another
             // computer's by browsing it.
@@ -457,27 +454,17 @@ struct StartForm: View {
         Button {
             choose(project.path)
         } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 8)
-                    AgeText(since: project.lastUsed) { startProjectMeta(project, now: $0) }
-                        .font(Theme.ui(11)).foregroundStyle(Theme.text3).lineLimit(1)
-                }
-                Text(project.shownPath)
-                    .font(Theme.mono(11))
-                    .foregroundStyle(Theme.text3)
-                    .lineLimit(1)
-                    .truncationMode(.head)
+            MenuRow(chosen: folderPath == project.path) {
+                Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 8)
+                AgeText(since: project.lastUsed) { startProjectMeta(project, now: $0) }
+                    .font(Theme.ui(11)).foregroundStyle(Theme.text3).lineLimit(1)
+            } second: {
+                Text(project.shownPath).font(Theme.mono(11.5)).truncationMode(.head)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(folderPath == project.path ? Theme.selected : .clear, in: Rectangle())
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 0, id: "start.folder.\(project.path)"))
+        .buttonStyle(.hover(radius: 8, id: "start.folder.\(project.path)"))
         .focusable(false)
         .accessibilityIdentifier("start.folder.\(project.path)")
         .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
@@ -539,15 +526,12 @@ struct StartForm: View {
 
     /// The selected folder above the rows when none of them shows it: its name and its path, selected.
     private func pickedRow(_ project: StartProject) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        MenuRow(chosen: true) {
             Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                        .truncationMode(.middle)
-            Text(project.path).font(Theme.mono(11)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head)
+                .truncationMode(.middle)
+        } second: {
+            Text(project.path).font(Theme.mono(11.5)).truncationMode(.head)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.selected, in: Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("start.picked")
         .accessibilityAddTraits(.isSelected)
