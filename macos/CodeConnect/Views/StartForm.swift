@@ -251,9 +251,6 @@ struct StartForm: View {
                 composer(context)
                     // Its menus open over what is above and below it: the last modifier, so they draw over the rest.
                     .zIndex(folderOpen || computerMenuOpen || branchMenuOpen || menuOpen ? 1 : 0)
-                if let folder, newName != nil, let answer = context.git(folder.path), let git = answer {
-                    BranchNaming(folder: folder, agent: pick?.agent, git: git, newName: choice(\.newName))
-                }
                 if let note = blocked ?? pick.map(StartContext.starts) {
                     Text(note).font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1)
                         .accessibilityIdentifier("start.note")
