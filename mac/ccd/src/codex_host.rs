@@ -10412,11 +10412,15 @@ mod tests {
                 .map_or(serde_json::Value::Null, |default| default["facts"].clone())
         };
         let (_uid, mut ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
+        // The keys and types real codex 0.170.0 sent signed in (app-qa's k307 sitting, 2026-11-23; values made up):
+        // one window, the secondary null.
         let limits = json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
             "limitId": "codex", "limitName": null, "planType": "plus",
             "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1795928400},
-            "secondary": {"usedPercent": 7, "windowDurationMins": 10080, "resetsAt": 1796428800},
-            "credits": null, "individualLimit": null, "spendControlReached": null, "rateLimitReachedType": null}}});
+            "secondary": null,
+            "credits": {"balance": "0", "hasCredits": false, "unlimited": false},
+            "individualLimit": null, "normalModelSlug": null, "rateLimitReachedType": null,
+            "spendControlReached": null}}});
         tell(&mut ws, &limits).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(
@@ -10451,14 +10455,12 @@ mod tests {
         assert_eq!(facts["email"], "default@example.test", "{facts}");
         assert_eq!(
             facts["windows"],
-            json!([{"used_percent": 42, "window_minutes": 300, "resets_at": 1795928400},
-                {"used_percent": 7, "window_minutes": 10080, "resets_at": 1796428800}]),
+            json!([{"used_percent": 42, "window_minutes": 300, "resets_at": 1795928400}]),
             "{facts}"
         );
         // A word that names no window (an API key's, every recording's) changes nothing.
         let mut none = limits.clone();
         none["params"]["rateLimits"]["primary"] = serde_json::Value::Null;
-        none["params"]["rateLimits"]["secondary"] = serde_json::Value::Null;
         tell(&mut ws, &none).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(held(&rig.daemon), facts, "a word naming no window");
