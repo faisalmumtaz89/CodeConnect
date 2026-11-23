@@ -2097,7 +2097,7 @@ private struct SessionComposeBar: View {
             dictation.isRecording
                 ? 2 * CC.size.hitTarget + 2 * CC.space.xxs : CC.size.hitTarget + CC.space.xxs)
         .padding(.vertical, CC.space.xs)
-        .frame(minHeight: Self.pillHeight)
+        .frame(minHeight: CCPillSurface.height)
         .frame(maxWidth: .infinity, alignment: .leading)
         // Read first: VoiceOver orders by position, and on one line the
         // circle's 44pt frame starts above the field's.
@@ -2118,42 +2118,10 @@ private struct SessionComposeBar: View {
             // pill's bottom and trailing edges.
             .padding(CC.space.xxs)
         }
-        .background { pillSurface }
+        .background { CCPillSurface() }
         // The sort priority above ranks within the pill alone.
         .accessibilityElement(children: .contain)
         .ccAnimation(CC.motion.small, value: dictation.isRecording)
-    }
-
-    /// The one-line height: the 36pt disc and 8pt of pill round it.
-    private static let pillHeight = CC.size.controlSm + 2 * CC.space.xs
-
-    /// Half the one-line height: a capsule at one line, and a corner that
-    /// stays concentric with the circle in it at every size.
-    private var pillShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: Self.pillHeight / 2, style: .continuous)
-    }
-
-    /// The top of the surface ladder, lit from inside: a hairline rim and a
-    /// soft glow under it, brightest where the edge faces up or down and gone
-    /// by the sides' middle.
-    private var pillSurface: some View {
-        let light = LinearGradient(
-            stops: [
-                .init(color: CC.color.borderFocus, location: 0),
-                .init(color: CC.color.borderFocus.opacity(0), location: 0.3),
-                .init(color: CC.color.borderFocus.opacity(0), location: 0.7),
-                .init(color: CC.color.borderFocus, location: 1),
-            ],
-            startPoint: .top, endPoint: .bottom)
-        return ZStack {
-            pillShape.fill(CC.color.surfaceOverlay)
-            pillShape.strokeBorder(light, lineWidth: 3)
-                .blur(radius: 2)
-                .opacity(0.15)
-                .clipShape(pillShape)
-            pillShape.strokeBorder(light, lineWidth: CC.stroke.hairline)
-                .opacity(0.24)
-        }
     }
 
     private var field: some View {
