@@ -7257,6 +7257,13 @@ mod tests {
             .await;
             assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
         }
+        // The read is done once what it found is held: the listing names its email.
+        let held = |rig: &Rig| {
+            let listing = crate::accounts::listing(&rig.daemon.store, None);
+            serde_json::to_string(&rig.daemon.account_facts.told(listing))
+                .unwrap()
+                .contains("default@example.test")
+        };
         let mut seq = 3;
         for _ in 0..3 {
             event(&mut one, seq).await;
@@ -7264,6 +7271,11 @@ mod tests {
             seq += 1;
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !held(&rig) && Instant::now() < deadline {
+            tokio::time::sleep(POLL).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(reads(&rig), (1, 1), "six events inside the hold");
         rig.daemon
             .account_facts
