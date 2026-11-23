@@ -24,13 +24,11 @@ struct BranchRow: View {
     @State private var buttonBottom: CGFloat = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        Group {
             if let answer = context.git(folder.path), let git = answer {
-                if let newName {
-                    naming(newName, git: git)
-                } else {
-                    button(startPlaceSummary(place, agent: agent ?? .claude, project: folder, git: git))
-                }
+                // A new worktree being named is named under the box (`BranchNaming`); here, its kind.
+                let summary = startPlaceSummary(place, agent: agent ?? .claude, project: folder, git: git)
+                button(newName == nil ? summary : StartWords.newWorktree)
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -39,7 +37,6 @@ struct BranchRow: View {
                 .accessibilityIdentifier("start.branch.reading")
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .coordinateSpace(.named(Self.space))
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(StartForm.space)) } action: { frame = $0 }
         .overlay(alignment: .topLeading) {
@@ -94,46 +91,49 @@ struct BranchRow: View {
             open.toggle()
         } label: {
             HStack(spacing: 5) {
-                Text(verbatim: title).font(Theme.mono(12)).lineLimit(1)
+                Image(systemName: "arrow.triangle.branch").font(.system(size: 11)).accessibilityHidden(true)
+                Text(verbatim: title).font(Theme.mono(12)).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(Theme.text)
-            .padding(.horizontal, 7)
-            .frame(height: 24)
-            .background(open ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
-            .contentShape(Rectangle())
+            .inputBoxChip(open: open)
         }
-        .buttonStyle(.hover(radius: 5, id: "start.branch"))
-        .padding(.leading, -7)
+        .buttonStyle(.hover(radius: 8, id: "start.branch"))
         .accessibilityIdentifier("start.branch")
         .accessibilityValue(open ? "open" : "closed")
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).maxY } action: { buttonBottom = $0 }
     }
+}
 
-    /// A new worktree being named: the menu's button, the name, the rule or what breaks it, and what the name makes.
-    private func naming(_ name: String, git: StartGit) -> some View {
-        let trimmed = name.trimmingCharacters(in: .whitespaces)
+/// A new worktree being named, under the start form's box: the name, the rule or what breaks it, and what the name
+/// makes. Escape stops naming it.
+struct BranchNaming: View {
+    let folder: StartProject
+    let agent: StartAgent?
+    let git: StartGit
+    @Binding var newName: String?
+
+    var body: some View {
+        let trimmed = (newName ?? "").trimmingCharacters(in: .whitespaces)
         let valid = StartPlace.isValidName(trimmed)
         let here = git.checkout(at: folder.path)
         return VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 8) {
-                button(StartWords.newWorktree)
-                TextField(
-                    "", text: Binding(get: { newName ?? "" }, set: { newName = $0 }),
-                    prompt: Text(StartWords.worktreeNameExample).foregroundStyle(Theme.text3)
-                )
-                .accessibilityLabel(StartWords.worktreeName)
-                .accessibilityIdentifier("start.branch.name")
-                .textFieldStyle(.plain)
-                .font(Theme.mono(12))
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
-                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(trimmed.isEmpty || valid ? Theme.hairline : Theme.red))
-                .onExitCommand { newName = nil }
-                // It appears because "New branch…" was just chosen: what is typed next is its name.
-                .takesKeyboardWhenShown()
-            }
+            TextField(
+                "", text: Binding(get: { newName ?? "" }, set: { newName = $0 }),
+                prompt: Text(StartWords.worktreeNameExample).foregroundStyle(Theme.text3)
+            )
+            .accessibilityLabel(StartWords.worktreeName)
+            .accessibilityIdentifier("start.branch.name")
+            .textFieldStyle(.plain)
+            .font(Theme.mono(12))
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7).strokeBorder(trimmed.isEmpty || valid ? Theme.hairline : Theme.red))
+            .onExitCommand { newName = nil }
+            // It appears because "New branch…" was just chosen: what is typed next is its name.
+            .takesKeyboardWhenShown()
             Text(trimmed.isEmpty || valid ? StartWords.worktreeNameRule : StartWords.worktreeNameBroken)
                 .font(Theme.ui(11))
                 .foregroundStyle(trimmed.isEmpty || valid ? Theme.text3 : Theme.red)
