@@ -167,7 +167,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
 }
 
 /// The accounts listing, with what is held, pushed to every connection that reads accounts.
-async fn push_accounts(daemon: &Arc<Daemon>) {
+pub(crate) async fn push_accounts(daemon: &Arc<Daemon>) {
     let store = daemon.store.clone();
     let Ok(listing) =
         tokio::task::spawn_blocking(move || crate::accounts::listing(&store, None)).await

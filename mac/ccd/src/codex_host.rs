@@ -790,6 +790,20 @@ async fn link(
                         running = Some((thread.to_string(), turn.to_string()));
                         daemon.note_turn_running(&uid);
                     }
+                    // Its own word that its account's limits changed, on this connection: no process started. A
+                    // word that names no window changes nothing.
+                    (Some("account/rateLimits/updated"), _, _) => {
+                        if let Ok(account) = daemon.store.run_account(&uid) {
+                            let key = account.map_or_else(
+                                || crate::accounts::default_key(&AgentKind::Codex),
+                                |account| account.id,
+                            );
+                            let windows = crate::accounts::codex_windows(&frame["params"]["rateLimits"]);
+                            if !windows.is_empty() && daemon.account_facts.update_windows(&key, windows) {
+                                crate::start_session::push_accounts(&daemon).await;
+                            }
+                        }
+                    }
                     (Some("turn/completed"), _, Some(turn)) => {
                         record_tools(host.as_ref(), &mut tools);
                         if running.as_ref().is_some_and(|(_, on)| on == turn) {
@@ -10379,6 +10393,94 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A Codex run's own word that its account's limits changed updates them, with no process started**: its
+    /// app-server's `account/rateLimits/updated` (sent on the connection ccd holds, before a turn's end), a sparse
+    /// update, replaces each held usage window of the account the run is on that it names (by length), read as
+    /// `account/rateLimits/read`'s are; a window it does not name, and the rest of what is held, kept; an account with
+    /// nothing held is left to its read, and a word that names no window changes nothing.
+    #[tokio::test]
+    async fn a_codex_runs_rate_limits_update_its_accounts_windows() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let key = crate::accounts::default_key(&AgentKind::Codex);
+        let held = |daemon: &Daemon| {
+            let listing = crate::accounts::listing(&daemon.store, None);
+            serde_json::to_value(daemon.account_facts.told(listing)).unwrap()["defaults"]
+                .as_array()
+                .and_then(|defaults| defaults.iter().find(|default| default["agent"] == "codex"))
+                .map_or(serde_json::Value::Null, |default| default["facts"].clone())
+        };
+        let (_uid, mut ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
+        // The keys and types real codex 0.170.0 sent signed in (app-qa's k307 sitting, 2026-11-23; values made up):
+        // one window, the secondary null.
+        let limits = json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+            "limitId": "codex", "limitName": null, "planType": "plus",
+            "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1795928400},
+            "secondary": null,
+            "credits": {"balance": "0", "hasCredits": false, "unlimited": false},
+            "individualLimit": null, "normalModelSlug": null, "rateLimitReachedType": null,
+            "spendControlReached": null}}});
+        tell(&mut ws, &limits).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            held(&rig.daemon),
+            serde_json::Value::Null,
+            "nothing held: left to its read"
+        );
+        rig.daemon.account_facts.read(
+            &key,
+            Some(protocol::ws::AccountFacts {
+                limits_available: None,
+                email: Some("default@example.test".into()),
+                plan: Some("plus".into()),
+                // A read naming both windows.
+                windows: vec![
+                    protocol::ws::UsageWindow {
+                        used_percent: 10,
+                        window_minutes: 300,
+                        resets_at: 1_795_920_000,
+                    },
+                    protocol::ws::UsageWindow {
+                        used_percent: 7,
+                        window_minutes: 10080,
+                        resets_at: 1_796_428_800,
+                    },
+                ],
+                read_at: "2026-11-23T10:00:00.000Z".into(),
+            }),
+        );
+        tell(&mut ws, &limits).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while held(&rig.daemon)["windows"][0]["used_percent"] != 42 {
+            assert!(
+                Instant::now() < deadline,
+                "never updated: {}",
+                held(&rig.daemon)
+            );
+            tokio::time::sleep(POLL).await;
+        }
+        let facts = held(&rig.daemon);
+        assert_eq!(facts["email"], "default@example.test", "{facts}");
+        assert_eq!(
+            facts["read_at"], "2026-11-23T10:00:00.000Z",
+            "as of the read: the window kept is no newer for the update"
+        );
+        assert_eq!(
+            facts["windows"],
+            json!([{"used_percent": 42, "window_minutes": 300, "resets_at": 1795928400},
+                {"used_percent": 7, "window_minutes": 10080, "resets_at": 1796428800}]),
+            "the window the word names replaced, the one it does not name kept: {facts}"
+        );
+        assert_eq!(facts["email"], "default@example.test", "{facts}");
+        // A word that names no window (an API key's, every recording's) changes nothing.
+        let mut none = limits.clone();
+        none["params"]["rateLimits"]["primary"] = serde_json::Value::Null;
+        tell(&mut ws, &none).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(held(&rig.daemon), facts, "a word naming no window");
+        assert_eq!(launches(&rig), 1, "no process started");
     }
 
     /// **A Codex run offers the model it started on, and can go back to it.** A start's answer
