@@ -398,7 +398,7 @@ final class AccountsWireTests: XCTestCase {
 
     /// Two accounts signed in as one address, and an account that isn't its own, each say so in one line.
     func testTheRowsQuietLinesSayWhatTheyMean() {
-        XCTAssertEqual(AccountSwitchWords.sameSignIn(as: "ada@example.com"), "The same sign-in as ada@example.com")
+        XCTAssertEqual(AccountSwitchWords.sameSignIn, "The same sign-in as another account here", "never the row's own email again")
         XCTAssertEqual(AccountSwitchWords.notSeparate, "Uses this computer's own Codex sign-in, so it isn't a separate account")
     }
 
