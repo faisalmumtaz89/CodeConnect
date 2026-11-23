@@ -878,7 +878,15 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     computer's memory only), and marks two signed in as one email. An account whose Codex sign-in is kept outside its home reads
 ///     [`ws::AgentAccount::not_separate`]. A daemon below 48 answers them `bad_request` and advertises no
 ///     `accounts`.
-pub const PROTOCOL_MINOR: u32 = 48;
+///   * `49` — **A Claude turn's usage names the context it ended with.**
+///
+///     No message changes shape. The `usage` event a Claude run files at a turn's end may carry `last.totalTokens`,
+///     the context its last top-level model call left (input, cache creation, cache read and output; a subagent's
+///     calls aside), and `modelContextWindow`, that model's context window: the keys a Codex turn's `usage` has
+///     carried since its first, so an app reads one pair for either agent. A turn with no call of its own (`/compact`,
+///     `/clear`, a command's) carries neither, nor does a turn whose daemon restarted during it, and a daemon below
+///     49 sends neither for Claude.
+pub const PROTOCOL_MINOR: u32 = 49;
 
 #[cfg(test)]
 mod ledger_tests {

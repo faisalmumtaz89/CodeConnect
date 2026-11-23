@@ -1,0 +1,24 @@
+{
+  "usage_compact": {
+    "total_cost_usd": 0.01,
+    "usage": {
+      "cache_creation_input_tokens": 9,
+      "cache_read_input_tokens": 9,
+      "input_tokens": 9,
+      "output_tokens": 9
+    }
+  },
+  "usage_turn": {
+    "last": {
+      "totalTokens": 38660
+    },
+    "modelContextWindow": 1000000,
+    "total_cost_usd": 0.01,
+    "usage": {
+      "cache_creation_input_tokens": 9,
+      "cache_read_input_tokens": 9,
+      "input_tokens": 9,
+      "output_tokens": 9
+    }
+  }
+}

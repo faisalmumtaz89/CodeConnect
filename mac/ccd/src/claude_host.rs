@@ -595,6 +595,9 @@ struct Turns {
     replayed: bool,
     /// Why the launch's first init starts a session: `startup`, or `resume` for a relaunch.
     launched: &'static str,
+    /// The context the turn's latest top-level call left (its input, cache creation, cache read and output) and that
+    /// call's model, for the turn's `usage` (minor 49); none until a call of the turn's own, and again at its result.
+    context: Option<(u64, String)>,
 }
 
 /// The mark of a turn's start or end at `now`, strictly after the link's latest one,
@@ -661,8 +664,43 @@ async fn apply_sdk(
     if text("type") == Some("conversation_reset") && text("trigger") == Some("clear") {
         turns.cleared = true;
     }
+    // A top-level call's context (a subagent's, under a `parent_tool_use_id`, and a command's output aside).
+    if text("type") == Some("assistant")
+        && message["parent_tool_use_id"].is_null()
+        && text("local_command_source").is_none()
+    {
+        let inner = &message["message"];
+        if let (Some(model), Some(usage)) = (inner["model"].as_str(), inner["usage"].as_object()) {
+            let tokens = [
+                "input_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+                "output_tokens",
+            ]
+            .iter()
+            .filter_map(|key| usage.get(*key).and_then(serde_json::Value::as_u64))
+            .sum();
+            turns.context = Some((tokens, model.to_string()));
+        }
+    }
     let mut mapped =
         protocol::sdk_map::map(&SessionKey::new(uid, uid), turns.init.as_deref(), message);
+    // A result's usage names the context the turn ended with, by the keys a Codex turn's has (minor 49).
+    if text("type") == Some("result") {
+        if let Some((tokens, model)) = turns.context.take() {
+            let window = message["modelUsage"][model.as_str()]["contextWindow"].as_u64();
+            if let (Some(window), Some(usage)) = (
+                window,
+                mapped
+                    .events
+                    .iter_mut()
+                    .find(|event| event.kind == EventKind::Usage),
+            ) {
+                usage.payload["last"] = serde_json::json!({ "totalTokens": tokens });
+                usage.payload["modelContextWindow"] = window.into();
+            }
+        }
+    }
     if let Some(source) = source {
         for event in &mut mapped.events {
             if event.kind == EventKind::SessionStart {
@@ -839,6 +877,7 @@ async fn link(
         marked: 0,
         replayed,
         launched: if resumed { "resume" } else { "startup" },
+        context: None,
     };
     let (mut live, mut refused) = (
         matches!(lifecycle, Lifecycle::Live | Lifecycle::Stopping),
@@ -3901,10 +3940,16 @@ mod tests {
                 .position(|event| event["kind"] == "session_start")
                 .unwrap();
         events[cleared]["payload"]["source"] = "clear".into();
-        assert_eq!(
-            serde_json::Value::Array(after_words(&rig, &played.uid)),
-            committed
-        );
+        // And each turn's context as ccd stamps it on the turn's usage (minor 49), which
+        // `fixtures/claude/sdk-session-events.json` pins: taken off here, it is the mapper's.
+        let mut filed = after_words(&rig, &played.uid);
+        for event in &mut filed {
+            if let Some(payload) = event["payload"].as_object_mut() {
+                payload.remove("last");
+                payload.remove("modelContextWindow");
+            }
+        }
+        assert_eq!(serde_json::Value::Array(filed), committed);
         let mut seqs = Vec::new();
         while let Ok(event) = broadcast.try_recv() {
             if event.session_uid == played.uid {
@@ -7206,6 +7251,66 @@ mod tests {
                 .claim_stale(std::slice::from_ref(&key))
                 .is_empty(),
             "read, not only forgotten"
+        );
+        stop(&played.dir);
+    }
+
+    /// **A Claude turn's usage names the context it ended with** (minor 49), as a Codex turn's does: the `usage`
+    /// filed at its result carries `last.totalTokens`, its last top-level call's input, cache creation, cache read
+    /// and output (a subagent's call, under a `parent_tool_use_id`, left out), and `modelContextWindow`, the result's
+    /// `modelUsage` window of that call's model. A turn with no top-level call of its own (`/compact`'s) carries
+    /// neither. `fixtures/claude/minor-49-wire.json` is the two payloads as this build files them.
+    #[tokio::test]
+    async fn a_claude_turns_usage_names_the_context_it_ended_with() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let call = |parent: Option<&str>, input: u64, created: u64, read: u64, output: u64| {
+            serde_json::json!({"type": "assistant", "uuid": format!("a{input}"), "session_id": "s1",
+                "parent_tool_use_id": parent,
+                "message": {"model": "claude-opus-5-5", "content": [],
+                    "usage": {"input_tokens": input, "cache_creation_input_tokens": created,
+                        "cache_read_input_tokens": read, "output_tokens": output}}})
+        };
+        let result = |uuid: &str, command: Option<&str>| {
+            serde_json::json!({"type": "result", "subtype": "success", "uuid": uuid, "session_id": "s1",
+                "is_error": false, "num_turns": 1, "local_command": command, "total_cost_usd": 0.01,
+                "usage": {"input_tokens": 9, "cache_creation_input_tokens": 9, "cache_read_input_tokens": 9,
+                    "output_tokens": 9},
+                "modelUsage": {"claude-haiku-5-5": {"contextWindow": 200000},
+                    "claude-opus-5-5": {"contextWindow": 1000000}}})
+        };
+        for (seq, message) in [
+            (3, call(None, 2, 170, 38390, 90)),
+            (4, call(None, 2, 170, 38390, 98)),
+            (5, call(Some("toolu_1"), 2, 19600, 0, 16)),
+            (6, result("r1", None)),
+            (7, result("r2", Some("compact"))),
+        ] {
+            sdk(&mut played.write, seq, message).await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        }
+        let usages: Vec<serde_json::Value> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "usage")
+            .map(|event| event["payload"].clone())
+            .collect();
+        assert_eq!(usages.len(), 2, "{usages:?}");
+        assert_eq!(usages[0]["last"], serde_json::json!({"totalTokens": 38660}));
+        assert_eq!(usages[0]["modelContextWindow"], 1_000_000);
+        assert_eq!(
+            usages[0]["usage"]["input_tokens"], 9,
+            "the turn's own sum kept"
+        );
+        assert_eq!(usages[1].get("last"), None, "{:?}", usages[1]);
+        assert_eq!(usages[1].get("modelContextWindow"), None);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../fixtures/claude/minor-49-wire.json"
+            ))
+            .unwrap(),
+            serde_json::json!({"usage_turn": usages[0], "usage_compact": usages[1]}),
+            "the committed minor 49 wire fixture no longer matches what this build emits"
         );
         stop(&played.dir);
     }
