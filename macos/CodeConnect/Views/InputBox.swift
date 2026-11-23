@@ -48,9 +48,11 @@ struct InputBox<Field: View, Leading: View, Trailing: View>: View {
             }
             .padding(.horizontal, InputBoxLayout.barInset)
         }
-        // Drawn behind the contents: a menu opened from the bar may sit over the box's edge.
-        .background { surface }
-        .overlay { rim }
+        // Drawn behind the contents, rim and all: a menu opened from the bar may sit over the box's edge and covers it.
+        .background {
+            surface
+            rim
+        }
     }
 
     /// A dark fill, darker toward the foot; a fine border; a faint line of light along the inside of its top; two
