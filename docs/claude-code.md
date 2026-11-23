@@ -24,8 +24,9 @@ account.
 For each Claude Code account, and the Default, the Accounts page shows the email and plan it is
 signed in as (from `claude auth status`) and its plan's five-hour and seven-day usage, or that
 it has no plan limits, as Claude Code reports them (asked through the agent host). They are read
-when you open the page, when a sign-in finishes, and when Claude Code says during a session that
-its limits changed, at most once a minute per account otherwise. CodeConnect keeps them in
+when you open the page, when a sign-in finishes, and after a turn of a session, when Claude Code
+reports its limits; each account at most once a minute, however many sessions are working, so the
+figures shown can be up to a minute old. CodeConnect keeps them in
 memory only, never on disk or in its log.
 
 Removing an account runs `claude auth logout` with the same two variables, and the account is

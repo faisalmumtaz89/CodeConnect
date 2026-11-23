@@ -430,6 +430,14 @@ impl Facts {
         false
     }
 
+    /// What is held for `key` is as old as [`FACTS_FRESH`], so the next refresh reads it again.
+    #[cfg(test)]
+    pub(crate) fn age(&self, key: &str) {
+        if let Some((_, at)) = self.known.lock().unwrap().get_mut(key) {
+            *at = at.checked_sub(FACTS_FRESH).unwrap();
+        }
+    }
+
     /// What is held for `key`, its facts and its sign-in, goes (its sign-in changed, or it was removed).
     pub(crate) fn forget(&self, key: &str) {
         self.known.lock().unwrap().remove(key);
