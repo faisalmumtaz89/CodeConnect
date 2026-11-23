@@ -44,11 +44,18 @@ final class DiffCommentTests: XCTestCase {
             codexSpentLedger: CodexSpentLedger(defaults: UserDefaults(suiteName: "cc.tests.\(UUID().uuidString)")!))
         model.connection.simulateConnectedForTesting()
         model.connection.simulateCapabilitiesForTesting(caps, minor: 41)
-        model.connection.sendStub = { _ in }
+        // The listing's own task subscribes to the run once it has read the run's cache: waited for, so no frame of
+        // its lands inside a comment's.
+        let subscribed = expectation(description: "the run subscribed")
+        subscribed.assertForOverFulfill = false
+        model.connection.sendStub = { message in
+            if case .subscribe(summary.sessionKey, _) = message { subscribed.fulfill() }
+        }
         addTeardownBlock { @MainActor in model.scenePhaseChanged(to: .background) }
         model.refreshFleet()
         model.connection.injectForTesting(.sessions([summary]))
         await settle(model)
+        await fulfillment(of: [subscribed], timeout: 10)
         return (model, summary.sessionKey)
     }
 

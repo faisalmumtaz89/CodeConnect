@@ -62,10 +62,18 @@ final class RunDraftsTests: XCTestCase {
     {
         let model = AppModel(cache: EventCache())
         model.connection.simulateConnectedForTesting()
+        // The listing's own task decides the run's subscription once it has read the run's cache, against the
+        // listing's last_seq: waited for, so no event a test sends later is read as the log rewound.
+        let subscribed = expectation(description: "the run subscribed")
+        subscribed.assertForOverFulfill = false
+        model.connection.sendStub = { message in
+            if case .subscribe("u-1", _) = message { subscribed.fulfill() }
+        }
         model.connection.injectForTesting(.event(try event(command)))
         model.connection.injectForTesting(.event(try event(question)))
         model.connection.injectForTesting(try list(lastSeq: 2))
         try await settle(model)
+        await fulfillment(of: [subscribed], timeout: 10)
         let waiting = try XCTUnwrap(model.shown(for: "u-1")?.pendingApprovals)
         let command = try XCTUnwrap(waiting.first { $0.card.requestID == "toolu_1" })
         let question = try XCTUnwrap(waiting.first { $0.card.requestID == "toolu_2" })
