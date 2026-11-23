@@ -790,7 +790,8 @@ async fn link(
                         running = Some((thread.to_string(), turn.to_string()));
                         daemon.note_turn_running(&uid);
                     }
-                    // Its own word that its account's limits changed, on this connection: no process started.
+                    // Its own word that its account's limits changed, on this connection: no process started. A
+                    // word that names no window changes nothing.
                     (Some("account/rateLimits/updated"), _, _) => {
                         if let Ok(account) = daemon.store.run_account(&uid) {
                             let key = account.map_or_else(
@@ -798,7 +799,7 @@ async fn link(
                                 |account| account.id,
                             );
                             let windows = crate::accounts::codex_windows(&frame["params"]["rateLimits"]);
-                            if daemon.account_facts.update_windows(&key, windows) {
+                            if !windows.is_empty() && daemon.account_facts.update_windows(&key, windows) {
                                 crate::start_session::push_accounts(&daemon).await;
                             }
                         }
@@ -10397,7 +10398,7 @@ mod tests {
     /// **A Codex run's own word that its account's limits changed updates them, with no process started**: its
     /// app-server's `account/rateLimits/updated` (sent on the connection ccd holds, before a turn's end) replaces the
     /// held usage windows of the account the run is on, read as `account/rateLimits/read`'s are, the rest of what is
-    /// held kept; an account with nothing held is left to its read.
+    /// held kept; an account with nothing held is left to its read, and a word that names no window changes nothing.
     #[tokio::test]
     async fn a_codex_runs_rate_limits_update_its_accounts_windows() {
         let _env = crate::ProcessEnvRead::take();
@@ -10454,6 +10455,13 @@ mod tests {
                 {"used_percent": 7, "window_minutes": 10080, "resets_at": 1796428800}]),
             "{facts}"
         );
+        // A word that names no window (an API key's, every recording's) changes nothing.
+        let mut none = limits.clone();
+        none["params"]["rateLimits"]["primary"] = serde_json::Value::Null;
+        none["params"]["rateLimits"]["secondary"] = serde_json::Value::Null;
+        tell(&mut ws, &none).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(held(&rig.daemon), facts, "a word naming no window");
         assert_eq!(launches(&rig), 1, "no process started");
     }
 
