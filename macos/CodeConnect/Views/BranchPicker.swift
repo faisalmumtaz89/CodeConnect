@@ -121,7 +121,8 @@ struct BranchRow: View {
 }
 
 /// A new worktree being named, in the branch menu under "New branch…": the name, the rule or what breaks it, and what
-/// the name makes. Return keeps it and closes the menu; Escape stops naming it.
+/// the name makes. While it has the keyboard the menu's keys are its own (`panelField`): Return keeps the name and
+/// closes the menu; Escape stops naming it, and a second Escape closes the menu.
 struct BranchNaming: View {
     let folder: StartProject
     let agent: StartAgent?

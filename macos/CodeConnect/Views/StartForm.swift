@@ -131,13 +131,14 @@ struct StartForm: View {
         if draft.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return StartWords.writeTheFirstMessage }
         if let name = newName?.trimmingCharacters(in: .whitespaces) {
             if name.isEmpty { return StartWords.nameTheWorktree }
-            if !StartPlace.isValidName(name) { return StartWords.nameBreaksTheRule }
+            // The rule is drawn in the branch menu, not above this line: the line says it.
+            if !StartPlace.isValidName(name) { return StartWords.worktreeNameBroken }
         }
         return nil
     }
 
-    /// The window has less room than the tallest form needs (a new worktree being named in a folder with changes, under
-    /// a notice): after the folder list, the heading goes, the first message starts at one line and the rows stand closer.
+    /// The window has less room than the tallest form needs (under a notice): after the folder list, the heading goes,
+    /// the first message starts at one line and the rows stand closer.
     private var short: Bool { room < 600 }
 
     /// The place Start sends: a new worktree by the name typed, else the one chosen.
@@ -247,7 +248,7 @@ struct StartForm: View {
     }
 
     /// The box: the first message, and in its bar the computer, the folder and where in the repository, the model and
-    /// Start. Under it, a new worktree being named, then why Start can't be pressed yet, or what it does.
+    /// Start. Under it, why Start can't be pressed yet, or what it does.
     private var form: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let context {
