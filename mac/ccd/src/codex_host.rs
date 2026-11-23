@@ -10448,7 +10448,7 @@ mod tests {
                         resets_at: 1_796_428_800,
                     },
                 ],
-                read_at: protocol::time::now_rfc3339(),
+                read_at: "2026-11-23T10:00:00.000Z".into(),
             }),
         );
         tell(&mut ws, &limits).await;
@@ -10463,6 +10463,10 @@ mod tests {
         }
         let facts = held(&rig.daemon);
         assert_eq!(facts["email"], "default@example.test", "{facts}");
+        assert_eq!(
+            facts["read_at"], "2026-11-23T10:00:00.000Z",
+            "as of the read: the window kept is no newer for the update"
+        );
         assert_eq!(
             facts["windows"],
             json!([{"used_percent": 42, "window_minutes": 300, "resets_at": 1795928400},

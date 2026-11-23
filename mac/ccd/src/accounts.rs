@@ -458,7 +458,6 @@ impl Facts {
         });
         facts.windows.extend(windows);
         facts.windows.sort_by_key(|window| window.window_minutes);
-        facts.read_at = protocol::time::now_rfc3339();
         true
     }
 
