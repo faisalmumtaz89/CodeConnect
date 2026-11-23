@@ -872,6 +872,16 @@ enum RenderCatalog {
                 try driver.requireExists(driver.text(containing: "Switched to", in: app), "the Switched to row")
             }),
         RenderScenario(
+            name: "switch-claude-moved-by-email-session",
+            purpose: "a moved run whose account the app's account book knows: the row names the account by its email",
+            arguments: [
+                "-CC_SWITCH", "switch-with-listing-claude",
+                "-CC_DEEPLINK", "codeconnect://session/01M82X1ASERF7DPA32E16243H9",
+            ],
+            reach: { app, driver in
+                try driver.requireExists(driver.text(containing: "b@example.test", in: app), "the row by its email")
+            }),
+        RenderScenario(
             name: "switch-codex-moved-session",
             purpose: "a Codex run moved to another account: one Switched to row, its reply box kept",
             arguments: [

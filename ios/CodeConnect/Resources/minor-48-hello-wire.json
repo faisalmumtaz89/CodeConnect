@@ -1,0 +1,41 @@
+[
+  {
+    "capabilities": {
+      "accounts": true,
+      "browse_folders": true,
+      "can_approve_reliably": true,
+      "claude_interrupt": true,
+      "codex_compose": true,
+      "codex_interrupt": true,
+      "command_catalog": true,
+      "delete_session": true,
+      "diff": true,
+      "history_pages": true,
+      "hook_only_approvals": true,
+      "machine_stats": true,
+      "private_transport": true,
+      "prompt_identity": true,
+      "push": false,
+      "push_relay": false,
+      "question_card": true,
+      "risk_class": true,
+      "send_text": true,
+      "send_text_idempotent": true,
+      "session_uid": true,
+      "start_session": true,
+      "start_worktree": true,
+      "stop_run": true,
+      "test_push": false,
+      "tls": false,
+      "tls_active": false
+    },
+    "device_id": "abcd1234",
+    "device_name": "iPhone",
+    "machine_name": "Example Mac",
+    "machine_os": "macos",
+    "protocol_minor": 48,
+    "protocol_version": 2,
+    "server_time": "2026-11-23T00:31:31.132Z",
+    "type": "hello_ack"
+  }
+]

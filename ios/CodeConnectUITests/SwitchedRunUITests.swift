@@ -12,6 +12,7 @@ final class SwitchedRunUITests: XCTestCase {
     private static let failed = "01M82B4K7A2XN1X22R98H2XB80"
     private static let ended = "01M82B4K7A2XN1X22R98H2XB7Z"
     private static let planLacksModel = "01M82HYZB0MPQRNE27QH73Q0JQ"
+    private static let withBook = "01M82X1ASERF7DPA32E16243H9"
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -78,6 +79,14 @@ final class SwitchedRunUITests: XCTestCase {
             app.staticTexts.matching(identifier: "session.composer.model").firstMatch.exists,
             "its model, read only", file: file, line: line)
         XCTAssertFalse(app.buttons["session.composer.settings"].exists, "no settings to change", file: file, line: line)
+    }
+
+    /// With the account book's listing (ccd's, recorded with the switch), the row names the account by its email.
+    func testAMovedRunNamesTheAccountByItsEmailWhenTheBookKnowsIt() {
+        let app = open("switch-with-listing-claude", session: Self.withBook)
+        let row = texts(app, beginningWith: "Switched to b@example.test")
+        XCTAssertTrue(row.firstMatch.waitForExistence(timeout: 25), "the row by its email")
+        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 1, "one row")
     }
 
     func testAMoveThatCouldNotStartReadsEndedWithOneWarningAndKeepsItsReplyBox() {
