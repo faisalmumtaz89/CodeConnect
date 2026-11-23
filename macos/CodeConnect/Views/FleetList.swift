@@ -262,8 +262,9 @@ struct FleetList: View {
             }
         }
         .background(Theme.window)
-        // Leaving the Ended runs leaves the choosing.
+        // Leaving the Ended runs leaves the choosing, and so does having nothing left to choose.
         .onChange(of: scope) { endSelection() }
+        .onChange(of: selectableKeys(rows).isEmpty) { _, none in if none { endSelection() } }
         #if DEBUG
             .task(id: rows.first?.id) {
                 guard let row = rows.first else { return }
