@@ -22,13 +22,11 @@ struct BranchRow: View {
     @State private var frame: CGRect = .zero
     /// The button's bottom edge, in the row's coordinates.
     @State private var buttonBottom: CGFloat = 0
-    /// How tall the menu's naming of a new worktree stands, while one is being named.
-    @State private var namingHeight: CGFloat = 0
 
     var body: some View {
         Group {
             if let answer = context.git(folder.path), let git = answer {
-                // A new worktree being named is named in the menu (`BranchNaming`); here, its kind.
+                // A new worktree being named is named under the box (`BranchNaming`); here, its kind.
                 let summary = startPlaceSummary(place, agent: agent ?? .claude, project: folder, git: git)
                 button(newName == nil ? summary : StartWords.newWorktree)
             } else {
@@ -61,9 +59,8 @@ struct BranchRow: View {
         let rows = BranchMenu.rows(git: git, folder: folder)
         let gap = Theme.panelGap
         let highest = max(top, Self.margin)
-        let naming = newName == nil ? 0 : namingHeight
-        let above = frame.minY - gap - highest - naming
-        let below = startHeight - frame.minY - buttonBottom - gap - Self.margin - naming
+        let above = frame.minY - gap - highest
+        let below = startHeight - frame.minY - buttonBottom - gap - Self.margin
         let opensAbove = BranchMenu.height(rows: rows) <= above || above > below
         let shown = BranchMenu.rows(fitting: opensAbove ? above : below, of: rows)
         let cut = shown < min(rows, BranchMenu.mostRows)
@@ -72,26 +69,20 @@ struct BranchRow: View {
             git: git, folder: folder, running: context.runningFolders, place: newName == nil ? place : nil,
             // Inside the pane by the start form's one rule (`StartPanel`), not as narrow as its row: beside the model
             // button the row is narrow, and its names would be cut that need not be.
-            shownRows: shown, width: placed.width,
-            naming: newName == nil
-                ? nil : BranchNaming(folder: folder, agent: agent, git: git, newName: $newName) { open = false },
-            namingHeight: $namingHeight
+            shownRows: shown, width: placed.width
         ) { chosen in
             if let chosen {
                 place = chosen
                 newName = nil
-                open = false
             } else {
-                // The menu stays open on its name, under "New branch…".
                 newName = ""
             }
+            open = false
         }
         .openPanel()
         .offset(
             x: placed.x - frame.minX,
-            y: !opensAbove
-                ? buttonBottom + gap
-                : cut ? highest - frame.minY : -(BranchMenu.height(rows: shown) + naming + gap))
+            y: !opensAbove ? buttonBottom + gap : cut ? highest - frame.minY : -(BranchMenu.height(rows: shown) + gap))
     }
 
     /// The chosen place, a button that opens the menu.
@@ -115,14 +106,13 @@ struct BranchRow: View {
     }
 }
 
-/// A new worktree being named, in the branch menu under "New branch…": the name, the rule or what breaks it, and what
-/// the name makes. Return keeps it and closes the menu; Escape stops naming it.
+/// A new worktree being named, under the start form's box: the name, the rule or what breaks it, and what the name
+/// makes. Escape stops naming it.
 struct BranchNaming: View {
     let folder: StartProject
     let agent: StartAgent?
     let git: StartGit
     @Binding var newName: String?
-    let done: () -> Void
 
     var body: some View {
         let trimmed = (newName ?? "").trimmingCharacters(in: .whitespaces)
@@ -137,9 +127,11 @@ struct BranchNaming: View {
             .accessibilityIdentifier("start.branch.name")
             .textFieldStyle(.plain)
             .font(Theme.mono(12))
-            .menuField()
-            .overlay { if !(trimmed.isEmpty || valid) { RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.red) } }
-            .onSubmit(done)
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7).strokeBorder(trimmed.isEmpty || valid ? Theme.hairline : Theme.red))
             .onExitCommand { newName = nil }
             // It appears because "New branch…" was just chosen: what is typed next is its name.
             .takesKeyboardWhenShown()
@@ -194,9 +186,6 @@ struct BranchMenu: View {
     /// How many lines show before it scrolls.
     let shownRows: Int
     let width: CGFloat
-    /// A new worktree's naming, under "New branch…" while one is being named, and how tall it stands.
-    let naming: BranchNaming?
-    @Binding var namingHeight: CGFloat
     let choose: (StartPlace?) -> Void
 
     static let width: CGFloat = 440
@@ -264,12 +253,6 @@ struct BranchMenu: View {
                 ) {
                     Text(StartWords.newBranch).font(Theme.ui(12.5)).foregroundStyle(Theme.text).fixedSize()
                     ModelDetail(text: StartWords.newBranchDetail)
-                }
-                if let naming {
-                    naming
-                        .padding(.horizontal, 10)
-                        .padding(.bottom, 6)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { namingHeight = $0 }
                 }
             }
             .overlay(alignment: .top) { MenuDivider() }
