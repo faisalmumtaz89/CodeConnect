@@ -79,19 +79,6 @@ struct KeyCap: View {
     }
 }
 
-/// A key and what it does, as the window's footer lists them.
-struct KeyHint: View {
-    let keys: [String]
-    let label: String
-
-    var body: some View {
-        HStack(spacing: 5) {
-            ForEach(keys, id: \.self) { KeyCap($0) }
-            Text(label).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
-        }
-    }
-}
-
 /// Takes the window's title bar out of the way, so the sidebar runs to the top edge under the
 /// traffic lights.
 struct WindowChrome: NSViewRepresentable {

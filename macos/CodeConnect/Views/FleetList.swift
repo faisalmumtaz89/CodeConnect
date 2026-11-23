@@ -246,27 +246,26 @@ struct FleetList: View {
                 }
             }
 
-            Rectangle().fill(Theme.hairline).frame(height: 1)
-            HStack(spacing: 14) {
-                if selecting {
+            // The list's foot, only while choosing runs: what is chosen is removed from it.
+            if selecting {
+                Rectangle().fill(Theme.hairline).frame(height: 1)
+                HStack(spacing: 14) {
                     Spacer()
                     ActionButton(
                         title: batchRunning ? "Removing…" : "Remove \(picked.count)…", key: nil, prominent: false,
                         destructive: true, id: "fleet.removeChosen"
                     ) { removingMany = picked }
                     .disabled(picked.isEmpty || batchRunning)
-                } else {
-                    KeyHint(.agent)
-                    KeyHint(.computer)
-                    Spacer()
                 }
+                .padding(.horizontal, 16)
+                .frame(height: 34)
             }
-            .padding(.horizontal, 16)
-            .frame(height: 34)
         }
         .background(Theme.window)
-        // Leaving the Ended runs leaves the choosing.
+        // Leaving the Ended runs leaves the choosing, and so does no removable run being left at all. A run only
+        // folded away or filtered out is still there: it stays chosen and is picked again once shown.
         .onChange(of: scope) { endSelection() }
+        .onChange(of: scope.rows(machines.fleet).contains(where: removable)) { _, any in if !any { endSelection() } }
         #if DEBUG
             .task(id: rows.first?.id) {
                 guard let row = rows.first else { return }
