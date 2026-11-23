@@ -116,25 +116,15 @@ struct ModelButton: View {
             open = false
         }
         return Button(action: select) {
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 9.5, weight: .bold))
-                    .opacity(choice == pick ? 1 : 0)
-                    .frame(width: 12)
-                    .accessibilityHidden(true)
+            MenuRow(chosen: choice == pick) {
                 Text(choice.label).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1).fixedSize()
                 if let detail = choice.detail {
                     ModelDetail(text: detail)
                 }
-                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8)
-            .frame(height: 24)
-            .contentShape(Rectangle())
         }
         .buttonStyle(.panelRow)
         .panelRow(index, id: id, choose: select)
-        .padding(.horizontal, 4)
         .accessibilityIdentifier(id)
         .accessibilityAddTraits(choice == pick ? .isSelected : [])
     }

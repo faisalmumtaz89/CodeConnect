@@ -189,7 +189,7 @@ struct BranchMenu: View {
     let choose: (StartPlace?) -> Void
 
     static let width: CGFloat = 440
-    static let rowHeight: CGFloat = 24
+    static let rowHeight: CGFloat = 32
     static let mostRows = 12
     /// The card's padding (`menuCard`), above and below the rows.
     private static let inset: CGFloat = 6
@@ -292,23 +292,12 @@ struct BranchMenu: View {
         @ViewBuilder content: () -> some View
     ) -> some View {
         Button(action: choose) {
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 9.5, weight: .bold))
-                    .opacity(checked ? 1 : 0)
-                    .frame(width: 12)
-                    .accessibilityHidden(true)
-                content()
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 8)
-            .frame(height: Self.rowHeight)
-            .contentShape(Rectangle())
+            MenuRow(chosen: checked) { content() }
+                .frame(height: Self.rowHeight)
         }
         .buttonStyle(.panelRow)
         .panelRow(index, id: id, choose: choose)
         .accessibilityLabel(name)
-        .padding(.horizontal, 4)
         .accessibilityIdentifier(id)
         .accessibilityAddTraits(checked ? .isSelected : [])
     }

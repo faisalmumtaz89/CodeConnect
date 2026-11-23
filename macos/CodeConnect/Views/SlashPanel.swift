@@ -14,23 +14,18 @@ struct SlashPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(content.rows.enumerated()), id: \.element.id) { index, row in
                 Button { run(row) } label: {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    MenuRow {
                         Image(systemName: Self.symbol(for: row.command)).font(.system(size: 11))
                             .foregroundStyle(Theme.text3)
                             .frame(width: 14)
                             .accessibilityHidden(true)
                         Text(verbatim: row.title).font(Theme.mono(12)).foregroundStyle(Theme.text).fixedSize()
                         ModelDetail(text: row.subtitle)
-                        Spacer(minLength: 0)
                     }
-                    .padding(.horizontal, 8)
-                    .frame(height: 24)
-                    .background(index == lit ? PanelLight.fill : .clear, in: RoundedRectangle(cornerRadius: 4))
-                    .contentShape(Rectangle())
+                    .background(index == lit ? PanelLight.fill : .clear, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.panelRow)
                 .onHover { if $0 { light(index) } }
-                .padding(.horizontal, 4)
                 .accessibilityLabel(row.title)
                 .accessibilityIdentifier("session.slash.\(row.command)")
                 .accessibilityAddTraits(index == lit ? .isSelected : [])

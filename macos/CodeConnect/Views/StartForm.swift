@@ -887,22 +887,12 @@ private struct ComputerButton: View {
                     open = false
                 }
                 Button(action: pick) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 9.5, weight: .bold))
-                            .opacity(context.id == chosen.id ? 1 : 0)
-                            .frame(width: 12)
-                            .accessibilityHidden(true)
+                    MenuRow(chosen: context.id == chosen.id) {
                         Text(context.machineName).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
-                        Spacer(minLength: 0)
                     }
-                    .padding(.horizontal, 8)
-                    .frame(height: 24)
-                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.panelRow)
                 .panelRow(index, id: "start.computer.\(context.id)", choose: pick)
-                .padding(.horizontal, 4)
                 .accessibilityIdentifier("start.computer.\(context.id)")
                 .accessibilityAddTraits(context.id == chosen.id ? .isSelected : [])
             }
@@ -911,19 +901,14 @@ private struct ComputerButton: View {
                 add()
             }
             Button(action: adding) {
-                HStack(spacing: 8) {
+                MenuRow {
                     Image(systemName: "plus").font(.system(size: 9.5, weight: .bold)).frame(width: 12)
                         .accessibilityHidden(true)
                     Text("Add a computer\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
-                    Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 8)
-                .frame(height: 24)
-                .contentShape(Rectangle())
             }
             .buttonStyle(.panelRow)
             .panelRow(contexts.count, id: "start.addComputer", choose: adding)
-            .padding(.horizontal, 4)
             .accessibilityIdentifier("start.addComputer")
         }
         .frame(width: placed.width - 12)

@@ -244,7 +244,6 @@ struct HostedSettingsButton: View {
         }
         .buttonStyle(.panelRow)
         .panelRow(index, id: id) { choose(asksFirst: asksFirst, set) }
-        .padding(.horizontal, 4)
         .disabled(marked)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier(id)
@@ -253,23 +252,14 @@ struct HostedSettingsButton: View {
 
     /// A row's label, and beside it, quieter, the agent's own description as sent, cut at its end.
     private func rowLabel(_ title: String, detail: String? = nil, marked: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: "checkmark")
-                .font(.system(size: 9.5, weight: .bold))
-                .opacity(marked ? 1 : 0)
-                .frame(width: 12)
-                .accessibilityHidden(true)
+        MenuRow(chosen: marked) {
             Text(title).font(Theme.ui(12.5)).foregroundStyle(settings.inFlight ? Theme.text3 : Theme.text)
                 .lineLimit(1)
                 .layoutPriority(1)
             if let detail {
                 ModelDetail(text: detail)
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
     }
 }
 

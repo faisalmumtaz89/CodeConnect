@@ -471,7 +471,7 @@ private struct PanelRow: ViewModifier {
     func body(content: Content) -> some View {
         let lit = light?.light.lit == index
         content
-            .background(lit && !lifts ? PanelLight.fill : .clear, in: RoundedRectangle(cornerRadius: 4))
+            .background(lit && !lifts ? PanelLight.fill : .clear, in: RoundedRectangle(cornerRadius: 8))
             .brightness(lit && lifts ? Theme.segmentLift : 0)
             .onHover { if $0 { light?.enter(index) } }
             .onAppear {
@@ -499,6 +499,28 @@ extension View {
     }
 }
 
+/// A menu card's row: what it says on one line, at least 32 pt tall and 10 pt in at its sides; the chosen one filled
+/// white 7%, with a check at its trailing end.
+struct MenuRow<Content: View>: View {
+    var chosen = false
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: 8) {
+            content
+            Spacer(minLength: 0)
+            if chosen {
+                Image(systemName: "checkmark").font(.system(size: 9.5, weight: .bold)).accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(minHeight: 32)
+        .background(chosen ? Color.white.opacity(0.07) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .contentShape(Rectangle())
+    }
+}
+
 /// A panel row's button: the panel's light is its only plate (`panelRow`); disabled it dims, pressed it fades.
 struct PanelRowStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { Label(configuration: configuration) }
@@ -510,7 +532,7 @@ struct PanelRowStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .opacity(!enabled ? Theme.disabledOpacity : configuration.isPressed ? 0.7 : 1)
-                .contentShape(RoundedRectangle(cornerRadius: 4))
+                .contentShape(Rectangle())
         }
     }
 }
@@ -565,21 +587,16 @@ struct PanelItem: View {
 
     var body: some View {
         Button(action: perform) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            MenuRow {
                 Image(systemName: symbol).font(.system(size: 11))
                     .foregroundStyle(destructive ? Theme.red : Theme.text3)
                     .frame(width: 14)
                     .accessibilityHidden(true)
                 Text(title).font(Theme.ui(12.5)).foregroundStyle(destructive ? Theme.red : Theme.text).lineLimit(1)
-                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
         }
         .buttonStyle(.panelRow)
         .panelRow(index, id: id, choose: perform)
-        .padding(.horizontal, 4)
         .accessibilityIdentifier(id)
     }
 }
