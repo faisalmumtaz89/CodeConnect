@@ -898,6 +898,26 @@ impl SignIns {
 /// How long an agent's logout may take before the removal is refused.
 const LOGOUT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The folder of the removed Claude Code account `id` deleted (`root`'s `accounts/claude/<id>`, the id ccd's own):
+/// nothing of a removed account is left. Only a real folder is deleted; one that is a link is left and logged. The
+/// deletion does not follow a link inside it (`std::fs::remove_dir_all` removes a link, never what it names). A
+/// failure is logged; the account is removed all the same.
+fn remove_claude_folder(root: &Path, id: &str) {
+    let folder = root.join("accounts").join("claude").join(id);
+    match folder.symlink_metadata() {
+        Ok(found) if found.is_dir() => {
+            if let Err(err) = std::fs::remove_dir_all(&folder) {
+                crate::log_error!(
+                    "could not delete the folder of removed account {id} ({}): {err}",
+                    folder.display()
+                );
+            }
+        }
+        Ok(_) => crate::log_error!("left the folder of removed account {id}: it is not a folder"),
+        Err(_) => {}
+    }
+}
+
 /// Removes `account_id`: its agent's own logout in its home, `codex` being Codex's path here; once the credential is
 /// gone, the row (and any choice of it). The home stays, its links and nothing of the account's: a thread started
 /// on the account is recorded through it and still resumes from another account (measured on codex 0.170.0,
@@ -982,6 +1002,10 @@ pub(crate) async fn remove_with(
     }
     if let Err(err) = store.remove_account(&account.id) {
         return unavailable(request_id, "remove the account", err);
+    }
+    // Signed out and its row gone: Claude Code's folder goes too. Codex's home is kept, as links its state records.
+    if account.agent == "claude" {
+        remove_claude_folder(&protocol::root_dir(), &account.id);
     }
     // The remaining accounts' sign-ins are what is held; the read behind the answer asks again.
     listing(store, Some(request_id))
@@ -1463,6 +1487,25 @@ pub(crate) mod tests {
             default.and_then(|facts| facts.email).as_deref(),
             Some("default@example.test")
         );
+        // A link inside the folder to a place outside it, which its removal must not follow.
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("kept"), "the person's").unwrap();
+        std::os::unix::fs::symlink(&outside, folder.join("link-out")).unwrap();
+        // The Default has no row, so no id reaches a folder outside an added account's.
+        let refused = serde_json::to_value(
+            super::remove_with(
+                &store,
+                &super::SignIns::default(),
+                &environment,
+                agents,
+                "r0".into(),
+                super::default_key(&protocol::agent::AgentKind::Claude),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(refused["type"], "accounts_refused", "{refused}");
         // Removed: signed out with the same two variables, the row gone.
         let removed = serde_json::to_value(
             super::remove_with(
@@ -1484,6 +1527,12 @@ pub(crate) mod tests {
         assert!(
             root.join("item-default").exists(),
             "the person's own is untouched"
+        );
+        // Nothing of a removed account is left: its folder is gone, and nothing a link in it named.
+        assert!(folder.symlink_metadata().is_err(), "its folder is gone");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("kept")).unwrap(),
+            "the person's"
         );
         let _ = std::fs::remove_dir_all(&folder);
         let _ = std::fs::remove_dir_all(&root);
@@ -1551,6 +1600,28 @@ pub(crate) mod tests {
             "asked with both of the account's variables"
         );
         let _ = std::fs::remove_dir_all(on_a.folder());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A removed Claude Code account's folder that is a link is left**, and what it names untouched: only a real
+    /// folder directly under the accounts root is deleted.
+    #[test]
+    fn a_removed_accounts_folder_that_is_a_link_is_left() {
+        let root =
+            std::env::temp_dir().join(format!("ccs-link.{}", &protocol::uid::new().unwrap()[20..]));
+        let target = root.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("kept"), "x").unwrap();
+        let id = protocol::uid::new().unwrap();
+        std::fs::create_dir_all(root.join("accounts").join("claude")).unwrap();
+        let folder = root.join("accounts").join("claude").join(&id);
+        std::os::unix::fs::symlink(&target, &folder).unwrap();
+        super::remove_claude_folder(&root, &id);
+        assert!(
+            folder.symlink_metadata().unwrap().file_type().is_symlink(),
+            "the link is left"
+        );
+        assert!(target.join("kept").exists(), "what it names is untouched");
         let _ = std::fs::remove_dir_all(&root);
     }
 

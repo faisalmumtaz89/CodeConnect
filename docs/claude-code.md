@@ -11,9 +11,9 @@ Code sign-in and settings.
 
 Each other Claude Code account you add in CodeConnect has a folder of its own,
 `~/.codeconnect/accounts/claude/<id>`. Signing it in runs Claude Code's own `claude auth login`
-with `CLAUDE_SECURESTORAGE_CONFIG_DIR` and `CLAUDE_CONFIG_DIR` both set to that folder, so the
-account's sign-in and its identity are kept there and your own Claude Code sign-in is not
-touched. A session on that account starts with `CLAUDE_SECURESTORAGE_CONFIG_DIR` alone set to
+with `CLAUDE_SECURESTORAGE_CONFIG_DIR` and `CLAUDE_CONFIG_DIR` both set to that folder: on a Mac,
+Claude Code keeps the account's sign-in in your login keychain under a name of that folder's, and
+its identity file in the folder; your own Claude Code sign-in is not touched. A session on that account starts with `CLAUDE_SECURESTORAGE_CONFIG_DIR` alone set to
 the folder: it uses that account's sign-in, and your own settings and projects, where its
 conversations are kept.
 
@@ -29,6 +29,5 @@ its limits changed, at most once a minute per account otherwise. CodeConnect kee
 memory only, never on disk or in its log.
 
 Removing an account runs `claude auth logout` with the same two variables, and the account is
-removed only once Claude Code says it is signed out. An account a running session is on is not
-removed. Its folder is kept; it holds only that account's Claude Code identity, never your
-conversations.
+removed only once Claude Code says it is signed out; its folder is then deleted. An account a
+running session is on is not removed.
