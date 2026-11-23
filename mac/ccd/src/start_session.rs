@@ -212,13 +212,13 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
     let keys: Vec<String> = wanted.iter().map(|(key, _, _)| key.clone()).collect();
     let claimed = daemon.account_facts.claim_stale(&keys);
     let signed = daemon.account_facts.signed_stale();
-    if claimed.is_empty() && !signed {
+    if claimed.is_empty() && signed.is_none() {
         return;
     }
     let environment = phone_environment();
     let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
     let claude = claude_path(&environment, daemon.config.claude_bin.as_deref()).await;
-    if signed {
+    if let Some(asked) = signed {
         let agents = crate::accounts::Agents {
             codex: codex.as_deref(),
             claude: claude.as_deref(),
@@ -228,7 +228,7 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
             tokio::task::spawn_blocking(move || crate::accounts::listing(&store, None)).await
         {
             let listing = crate::accounts::with_signed_in(&environment, agents, listing).await;
-            daemon.account_facts.keep_signed(&listing);
+            daemon.account_facts.keep_signed(&listing, asked);
         }
     }
     let root = protocol::root_dir();

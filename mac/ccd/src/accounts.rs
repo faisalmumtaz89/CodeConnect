@@ -342,11 +342,14 @@ pub(crate) struct Facts {
     /// Each account's `signed_in` and `not_separate` as its agent last said ([`with_signed_in`]), read behind every
     /// accounts call; an account not read yet has none, so its row says nothing of its sign-in.
     signed: std::sync::Mutex<HashMap<String, (Option<bool>, bool)>>,
-    /// When the sign-ins were last read; none when a call may have changed one since.
-    signed_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// When the sign-ins were last read (none when a call may have changed one since), and how many times a call has
+    /// so asked: a read begun before such a call is kept but not taken for fresh.
+    signed_at: std::sync::Mutex<(Option<std::time::Instant>, u64)>,
     /// A refresh is running, and whether a call asked for another after it.
     refreshing: std::sync::Mutex<(bool, bool)>,
     reading: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Keys forgotten while being read: that read found the old sign-in's facts, so it is not kept.
+    dropped: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// The key of `agent`'s Default among [`Facts`].
@@ -379,24 +382,27 @@ impl Facts {
 
     /// The read of `key` is over: what it found, if anything, is kept.
     pub(crate) fn read(&self, key: &str, facts: Option<protocol::ws::AccountFacts>) {
-        self.known
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), (facts, std::time::Instant::now()));
+        if !self.dropped.lock().unwrap().remove(key) {
+            self.known
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), (facts, std::time::Instant::now()));
+        }
         self.reading.lock().unwrap().remove(key);
     }
 
-    /// Whether the sign-ins are to be read again: never read, read [`FACTS_FRESH`] ago, or a call may have changed one.
-    pub(crate) fn signed_stale(&self) -> bool {
-        self.signed_at
-            .lock()
-            .unwrap()
-            .is_none_or(|at| at.elapsed() >= FACTS_FRESH)
+    /// When the sign-ins are to be read again (never read, read [`FACTS_FRESH`] ago, or a call may have changed one):
+    /// the count of such calls the read begins at, for [`Facts::keep_signed`].
+    pub(crate) fn signed_stale(&self) -> Option<u64> {
+        let (at, asked) = *self.signed_at.lock().unwrap();
+        at.is_none_or(|at| at.elapsed() >= FACTS_FRESH)
+            .then_some(asked)
     }
 
     /// A call may have changed a sign-in (an account added, removed, or a sign-in ended): the next refresh reads them.
     pub(crate) fn forget_signed(&self) {
-        *self.signed_at.lock().unwrap() = None;
+        let mut signed_at = self.signed_at.lock().unwrap();
+        *signed_at = (None, signed_at.1 + 1);
     }
 
     /// Whether this caller runs the refresh: false while one runs, which then goes round once more.
@@ -424,10 +430,14 @@ impl Facts {
     /// What is held for `key` goes (its sign-in changed, or it was removed).
     pub(crate) fn forget(&self, key: &str) {
         self.known.lock().unwrap().remove(key);
+        if self.reading.lock().unwrap().contains(key) {
+            self.dropped.lock().unwrap().insert(key.to_string());
+        }
     }
 
-    /// What `listing` ([`with_signed_in`]'s) says of each account's sign-in, kept for the answers that follow.
-    pub(crate) fn keep_signed(&self, listing: &protocol::ws::ServerMessage) {
+    /// What `listing` ([`with_signed_in`]'s, begun at `asked`, [`Facts::signed_stale`]) says of each account's sign-in,
+    /// kept for the answers that follow; fresh only if no call has asked for another read since it began.
+    pub(crate) fn keep_signed(&self, listing: &protocol::ws::ServerMessage, asked: u64) {
         if let protocol::ws::ServerMessage::Accounts { accounts, .. } = listing {
             let mut signed = self.signed.lock().unwrap();
             for account in accounts {
@@ -436,7 +446,10 @@ impl Facts {
                     (account.signed_in, account.not_separate),
                 );
             }
-            *self.signed_at.lock().unwrap() = Some(std::time::Instant::now());
+            let mut signed_at = self.signed_at.lock().unwrap();
+            if signed_at.1 == asked {
+                signed_at.0 = Some(std::time::Instant::now());
+            }
         }
     }
 
@@ -1042,7 +1055,7 @@ pub(crate) mod tests {
     /// identity its config directory holds, the person's shared one without it), orgId, orgName, planTier,
     /// storedClaudeAiLogin and subscriptionType, all made up but the email) and exits 0 signed in, 1 signed out; `auth logout` takes the item and exits 0. A login
     /// run without a config directory of its own writes the person's shared identity, and says so in `shared`.
-    fn stand_in_claude(dir: &Path) -> std::path::PathBuf {
+    pub(crate) fn stand_in_claude(dir: &Path) -> std::path::PathBuf {
         let path = dir.join("claude");
         std::fs::write(
             &path,
