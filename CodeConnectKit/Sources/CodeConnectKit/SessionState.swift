@@ -424,6 +424,8 @@ public final class SessionState {
     /// The turns a Codex mutation reported begun and ended, which
     /// `runningTurn` reads beside the events. `AppModel` supplies them.
     @ObservationIgnored var codexTurns: () -> (observed: [String], retired: Set<String>) = { ([], []) }
+    /// An account's name as this app's account book knows it, by its id (nil: the Default), for a switch's rows.
+    @ObservationIgnored var accountName: (String?) -> String? = { _ in nil }
 
     /// What a publication now would put on screen.
     var current: Shown {
@@ -489,6 +491,12 @@ public final class SessionState {
         private(set) var publications: [Publication] = []
         @ObservationIgnored var publishing: Publication?
     #endif
+
+    /// The account book changed: a switch's rows may now name an account by its email.
+    func accountNamesChanged() {
+        rebuildTimeline()
+        publish()
+    }
 
     /// A Codex mutation reported a turn begun or ended.
     func codexTurnsChanged() {
@@ -1088,7 +1096,8 @@ public final class SessionState {
         // there; the chat draws only the window's rows.
         let built = TimelineBuilder.build(
             pins.values.flatMap { [$0.event] + ($0.resolution.map { [$0] } ?? []) }
-                .sorted { $0.seq < $1.seq } + events)
+                .sorted { $0.seq < $1.seq } + events,
+            accountName: accountName)
         let start = windowStart ?? 0
         let next = pins.isEmpty ? built : built.filter { $0.seq >= start }
         pinnedItems = pins.isEmpty ? [] : built.filter { $0.seq < start }.map(withPinnedHold)

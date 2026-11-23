@@ -85,6 +85,9 @@ public enum EngineNotice {
     public static let compacted = "compacted"
     /// A run moving to another account could not start there (`{message, switched_to}`, minor 48).
     public static let switchFailed = "switch_failed"
+    /// A run moved onto an account whose plan lacks its model, going on with that plan's default (`{from_model,
+    /// from_label, to_model, to_label, account}`, minor 48).
+    public static let modelUnavailable = "model_unavailable"
 }
 
 /// The two lines ccd sends to wake an idle Codex agent for its mail

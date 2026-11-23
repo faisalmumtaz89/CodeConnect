@@ -220,7 +220,9 @@ public enum TimelineBuilder {
         }
     }
 
-    static func build(_ events: [Event]) -> [TimelineItem] {
+    /// `accountName` names an account by its id (nil: the agent's Default) as this app's account book knows it, or nil
+    /// when it does not; a switch's rows read it, else the label their event carries.
+    static func build(_ events: [Event], accountName: (String?) -> String? = { _ in nil }) -> [TimelineItem] {
         guard !events.isEmpty else { return [] }
 
         var resultsByToolUse: [String: ToolOutcome] = [:]
@@ -546,7 +548,7 @@ public enum TimelineBuilder {
                 // A send_not_sent notice is consumed into the person's row it cancelled
                 // (its `notSent`, set above), not drawn as its own row.
                 if event.sendNotSentStoppedRequestID != nil { break }
-                guard let notice = notice(for: event) else {
+                guard let notice = notice(for: event, accountName: accountName) else {
                     break
                 }
                 items.append(event.item(.notice(notice)))
@@ -557,7 +559,8 @@ public enum TimelineBuilder {
                 }
                 // A switch of account is no end: the run reads live throughout, so one quiet row names the account,
                 // and its link letting go and coming back is the switch itself.
-                if let account = event.switchedToLabel {
+                if let label = event.switchedToLabel {
+                    let account = accountName(event.switchedToID) ?? label
                     switched = true
                     linkWasDown = false
                     items.append(
@@ -748,7 +751,7 @@ public enum TimelineBuilder {
 
     // MARK: Notices
 
-    private static func notice(for event: Event) -> NoticeItem? {
+    private static func notice(for event: Event, accountName: (String?) -> String?) -> NoticeItem? {
         let type = event.notificationType ?? "notification"
         switch type {
         case EngineNotice.conversationCleared:
@@ -772,8 +775,19 @@ public enum TimelineBuilder {
             // ccd's own notice that a run moved to another account could not start there: a warning by the account
             // it names, ccd's sentence beneath. Drawn by its type, it read a grey "Switch Failed".
             return NoticeItem(
-                kind: .other, symbol: "warning", title: "Couldn’t move to \(event.switchedToLabel ?? "the account")",
+                kind: .other, symbol: "warning",
+                title: "Couldn’t move to \(accountName(event.switchedToID) ?? event.switchedToLabel ?? "the account")",
                 detail: event.notificationMessage, severity: .warning)
+        case EngineNotice.modelUnavailable:
+            // ccd's own notice that a run moved onto a plan without its model goes on with that plan's default: one
+            // quiet row from its typed names, as the switch's own row is. Drawn by its type, it read "Model Unavailable".
+            let to = event.payload["to_label"]?.stringValue ?? ""
+            let from = event.payload["from_label"]?.stringValue ?? ""
+            let account = accountName(event.payload["account"]?["id"]?.stringValue)
+                ?? event.payload["account"]?["label"]?.stringValue ?? ""
+            return NoticeItem(
+                kind: .other, symbol: "arrows-clockwise", title: "Now on \(to): \(from) isn’t in \(account)’s plan.",
+                detail: nil, severity: .info)
         case EngineNotice.mailNudge:
             // ccd's own notice that it woke a Claude run for its mail; its message is the wake line, which is ccd's
             // words to the agent, not the reader's, so the row is the one a Codex wake draws.

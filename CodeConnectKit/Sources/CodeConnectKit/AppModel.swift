@@ -388,6 +388,9 @@ public final class AppModel {
             // foreground check, and this is where its prerequisites arrive.
             // Debounced, so it is at most a daily status GET.
             self.foregroundRelayRefresh()
+            // The account book, so a switch's rows name an account by its email; kept current by the computer's
+            // pushes from then on. Asked only of a computer that keeps accounts.
+            Task { await self.loadAccounts() }
         }
         connection.onDeviceToken = { [weak self] token in self?.adopt(deviceToken: token) }
         connection.onTransportSettled = { [weak self] useTLS in
@@ -1189,7 +1192,20 @@ public final class AppModel {
     // MARK: Accounts (minor 48)
 
     /// This computer's accounts per agent and the one each agent's starts use, once asked; nil before.
-    public private(set) var accountBook: AccountBook?
+    /// Held in memory only: no account's email is written to the cache or the store.
+    public private(set) var accountBook: AccountBook? {
+        didSet {
+            guard accountBook != oldValue else { return }
+            for state in states.values { state.accountNamesChanged() }
+        }
+    }
+
+    /// An account's email as this computer's account book knows it, for a switch's rows on run `key`: by its id (nil:
+    /// the agent's Default), under the run's agent. Nil while the book is not in, or for an account it no longer lists.
+    private func accountEmail(run key: String, id: String?) -> String? {
+        guard let agent = summary(for: key).flatMap({ StartAgent(rawValue: $0.agent.rawValue) }) else { return nil }
+        return accountBook?.facts(for: agent, accountID: id)?.email
+    }
     /// What the computer said when it refused, or could not answer, the last accounts request; cleared as the next
     /// one starts.
     public private(set) var accountsProblem: String?
@@ -2077,6 +2093,7 @@ public final class AppModel {
             self.fillWindow(of: key)
             if !self.launchSettled { self.settleLaunchIfCaughtUp() }
         }
+        fresh.accountName = { [weak self] id in self?.accountEmail(run: key, id: id) }
         fresh.codexTurns = { [weak self] in
             guard let controls = self?.codexControlsByKey[key] else { return ([], []) }
             return (controls.observedTurns, controls.retiredTurns)

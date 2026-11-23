@@ -171,4 +171,21 @@ final class SwitchedRunTimelineTests: XCTestCase {
             }
         }
     }
+
+    /// **A move onto a plan without the run's model** (decision 316) draws one quiet row from the notice's typed fields,
+    /// "Now on <to>: <from> isn't in <account>'s plan.", never a title made from its kind; the run reads live.
+    func testAMoveOntoAPlanWithoutTheModelDrawsOneQuietRow() async throws {
+        let all = events(try frames("relaunch-plan-default-codex-wire"))
+        let notice = try XCTUnwrap(all.first { $0.kind == .notification && $0.notificationType == "model_unavailable" })
+        let drawn = await state(all)
+        XCTAssertEqual(
+            drawn.timeline.filter { $0.seq == notice.seq }.map(\.content),
+            [.notice(NoticeItem(
+                kind: .other, symbol: "arrows-clockwise", title: "Now on gpt-6-luna: GPT-6.1-Sol isn’t in B’s plan.",
+                detail: nil, severity: .info))])
+        for (summary, status) in try await listings("relaunch-plan-default-codex-wire") {
+            XCTAssertFalse(status == .ended || status == .failed, "\(status)")
+            XCTAssertFalse(summary.takesNoReply)
+        }
+    }
 }
