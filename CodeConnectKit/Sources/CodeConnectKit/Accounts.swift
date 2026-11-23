@@ -198,8 +198,9 @@ public enum AccountSwitchWords {
     /// A row's second line while its sign-in waits on the browser; the computer ends it after ten minutes.
     public static let signingIn = "Finish signing in in your browser. This stops by itself after 10 minutes."
 
-    /// A row's second line when another account is signed in as the same address.
-    public static func sameSignIn(as email: String) -> String { "The same sign-in as \(email)" }
+    /// A row's second line when another account is signed in as the same address: the row's title already is that
+    /// address, so the line names none.
+    public static let sameSignIn = "The same sign-in as another account here"
 
     /// A row's second line when Codex keeps its sign-in in the computer's own store.
     public static let notSeparate = "Uses this computer's own Codex sign-in, so it isn't a separate account"

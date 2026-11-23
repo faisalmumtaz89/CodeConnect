@@ -544,8 +544,7 @@ private struct AgentAccounts: View {
     /// A row's quiet second line when the account isn't a sign-in of its own.
     private func note(_ account: AgentAccount, in book: AccountBook) -> String? {
         if account.notSeparate { return AccountSwitchWords.notSeparate }
-        guard account.sameAsAnother, let email = account.facts?.email else { return nil }
-        return AccountSwitchWords.sameSignIn(as: email)
+        return account.sameAsAnother ? AccountSwitchWords.sameSignIn : nil
     }
 
     private func line(_ text: String, _ color: Color, id: String) -> some View {
