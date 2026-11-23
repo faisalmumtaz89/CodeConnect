@@ -627,18 +627,13 @@ async fn apply_sdk(
     write: &mut OwnedWriteHalf,
 ) -> Result<(), String> {
     let text = |key: &str| message.get(key).and_then(serde_json::Value::as_str);
-    // claude says its plan's limits changed (306 Slice F): the run's account's are read again, through the host, and
-    // pushed. The event's own figures are not read: their units are not part of the SDK's word.
+    // claude says its plan's limits changed (306 Slice F), on every turn: the accounts are refreshed, so the run's
+    // account's are read again, through the host, once what is held is old (at most once a FACTS_FRESH per account,
+    // however many runs and turns), and pushed. The event's own figures are not read: their units are not part of
+    // the SDK's word.
     if text("type") == Some("rate_limit_event") {
-        if let Ok(account) = daemon.store.run_account(uid) {
-            let key = account.map_or_else(
-                || crate::accounts::default_key(&AgentKind::Claude),
-                |account| account.id,
-            );
-            daemon.account_facts.forget(&key);
-            let daemon = Arc::clone(daemon);
-            tokio::spawn(async move { crate::start_session::refresh_facts(&daemon).await });
-        }
+        let daemon = Arc::clone(daemon);
+        tokio::spawn(async move { crate::start_session::refresh_facts(&daemon).await });
     }
     // Why a session starts, where ccd knows it, on the init's `session_start` as Claude
     // Code's own SessionStart hook names it: the launch's first init starts the session, or resumes
@@ -7158,56 +7153,86 @@ mod tests {
         stop(&played.dir);
     }
 
-    /// **claude's word that its plan's limits changed reads the run's account again** (306 Slice F): a
-    /// `rate_limit_event` on a Default run leaves the Default's facts to be read anew, and is acknowledged.
+    /// **claude's word that its plan's limits changed reads the run's account at most once a [`FACTS_FRESH`]**
+    /// (306 Slice F): claude sends a `rate_limit_event` on every turn, so two runs on one account sending six
+    /// between them start one read of the account (one `auth status`, one usage launch through the host), each event
+    /// acknowledged; once what that read found is [`FACTS_FRESH`] old, the next event starts one more.
+    ///
+    /// [`FACTS_FRESH`]: crate::accounts::FACTS_FRESH
     #[tokio::test]
-    async fn a_rate_limit_event_reads_the_runs_account_again() {
+    async fn rate_limit_events_read_the_runs_account_at_most_once_a_hold() {
         let _env = crate::ProcessEnvRead::take();
-        let rig = rig();
-        let mut played = live_run(&rig).await;
-        let key = crate::accounts::default_key(&AgentKind::Claude);
-        rig.daemon.account_facts.read(
-            &key,
-            Some(protocol::ws::AccountFacts {
-                limits_available: None,
-                email: Some("default@example.test".into()),
-                plan: None,
-                windows: Vec::new(),
-                read_at: protocol::time::now_rfc3339(),
-            }),
-        );
-        let held = |daemon: &Daemon| {
-            let listing = crate::accounts::listing(&daemon.store, None);
-            serde_json::to_string(&daemon.account_facts.told(listing))
-                .unwrap()
-                .contains("default@example.test")
-        };
-        assert!(held(&rig.daemon), "held before");
-        sdk(
-            &mut played.write,
-            3,
-            serde_json::json!({"type": "rate_limit_event", "uuid": "l1", "session_id": "s1",
-                "rate_limit_info": {"status": "allowed", "rateLimitType": "seven_day", "utilization": 0.4}}),
+        let mut rig = rig();
+        let claude = rig.root.join("claude");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/calls\"\n\
+             if [ \"$1\" = auth ] && [ \"$2\" = status ]; then printf '{\\n  \"loggedIn\": true,\\n  \"email\": \"default@example.test\",\\n  \"subscriptionType\": \"max\"\\n}\\n'; fi\n",
         )
-        .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
-        // Read again: this rig's claude is none, so what is held now is nothing found.
+        .unwrap();
+        let usage = rig.root.join("usage-host");
+        std::fs::write(
+            &usage,
+            "#!/bin/sh\necho \"host $1\" >> \"$(dirname \"$0\")/calls\"\n\
+             echo '{\"available\":true,\"plan\":\"max\",\"windows\":[]}'\n",
+        )
+        .unwrap();
+        for path in [&claude, &usage] {
+            std::process::Command::new("chmod")
+                .arg("755")
+                .arg(path)
+                .status()
+                .unwrap();
+        }
+        rig.daemon = daemon_with(
+            &rig.root,
+            Config {
+                claude_bin: Some(claude.display().to_string()),
+                agent_host_bin: Some(usage.display().to_string()),
+                ..Default::default()
+            },
+        );
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let mut one = live_run_as(&rig, &host, "req-one").await;
+        let mut two = live_run_as(&rig, &host, "req-two").await;
+        let reads = |rig: &Rig| {
+            let calls = std::fs::read_to_string(rig.root.join("calls")).unwrap_or_default();
+            (
+                calls.lines().filter(|line| *line == "auth status").count(),
+                calls.lines().filter(|line| *line == "host --usage").count(),
+            )
+        };
+        async fn event(played: &mut Played, seq: u64) {
+            sdk(
+                &mut played.write,
+                seq,
+                serde_json::json!({"type": "rate_limit_event", "uuid": format!("l{seq}"), "session_id": "s1",
+                    "rate_limit_info": {"status": "allowed", "rateLimitType": "seven_day", "utilization": 0.4}}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        }
+        let mut seq = 3;
+        for _ in 0..3 {
+            event(&mut one, seq).await;
+            event(&mut two, seq).await;
+            seq += 1;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        assert_eq!(reads(&rig), (1, 1), "six events inside the hold");
+        rig.daemon
+            .account_facts
+            .age(&crate::accounts::default_key(&AgentKind::Claude));
+        event(&mut one, seq).await;
         for _ in 0..200 {
-            if !held(&rig.daemon) {
+            if reads(&rig) == (2, 2) {
                 break;
             }
             tokio::time::sleep(POLL).await;
         }
-        assert!(!held(&rig.daemon), "read again");
-        // A read ran and its finding is held, fresh: a forget alone would leave the key to be read.
-        assert!(
-            rig.daemon
-                .account_facts
-                .claim_stale(std::slice::from_ref(&key))
-                .is_empty(),
-            "read, not only forgotten"
-        );
-        stop(&played.dir);
+        assert_eq!(reads(&rig), (2, 2), "an event once the hold is over");
+        stop(&one.dir);
+        stop(&two.dir);
     }
 
     /// **B6 G4: withdrawn.** claude stops waiting on a request (End run, or its own end):
