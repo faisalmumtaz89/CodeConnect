@@ -450,4 +450,13 @@ final class AccountsWireTests: XCTestCase {
         let wasAdded = await added
         XCTAssertTrue(wasAdded)
     }
+
+    /// Whether plan limits apply, as the agent says (`limits_available`, machine's 39685ca2): false is a sign-in with
+    /// none, "No plan limits"; absent is not reported yet. Never inferred from an empty list of windows.
+    func testWhetherPlanLimitsApplyIsTheAgentsOwnWord() throws {
+        let decode = { (json: String) in try JSONDecoder().decode(AccountFacts.self, from: Data(json.utf8)) }
+        XCTAssertEqual(try decode(#"{"read_at": "2026-11-23T03:00:00Z", "limits_available": false}"#).limitsAvailable, false)
+        XCTAssertEqual(try decode(#"{"read_at": "2026-11-23T03:00:00Z", "limits_available": true}"#).limitsAvailable, true)
+        XCTAssertNil(try decode(#"{"read_at": "2026-11-23T03:00:00Z"}"#).limitsAvailable, "not reported yet")
+    }
 }
