@@ -19,6 +19,10 @@ public struct AgentAccount: Decodable, Hashable, Sendable, Identifiable {
     /// What its agent says of it; nil until the computer has read it.
     public let facts: AccountFacts?
 
+    /// Signed out, as a row says it: its agent says it isn't signed in, and no sign-in for it is going on (the computer
+    /// says `signed_in: false` while the person is still in the browser). Not while unread, nor when not separate.
+    public var signedOut: Bool { signedIn == false && !signingIn && !notSeparate }
+
     private enum CodingKeys: String, CodingKey {
         case id, agent, label, facts
         case signedIn = "signed_in"

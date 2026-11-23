@@ -489,7 +489,7 @@ private struct AgentAccounts: View {
                     ForEach(book.accounts(for: agent)) { account in
                         AccountRow(
                             model: model, agent: agent, id: account.id, facts: account.facts, label: account.label,
-                            signedOut: account.signedIn == false && !account.notSeparate, signingIn: account.signingIn,
+                            signedOut: account.signedOut, signingIn: account.signingIn,
                             note: note(account, in: book), columns: columns, inUse: active == account.id,
                             remove: { removing = account })
                     }
