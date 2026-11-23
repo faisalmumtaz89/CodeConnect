@@ -132,7 +132,8 @@ final class SwitchedRunTimelineTests: XCTestCase {
             drawn.timeline.filter { $0.seq == notice.seq }.map(\.content),
             [.notice(NoticeItem(
                 kind: .other, symbol: "warning", title: "Couldn’t move to B",
-                detail: "Couldn’t start on B: B is signed out", severity: .warning))])
+                detail: "The session could not be started on the new account. Try again, or choose the account it ran on.",
+                severity: .warning))])
         let read = try await listings("switch-failed-then-recovered-claude-wire")
         let failed = try XCTUnwrap(read.first { $0.summary.lifecycle == .exited })
         XCTAssertEqual(failed.status, .ended, "a refused start reads ended")

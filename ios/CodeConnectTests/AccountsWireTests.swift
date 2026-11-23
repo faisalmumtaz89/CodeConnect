@@ -129,7 +129,7 @@ final class AccountsWireTests: XCTestCase {
         }
         XCTAssertEqual(requestID, try step("refused_label_too_long").request.objectValue?["request_id"]?.stringValue)
         XCTAssertEqual(code, "bad_request")
-        XCTAssertEqual(message, "an account's name is 1 to 64 characters")
+        XCTAssertEqual(message, "An account's name is 1 to 64 characters.")
     }
 
     /// The three requests encode as the device that recorded the fixture sent them.
@@ -214,7 +214,7 @@ final class AccountsWireTests: XCTestCase {
         model.connection.injectForTesting(try refusal(naming: try XCTUnwrap(requestID(sent.sent.last))))
         let wasAdded = await added
         XCTAssertFalse(wasAdded)
-        XCTAssertEqual(model.accountsProblem, "an account's name is 1 to 64 characters")
+        XCTAssertEqual(model.accountsProblem, "An account's name is 1 to 64 characters.")
         XCTAssertEqual(model.accountBook, before, "unchanged by a refusal")
         XCTAssertFalse(model.accountsBusy, "free for the next request")
     }
@@ -227,7 +227,7 @@ final class AccountsWireTests: XCTestCase {
         await waitUntil({ sent.sent.count == 1 }, "the add to be sent")
         model.connection.injectForTesting(try refusal(naming: try XCTUnwrap(requestID(sent.sent.last))))
         _ = await added
-        XCTAssertEqual(model.accountsProblem, "an account's name is 1 to 64 characters")
+        XCTAssertEqual(model.accountsProblem, "An account's name is 1 to 64 characters.")
 
         async let loaded: Void = model.loadAccounts()
         await waitUntil({ sent.sent.count == 2 }, "the list to be sent")
@@ -436,7 +436,7 @@ final class AccountsWireTests: XCTestCase {
         await waitUntil({ model.accountSwitch(for: .claude)?.failure != nil }, "the failed listing to be read")
         XCTAssertEqual(
             model.accountSwitch(for: .claude)?.failure,
-            "cch2.D8GXVZ8M48 couldn't switch accounts. Its conversation says what to do.")
+            "cch2.3JSW8N42JT couldn't switch accounts. Its conversation says what to do.")
     }
 
     /// An account signing in is not signed out: the service says `signed_in: false` with `signing_in: true` while the
