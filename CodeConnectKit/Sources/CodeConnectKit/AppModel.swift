@@ -1251,10 +1251,14 @@ public final class AppModel {
         await accountsRequest { try await $0.addAccount(agent: agent, label: label) }
     }
 
-    /// Makes `accountID` (nil: Default) the account `agent`'s next starts use; true once the computer has made it.
+    /// Makes `accountID` (nil: Default) the account `agent`'s next starts use; true once the computer has made it. Then
+    /// its sessions are asked for once, so the switch's sentence counts them now: the computer lists them only when
+    /// asked.
     @discardableResult
     public func activateAccount(agent: StartAgent, accountID: String?) async -> Bool {
-        await accountsRequest { try await $0.activateAccount(agent: agent, accountID: accountID) }
+        guard await accountsRequest({ try await $0.activateAccount(agent: agent, accountID: accountID) }) else { return false }
+        refreshFleet()
+        return true
     }
 
     /// The switch `agent`'s sessions on this computer are in (their summaries' `switching`), toward the account its
