@@ -91,8 +91,8 @@ struct ModelButton: View {
     }
 
     private func header(_ text: String) -> some View {
-        Text(text).font(Theme.ui(11, .semibold)).foregroundStyle(Theme.text3)
-            .padding(.horizontal, 12)
+        MenuHeader(text: text)
+            .padding(.horizontal, 10)
             .padding(.top, 5)
             .padding(.bottom, 3)
     }
@@ -105,7 +105,7 @@ struct ModelButton: View {
     }
 
     private var divider: some View {
-        Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, 5)
+        MenuDivider().padding(.vertical, 5)
     }
 
     /// The model's name, and its description beside it: the menu's row `index`.

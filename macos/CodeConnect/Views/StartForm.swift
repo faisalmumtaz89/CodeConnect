@@ -406,10 +406,7 @@ struct StartForm: View {
                     .onSubmit { folderOpen = false }
                     .textFieldStyle(.plain)
                     .font(Theme.ui(12.5))
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
-                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
-                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+                    .menuField()
                 ScrollViewReader { list in
                     ScrollView {
                         // Not lazy: every folder is in the accessibility tree, scrolled to or not.

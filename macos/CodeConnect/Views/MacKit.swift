@@ -499,6 +499,28 @@ extension View {
     }
 }
 
+/// A menu card's section heading: 11 pt medium, muted.
+struct MenuHeader: View {
+    let text: String
+
+    var body: some View { Text(text).font(Theme.ui(11, .medium)).foregroundStyle(Theme.text3) }
+}
+
+/// A menu card's divider: a fine white line.
+struct MenuDivider: View {
+    var body: some View { Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1) }
+}
+
+extension View {
+    /// A field in a menu card, to filter or name: 32 pt tall, 10 pt in, a faint fill and border, corners of 8.
+    func menuField() -> some View {
+        padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.07)))
+    }
+}
+
 /// A menu card's row: what it says on one line, at least 32 pt tall and 10 pt in at its sides; the chosen one filled
 /// white 7%, with a check at its trailing end.
 struct MenuRow<Content: View>: View {

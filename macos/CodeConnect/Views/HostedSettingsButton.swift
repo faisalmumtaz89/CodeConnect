@@ -214,14 +214,14 @@ struct HostedSettingsButton: View {
     }
 
     private func header(_ text: String) -> some View {
-        Text(text).font(Theme.ui(11, .semibold)).foregroundStyle(Theme.text3)
-            .padding(.horizontal, 12)
+        MenuHeader(text: text)
+            .padding(.horizontal, 10)
             .padding(.top, 5)
             .padding(.bottom, 3)
     }
 
     private var divider: some View {
-        Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, 5)
+        MenuDivider().padding(.vertical, 5)
     }
 
     /// The panel closes and Kit sends the choice, one call at a time; one that asks first answers the draft that

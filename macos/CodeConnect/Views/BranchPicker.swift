@@ -255,7 +255,7 @@ struct BranchMenu: View {
                     ModelDetail(text: StartWords.newBranchDetail)
                 }
             }
-            .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+            .overlay(alignment: .top) { MenuDivider() }
         }
         .frame(width: width - 12, alignment: .leading)
         .menuCard()
@@ -263,12 +263,12 @@ struct BranchMenu: View {
 
     /// A section's heading, a hairline over it after the first.
     private func header(_ text: String, divided: Bool) -> some View {
-        Text(text).font(Theme.ui(11, .semibold)).foregroundStyle(Theme.text3)
-            .padding(.horizontal, 12)
+        MenuHeader(text: text)
+            .padding(.horizontal, 10)
             .padding(.bottom, 3)
             .frame(maxWidth: .infinity, minHeight: Self.rowHeight, maxHeight: Self.rowHeight, alignment: .bottomLeading)
             .overlay(alignment: .top) {
-                if divided { Rectangle().fill(Theme.hairline).frame(height: 1).padding(.top, 3) }
+                if divided { MenuDivider().padding(.top, 3) }
             }
     }
 
