@@ -3,6 +3,22 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.14, with the iPhone app 1.1.31
+
+- On the Mac, Settings › Accounts keeps several Claude Code and Codex accounts. Add account… signs one in from your
+  browser with no name to give it, and each account is shown by its email, with its plan and, where its agent
+  reports it, how much of its usage limits it has used. Remove takes an account off this Mac, and a removed Claude
+  Code account leaves nothing behind.
+- Choosing another account moves that agent's sessions to it: a session that is idle starts on the new account with
+  your next message, and one in the middle of a turn finishes the turn first. The conversation says "Switched to" the
+  account's email, never that the session ended, on the Mac and on the iPhone.
+- A session that cannot start on the new account says so in its conversation and can be sent a message again. A
+  session moved onto a plan without its model goes on with that plan's default model, and says so.
+- When a session moves, a command it left running in the background stops, and its model and settings can be changed
+  again after its next message. A moved Codex session names its model by its id until then.
+- The iPhone has no Accounts screen yet. An iPhone still on 1.1.30 shows "Run ended" and "Run resumed" where a session
+  moved, until it is updated.
+
 ## CodeConnect 0.19.13, with the iPhone app 1.1.30
 
 - On the Mac and the iPhone, when you have not chosen an effort, the reply row and the settings name the model's own
