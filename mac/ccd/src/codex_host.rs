@@ -8808,8 +8808,25 @@ mod tests {
             .store
             .activate_account("codex", Some(&b.id))
             .unwrap());
-        app_server_ended(&rig, &uid, ws).await;
+        // Moved by the switch (from its typed end on, as a device is sent it): idle, so at once.
         let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
+        crate::switch::begin(&rig.daemon, &AgentKind::Codex).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while rig.daemon.db.switch_state(uid.clone()).await.unwrap()
+            != Some(crate::store::Store::SWITCH_MOVED)
+        {
+            assert!(Instant::now() < deadline, "not moved");
+            tokio::time::sleep(POLL).await;
+        }
+        // Its connection closes as its app-server ends.
+        drop(ws);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap()["switching"]
+            != "moved"
+        {
+            assert!(Instant::now() < deadline, "never listed moved");
+            tokio::time::sleep(POLL).await;
+        }
         let said = saying(&rig.daemon, &uid, "say-plan", "go on");
         let dir = run_folder(&rig).await;
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -8830,7 +8847,8 @@ mod tests {
         answer(
             &mut ws,
             &listed,
-            json!({"data": [{"model": "gpt-6-luna", "isDefault": true}, {"model": "gpt-5.6-terra", "isDefault": false}]}),
+            json!({"data": [{"model": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": true},
+                {"model": "gpt-5.6-terra", "displayName": "GPT-5.6 Terra", "isDefault": false}]}),
         )
         .await;
         let skills = asked(&mut ws, "skills/list").await;
@@ -8840,7 +8858,8 @@ mod tests {
             resume["params"]["model"], "gpt-6-luna",
             "resumed on the plan's default: {resume}"
         );
-        // Real codex's answer for a thread that has run (0.164.0's, recorded), on this thread and B's plan's model.
+        // Real codex's answer for a thread that has run (0.164.0's, recorded), on this thread, its history and B's plan's
+        // model.
         let mut real: serde_json::Value = serde_json::from_str(include_str!(
             "../../../fixtures/codex/resume-interrupted-command-0.164.0.json"
         ))
@@ -8854,6 +8873,12 @@ mod tests {
         resumed["thread"]["id"] = "thr-x6".into();
         resumed["thread"]["sessionId"] = "thr-x6".into();
         resumed["model"] = "gpt-6-luna".into();
+        // This run's history, not the recorded one's: one completed turn of real codex's form, its items already filed.
+        let mut turn = resumed["thread"]["turns"][0].take();
+        turn["id"] = "turn-1".into();
+        turn["items"] = json!([]);
+        resumed["thread"]["turns"] = json!([turn]);
+        resumed["thread"]["path"] = "/tmp/cch.x/rollout-thr-x6.jsonl".into();
         answer(&mut ws, &resume, resumed).await;
         let sent = asked(&mut ws, "turn/start").await;
         answer(&mut ws, &sent, json!({"turn": {"id": "turn-2"}})).await;
