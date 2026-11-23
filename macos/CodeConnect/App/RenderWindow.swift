@@ -443,7 +443,7 @@
             FileHandle.standardError.write(Data("fault: \(what)\n".utf8))
         }
 
-        /// The faces Theme's fonts resolve to, as the views build them, at every weight the
+        /// The faces Theme's fonts resolve to, as the views and AppKit's measurements build them, at every weight the
         /// app draws in: Inter regular, medium and semibold, and Menlo. Each is printed (`face: …`); any other is a fault,
         /// so a missing font file or a weight that falls back fails every render.
         @MainActor static func checkFaces() {
@@ -451,7 +451,8 @@
             func resolved(_ font: Font) -> CTFont { font.resolve(in: context).ctFont }
             let wanted: [(face: CTFont, is: String)] = [
                 (resolved(Theme.ui(13)), "Inter Variable 400"), (resolved(Theme.ui(13, .medium)), "Inter Variable 500"),
-                (resolved(Theme.ui(13, .semibold)), "Inter Variable 600"), (resolved(Theme.mono(12)), "Menlo-Regular"),
+                (resolved(Theme.ui(13, .semibold)), "Inter Variable 600"), (Theme.uiFont(13, .semibold), "Inter Variable 600"),
+                (resolved(Theme.mono(12)), "Menlo-Regular"), (Theme.monoFont(12), "Menlo-Regular"),
             ]
             for want in wanted {
                 let face = described(want.face)

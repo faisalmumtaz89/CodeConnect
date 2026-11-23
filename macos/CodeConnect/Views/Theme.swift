@@ -45,12 +45,31 @@ enum Theme {
     static let red = CC.color.danger
     static let amber = CC.color.warning
 
+    /// The words' face: Inter, bundled (Resources/Fonts, registered by Info.plist's ATSApplicationFontsPath), one
+    /// variable file whose weights and optical sizes CoreText picks as it does the system face's.
+    static let wordsFace = "InterVariable"
+    /// The code face: Menlo, the system's, as code editors on a Mac draw code.
+    static let codeFace = "Menlo-Regular"
+
+    /// Regular is the face as it is: an explicit regular weight would make a bold italic resolve the italic file's
+    /// SemiBold, not its Bold.
     static func ui(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight)
+        weight == .regular ? .custom(wordsFace, fixedSize: size) : .custom(wordsFace, fixedSize: size).weight(weight)
     }
 
-    static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+    static func mono(_ size: CGFloat) -> Font {
+        .custom(codeFace, fixedSize: size)
+    }
+
+    /// The same faces for AppKit's measurements, so a width measured is the width drawn.
+    static func uiFont(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
+        let family = NSFont(name: wordsFace, size: size)!.familyName!
+        let face = NSFontDescriptor(fontAttributes: [.family: family, .traits: [NSFontDescriptor.TraitKey.weight: weight]])
+        return NSFont(descriptor: face, size: size)!
+    }
+
+    static func monoFont(_ size: CGFloat) -> NSFont {
+        NSFont(name: codeFace, size: size)!
     }
 }
 
@@ -60,6 +79,14 @@ extension Color {
             .sRGB, red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255,
             blue: Double(hex & 0xFF) / 255)
     }
+}
+
+/// The root of every SwiftUI hierarchy the app hosts (its window, the update window, and the AppKit-hosted rows and
+/// tables): its text is Inter at 13 pt, macOS's body size, what a Text with no font of its own drew before.
+struct ThemeRoot<Content: View>: View {
+    let content: Content
+
+    var body: some View { content.font(Theme.ui(13)) }
 }
 
 /// A key as a hint prints it: a small raised cap.

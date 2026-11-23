@@ -560,7 +560,7 @@ private struct CommandPreview: View {
     @State private var width: CGFloat = 0
 
     /// One character's width in the line's font: a monospaced font has one.
-    private static let advance = max(("0" as NSString).size(withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)]).width, 1)
+    private static let advance = max(("0" as NSString).size(withAttributes: [.font: Theme.monoFont(11.5)]).width, 1)
 
     /// Half a point of slack, so a rounding difference never pushes the last character past the edge.
     private var columns: Int { width > 0 ? Int(((width - 0.5) / Self.advance).rounded(.down)) : 0 }
