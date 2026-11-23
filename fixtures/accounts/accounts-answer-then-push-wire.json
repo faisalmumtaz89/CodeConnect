@@ -1,0 +1,570 @@
+[
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B"
+      }
+    ],
+    "active": [],
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B"
+      }
+    ],
+    "active": [],
+    "request_id": "add-0",
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B"
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C"
+      }
+    ],
+    "active": [],
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B"
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C"
+      }
+    ],
+    "active": [],
+    "request_id": "add-1",
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B"
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C"
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D"
+      }
+    ],
+    "active": [],
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B"
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C"
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D"
+      }
+    ],
+    "active": [],
+    "request_id": "add-2",
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B",
+        "signing_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C"
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D"
+      }
+    ],
+    "active": [],
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B",
+        "signing_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C"
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D"
+      }
+    ],
+    "active": [],
+    "request_id": "sign-in-0",
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C",
+        "signed_in": false
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D",
+        "signed_in": false
+      }
+    ],
+    "active": [],
+    "defaults": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "default@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.412Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        }
+      }
+    ],
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C",
+        "signed_in": false,
+        "signing_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D",
+        "signed_in": false
+      }
+    ],
+    "active": [],
+    "defaults": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "default@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.412Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        }
+      }
+    ],
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C",
+        "signed_in": false,
+        "signing_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D",
+        "signed_in": false
+      }
+    ],
+    "active": [],
+    "defaults": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "default@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.412Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        }
+      }
+    ],
+    "request_id": "sign-in-1",
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "01M82X1ASRPJJMQVFAMGH8RY9A@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.562Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        },
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D",
+        "signed_in": false
+      }
+    ],
+    "active": [],
+    "defaults": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "default@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.412Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        }
+      }
+    ],
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "01M82X1ASRPJJMQVFAMGH8RY9A@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.562Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        },
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D",
+        "signed_in": false,
+        "signing_in": true
+      }
+    ],
+    "active": [],
+    "defaults": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "default@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.412Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        }
+      }
+    ],
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "01M82X1ASRPJJMQVFAMGH8RY9A@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.562Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        },
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D",
+        "signed_in": false,
+        "signing_in": true
+      }
+    ],
+    "active": [],
+    "defaults": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "default@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.412Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        }
+      }
+    ],
+    "request_id": "sign-in-2",
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "01M82X1ASRPJJMQVFAMGH8RY9A@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.562Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        },
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "facts": {
+          "email": "01M82X1ASVJAY2NCBF4WDAB0KC@example.test",
+          "limits_available": false,
+          "plan": "max",
+          "read_at": "2026-11-23T00:31:31.922Z"
+        },
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D",
+        "signed_in": true
+      }
+    ],
+    "active": [],
+    "defaults": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "default@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.412Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        }
+      }
+    ],
+    "type": "accounts"
+  },
+  {
+    "accounts": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "01M82X1ASRPJJMQVFAMGH8RY9A@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.562Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        },
+        "id": "01M82X1ASRPJJMQVFAMGH8RY9A",
+        "label": "B",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "facts": {
+          "email": "01M82X1ASVJAY2NCBF4WDAB0KC@example.test",
+          "limits_available": false,
+          "plan": "max",
+          "read_at": "2026-11-23T00:31:31.922Z"
+        },
+        "id": "01M82X1ASVJAY2NCBF4WDAB0KC",
+        "label": "C",
+        "signed_in": true
+      },
+      {
+        "agent": "claude",
+        "facts": {
+          "email": "01M82X1ASWYFFX2YHDYEJ02WXG@example.test",
+          "limits_available": true,
+          "plan": "max",
+          "read_at": "2026-11-23T00:31:32.049Z",
+          "windows": [
+            {
+              "resets_at": 1795900000,
+              "used_percent": 12,
+              "window_minutes": 300
+            },
+            {
+              "resets_at": 1796400000,
+              "used_percent": 42,
+              "window_minutes": 10080
+            }
+          ]
+        },
+        "id": "01M82X1ASWYFFX2YHDYEJ02WXG",
+        "label": "D",
+        "signed_in": true
+      }
+    ],
+    "active": [],
+    "defaults": [
+      {
+        "agent": "codex",
+        "facts": {
+          "email": "default@example.test",
+          "plan": "plus",
+          "read_at": "2026-11-23T00:31:31.412Z",
+          "windows": [
+            {
+              "resets_at": 1800000000,
+              "used_percent": 42,
+              "window_minutes": 300
+            }
+          ]
+        }
+      }
+    ],
+    "type": "accounts"
+  }
+]

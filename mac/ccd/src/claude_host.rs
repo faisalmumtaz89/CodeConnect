@@ -12245,7 +12245,34 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
         window_over.send(()).unwrap();
-        crate::switch::window::check(&window.await.unwrap(), "B", "switch-claude-wire.json");
+        let mut frames = window.await.unwrap();
+        crate::switch::window::check(&frames, "B", "switch-claude-wire.json");
+        // The same switch with the accounts listing a device holds after it: the ids the end names, each with an
+        // address (made up, held in memory as a read would leave it).
+        for account in [&a, &b] {
+            rig.daemon.account_facts.read(
+                &account.id,
+                Some(protocol::ws::AccountFacts {
+                    limits_available: None,
+                    email: Some(format!("{}@example.test", account.label.to_lowercase())),
+                    plan: Some("max".into()),
+                    windows: Vec::new(),
+                    read_at: "2026-11-23T03:00:00.000Z".into(),
+                }),
+            );
+        }
+        let listing = rig
+            .daemon
+            .account_facts
+            .told(crate::accounts::listing(&rig.daemon.store, None));
+        let listing = serde_json::to_value(listing).unwrap();
+        assert_eq!(listing["accounts"][1]["id"], b.id.as_str(), "{listing}");
+        assert_eq!(
+            listing["accounts"][1]["facts"]["email"], "b@example.test",
+            "{listing}"
+        );
+        frames.push(listing);
+        crate::switch::window::keep(&frames, "switch-with-listing-claude-wire.json");
         stop(&relaunched.dir);
     }
 

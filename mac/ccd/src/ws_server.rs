@@ -6834,6 +6834,166 @@ mod tests {
         let _ = std::fs::remove_dir_all(&agents);
     }
 
+    /// **The frames the accounts page reads, in their real order** (recorded for the apps): each add's answer with its
+    /// sign-in and facts not read yet, each sign-in's answer, then the pushes that fill them in: a Codex account with
+    /// one usage window, a Claude Code account whose sign-in has no plan limits, and one with two windows.
+    #[tokio::test]
+    async fn the_accounts_pages_frames_arrive_answer_then_push() {
+        let _env = crate::ProcessEnvRead::take();
+        use protocol::agent::AgentKind;
+        let agents =
+            std::env::temp_dir().join(format!("ccw-page.{}", &protocol::uid::new().unwrap()[20..]));
+        std::fs::create_dir_all(&agents).unwrap();
+        let codex = crate::accounts::tests::stand_in_codex(&agents);
+        let claude = crate::accounts::tests::stand_in_claude(&agents);
+        // The host's usage launch: no plan limits for an account named in `nolimits-<id>`, else both windows.
+        let host = agents.join("cc-agent-host");
+        std::fs::write(
+            &host,
+            "#!/bin/sh\nif [ -e \"$(dirname \"$0\")/nolimits-$(basename \"$CLAUDE_CONFIG_DIR\")\" ]; then \
+             echo '{\"available\":false,\"plan\":null,\"windows\":[]}'; else \
+             echo '{\"available\":true,\"plan\":\"max\",\"windows\":[{\"name\":\"five_hour\",\"utilization\":12,\"resets_at\":1795900000},{\"name\":\"seven_day\",\"utilization\":42,\"resets_at\":1796400000}]}'; fi\n",
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&host)
+            .status()
+            .unwrap();
+        let (server, _) = live_server(protocol::config::Config {
+            codex_bin: Some(codex.display().to_string()),
+            claude_bin: Some(claude.display().to_string()),
+            agent_host_bin: Some(host.display().to_string()),
+            ..protocol::config::Config::default()
+        })
+        .await;
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let send = |message: ClientMessage| Message::Text(serde_json::to_string(&message).unwrap());
+        let mut frames: Vec<serde_json::Value> = Vec::new();
+        // Every accounts frame in the order it arrives, until one `done` accepts, within 30 s.
+        async fn read_until(
+            phone: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+            frames: &mut Vec<serde_json::Value>,
+            done: impl Fn(&serde_json::Value) -> bool,
+        ) -> serde_json::Value {
+            let started = std::time::Instant::now();
+            while started.elapsed() < Duration::from_secs(30) {
+                if let Frame::Json(frame) = next_frame(phone, Duration::from_secs(1)).await {
+                    if frame["type"] == "accounts" {
+                        frames.push(frame.clone());
+                        if done(&frame) {
+                            return frame;
+                        }
+                    }
+                }
+            }
+            panic!("not within 30 s: {frames:#?}");
+        }
+        let mut ids = Vec::new();
+        for (n, (agent, label)) in [
+            (AgentKind::Codex, "B"),
+            (AgentKind::Claude, "C"),
+            (AgentKind::Claude, "D"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request = format!("add-{n}");
+            phone
+                .send(send(ClientMessage::AddAccount {
+                    request_id: request.clone(),
+                    agent,
+                    label: label.into(),
+                }))
+                .await
+                .unwrap();
+            let added = read_until(&mut phone, &mut frames, |frame| {
+                frame["request_id"] == request.as_str()
+            })
+            .await;
+            let row = added["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["label"] == label)
+                .unwrap()
+                .clone();
+            assert_eq!(
+                (row.get("signed_in"), row.get("facts")),
+                (None, None),
+                "not read yet: {row}"
+            );
+            ids.push(row["id"].as_str().unwrap().to_string());
+        }
+        std::fs::write(agents.join(format!("nolimits-{}", ids[1])), "").unwrap();
+        let row = |frame: &serde_json::Value, id: &str| {
+            frame["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == id)
+                .cloned()
+                .unwrap_or_default()
+        };
+        for (n, id) in ids.iter().enumerate() {
+            let request = format!("sign-in-{n}");
+            phone
+                .send(send(ClientMessage::SignInAccount {
+                    request_id: request.clone(),
+                    account_id: id.clone(),
+                }))
+                .await
+                .unwrap();
+            read_until(&mut phone, &mut frames, |frame| {
+                frame["request_id"] == request.as_str()
+            })
+            .await;
+            // One sign-in at a time: a newer one replaces the one going, so each is let end first.
+            read_until(&mut phone, &mut frames, |frame| {
+                frame.get("request_id").is_none() && row(frame, id)["signed_in"] == true
+            })
+            .await;
+        }
+        let whole = |frame: &serde_json::Value| {
+            frame.get("request_id").is_none()
+                && ids.iter().all(|id| {
+                    row(frame, id)["signed_in"] == true
+                        && row(frame, id)["facts"]["email"].is_string()
+                })
+                && row(frame, &ids[2])["facts"]["windows"]
+                    .as_array()
+                    .is_some_and(|windows| windows.len() == 2)
+                && row(frame, &ids[1])["facts"]["limits_available"] == false
+        };
+        // The last sign-in's push may already be the whole one.
+        let filled = match frames.last().filter(|frame| whole(frame)) {
+            Some(frame) => frame.clone(),
+            None => read_until(&mut phone, &mut frames, whole).await,
+        };
+        assert_eq!(
+            row(&filled, &ids[0])["facts"]["windows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "{filled}"
+        );
+        assert_eq!(
+            row(&filled, &ids[1])["facts"].get("windows"),
+            None,
+            "no plan limits: no window: {filled}"
+        );
+        assert_eq!(
+            row(&filled, &ids[2])["facts"]["limits_available"],
+            true,
+            "{filled}"
+        );
+        crate::switch::window::keep(&frames, "accounts-answer-then-push-wire.json");
+        let _ = std::fs::remove_dir_all(&agents);
+    }
+
     /// **Accounts are kept and chosen by a paired device only** (minor 48): advertised to it and not to the bootstrap
     /// token, which is refused all three asks. An account is added for its agent, made active, and set back to
     /// Default; another agent's id is refused and nothing changes.
@@ -6898,6 +7058,10 @@ mod tests {
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
             .await;
         assert_eq!(ack["capabilities"]["accounts"], true, "{ack}");
+        // Kept with a made-up computer name: the one this daemon reads is the computer's own.
+        let mut kept = ack.clone();
+        kept["machine_name"] = "Example Mac".into();
+        crate::switch::window::keep(std::slice::from_ref(&kept), "minor-48-hello-wire.json");
         async fn ask(
             phone: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
             message: Message,
