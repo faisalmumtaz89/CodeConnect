@@ -1,1 +1,1 @@
-An account’s “…” in Settings › Accounts is the same button and menu as everywhere else in the app: easy to hit, and a click on it never chooses the account. Claude Code’s usage is asked for at most once a minute per account, however many sessions are running.
+Words are set in Inter and code in Menlo. Starting a session and replying use the same message box, the menus share one look, and the reply box shows how full the conversation is and your usage limits. In Settings › Accounts each usage figure says when it resets, and a button takes a click wherever it lights up.

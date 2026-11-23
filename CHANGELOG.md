@@ -3,6 +3,32 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.16, with the iPhone app 1.1.33
+
+- On the Mac, words are now set in Inter and code in Menlo, the face code editors on a Mac use; a reply's bold and
+  italic stay as they were written.
+- On the Mac, starting a session and replying use the same message box: you write first, and one bar under it holds
+  the model and its settings beside an arrow to send, which becomes Stop while a turn runs, as before. When you start a
+  session, the bar holds the computer, folder, branch and model; on a narrow window it splits into two rows.
+- On the Mac, every menu in the window now looks the same: one card, the same rows and headings, and the chosen item
+  ticked at its end.
+- On the Mac, the buttons under the start form are gone: "Choose a folder…" (or "Browse…" for another computer) is
+  now the last row of the folder menu, and "Add a computer…" the last row of the computer menu.
+- On the Mac, the reply box now shows how full the conversation is, such as "390k / 1M", and a small ring for each of
+  your account's usage limits; hover over them for each limit's share and when it resets, and the account.
+- On the Mac, in Settings › Accounts, each usage figure says beneath it how long until its window resets: "resets in
+  3 days", "resets in 2h 10m" or "resets in 45 min".
+- On the Mac, Codex's usage on the Accounts page now updates while a session is working; before, it stayed as of the
+  last time the page asked.
+- On the Mac, the bottom of the window no longer shows the ⌘N and ⇧⌘N shortcut hints (the shortcuts and the File menu
+  items are unchanged), and Settings is now a solid gear.
+- On the Mac, choosing ended sessions to remove now ends by itself once no removable session is left, instead of
+  waiting for Done; sessions only folded away or filtered out stay chosen.
+- On the Mac, a button now takes a click wherever it lights up, its corners included. In 0.19.15 a click in the very
+  corner of a "…" could fall through to what lay under it, opening the session or choosing the account, although
+  0.19.15's notes said a click on an account's "…" never chooses the account.
+- On the iPhone, words are now set in Inter and code in Menlo, the screens' titles included.
+
 ## CodeConnect 0.19.15, with the iPhone app 1.1.32
 
 - On the Mac, in Settings › Accounts, an account's "…" is the same button and menu as everywhere else in the app: easy
