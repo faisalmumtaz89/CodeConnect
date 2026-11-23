@@ -712,6 +712,18 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.require(driver.text(containing: "Turn complete", in: app), "the line")
             }),
+        // **The website's conversation.** The same exchange ending on its last turn, its messages stamped against
+        // today's 9:41 here, so with the status bar overridden to 9:41 every time on screen reads before it.
+        RenderScenario(
+            name: "session-showcase",
+            purpose: "the website's conversation: fx-7 on its last turn, its times just before 9:41",
+            arguments: [
+                "-CC_FIXTURE", "timeline", "-CC_DEEPLINK", "codeconnect://session/fx-7",
+                "-CC_FIXTURE_PLAIN_CONVERSATION", "YES", "-CC_FIXTURE_NOW", nineFortyOneToday,
+            ],
+            reach: { app, driver in
+                try driver.require(driver.text(containing: "Turn complete", in: app), "the line")
+            }),
         // **"Not sent: stopped."** A follow-up a Stop cancelled marks the person's own row.
         RenderScenario(
             name: "session-not-sent-stopped",
@@ -1362,6 +1374,11 @@ enum RenderCatalog {
     static let secondMachineArguments = [
         "-CC_FIXTURE", "deck", "-CC_FIXTURE_SECOND_MACHINE", secondMachine,
     ]
+
+    /// Today at 9:41 in this device's time zone, as `-CC_FIXTURE_NOW` takes it: the time a status bar shows in the
+    /// website's pictures.
+    static let nineFortyOneToday = ISO8601DateFormatter().string(
+        from: Calendar.current.date(bySettingHour: 9, minute: 41, second: 0, of: Date())!)
 
     /// Its row in Settings, by the name its label starts with.
     static func secondMachineRow(_ app: XCUIApplication) -> XCUIElement {
