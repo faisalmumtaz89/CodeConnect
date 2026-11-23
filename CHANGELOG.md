@@ -9,6 +9,7 @@ User-facing changes, newest first. Mac releases are cut per
   Claude Code decides it, from your own settings or the model's default. Choosing a level sets it. Codex is unchanged:
   it names its default.
 - On the Mac, a new worktree is named in the branch menu, under New branch…: Return keeps the name and closes the menu.
+- On the Mac, choosing /diff in the slash list with only part of it typed no longer sends the typed part to the agent.
 
 ## CodeConnect 0.19.16, with the iPhone app 1.1.33
 

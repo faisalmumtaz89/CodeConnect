@@ -495,8 +495,9 @@ private struct Composer: View {
             opener = draft
             clearing = true
         case .nativeDiff:
-            // Kit's policy refuses it, before the wire, in its own words: they point to the Changes tab.
-            Task { noteResult(await model.send(text: draft, to: key)) }
+            // The command, not the draft: a row chosen with part of it typed is still /diff. Kit's policy refuses it,
+            // before the wire, in its own words: they point to the Changes tab.
+            Task { noteResult(await model.send(text: "/diff", to: key)) }
         case .blocked(_, let reason):
             noteResult(.refused(reason))
         case .passThrough:
