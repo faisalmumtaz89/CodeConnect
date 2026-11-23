@@ -17,7 +17,7 @@ enum Theme {
     static let hairline = Color.white.opacity(0.07)
     /// A list box's corners: a box of rows, as a text field's.
     static let boxRadius: CGFloat = 7
-    /// Every list box's fill (Settings' lists, Set Up's checklist, Start's folders): one kind of box, one fill.
+    /// Every list box's fill (Settings' lists, Set Up's checklist): one kind of box, one fill.
     static let boxFill = code.opacity(0.5)
     /// A list box's rows' leading and trailing inset, the one a text field gives its text.
     static let rowInset: CGFloat = 10

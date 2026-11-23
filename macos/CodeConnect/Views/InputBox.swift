@@ -116,7 +116,7 @@ struct InputBoxSubmit: View {
 }
 
 extension View {
-    /// A chip in the box's bar, drawn around its label: 8 pt in at the sides, `InputBox.chipHeight` tall, corners of 8,
+    /// A chip in the box's bar, drawn around its label: 8 pt in at the sides, `InputBoxChip.height` tall, corners of 8,
     /// filled while its menu is `open`; `bordered`, the model chip's fine border. Its whole frame takes a click.
     func inputBoxChip(open: Bool, bordered: Bool = false) -> some View {
         padding(.horizontal, 8)
@@ -140,6 +140,13 @@ enum InputBoxLayout {
 enum InputBoxChip {
     static let height: CGFloat = 28
     static let font = Theme.ui(12.5, .medium)
+}
+
+/// A card's colours, the menus' (`menuCard`) and the usage tip's: its fill, its fine border, and its muted words.
+enum Card {
+    static let fill = Color(themeHex: 0x141418)
+    static let border = Color.white.opacity(0.09)
+    static let muted = Color(themeHex: 0x8A8A93)
 }
 
 /// The input box's shadows, which every menu card casts too: a deep soft one and a close one. A shadow's spread is the

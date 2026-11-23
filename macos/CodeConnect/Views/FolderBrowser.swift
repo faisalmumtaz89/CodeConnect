@@ -1,7 +1,7 @@
 import CodeConnectKit
 import SwiftUI
 
-/// Any folder on a computer that is not this Mac, found as in a terminal, in the Folder box of the start form: the
+/// Any folder on a computer that is not this Mac, found as in a terminal, in the start form's folder menu: the
 /// folder's path, ".." and the folders in it. A click chooses a row, a double-click or Return goes into it, ← or ⌫ goes
 /// up; Use This Folder starts in the folder shown, Recent Folders goes back to the recent ones. New Folder… names one
 /// in the app's own card and goes into it. What it says is the Kit's, as on the iPhone's browse step.

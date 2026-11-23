@@ -70,20 +70,19 @@ struct ReplyUsage: View {
         .padding(.horizontal, 13)
         .background {
             BoxShadow(radius: 12)
-            RoundedRectangle(cornerRadius: 12).fill(Color(themeHex: 0x141418))
+            RoundedRectangle(cornerRadius: 12).fill(Card.fill)
         }
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.09)))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Card.border))
     }
 
     /// A card row, 12 pt throughout: its label muted at the leading side; at least 24 pt on, its value bright in Menlo,
     /// then the rest muted.
     private func row(_ label: String, value: String? = nil, rest: String? = nil) -> some View {
-        let muted = Color(themeHex: 0x8A8A93)
-        return HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(label).font(Theme.ui(12)).foregroundStyle(muted)
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label).font(Theme.ui(12)).foregroundStyle(Card.muted)
             Spacer(minLength: 24)
             if let value { Text(value).font(Theme.mono(12)).foregroundStyle(Color(themeHex: 0xE4E4E7)) }
-            if let rest { Text(rest).font(Theme.ui(12)).foregroundStyle(muted) }
+            if let rest { Text(rest).font(Theme.ui(12)).foregroundStyle(Card.muted) }
         }
         .padding(.vertical, 4)
     }

@@ -493,9 +493,9 @@ extension View {
         padding(6)
             .background {
                 BoxShadow(radius: 14)
-                RoundedRectangle(cornerRadius: 14).fill(Color(themeHex: 0x141418))
+                RoundedRectangle(cornerRadius: 14).fill(Card.fill)
             }
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.09)))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Card.border))
     }
 }
 
@@ -504,7 +504,7 @@ struct MenuHeader: View {
     let text: String
 
     var body: some View {
-        Text(text).font(Theme.ui(11, .medium)).foregroundStyle(Color(themeHex: 0x8A8A93))
+        Text(text).font(Theme.ui(11, .medium)).foregroundStyle(Card.muted)
             .padding(.top, 8)
             .padding(.horizontal, 10)
             .padding(.bottom, 6)
@@ -513,7 +513,7 @@ struct MenuHeader: View {
 
 /// A menu card's divider: a fine white line.
 struct MenuDivider: View {
-    var body: some View { Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1) }
+    var body: some View { Rectangle().fill(Theme.hairline).frame(height: 1) }
 }
 
 extension View {
@@ -522,7 +522,7 @@ extension View {
         padding(.horizontal, 10)
             .frame(height: 32)
             .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.07)))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.hairline))
     }
 }
 
@@ -617,9 +617,9 @@ enum PanelSymbol {
     static let signIn = "person.badge.key"
 }
 
-/// One act in a "…" panel, on the Model and Mode panels' row: a quiet icon, the 12.5 pt label 8 pt in, 4 pt above and
-/// below, lit by the panel's plate 4 pt in from its edge (`panelRow`, row `index`). A destructive act's icon and label
-/// are red.
+/// One act in a "…" panel, on the Model and Mode panels' row: a quiet icon and the 12.5 pt label in a `MenuRow` (10 pt
+/// in, 5 above and below, at least 32 tall), lit at corners of 8 inside the card's 6 (`panelRow`, row `index`). A
+/// destructive act's icon and label are red.
 struct PanelItem: View {
     let index: Int
     let title: String
