@@ -1,1 +1,1 @@
-When you have not chosen an effort, the reply row and the settings name the model’s own default effort and mark it as the default; choosing it makes it yours. An ended conversation that cannot be continued names the effort it ended with in its header.
+Settings › Accounts keeps several Claude Code and Codex accounts, each shown by its email with its plan and usage. Choose another and your sessions move to it with their next message; a session in a turn finishes it first.
