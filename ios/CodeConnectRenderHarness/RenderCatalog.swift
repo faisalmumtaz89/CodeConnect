@@ -1368,17 +1368,17 @@ enum RenderCatalog {
     /// (in the unit target, which *can* see both) pins them against each other.
     /// A state added on one side and not the other fails there rather than
     /// producing a render nobody notices is missing.
-    /// Today at 9:41 in this device's time zone, as `-CC_FIXTURE_NOW` takes it: the time a status bar shows in the
-    /// website's pictures.
-    static let nineFortyOneToday = ISO8601DateFormatter().string(
-        from: Calendar.current.date(bySettingHour: 9, minute: 41, second: 0, of: Date())!)
-
     /// A second machine beside the fixture's, offline, named as long as a
     /// machine's name gets.
     static let secondMachine = "build-server-eu-west-1"
     static let secondMachineArguments = [
         "-CC_FIXTURE", "deck", "-CC_FIXTURE_SECOND_MACHINE", secondMachine,
     ]
+
+    /// Today at 9:41 in this device's time zone, as `-CC_FIXTURE_NOW` takes it: the time a status bar shows in the
+    /// website's pictures.
+    static let nineFortyOneToday = ISO8601DateFormatter().string(
+        from: Calendar.current.date(bySettingHour: 9, minute: 41, second: 0, of: Date())!)
 
     /// Its row in Settings, by the name its label starts with.
     static func secondMachineRow(_ app: XCUIApplication) -> XCUIElement {
