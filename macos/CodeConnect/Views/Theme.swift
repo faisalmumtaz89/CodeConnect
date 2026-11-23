@@ -45,8 +45,9 @@ enum Theme {
     static let red = CC.color.danger
     static let amber = CC.color.warning
 
-    /// The words' face: Inter, bundled (Resources/Fonts, registered by Info.plist's ATSApplicationFontsPath), one
-    /// variable file whose weights and optical sizes CoreText picks as it does the system face's.
+    /// The words' face: Inter, bundled (Resources/Fonts, registered by Info.plist's ATSApplicationFontsPath), an
+    /// upright and an italic variable file whose weights, italics and optical sizes CoreText picks as it does the
+    /// system face's.
     static let wordsFace = "InterVariable"
     /// The code face: Menlo, the system's, as code editors on a Mac draw code.
     static let codeFace = "Menlo-Regular"
