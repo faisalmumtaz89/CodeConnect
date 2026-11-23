@@ -100,20 +100,30 @@ struct HoverButtonStyle: ButtonStyle {
             let off = !enabled || forcedState("disabled")
             let lit = (hovering || forced) && !off
             configuration.label
+                // A bare label's fill stands off it (`bleed`, none on a `flush` side): as room inside the button, so a
+                // click there presses, given back outside it, so nothing moves.
+                .padding(margin(1))
                 .disabled(forcedState("disabled"))
-                .background(lit && !over ? Theme.hover : .clear, in: plate)
+                .background(lit && !over ? Theme.hover : .clear, in: RoundedRectangle(cornerRadius: radius))
                 .brightness(lit && over ? lift : 0)
                 .opacity(off ? Theme.disabledOpacity : configuration.isPressed || forcedState("pressed") ? 0.7 : 1)
-                // What lights is what a click takes, the label's clear gaps and the plate's rounded-off corners
-                // included: a corner that lit and did not press would leave a click to whatever lies under it.
-                .contentShape(Plate(radius: 0, bleed: bleed, flush: flush))
+                // What lights is what a click takes: the whole fill, its clear gaps and rounded-off corners included,
+                // so a corner that lights never leaves a click to whatever lies under it.
+                .contentShape(Rectangle())
                 // The keyboard's focus ring takes the hover's shape too: square on a row that fills its list edge to
                 // edge, never a rounded pill against the list's straight sides.
-                .contentShape(.focusEffect, plate)
+                .contentShape(.focusEffect, RoundedRectangle(cornerRadius: radius))
                 .onHover { hovering = $0 }
+                .padding(margin(-1))
         }
 
-        private var plate: Plate { Plate(radius: radius, bleed: bleed, flush: flush) }
+        /// The fill's room around the label, taken (1) or given back (-1).
+        private func margin(_ sign: CGFloat) -> EdgeInsets {
+            let side = sign * bleed.width
+            return EdgeInsets(
+                top: sign * bleed.height, leading: flush.contains(.leading) ? 0 : side, bottom: sign * bleed.height,
+                trailing: flush.contains(.trailing) ? 0 : side)
+        }
 
         private var forced: Bool { id.map(HoverButtonStyle.forced) ?? false }
 
@@ -125,22 +135,6 @@ struct HoverButtonStyle: ButtonStyle {
                 false
             #endif
         }
-    }
-}
-
-/// A hover fill: the label's frame grown by `bleed`, but not past a `flush` side, its corners rounded by `radius`.
-private struct Plate: Shape {
-    let radius: CGFloat
-    let bleed: CGSize
-    let flush: Edge.Set
-
-    func path(in rect: CGRect) -> Path {
-        let leading = flush.contains(.leading) ? 0 : bleed.width
-        let trailing = flush.contains(.trailing) ? 0 : bleed.width
-        return RoundedRectangle(cornerRadius: radius).path(
-            in: CGRect(
-                x: rect.minX - leading, y: rect.minY - bleed.height,
-                width: rect.width + leading + trailing, height: rect.height + 2 * bleed.height))
     }
 }
 
