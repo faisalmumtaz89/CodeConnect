@@ -1031,9 +1031,8 @@ struct NoticeRow: View {
                         // which read as a duplicate; its detail is now nil at the
                         // builder, so the boundary is a boundary.)
                         Text(AgentProse.inline(detail))
-                            .ccType(CC.type.reading)
                             // A run's start names its model as the agent reported it: an id, in code type.
-                            .fontDesign(notice.kind == .sessionStart ? .monospaced : nil)
+                            .ccType(notice.kind == .sessionStart ? CC.type.reading.monospaced() : CC.type.reading)
                             .foregroundStyle(CC.text.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

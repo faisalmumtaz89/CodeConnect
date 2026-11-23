@@ -215,7 +215,9 @@ final class FleetRowHeightTests: XCTestCase {
             .frame(width: width))
         renderer.scale = 1
         let image = try XCTUnwrap(renderer.cgImage)
-        let left = Int(CC.space.md + CC.size.dot)
+        // A point clear of the dot's column: the running row's dot is drawn
+        // antialiased, and its edge can tint the first pixel past the column.
+        let left = Int(CC.space.md + CC.size.dot) + 1
         let crop = try XCTUnwrap(
             image.cropping(to: CGRect(x: left, y: 0, width: Int(width / 2) - left, height: image.height)))
         var bytes = [UInt8](repeating: 0, count: crop.width * crop.height * 4)

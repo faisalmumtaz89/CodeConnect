@@ -76,7 +76,7 @@ struct HostedSettingsBar: View {
     /// `mono`: the name is the agent's own report of the model (an id), drawn in code type.
     private func label(modelName: String, mono: Bool, effort: String?, mode: MenuMode?) -> some View {
         let icon = Image(systemName: "slider.horizontal.3").accessibilityHidden(true)
-        let name = Text(modelName).fontDesign(mono ? .monospaced : nil)
+        let name = Text(modelName).ccType(mono ? CC.type.footnote.monospaced() : CC.type.footnote)
         Group {
             if typeSize.isAccessibilitySize, let mode {
                 VStack(alignment: .trailing, spacing: 1) {

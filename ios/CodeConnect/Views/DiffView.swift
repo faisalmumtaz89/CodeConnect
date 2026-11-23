@@ -1136,7 +1136,7 @@ struct DiffDocumentView: View {
 
     private func fileNote(_ note: String, metrics: CCDiffMetrics) -> some View {
         Text(note)
-            .font(.system(size: metrics.fontSize - 1, design: .monospaced))
+            .font(.custom(CCFace.code, fixedSize: metrics.fontSize - 1))
             .foregroundStyle(CC.text.secondary)
             .padding(.horizontal, CC.space.xs)
             .textSelection(.enabled)
@@ -1214,7 +1214,7 @@ struct DiffDocumentView: View {
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, reported in
                     HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
                         Text(reported.text)
-                            .font(.system(size: metrics.fontSize, design: .monospaced))
+                            .font(.custom(CCFace.code, fixedSize: metrics.fontSize))
                             .foregroundStyle(CC.text.primary)
                             .textSelection(.enabled)
                         if let label = reported.label {

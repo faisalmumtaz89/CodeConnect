@@ -52,7 +52,7 @@ struct CCDiffMetrics: Equatable {
     init(fontSize: Double, availableWidth: CGFloat, gutter: Gutter = .dual) {
         self.fontSize = fontSize
         self.gutter = gutter
-        let font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let font = UIFont(name: CCFace.code, size: fontSize)!
         let advance = max(("0" as NSString).size(withAttributes: [.font: font]).width, 1)
         self.advance = advance
         switch gutter {
@@ -224,7 +224,7 @@ struct CCDiffRow: View {
         HStack(alignment: .top, spacing: 0) {
             if metrics.gutter != .inline {
                 Text(gutterText)
-                    .font(.system(size: fontSize - 1, design: .monospaced).monospacedDigit())
+                    .font(.custom(CCFace.code, fixedSize: fontSize - 1).monospacedDigit())
                     // One of the few positions `textDisabled` is permitted in:
                     // a line number is not a fact you have to read, it is a
                     // coordinate you look up.
@@ -269,7 +269,7 @@ struct CCDiffRow: View {
         // `+` landed next to `load, deadline:` and the first line read as
         // context. The marker belongs to the line, and the line starts at the top.
         Text(markerGlyph)
-            .font(.system(size: fontSize, design: .monospaced))
+            .font(.custom(CCFace.code, fixedSize: fontSize))
             .foregroundStyle(changeTone ?? CC.text.disabled)
             .frame(width: metrics.markerWidth, alignment: .top)
             .accessibilityHidden(true)
@@ -374,7 +374,7 @@ struct CCDiffRow: View {
         }
     }
 
-    private var mono: Font { .system(size: fontSize, design: .monospaced) }
+    private var mono: Font { .custom(CCFace.code, fixedSize: fontSize) }
 
     /// One wrapped run: the continuation glyph, the inline line number, the code,
     /// and the word-level highlight drawn **behind** it.
@@ -588,12 +588,12 @@ struct CCHunkHeader<Actions: View>: View {
     private func band<Trailing: View>(@ViewBuilder trailing: () -> Trailing) -> some View {
         HStack(spacing: CC.space.xs) {
             Text(machinePart)
-                .font(.system(size: fontSize - 1, design: .monospaced).monospacedDigit())
+                .font(.custom(CCFace.code, fixedSize: fontSize - 1).monospacedDigit())
                 .foregroundStyle(CC.text.tertiary)
                 .lineLimit(1)
             if let context = contextPart {
                 Text(context)
-                    .font(.system(size: fontSize - 1, design: .monospaced))
+                    .font(.custom(CCFace.code, fixedSize: fontSize - 1))
                     .foregroundStyle(CC.text.tertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -872,7 +872,7 @@ struct CCFoldRow: View {
             // ride Dynamic Type, and a label that did stood over the code it
             // folds, broken into fragments at AX5.
             Text(label)
-                .font(.system(size: metrics.fontSize - 1, design: .monospaced))
+                .font(.custom(CCFace.code, fixedSize: metrics.fontSize - 1))
                 .foregroundStyle(CC.text.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)

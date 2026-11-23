@@ -132,7 +132,7 @@ struct DeckView: View {
             // One vocabulary. Every surface that speaks to the *reader* says
             // `waiting for you` — the fleet's headline, its band, the bar — and
             // this screen is the one where the reader answers.
-            .navigationTitle("Waiting for you")
+            .ccNavigationTitle("Waiting for you")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 // Nothing waiting is what the clear state says in full; a "0"

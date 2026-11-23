@@ -74,9 +74,10 @@ final class WideToolLabelUITests: XCTestCase {
         let whole = comparable(command[...])
         if comparable(line[...]).hasSuffix(whole) { return true }
         // Recognition reads an ellipsis as `…`, as two or three dots, or as one
-        // dot opening a word — never a path's own `./`.
+        // dot opening a word or a path's segment (Menlo's `…` is three tight
+        // dots in one cell, read as `/.es`) — never a path's own `./`.
         let line = line.replacingOccurrences(
-            of: #"\.{2,3}|(?<=\s)\.(?=[^./\s])"#, with: "…", options: .regularExpression)
+            of: #"\.{2,3}|(?<=[\s/])\.(?=[^./\s])"#, with: "…", options: .regularExpression)
         guard let ellipsis = line.lastIndex(of: "…") else { return false }
         let tail = comparable(line[line.index(after: ellipsis)...])
         // An empty tail is a suffix of everything: `./soak/run.sh …` would pass
@@ -111,9 +112,9 @@ final class WideToolLabelUITests: XCTestCase {
     /// recognition splits `mcp__fil` into `mcp_ fil`.
     private func showsBothEnds(_ line: String, of name: String) -> Bool {
         // The ellipsis as `draws` reads it: `…`, two or three dots, or one dot
-        // opening a word.
+        // opening a word or a path's segment.
         let line = line.replacingOccurrences(
-            of: #"\.{2,3}|(?<=\s)\.(?=[^./\s])"#, with: "…", options: .regularExpression)
+            of: #"\.{2,3}|(?<=[\s/])\.(?=[^./\s])"#, with: "…", options: .regularExpression)
         guard let ellipsis = line.firstIndex(of: "…") else { return false }
         let whole = comparable(name[...])
         let before = comparable(line[..<ellipsis])
