@@ -157,15 +157,14 @@ struct BranchNaming: View {
                 .foregroundStyle(trimmed.isEmpty || valid ? Theme.text3 : Theme.red)
                 .accessibilityIdentifier("start.branch.rule")
             if let agent {
-                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                // Each on a line of its own, as Changes is: the menu is narrower than the box.
+                VStack(alignment: .leading, spacing: 5) {
                     fact(StartWords.branch) {
                         Text(verbatim: valid ? StartPlace.newBranch(trimmed, for: agent) : StartWords.notNamedYet)
                             .font(valid ? Theme.mono(11) : Theme.ui(11))
                     }
-                    Text(verbatim: "·").foregroundStyle(Theme.text3)
                     fact(StartWords.from) { Text(StartPlace.newWorktreeBase(for: agent, from: here)) }
                 }
-                .lineLimit(1)
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("start.branch.facts")
                 if here?.dirty == true {
@@ -178,11 +177,11 @@ struct BranchNaming: View {
     }
 }
 
-/// One fact about the new worktree: its label, then its value.
+/// One fact about the new worktree, on one line: its label whole, then its value, cut in the middle where too long.
 private func fact(_ label: String, @ViewBuilder value: () -> some View) -> some View {
     HStack(alignment: .firstTextBaseline, spacing: 5) {
-        Text(label).foregroundStyle(Theme.text3)
-        value().foregroundStyle(Theme.text2)
+        Text(label).foregroundStyle(Theme.text3).fixedSize()
+        value().foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.middle)
     }
     .font(Theme.ui(11))
 }
