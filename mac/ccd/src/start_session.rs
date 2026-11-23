@@ -255,11 +255,8 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
                     None => None,
                 };
                 let facts = match (agent, codex, claude) {
-                    // Codex's reader gives none only when it was not answered; a signed-out account answers.
                     (AgentKind::Codex, Some(codex), _) => {
-                        crate::accounts::read_facts(environment, home.as_ref(), codex)
-                            .await
-                            .map(Some)
+                        crate::accounts::read_facts(environment, home.as_ref(), codex).await
                     }
                     (AgentKind::Claude, _, Some(claude)) => {
                         let facts =
@@ -267,7 +264,7 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
                                 .await;
                         // Its plan's limits, through the host, for a signed-in account only.
                         match (facts, crate::claude_host::host_binary(&daemon.config)) {
-                            (Some(Some(mut facts)), Ok(host)) => {
+                            (Some(mut facts), Ok(host)) => {
                                 if let Some((available, plan, windows)) =
                                     crate::accounts::read_claude_usage(
                                         environment,
@@ -281,13 +278,12 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
                                     facts.plan = facts.plan.or(plan);
                                     facts.windows = windows;
                                 }
-                                Some(Some(facts))
+                                Some(facts)
                             }
                             (facts, _) => facts,
                         }
                     }
-                    // Its agent is not on this computer: nothing to show, which is an answer.
-                    _ => Some(None),
+                    _ => None,
                 };
                 daemon.account_facts.read(key, facts);
             }

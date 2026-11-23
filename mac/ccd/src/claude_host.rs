@@ -7168,13 +7168,13 @@ mod tests {
         let key = crate::accounts::default_key(&AgentKind::Claude);
         rig.daemon.account_facts.read(
             &key,
-            Some(Some(protocol::ws::AccountFacts {
+            Some(protocol::ws::AccountFacts {
                 limits_available: None,
                 email: Some("default@example.test".into()),
                 plan: None,
                 windows: Vec::new(),
                 read_at: protocol::time::now_rfc3339(),
-            })),
+            }),
         );
         let held = |daemon: &Daemon| {
             let listing = crate::accounts::listing(&daemon.store, None);
@@ -12260,13 +12260,13 @@ mod tests {
         for account in [&a, &b] {
             rig.daemon.account_facts.read(
                 &account.id,
-                Some(Some(protocol::ws::AccountFacts {
+                Some(protocol::ws::AccountFacts {
                     limits_available: None,
                     email: Some(format!("{}@example.test", account.label.to_lowercase())),
                     plan: Some("max".into()),
                     windows: Vec::new(),
                     read_at: "2026-11-23T03:00:00.000Z".into(),
-                })),
+                }),
             );
         }
         let listing = rig
