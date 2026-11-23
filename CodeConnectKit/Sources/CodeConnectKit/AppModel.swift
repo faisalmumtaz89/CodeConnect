@@ -1004,6 +1004,12 @@ public final class AppModel {
             // `FleetRowChangeUITests` drive it.
             let lateApprovals = UserDefaults.standard.bool(forKey: "CC_FIXTURE_LATE_APPROVALS")
             var frames = Fixtures.frames(variant: variant)
+            // `-CC_FIXTURE_USAGE YES|limits`: each run's account, and with YES its context (`Fixtures.withUsage`); the
+            // account's limits are `-CC_ACCOUNTS_WIRE`'s, loaded here so the reply bar has them from the start.
+            if let usage = UserDefaults.standard.string(forKey: "CC_FIXTURE_USAGE") {
+                frames = Fixtures.withUsage(frames, context: usage != "limits")
+            }
+            if fixtureAccountBook != nil { Task { await loadAccounts() } }
             // **`-CC_FIXTURE_LATE_EVENTS <n>` is events arriving while the
             // reader is on screen.** The stream's last `n` frames are held back
             // and delivered in stream order, the `i`th on the test's `late-<i>`

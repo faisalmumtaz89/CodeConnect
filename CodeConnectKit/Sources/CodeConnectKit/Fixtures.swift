@@ -1066,6 +1066,46 @@ enum Fixtures {
     }
 }
 
+#if DEBUG
+    extension Fixtures {
+        /// `-CC_FIXTURE_USAGE YES|limits`, on whichever fixture is active: every run names its own agent's Default
+        /// account, so the limits `-CC_ACCOUNTS_WIRE`'s `defaults` give that agent are its; with `YES` each run also
+        /// reports its context once, after its last event ("390k / 1M"), its listing's `last_seq` raised to match.
+        static func withUsage(_ frames: [ServerMessage], context: Bool, now: Date = Fixtures.now) -> [ServerMessage] {
+            var next: [String: UInt64] = [:]
+            for frame in frames {
+                switch frame {
+                case .event(let event): next[event.sessionKey] = max(next[event.sessionKey] ?? 0, event.seq + 1)
+                case .sessions(let runs):
+                    for run in runs { next[run.sessionKey] = max(next[run.sessionKey] ?? 0, run.lastSeq + 1) }
+                default: break
+                }
+            }
+            var usage: [String: SessionSummary] = [:]
+            let named = frames.map { frame -> ServerMessage in
+                guard case .sessions(let runs) = frame else { return frame }
+                return .sessions(runs.map { run in
+                    var object = (try? JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(run)))?
+                        .objectValue ?? [:]
+                    object["account"] = .object(["id": .null, "label": .string("Default")])
+                    if context, let seq = next[run.sessionKey] { object["last_seq"] = .int(Int64(seq)) }
+                    let decoded = (try? JSONDecoder().decode(
+                        SessionSummary.self, from: Data(JSONValue.object(object).canonicalJSONString.utf8))) ?? run
+                    usage[run.sessionKey] = decoded
+                    return decoded
+                })
+            }
+            guard context else { return named }
+            return named + usage.values.sorted { $0.sessionKey < $1.sessionKey }.compactMap { run in
+                decode(
+                    "{\"type\":\"event\",\"event\":{\"seq\":\(run.lastSeq),\"session_uid\":\(quoted(run.sessionUID)),"
+                        + "\"session_id\":\(quoted(run.sessionID)),\"ts\":\"\(rfc3339(now))\",\"kind\":\"usage\","
+                        + "\"source\":\"sdk\",\"payload\":{\"last\":{\"totalTokens\":390400},\"modelContextWindow\":1000000}}}")
+            }
+        }
+    }
+#endif
+
 // MARK: - Codex
 
 /// **The Codex fleet, seeded from `fixtures/codex/*`.**
