@@ -55,13 +55,12 @@ struct InputBox<Field: View, Leading: View, Trailing: View>: View {
         }
     }
 
-    /// A dark fill, darker toward the foot; a fine border; a faint line of light along the inside of its top; two
-    /// shadows under it. A shadow's spread is the inset of the shape that casts it.
+    /// A dark fill, darker toward the foot; a fine border; a faint line of light along the inside of its top; the
+    /// box's shadows under it.
     private var surface: some View {
         let shape = RoundedRectangle(cornerRadius: Self.radius)
         return ZStack(alignment: .top) {
-            shape.inset(by: 16).fill(Color.black).shadow(color: .black.opacity(0.78), radius: 30, y: 24)
-            shape.inset(by: 4).fill(Color.black).shadow(color: .black.opacity(0.5), radius: 8, y: 4)
+            BoxShadow(radius: Self.radius)
             shape.fill(LinearGradient(
                 colors: [Color(themeHex: 0x131316), Color(themeHex: 0x101013)], startPoint: .top, endPoint: .bottom))
             shape.strokeBorder(Color.white.opacity(0.085))
@@ -141,4 +140,18 @@ enum InputBoxLayout {
 enum InputBoxChip {
     static let height: CGFloat = 28
     static let font = Theme.ui(12.5, .medium)
+}
+
+/// The input box's shadows, which every menu card casts too: a deep soft one and a close one. A shadow's spread is the
+/// inset of the shape that casts it.
+struct BoxShadow: View {
+    let radius: CGFloat
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: radius)
+        ZStack {
+            shape.inset(by: 16).fill(Color.black).shadow(color: .black.opacity(0.78), radius: 30, y: 24)
+            shape.inset(by: 4).fill(Color.black).shadow(color: .black.opacity(0.5), radius: 8, y: 4)
+        }
+    }
 }

@@ -87,16 +87,11 @@ struct ModelButton: View {
         // Its top 8 pt inside the pane (before the button is measured, its tallest).
         .frame(maxHeight: minY > 0 ? min(360, minY - Theme.panelGap - StartPanel.margin) : 360)
         .fixedSize(horizontal: false, vertical: true)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+        .menuCard()
     }
 
     private func header(_ text: String) -> some View {
-        Text(text).font(Theme.ui(11, .semibold)).foregroundStyle(Theme.text3)
-            .padding(.horizontal, 12)
-            .padding(.top, 5)
-            .padding(.bottom, 3)
+        MenuHeader(text: text)
     }
 
     private func note(_ text: String) -> some View {
@@ -107,7 +102,7 @@ struct ModelButton: View {
     }
 
     private var divider: some View {
-        Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, 5)
+        MenuDivider().padding(.vertical, 5)
     }
 
     /// The model's name, and its description beside it: the menu's row `index`.
@@ -118,25 +113,15 @@ struct ModelButton: View {
             open = false
         }
         return Button(action: select) {
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 9.5, weight: .bold))
-                    .opacity(choice == pick ? 1 : 0)
-                    .frame(width: 12)
-                    .accessibilityHidden(true)
+            MenuRow(chosen: choice == pick) {
                 Text(choice.label).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1).fixedSize()
                 if let detail = choice.detail {
                     ModelDetail(text: detail)
                 }
-                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8)
-            .frame(height: 24)
-            .contentShape(Rectangle())
         }
         .buttonStyle(.panelRow)
         .panelRow(index, id: id, choose: select)
-        .padding(.horizontal, 4)
         .accessibilityIdentifier(id)
         .accessibilityAddTraits(choice == pick ? .isSelected : [])
     }

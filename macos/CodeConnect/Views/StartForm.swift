@@ -34,8 +34,12 @@ struct StartForm: View {
     @State private var folderOpen = false
     /// Where the box stands in `StartForm.space`, which its panels stay inside.
     @State private var box: CGRect = .zero
-    /// The folder chip's leading edge in `StartForm.space`, where its panel starts when it fits.
-    @State private var folderChipX: CGFloat = 0
+    /// The folder chip in `StartForm.space`: its panel starts at its leading edge when it fits, and under it.
+    @State private var folderChip: CGRect = .zero
+    /// How tall the folder panel stands, and its list in it, as drawn.
+    @State private var folderPanelHeight: CGFloat = 0
+    @State private var listShown: CGFloat = 0
+    @Environment(\.startHeight) private var startHeight
     /// The first message has the keyboard: as the form appears, and when New Agent asks for it.
     @FocusState private var messageFocused: Bool
     /// The first message's caret, which the form sets when New Agent gives it the keyboard (`giveKeyboard`).
@@ -47,7 +51,7 @@ struct StartForm: View {
     @State private var thisMac: String?
     /// The search field has the keyboard, and with it the folders under it.
     @FocusState private var searchFocused: Bool
-    /// The folder list's rows, measured: the box is as tall as they are, up to its most.
+    /// The folder list's rows, measured: the list is as tall as they are, up to its most (`listMost`).
     @State private var listHeight: CGFloat = 0
 
     private var contexts: [StartContext] { machines.startContexts }
@@ -352,26 +356,33 @@ struct StartForm: View {
         .help(folder?.path ?? "Choose a folder")
         .accessibilityIdentifier("start.folder")
         .accessibilityValue(folderOpen ? "open" : "closed")
-        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).minX } action: { folderChipX = $0 }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { folderChip = $0 }
         .overlay(alignment: .topLeading) {
             if folderOpen {
-                let placed = StartPanel.place(widest: 520, leading: folderChipX, box: box)
+                let placed = StartPanel.place(widest: 520, leading: folderChip.minX, box: box)
                 folderPanel(context, width: placed.width).openPanel()
-                    .offset(x: placed.x - folderChipX, y: InputBoxChip.height + Theme.panelGap)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { folderPanelHeight = $0 }
+                    .offset(x: placed.x - folderChip.minX, y: InputBoxChip.height + Theme.panelGap)
             }
         }
         .closesPanel($folderOpen)
         .onChange(of: folderOpen) { _, open in if !open { browsing = false } }
     }
 
+    /// The most the folder list stands: 260 pt, or less where the pane ends sooner, so the whole panel, its foot rows
+    /// included, stays inside the pane; at least one folder's row. Before the panel is measured, 260.
+    private var listMost: CGFloat {
+        guard folderPanelHeight > 0 else { return 260 }
+        let others = folderPanelHeight - listShown
+        let room = startHeight - StartPanel.margin - folderChip.maxY - Theme.panelGap - others
+        return min(260, max(room, 44))
+    }
+
     /// Up to 520 pt wide, inside the box (`StartPanel.place`).
     private func folderPanel(_ context: StartContext, width: CGFloat) -> some View {
         folderRows(context)
-            .padding(8)
-            .frame(width: width)
-            .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-            .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+            .frame(width: width - 12)
+            .menuCard()
     }
 
     @ViewBuilder private func folderRows(_ context: StartContext) -> some View {
@@ -409,10 +420,8 @@ struct StartForm: View {
                     .onSubmit { folderOpen = false }
                     .textFieldStyle(.plain)
                     .font(Theme.ui(12.5))
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
-                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
-                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+                    .menuField()
+                MenuHeader(text: "Recent")
                 ScrollViewReader { list in
                     ScrollView {
                         // Not lazy: every folder is in the accessibility tree, scrolled to or not.
@@ -426,28 +435,17 @@ struct StartForm: View {
                     // or the choice or the list changes, so a click on a row in view moves nothing.
                     .task(id: [folderPath ?? "", "\(context.projects.count)"]) { list.scrollTo(folderPath) }
                 }
-                // As tall as its rows, up to 260 pt, then it scrolls. An exact height: a panel is drawn over its button,
-                // which offers it only the button's own height, so a range would collapse the list to its least.
-                .frame(height: min(max(listHeight, 1), 260))
-                // The rows' fills are square and run edge to edge; the box's corners cut a first or last row's.
-                .clipShape(RoundedRectangle(cornerRadius: Theme.boxRadius))
-                .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
-                .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
+                // As tall as its rows, up to 260 pt or the room the pane has under the panel, then it scrolls. An exact
+                // height: a panel is drawn over its button, which offers it only the button's own height, so a range
+                // would collapse the list to its least.
+                .frame(height: min(max(listHeight, 1), listMost))
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listShown = $0 }
             }
             // A folder from elsewhere, whatever the list holds: this Mac's from the standard folder panel, another
             // computer's by browsing it.
-            if !browsing {
-                if isThisMac(context) {
-                    HStack {
-                        Spacer()
-                        chooseButton
-                    }
-                } else if context.browses {
-                    HStack {
-                        Spacer()
-                        browseButton
-                    }
-                }
+            if !browsing && (isThisMac(context) || context.browses) {
+                MenuDivider()
+                if isThisMac(context) { chooseButton } else { browseButton }
             }
         }
     }
@@ -463,27 +461,17 @@ struct StartForm: View {
         Button {
             choose(project.path)
         } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 8)
-                    AgeText(since: project.lastUsed) { startProjectMeta(project, now: $0) }
-                        .font(Theme.ui(11)).foregroundStyle(Theme.text3).lineLimit(1)
-                }
-                Text(project.shownPath)
-                    .font(Theme.mono(11))
-                    .foregroundStyle(Theme.text3)
-                    .lineLimit(1)
-                    .truncationMode(.head)
+            MenuRow(chosen: folderPath == project.path) {
+                Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 8)
+                AgeText(since: project.lastUsed) { startProjectMeta(project, now: $0) }
+                    .font(Theme.ui(11)).foregroundStyle(Theme.text3).lineLimit(1)
+            } second: {
+                Text(project.shownPath).font(Theme.mono(11.5)).truncationMode(.head)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(folderPath == project.path ? Theme.selected : .clear, in: Rectangle())
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 0, id: "start.folder.\(project.path)"))
+        .buttonStyle(.hover(radius: 8, id: "start.folder.\(project.path)"))
         .focusable(false)
         .accessibilityIdentifier("start.folder.\(project.path)")
         .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
@@ -493,9 +481,9 @@ struct StartForm: View {
     /// Any folder on this Mac, from the standard folder panel.
     private var chooseButton: some View {
         Button(action: chooseFolder) {
-            Text("Choose a folder\u{2026}").font(Theme.ui(11.5)).foregroundStyle(Theme.text2).contentShape(Rectangle())
+            MenuRow { Text("Choose a folder\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
         }
-        .buttonStyle(.hover(bare: true, flush: .trailing, id: "start.choose"))
+        .buttonStyle(.hover(radius: 8, id: "start.choose"))
         .accessibilityIdentifier("start.choose")
     }
 
@@ -506,9 +494,9 @@ struct StartForm: View {
             branchMenuOpen = false
             browsing = true
         } label: {
-            Text("Browse\u{2026}").font(Theme.ui(11.5)).foregroundStyle(Theme.text2).contentShape(Rectangle())
+            MenuRow { Text("Browse\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
         }
-        .buttonStyle(.hover(bare: true, flush: .trailing, id: "start.browse"))
+        .buttonStyle(.hover(radius: 8, id: "start.browse"))
         .accessibilityIdentifier("start.browse")
     }
 
@@ -545,15 +533,12 @@ struct StartForm: View {
 
     /// The selected folder above the rows when none of them shows it: its name and its path, selected.
     private func pickedRow(_ project: StartProject) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        MenuRow(chosen: true) {
             Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                        .truncationMode(.middle)
-            Text(project.path).font(Theme.mono(11)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head)
+                .truncationMode(.middle)
+        } second: {
+            Text(project.path).font(Theme.mono(11.5)).truncationMode(.head)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.selected, in: Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("start.picked")
         .accessibilityAddTraits(.isSelected)
@@ -890,22 +875,12 @@ private struct ComputerButton: View {
                     open = false
                 }
                 Button(action: pick) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 9.5, weight: .bold))
-                            .opacity(context.id == chosen.id ? 1 : 0)
-                            .frame(width: 12)
-                            .accessibilityHidden(true)
+                    MenuRow(chosen: context.id == chosen.id) {
                         Text(context.machineName).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
-                        Spacer(minLength: 0)
                     }
-                    .padding(.horizontal, 8)
-                    .frame(height: 24)
-                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.panelRow)
                 .panelRow(index, id: "start.computer.\(context.id)", choose: pick)
-                .padding(.horizontal, 4)
                 .accessibilityIdentifier("start.computer.\(context.id)")
                 .accessibilityAddTraits(context.id == chosen.id ? .isSelected : [])
             }
@@ -913,26 +888,19 @@ private struct ComputerButton: View {
                 open = false
                 add()
             }
+            MenuDivider().padding(.vertical, 5)
             Button(action: adding) {
-                HStack(spacing: 8) {
+                MenuRow {
                     Image(systemName: "plus").font(.system(size: 9.5, weight: .bold)).frame(width: 12)
                         .accessibilityHidden(true)
                     Text("Add a computer\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
-                    Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 8)
-                .frame(height: 24)
-                .contentShape(Rectangle())
             }
             .buttonStyle(.panelRow)
             .panelRow(contexts.count, id: "start.addComputer", choose: adding)
-            .padding(.horizontal, 4)
             .accessibilityIdentifier("start.addComputer")
         }
-        .padding(.vertical, 5)
-        .frame(width: placed.width)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+        .frame(width: placed.width - 12)
+        .menuCard()
     }
 }

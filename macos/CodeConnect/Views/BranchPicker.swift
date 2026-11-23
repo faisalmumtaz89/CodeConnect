@@ -189,9 +189,10 @@ struct BranchMenu: View {
     let choose: (StartPlace?) -> Void
 
     static let width: CGFloat = 440
-    static let rowHeight: CGFloat = 24
+    static let rowHeight: CGFloat = 32
     static let mostRows = 12
-    private static let inset: CGFloat = 5
+    /// The card's padding (`menuCard`), above and below the rows.
+    private static let inset: CGFloat = 6
 
     /// The menu's lines for this folder: each section's heading and entries.
     static func rows(git: StartGit, folder: StartProject) -> Int {
@@ -254,23 +255,18 @@ struct BranchMenu: View {
                     ModelDetail(text: StartWords.newBranchDetail)
                 }
             }
-            .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+            .overlay(alignment: .top) { MenuDivider() }
         }
-        .padding(.vertical, Self.inset)
-        .frame(width: width, alignment: .leading)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+        .frame(width: width - 12, alignment: .leading)
+        .menuCard()
     }
 
     /// A section's heading, a hairline over it after the first.
     private func header(_ text: String, divided: Bool) -> some View {
-        Text(text).font(Theme.ui(11, .semibold)).foregroundStyle(Theme.text3)
-            .padding(.horizontal, 12)
-            .padding(.bottom, 3)
+        MenuHeader(text: text)
             .frame(maxWidth: .infinity, minHeight: Self.rowHeight, maxHeight: Self.rowHeight, alignment: .bottomLeading)
             .overlay(alignment: .top) {
-                if divided { Rectangle().fill(Theme.hairline).frame(height: 1).padding(.top, 3) }
+                if divided { MenuDivider().padding(.top, 3) }
             }
     }
 
@@ -294,23 +290,12 @@ struct BranchMenu: View {
         @ViewBuilder content: () -> some View
     ) -> some View {
         Button(action: choose) {
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 9.5, weight: .bold))
-                    .opacity(checked ? 1 : 0)
-                    .frame(width: 12)
-                    .accessibilityHidden(true)
-                content()
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 8)
-            .frame(height: Self.rowHeight)
-            .contentShape(Rectangle())
+            MenuRow(chosen: checked) { content() }
+                .frame(height: Self.rowHeight)
         }
         .buttonStyle(.panelRow)
         .panelRow(index, id: id, choose: choose)
         .accessibilityLabel(name)
-        .padding(.horizontal, 4)
         .accessibilityIdentifier(id)
         .accessibilityAddTraits(checked ? .isSelected : [])
     }

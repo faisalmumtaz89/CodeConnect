@@ -471,7 +471,7 @@ private struct PanelRow: ViewModifier {
     func body(content: Content) -> some View {
         let lit = light?.light.lit == index
         content
-            .background(lit && !lifts ? PanelLight.fill : .clear, in: RoundedRectangle(cornerRadius: 4))
+            .background(lit && !lifts ? PanelLight.fill : .clear, in: RoundedRectangle(cornerRadius: 8))
             .brightness(lit && lifts ? Theme.segmentLift : 0)
             .onHover { if $0 { light?.enter(index) } }
             .onAppear {
@@ -486,6 +486,84 @@ private struct PanelRow: ViewModifier {
     private func register() { light?.register(index, id: id, enabled: choosable && isEnabled, choose: choose) }
 }
 
+extension View {
+    /// Every menu's card, whatever it holds: a near-black fill, a fine border, corners of 14, 6 pt in from its edge,
+    /// and the input box's shadows.
+    func menuCard() -> some View {
+        padding(6)
+            .background {
+                BoxShadow(radius: 14)
+                RoundedRectangle(cornerRadius: 14).fill(Color(themeHex: 0x141418))
+            }
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.09)))
+    }
+}
+
+/// A menu card's section heading: 11 pt medium, muted, 8 pt above it, 10 in, 6 below.
+struct MenuHeader: View {
+    let text: String
+
+    var body: some View {
+        Text(text).font(Theme.ui(11, .medium)).foregroundStyle(Color(themeHex: 0x8A8A93))
+            .padding(.top, 8)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 6)
+    }
+}
+
+/// A menu card's divider: a fine white line.
+struct MenuDivider: View {
+    var body: some View { Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1) }
+}
+
+extension View {
+    /// A field in a menu card, to filter or name: 32 pt tall, 10 pt in, a faint fill and border, corners of 8.
+    func menuField() -> some View {
+        padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.07)))
+    }
+}
+
+/// A menu card's row: what it says on one line, and under it, where the row has one, a second line in 11.5 pt, muted;
+/// at least 32 pt tall and 10 pt in at its sides; the chosen one filled white 7%, with a check at its trailing end.
+struct MenuRow<Content: View, Second: View>: View {
+    var chosen = false
+    let content: Content
+    let second: Second
+
+    init(chosen: Bool = false, @ViewBuilder content: () -> Content, @ViewBuilder second: () -> Second) {
+        self.chosen = chosen
+        self.content = content()
+        self.second = second()
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) { content }
+                second.font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            if chosen {
+                Image(systemName: "checkmark").font(.system(size: 9.5, weight: .bold)).accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(minHeight: 32)
+        .background(chosen ? Color.white.opacity(0.07) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .contentShape(Rectangle())
+    }
+}
+
+extension MenuRow where Second == EmptyView {
+    init(chosen: Bool = false, @ViewBuilder content: () -> Content) {
+        self.init(chosen: chosen, content: content, second: { EmptyView() })
+    }
+}
+
 /// A panel row's button: the panel's light is its only plate (`panelRow`); disabled it dims, pressed it fades.
 struct PanelRowStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { Label(configuration: configuration) }
@@ -497,7 +575,7 @@ struct PanelRowStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .opacity(!enabled ? Theme.disabledOpacity : configuration.isPressed ? 0.7 : 1)
-                .contentShape(RoundedRectangle(cornerRadius: 4))
+                .contentShape(Rectangle())
         }
     }
 }
@@ -552,21 +630,16 @@ struct PanelItem: View {
 
     var body: some View {
         Button(action: perform) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            MenuRow {
                 Image(systemName: symbol).font(.system(size: 11))
                     .foregroundStyle(destructive ? Theme.red : Theme.text3)
                     .frame(width: 14)
                     .accessibilityHidden(true)
                 Text(title).font(Theme.ui(12.5)).foregroundStyle(destructive ? Theme.red : Theme.text).lineLimit(1)
-                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
         }
         .buttonStyle(.panelRow)
         .panelRow(index, id: id, choose: perform)
-        .padding(.horizontal, 4)
         .accessibilityIdentifier(id)
     }
 }
@@ -684,11 +757,9 @@ private struct RowMenuHost: ViewModifier {
                             }
                         }
                         .padding(.vertical, 5)
-                        .frame(minWidth: Self.minWidth)
+                        .frame(minWidth: Self.minWidth - 12)
                         .fixedSize()
-                        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1)))
-                        .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+                        .menuCard()
                         .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
                         .modifier(ControlRect(rect: shown.rect, window: bounds))
                         .openPanel()
