@@ -1026,7 +1026,8 @@ pub(crate) mod tests {
     /// A stand-in codex in `dir`: `login` writes `auth.json` into its `CODEX_HOME`, or, while `dir/hang` exists, waits
     /// as the npm launcher does: its native login a child (pid in `dir/kid`), passed SIGTERM and nothing else (its own
     /// pid in `dir/pid`); `login status` succeeds once that home has one, after 3 s while `dir/slowstatus` exists.
-    /// Each run's first two words go into `dir/runs`.
+    /// Each run's first two words go into `dir/runs`. Its app-server names an account's email only once that home
+    /// is signed in (the Default's always).
     pub(crate) fn stand_in_codex(dir: &Path) -> std::path::PathBuf {
         let path = dir.join("codex");
         std::fs::write(
@@ -1035,7 +1036,7 @@ pub(crate) mod tests {
              if [ \"$1\" = login ] && [ -e \"$here/keyring\" ]; then echo '{}' > \"$here/keyring-login\"; exit 0; fi\n\
              if [ \"$1\" = login ]; then if [ -e \"$here/hang\" ]; then sleep 30 & kid=$!; echo $kid > \"$here/kid\"; echo $$ > \"$here/pid\"; trap 'kill -TERM $kid; exit 0' TERM; wait; fi; echo '{}' > \"$CODEX_HOME/auth.json\"; fi\n\
              if [ \"$1\" = app-server ] && [ -e \"$here/hangfacts\" ]; then sleep 120 & kid=$!; echo $kid > \"$here/kid\"; wait; fi\n\
-             if [ \"$1\" = app-server ]; then n=$(basename \"${CODEX_HOME:-default}\"); while IFS= read -r line; do case \"$line\" in *'\"id\":1,'*) printf '{\"id\":1,\"result\":{\"userAgent\":\"stand-in\"}}\\n';; *account/rateLimits/read*) printf '{\"id\":3,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":42,\"windowDurationMins\":300,\"resetsAt\":1800000000},\"secondary\":null,\"planType\":\"plus\"}}}\\n';; *account/read*) [ -e \"$here/same\" ] && n=same; printf '{\"id\":2,\"result\":{\"account\":{\"email\":\"%s@example.test\",\"planType\":\"plus\",\"type\":\"chatgpt\",\"workspaceName\":null},\"requiresOpenaiAuth\":true}}\\n' \"$n\";; esac; done; exit 0; fi\n\
+             if [ \"$1\" = app-server ]; then n=$(basename \"${CODEX_HOME:-default}\"); while IFS= read -r line; do case \"$line\" in *'\"id\":1,'*) printf '{\"id\":1,\"result\":{\"userAgent\":\"stand-in\"}}\\n';; *account/rateLimits/read*) printf '{\"id\":3,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":42,\"windowDurationMins\":300,\"resetsAt\":1800000000},\"secondary\":null,\"planType\":\"plus\"}}}\\n';; *account/read*) [ -e \"$here/same\" ] && n=same; if [ -n \"$CODEX_HOME\" ] && [ ! -f \"$CODEX_HOME/auth.json\" ] && [ ! -e \"$here/keyring-login\" ]; then printf '{\"id\":2,\"result\":{\"account\":null,\"requiresOpenaiAuth\":true}}\\n'; else printf '{\"id\":2,\"result\":{\"account\":{\"email\":\"%s@example.test\",\"planType\":\"plus\",\"type\":\"chatgpt\",\"workspaceName\":null},\"requiresOpenaiAuth\":true}}\\n' \"$n\"; fi;; esac; done; exit 0; fi\n\
              if [ \"$1\" = logout ]; then echo \"$CODEX_HOME\" >> \"$here/logouts\"; [ -e \"$here/keep\" ] || rm -f \"$CODEX_HOME/auth.json\"; fi\n",
         )
         .unwrap();
@@ -1248,6 +1249,9 @@ pub(crate) mod tests {
         let on_a = super::AccountEnv::for_account(&protocol::root_dir(), &a)
             .unwrap()
             .unwrap();
+        // Signed in, as its sign-in leaves it: the stand-in names an account's email only then.
+        std::fs::create_dir_all(on_a.folder()).unwrap();
+        std::fs::write(on_a.folder().join("auth.json"), "{}").unwrap();
         let facts = super::Facts::default();
         let mut keys = vec![
             a.id.clone(),
@@ -1297,6 +1301,9 @@ pub(crate) mod tests {
         let on_b = super::AccountEnv::for_account(&protocol::root_dir(), &b)
             .unwrap()
             .unwrap();
+        // Signed in, as its sign-in leaves it: the stand-in names an account's email only then.
+        std::fs::create_dir_all(on_b.folder()).unwrap();
+        std::fs::write(on_b.folder().join("auth.json"), "{}").unwrap();
         facts.forget(&a.id);
         keys.push(b.id.clone());
         for key in facts.claim_stale(&keys) {

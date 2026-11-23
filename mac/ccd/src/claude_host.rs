@@ -7199,6 +7199,14 @@ mod tests {
             tokio::time::sleep(POLL).await;
         }
         assert!(!held(&rig.daemon), "read again");
+        // A read ran and its finding is held, fresh: a forget alone would leave the key to be read.
+        assert!(
+            rig.daemon
+                .account_facts
+                .claim_stale(std::slice::from_ref(&key))
+                .is_empty(),
+            "read, not only forgotten"
+        );
         stop(&played.dir);
     }
 
