@@ -1,1 +1,1 @@
-Settings › Accounts keeps several Claude Code and Codex accounts, each shown by its email with its plan and usage. Choose another and your sessions move to it with their next message; a session in a turn finishes it first.
+An account’s “…” in Settings › Accounts is the same button and menu as everywhere else in the app: easy to hit, and a click on it never chooses the account. Claude Code’s usage is asked for at most once a minute per account, however many sessions are running.

@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.15, with the iPhone app 1.1.32
+
+- On the Mac, in Settings › Accounts, an account's "…" is the same button and menu as everywhere else in the app: easy
+  to hit, and a click on it opens its menu and never chooses the account.
+- Claude Code's usage is asked for at most once a minute per account, however many sessions are running (0.19.14
+  asked after every reply).
+- A Codex session that has moved to another account or has ended names its model as its menu did, not by its id.
+
 ## CodeConnect 0.19.14, with the iPhone app 1.1.31
 
 - On the Mac, Settings › Accounts keeps several Claude Code and Codex accounts. Add account… signs one in from your
