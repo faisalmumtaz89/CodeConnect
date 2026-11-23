@@ -1,6 +1,5 @@
 import CodeConnectKit
 import SwiftUI
-import UIKit
 
 @main
 struct CodeConnectApp: App {
@@ -11,19 +10,6 @@ struct CodeConnectApp: App {
     /// A pairing link opened from outside the app, waiting on its sheet.
     @State private var pairingLink: PairingLink?
     @Environment(\.scenePhase) private var scenePhase
-
-    /// The bar titles iOS draws itself (`.navigationTitle`: Waiting for you, Settings, a computer, Folders) are set in
-    /// the app's headline face, growing with Dynamic Type as the system's own title does and stopping where the app's
-    /// other bar titles stop, at xxxLarge.
-    init() {
-        let headline = CC.type.headline
-        let metrics = UIFontMetrics(forTextStyle: .headline)
-        let ceiling = metrics.scaledValue(
-            for: headline.size, compatibleWith: UITraitCollection(preferredContentSizeCategory: .extraExtraExtraLarge))
-        UINavigationBar.appearance().titleTextAttributes = [
-            .font: metrics.scaledFont(for: headline.uiFont(ofSize: headline.size), maximumPointSize: ceiling)
-        ]
-    }
 
     var body: some Scene {
         WindowGroup {
