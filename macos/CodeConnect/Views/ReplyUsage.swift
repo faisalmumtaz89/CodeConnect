@@ -55,21 +55,24 @@ struct ReplyUsage: View {
     /// Context, each window with its share and reset, then the account: the rows the Kit holds, in that order.
     private func card(_ bar: ReplyBar) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let context = bar.context { row("Context", "\(context.used) of \(context.window)") }
+            if let context = bar.context { row("Context", value: context.used, rest: "of \(context.window)") }
             ForEach(bar.limits, id: \.caption) { limit in
-                row(limit.caption, "\(limit.usedPercent)%" + (limit.resets.map { " · \($0)" } ?? ""))
+                row(limit.caption, value: "\(limit.usedPercent)%", rest: limit.resets)
             }
-            if let note = bar.limitsNote { row(note, "") }
-            if let account = bar.account { row("Account", account) }
+            if let note = bar.limitsNote { row(note) }
+            if let account = bar.account { row("Account", rest: account) }
         }
         .menuCard()
     }
 
-    private func row(_ caption: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
-            Text(caption).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
-            Spacer(minLength: 0)
-            Text(value).font(Theme.ui(12.5)).monospacedDigit().foregroundStyle(Theme.text)
+    /// A card row: its label muted at the leading side; at the trailing side its value bright in Menlo, then the rest
+    /// muted.
+    private func row(_ label: String, value: String? = nil, rest: String? = nil) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
+            Spacer(minLength: 16)
+            if let value { Text(value).font(Theme.mono(12)).foregroundStyle(Color(themeHex: 0xE4E4E7)) }
+            if let rest { Text(rest).font(Theme.ui(12)).foregroundStyle(Theme.text3) }
         }
         .padding(.horizontal, 10)
         .frame(minHeight: 28)
