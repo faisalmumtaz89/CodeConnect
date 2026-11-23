@@ -1261,6 +1261,21 @@ public final class AppModel {
         return true
     }
 
+    /// Whether an account can be added for `agent` now: not while an accounts request is out, nor while one of its
+    /// accounts is signing in (its row's line says so), so a second click never ends that sign-in for another account.
+    public func canAddAccount(agent: StartAgent) -> Bool {
+        !accountsBusy && !(accountBook?.accounts(for: agent).contains(where: \.signingIn) ?? false)
+    }
+
+    /// A click on `account`'s row: a signed-out one is signed in again, as its menu's Sign In Again… does, and never
+    /// becomes the account in use, so no session moves onto an account that can't start; any other is chosen.
+    @discardableResult
+    public func choose(_ account: AgentAccount) async -> Bool {
+        if account.signedOut { return await signInAccount(accountID: account.id) }
+        guard let agent = StartAgent(rawValue: account.agent) else { return false }
+        return await activateAccount(agent: agent, accountID: account.id)
+    }
+
     /// The switch `agent`'s sessions on this computer are in (their summaries' `switching`), toward the account its
     /// new starts now use; nil while none is moving.
     public func accountSwitch(for agent: StartAgent) -> AccountSwitch? {

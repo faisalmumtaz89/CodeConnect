@@ -485,13 +485,13 @@ private struct AgentAccounts: View {
                     AccountRow(
                         model: model, agent: agent, id: nil, facts: book.defaultFacts(for: agent), label: "Default",
                         signedOut: false, signingIn: false, note: nil, columns: columns, inUse: active == nil,
-                        remove: nil)
+                        choose: { await model.activateAccount(agent: agent, accountID: nil) }, remove: nil)
                     ForEach(book.accounts(for: agent)) { account in
                         AccountRow(
                             model: model, agent: agent, id: account.id, facts: account.facts, label: account.label,
                             signedOut: account.signedOut, signingIn: account.signingIn,
                             note: note(account, in: book), columns: columns, inUse: active == account.id,
-                            remove: { removing = account })
+                            choose: { await model.choose(account) }, remove: { removing = account })
                     }
                     Button { Task { await model.addAndSignIn(agent: agent) } } label: {
                         HStack(spacing: 10) {
@@ -504,7 +504,7 @@ private struct AgentAccounts: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .disabled(model.accountsBusy)
+                    .disabled(!model.canAddAccount(agent: agent))
                     .accessibilityIdentifier("settings.accounts.\(agent.rawValue).add")
                 } else {
                     // Not yet answered: no account is shown as in use before the computer says which.
@@ -569,6 +569,8 @@ private struct AccountRow: View {
     let note: String?
     let columns: [Int]
     let inUse: Bool
+    /// What a click does: use it, or sign a signed-out one in again (`AppModel.choose`).
+    let choose: () async -> Void
     let remove: (() -> Void)?
     @State private var hovered = false
 
@@ -582,7 +584,7 @@ private struct AccountRow: View {
     var body: some View {
         Button {
             guard !inUse else { return }
-            Task { await model.activateAccount(agent: agent, accountID: id) }
+            Task { await choose() }
         } label: {
             HStack(spacing: 8) {
                 HStack(spacing: 10) {
