@@ -173,6 +173,22 @@ final class SwitchedRunTimelineTests: XCTestCase {
         }
     }
 
+    /// A moved Codex run's read-only line names its model as its menu did (`model_label`), in ordinary type, never by
+    /// its id: `relaunch-plan-default-codex-wire.json`'s moved listings, on gpt-6.1-sol and then on the plan's gpt-6-luna.
+    func testAMovedCodexRunNamesItsModelAsItsMenuDid() throws {
+        let moved = try frames("relaunch-plan-default-codex-wire").compactMap {
+            if case .sessions(let sessions) = $0, let summary = sessions.first, summary.switching == .moved {
+                summary
+            } else {
+                nil
+            }
+        }
+        XCTAssertEqual(
+            moved.map { RunSettings.of(summary: $0) },
+            [.hostedReadOnly(model: RunModelName(text: "GPT-6.1-Sol", reported: false)),
+             .hostedReadOnly(model: RunModelName(text: "GPT-6 Luna", reported: false))])
+    }
+
     /// **A move onto a plan without the run's model** (decision 316) draws one quiet row from the notice's typed fields,
     /// "Now on <to>: <from> isn't in <account>'s plan.", never a title made from its kind; the run reads live.
     func testAMoveOntoAPlanWithoutTheModelDrawsOneQuietRow() async throws {
