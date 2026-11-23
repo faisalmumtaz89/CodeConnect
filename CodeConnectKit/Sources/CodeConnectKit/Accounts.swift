@@ -47,11 +47,15 @@ public struct AccountFacts: Decodable, Hashable, Sendable {
     public let email: String?
     public let plan: String?
     public let windows: [UsageWindow]
+    /// Whether plan limits apply to this sign-in, as the agent says: false for one with none ("No plan limits"); nil
+    /// while not reported.
+    public let limitsAvailable: Bool?
     /// When the computer read them (RFC 3339), for an "as of".
     public let readAt: String
 
     private enum CodingKeys: String, CodingKey {
         case email, plan, windows
+        case limitsAvailable = "limits_available"
         case readAt = "read_at"
     }
 
@@ -60,6 +64,7 @@ public struct AccountFacts: Decodable, Hashable, Sendable {
         email = try c.decodeIfPresent(String.self, forKey: .email)
         plan = try c.decodeIfPresent(String.self, forKey: .plan)
         windows = try c.decodeIfPresent([UsageWindow].self, forKey: .windows) ?? []
+        limitsAvailable = try c.decodeIfPresent(Bool.self, forKey: .limitsAvailable)
         readAt = try c.decode(String.self, forKey: .readAt)
     }
 }

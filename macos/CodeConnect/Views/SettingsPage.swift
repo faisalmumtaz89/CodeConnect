@@ -628,7 +628,7 @@ private struct AccountRow: View {
     }
 
     /// Its share used of each column's window, right-aligned, an empty cell where it names no such window; or, in
-    /// their place, that its agent says the plan has no limits, or hasn't said yet.
+    /// their place, "No plan limits" where its agent says none apply (`limitsAvailable` false), else "Not reported yet".
     @ViewBuilder private var figures: some View {
         if let facts, !facts.windows.isEmpty {
             HStack(spacing: 0) {
@@ -641,7 +641,7 @@ private struct AccountRow: View {
             }
             .accessibilityIdentifier("\(rowID).usage")
         } else {
-            Text(facts == nil ? AccountSwitchWords.notReported : AccountSwitchWords.noPlanLimits)
+            Text(facts?.limitsAvailable == false ? AccountSwitchWords.noPlanLimits : AccountSwitchWords.notReported)
                 .font(Theme.ui(12)).foregroundStyle(Theme.text3)
                 .accessibilityIdentifier("\(rowID).usage")
         }
