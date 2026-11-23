@@ -614,14 +614,12 @@ pub(crate) async fn read_claude_usage(
 
 /// What the codex at `codex` says of the account whose home `account` gives (its Default for none): its email and
 /// plan (`account/read`) and its usage windows (`account/rateLimits/read`), asked of an app-server started in that
-/// home and ended once it has answered. Some(None) when `account/read` answers with no account (signed out) or
-/// refuses, whatever the limits say; the windows only when the limits are answered too, else none. None when
-/// `account/read` was not answered: it could not be asked, or not within [`FACTS_WAIT`].
+/// home and ended once it has answered. None when it could not be asked or did not answer within [`FACTS_WAIT`].
 pub(crate) async fn read_facts(
     environment: &HashMap<OsString, OsString>,
     account: Option<&AccountEnv>,
     codex: &Path,
-) -> Option<Option<protocol::ws::AccountFacts>> {
+) -> Option<protocol::ws::AccountFacts> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let asking = concat!(
         r#"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codeconnect-ccd","title":"CodeConnect daemon","version":"0"}}}"#,
@@ -644,21 +642,24 @@ pub(crate) async fn read_facts(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     let mut child = command.spawn().ok()?;
-    // Each answer as it comes (a refusal's result is null), so one answered before the bound counts.
-    let (mut said_account, mut said_limits): (
-        Option<serde_json::Value>,
-        Option<serde_json::Value>,
-    ) = (None, None);
     let asked = async {
         let mut stdin = child.stdin.take()?;
         stdin.write_all(asking.as_bytes()).await.ok()?;
         let mut lines = tokio::io::BufReader::new(child.stdout.take()?).lines();
+        let (mut said_account, mut said_limits) = (None, None);
         while said_account.is_none() || said_limits.is_none() {
             let line = lines.next_line().await.ok()??;
             // What the user's shell prints as it starts is not the agent's.
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
+            // An answer is its result; a refusal or a null is no facts.
+            if !value["result"].is_object() {
+                if matches!(value["id"].as_u64(), Some(2 | 3)) {
+                    return None;
+                }
+                continue;
+            }
             match value["id"].as_u64() {
                 Some(2) => said_account = Some(value["result"].clone()),
                 Some(3) => said_limits = Some(value["result"].clone()),
@@ -666,33 +667,29 @@ pub(crate) async fn read_facts(
             }
         }
         drop(stdin);
-        Some(())
-    };
-    let _ = tokio::time::timeout(FACTS_WAIT, asked).await;
-    // A signed-in app-server keeps running: it is ended, with what it started, answered or not.
-    crate::start_session::end_agent(&mut child).await;
-    let said = said_account?;
-    let Some(signed_in) = said.get("account").filter(|account| account.is_object()) else {
-        return Some(None);
-    };
-    let window = |window: &serde_json::Value| {
-        Some(protocol::ws::UsageWindow {
-            used_percent: u32::try_from(window["usedPercent"].as_u64()?).ok()?,
-            window_minutes: window["windowDurationMins"].as_u64()?,
-            resets_at: window["resetsAt"].as_i64()?,
+        let (account, limits) = (said_account?, said_limits?);
+        let window = |window: &serde_json::Value| {
+            Some(protocol::ws::UsageWindow {
+                used_percent: u32::try_from(window["usedPercent"].as_u64()?).ok()?,
+                window_minutes: window["windowDurationMins"].as_u64()?,
+                resets_at: window["resetsAt"].as_i64()?,
+            })
+        };
+        Some(protocol::ws::AccountFacts {
+            limits_available: None,
+            email: account["account"]["email"].as_str().map(str::to_string),
+            plan: account["account"]["planType"].as_str().map(str::to_string),
+            windows: ["primary", "secondary"]
+                .iter()
+                .filter_map(|which| window(&limits["rateLimits"][which]))
+                .collect(),
+            read_at: protocol::time::now_rfc3339(),
         })
     };
-    let limits = said_limits.unwrap_or_default();
-    Some(Some(protocol::ws::AccountFacts {
-        limits_available: None,
-        email: signed_in["email"].as_str().map(str::to_string),
-        plan: signed_in["planType"].as_str().map(str::to_string),
-        windows: ["primary", "secondary"]
-            .iter()
-            .filter_map(|which| window(&limits["rateLimits"][which]))
-            .collect(),
-        read_at: protocol::time::now_rfc3339(),
-    }))
+    let facts = tokio::time::timeout(FACTS_WAIT, asked).await.ok().flatten();
+    // A signed-in app-server keeps running: it is ended, with what it started, answered or not.
+    crate::start_session::end_agent(&mut child).await;
+    facts
 }
 
 /// How a sign-in going is ended: it is sent where to say its login's group is gone.
@@ -1077,7 +1074,7 @@ pub(crate) mod tests {
     /// as the npm launcher does: its native login a child (pid in `dir/kid`), passed SIGTERM and nothing else (its own
     /// pid in `dir/pid`); `login status` succeeds once that home has one, after 3 s while `dir/slowstatus` exists.
     /// Each run's first two words go into `dir/runs`. Its app-server names an account's email only once that home
-    /// is signed in (the Default's always), and refuses its rate limits while it is not.
+    /// is signed in (the Default's always).
     pub(crate) fn stand_in_codex(dir: &Path) -> std::path::PathBuf {
         let path = dir.join("codex");
         std::fs::write(
@@ -1086,7 +1083,7 @@ pub(crate) mod tests {
              if [ \"$1\" = login ] && [ -e \"$here/keyring\" ]; then echo '{}' > \"$here/keyring-login\"; exit 0; fi\n\
              if [ \"$1\" = login ]; then if [ -e \"$here/hang\" ]; then sleep 30 & kid=$!; echo $kid > \"$here/kid\"; echo $$ > \"$here/pid\"; trap 'kill -TERM $kid; exit 0' TERM; wait; fi; echo '{}' > \"$CODEX_HOME/auth.json\"; fi\n\
              if [ \"$1\" = app-server ] && [ -e \"$here/hangfacts\" ]; then sleep 120 & kid=$!; echo $kid > \"$here/kid\"; wait; fi\n\
-             if [ \"$1\" = app-server ]; then n=$(basename \"${CODEX_HOME:-default}\"); while IFS= read -r line; do case \"$line\" in *'\"id\":1,'*) printf '{\"id\":1,\"result\":{\"userAgent\":\"stand-in\"}}\\n';; *account/rateLimits/read*) if [ -n \"$CODEX_HOME\" ] && [ ! -f \"$CODEX_HOME/auth.json\" ] && [ ! -e \"$here/keyring-login\" ]; then printf '{\"id\":3,\"error\":{\"code\":-32600,\"message\":\"not signed in\"}}\\n'; continue; fi; printf '{\"id\":3,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":42,\"windowDurationMins\":300,\"resetsAt\":1800000000},\"secondary\":null,\"planType\":\"plus\"}}}\\n';; *account/read*) [ -e \"$here/same\" ] && n=same; if [ -n \"$CODEX_HOME\" ] && [ ! -f \"$CODEX_HOME/auth.json\" ] && [ ! -e \"$here/keyring-login\" ]; then printf '{\"id\":2,\"result\":{\"account\":null,\"requiresOpenaiAuth\":true}}\\n'; else printf '{\"id\":2,\"result\":{\"account\":{\"email\":\"%s@example.test\",\"planType\":\"plus\",\"type\":\"chatgpt\",\"workspaceName\":null},\"requiresOpenaiAuth\":true}}\\n' \"$n\"; fi;; esac; done; exit 0; fi\n\
+             if [ \"$1\" = app-server ]; then n=$(basename \"${CODEX_HOME:-default}\"); while IFS= read -r line; do case \"$line\" in *'\"id\":1,'*) printf '{\"id\":1,\"result\":{\"userAgent\":\"stand-in\"}}\\n';; *account/rateLimits/read*) printf '{\"id\":3,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":42,\"windowDurationMins\":300,\"resetsAt\":1800000000},\"secondary\":null,\"planType\":\"plus\"}}}\\n';; *account/read*) [ -e \"$here/same\" ] && n=same; if [ -n \"$CODEX_HOME\" ] && [ ! -f \"$CODEX_HOME/auth.json\" ] && [ ! -e \"$here/keyring-login\" ]; then printf '{\"id\":2,\"result\":{\"account\":null,\"requiresOpenaiAuth\":true}}\\n'; else printf '{\"id\":2,\"result\":{\"account\":{\"email\":\"%s@example.test\",\"planType\":\"plus\",\"type\":\"chatgpt\",\"workspaceName\":null},\"requiresOpenaiAuth\":true}}\\n' \"$n\"; fi;; esac; done; exit 0; fi\n\
              if [ \"$1\" = logout ]; then echo \"$CODEX_HOME\" >> \"$here/logouts\"; [ -e \"$here/keep\" ] || rm -f \"$CODEX_HOME/auth.json\"; fi\n",
         )
         .unwrap();
@@ -1315,11 +1312,15 @@ pub(crate) mod tests {
         );
         facts.read(
             &a.id,
-            super::read_facts(&environment, Some(&on_a), &codex).await,
+            super::read_facts(&environment, Some(&on_a), &codex)
+                .await
+                .map(Some),
         );
         facts.read(
             &super::default_key(&protocol::agent::AgentKind::Codex),
-            super::read_facts(&environment, None, &codex).await,
+            super::read_facts(&environment, None, &codex)
+                .await
+                .map(Some),
         );
         assert_eq!(
             facts.claim_stale(&keys),
@@ -1362,7 +1363,12 @@ pub(crate) mod tests {
             } else {
                 Some(&on_b)
             };
-            facts.read(&key, super::read_facts(&environment, home, &codex).await);
+            facts.read(
+                &key,
+                super::read_facts(&environment, home, &codex)
+                    .await
+                    .map(Some),
+            );
         }
         let told = serde_json::to_value(facts.told(super::listing(&store, None))).unwrap();
         assert_eq!(
@@ -1697,7 +1703,9 @@ pub(crate) mod tests {
         assert_eq!(facts.claim_stale(&key), key);
         facts.read(
             &a.id,
-            super::read_facts(&environment, Some(&on_a), &codex).await,
+            super::read_facts(&environment, Some(&on_a), &codex)
+                .await
+                .map(Some),
         );
         assert_eq!(
             email(&facts),
@@ -1710,7 +1718,9 @@ pub(crate) mod tests {
         assert_eq!(facts.claim_stale(&key), key);
         facts.read(
             &a.id,
-            super::read_facts(&environment, Some(&on_a), &codex).await,
+            super::read_facts(&environment, Some(&on_a), &codex)
+                .await
+                .map(Some),
         );
         assert_eq!(
             email(&facts),
@@ -1728,7 +1738,9 @@ pub(crate) mod tests {
         assert_eq!(facts.claim_stale(&key), key);
         facts.read(
             &a.id,
-            super::read_facts(&environment, Some(&on_a), &codex).await,
+            super::read_facts(&environment, Some(&on_a), &codex)
+                .await
+                .map(Some),
         );
         assert_eq!(email(&facts), None, "a signed-out answer clears it");
         let _ = std::fs::remove_dir_all(on_a.folder());
