@@ -614,8 +614,8 @@ private struct SidebarFoot: View {
                 }
                 Spacer(minLength: 4)
                 Button { openSettings() } label: {
-                    Image(systemName: "gearshape").font(.system(size: 12.5)).foregroundStyle(Theme.text2)
-                        .frame(width: 28, height: 28)
+                    Image(systemName: "gearshape.fill").font(.system(size: 13)).foregroundStyle(Theme.text2)
+                        .frame(width: 26, height: 26)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.hover(radius: 6, id: "sidebar.settings"))
@@ -962,13 +962,7 @@ private struct EmptyFleet: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Rectangle().fill(Theme.hairline).frame(height: 1)
-            HStack(spacing: 14) {
-                KeyHint(.agent)
-                KeyHint(.computer)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .frame(height: 34)
+            Color.clear.frame(height: 34)
         }
         .background(Theme.window)
     }

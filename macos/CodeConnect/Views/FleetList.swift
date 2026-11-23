@@ -248,17 +248,13 @@ struct FleetList: View {
 
             Rectangle().fill(Theme.hairline).frame(height: 1)
             HStack(spacing: 14) {
+                Spacer()
                 if selecting {
-                    Spacer()
                     ActionButton(
                         title: batchRunning ? "Removing…" : "Remove \(picked.count)…", key: nil, prominent: false,
                         destructive: true, id: "fleet.removeChosen"
                     ) { removingMany = picked }
                     .disabled(picked.isEmpty || batchRunning)
-                } else {
-                    KeyHint(.agent)
-                    KeyHint(.computer)
-                    Spacer()
                 }
             }
             .padding(.horizontal, 16)

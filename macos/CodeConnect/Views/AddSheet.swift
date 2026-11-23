@@ -35,11 +35,6 @@ enum AddKind: String, Identifiable, CaseIterable {
     }
 }
 
-extension KeyHint {
-    /// What a key opens: its key and the sheet's title.
-    init(_ kind: AddKind) { self.init(keys: kind.shortcut.map { [$0] } ?? [], label: kind.title.titleStyle) }
-}
-
 /// The way a computer or an iPhone is added: a sheet with the two side by side.
 struct AddSheet: View {
     @State private var kind: AddKind
