@@ -683,14 +683,16 @@ private struct AccountRow: View {
                 HStack(spacing: 0) {
                     ForEach(columns, id: \.self) { minutes in
                         let window = facts.windows.first { $0.windowMinutes == minutes }
+                        // Once its time has come, a window says nothing of it: no line, no tooltip.
+                        let resets = window.flatMap { AccountSwitchWords.resets($0, now: now) }
                         VStack(alignment: .trailing, spacing: 2) {
                             Text(window.map { "\($0.usedPercent)%" } ?? " ").font(Theme.ui(13)).monospacedDigit()
                                 .foregroundStyle((window?.usedPercent ?? 0) >= 90 ? Theme.amber : Theme.text2)
-                            Text(window.flatMap { AccountSwitchWords.resets($0, now: now) } ?? " ")
+                            Text(resets ?? " ")
                                 .font(Theme.ui(11.5)).monospacedDigit().foregroundStyle(Theme.text3).lineLimit(1)
                         }
                         .frame(width: Self.column, alignment: .trailing)
-                        .help(window.map { Self.resetTime($0) } ?? "")
+                        .help(resets == nil ? "" : window.map { Self.resetTime($0) } ?? "")
                     }
                 }
             }
