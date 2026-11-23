@@ -368,15 +368,15 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertNil(AccountSwitchWords.sentence(to: "ben@example.com", waiting: 0, moved: 0), "no live session: no sentence")
     }
 
-    /// A session that couldn't start on the new account is named; several are counted.
+    /// A session that couldn't switch is named; several are counted.
     func testAFailedMoveIsNamed() {
         XCTAssertEqual(
-            AccountSwitchWords.failure(to: "ben@example.com", sessions: ["query-parser"]),
-            "query-parser couldn't start on ben@example.com. Its conversation says why.")
+            AccountSwitchWords.failure(sessions: ["query-parser"]),
+            "query-parser couldn't switch accounts. Its conversation says why.")
         XCTAssertEqual(
-            AccountSwitchWords.failure(to: "ben@example.com", sessions: ["query-parser", "docs-site"]),
-            "2 sessions couldn't start on ben@example.com. Their conversations say why.")
-        XCTAssertNil(AccountSwitchWords.failure(to: "ben@example.com", sessions: []))
+            AccountSwitchWords.failure(sessions: ["query-parser", "docs-site"]),
+            "2 sessions couldn't switch accounts. Their conversations say why.")
+        XCTAssertNil(AccountSwitchWords.failure(sessions: []))
     }
 
     /// Two accounts signed in as one address, and an account that isn't its own, each say so in one line.

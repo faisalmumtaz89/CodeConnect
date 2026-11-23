@@ -166,13 +166,13 @@ public enum AccountSwitchWords {
         }
     }
 
-    /// In amber under the group: the sessions that couldn't start on `target`, named when one; nil with none. The
-    /// service's own sentence is in each conversation, where its warning row stands.
-    public static func failure(to target: String, sessions: [String]) -> String? {
+    /// In amber under the group: the sessions that couldn't switch, named when one; nil with none. No account is
+    /// named: the one a session failed on may since be removed or replaced, and its conversation says which and why.
+    public static func failure(sessions: [String]) -> String? {
         switch sessions.count {
         case 0: return nil
-        case 1: return "\(sessions[0]) couldn't start on \(target). Its conversation says why."
-        default: return "\(sessions.count) sessions couldn't start on \(target). Their conversations say why."
+        case 1: return "\(sessions[0]) couldn't switch accounts. Its conversation says why."
+        default: return "\(sessions.count) sessions couldn't switch accounts. Their conversations say why."
         }
     }
 
@@ -201,9 +201,9 @@ public enum AccountSwitchWords {
     public static let notSeparate = "Uses this computer's own Codex sign-in, so it isn't a separate account"
 }
 
-/// A switch in progress for one agent's sessions on a computer: the account they move to (its email where its agent
-/// says it, else its name), how many still finish a turn first, how many move with their next message, and the ones
-/// whose start there was refused, by their folder's name.
+/// A switch in progress for one agent's sessions on a computer: the account the waiting and moved ones go to (its email
+/// where its agent says it, else its name), how many still finish a turn first, how many move with their next message,
+/// and the ones that couldn't switch, by their folder's name, whatever account they tried.
 public struct AccountSwitch: Equatable, Sendable {
     public let target: String
     public let waiting: Int
@@ -218,5 +218,5 @@ public struct AccountSwitch: Equatable, Sendable {
     }
 
     public var sentence: String? { AccountSwitchWords.sentence(to: target, waiting: waiting, moved: moved) }
-    public var failure: String? { AccountSwitchWords.failure(to: target, sessions: failed) }
+    public var failure: String? { AccountSwitchWords.failure(sessions: failed) }
 }
