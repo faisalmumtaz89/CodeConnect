@@ -26,13 +26,14 @@ struct ModelButton: View {
         } label: {
             HStack(spacing: 5) {
                 if let pick { AgentMark(agent: pick.agent == .claude ? .claude : .codex) }
-                Text(label).font(InputBoxChip.font)
+                Text(label).font(InputBoxChip.font).lineLimit(1)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(pick == nil ? Theme.text3 : Theme.text2)
             .inputBoxChip(open: open, bordered: true)
         }
         .buttonStyle(.hover(radius: 8, id: "start.model"))
+        .help(label)
         .disabled(checking)
         .accessibilityIdentifier("start.model")
         .accessibilityValue(open ? "open" : "closed")

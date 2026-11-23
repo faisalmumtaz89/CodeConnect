@@ -92,13 +92,14 @@ struct BranchRow: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "arrow.triangle.branch").font(.system(size: 11)).accessibilityHidden(true)
-                Text(verbatim: title).font(Theme.mono(12)).lineLimit(1).truncationMode(.middle)
+                Text(verbatim: title).font(Theme.mono(12)).lineLimit(1)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(Theme.text)
             .inputBoxChip(open: open)
         }
         .buttonStyle(.hover(radius: 8, id: "start.branch"))
+        .help(title)
         .accessibilityIdentifier("start.branch")
         .accessibilityValue(open ? "open" : "closed")
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).maxY } action: { buttonBottom = $0 }

@@ -323,7 +323,7 @@ struct StartForm: View {
         ComputerButton(contexts: contexts, chosen: context, open: $computerMenuOpen, add: addComputer) {
             draft.computerID = $0
         }
-        .help(Self.summary(context, now: .now))
+        .help("\(context.machineName) · \(Self.summary(context, now: .now))")
     }
 
     /// `12 recent folders · last used 4m ago`, as the iPhone says it.
@@ -341,13 +341,14 @@ struct StartForm: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "folder").font(.system(size: 11)).accessibilityHidden(true)
-                Text(folder?.name ?? "Choose a folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
+                Text(folder?.name ?? "Choose a folder").font(InputBoxChip.font).lineLimit(1)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(folder == nil ? Theme.text2 : Theme.text)
             .inputBoxChip(open: folderOpen)
         }
         .buttonStyle(.hover(radius: 8, id: "start.folder"))
+        .help(folder?.path ?? "Choose a folder")
         .accessibilityIdentifier("start.folder")
         .accessibilityValue(folderOpen ? "open" : "closed")
         .overlay(alignment: .topLeading) {
@@ -586,9 +587,7 @@ struct StartForm: View {
                 )
             }
         } trailing: {
-            // Never cut: the left chips share what is left.
             ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }
-                .fixedSize()
             startButton
         }
     }
@@ -855,7 +854,7 @@ private struct ComputerButton: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "desktopcomputer").font(.system(size: 11)).accessibilityHidden(true)
-                Text(chosen.machineName).font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
+                Text(chosen.machineName).font(InputBoxChip.font).lineLimit(1)
                 Circle().fill(Theme.green).frame(width: 6, height: 6).accessibilityHidden(true)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
