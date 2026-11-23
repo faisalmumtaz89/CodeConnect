@@ -1212,6 +1212,13 @@ public final class AppModel {
         }
     }
 
+    /// What run `key`'s reply box shows beside its send button (`ReplyBar`), from what this app holds; nil for a run it
+    /// does not list.
+    public func replyBar(for key: String, now: Date) -> ReplyBar? {
+        guard let summary = summary(for: key) else { return nil }
+        return ReplyBar.of(events: states[key]?.events ?? [], summary: summary, book: accountBook, now: now)
+    }
+
     /// An account's email as this computer's account book knows it, for a switch's rows on run `key`: by its id (nil:
     /// the agent's Default), under the run's agent. Nil while the book is not in, or for an account it no longer lists.
     private func accountEmail(run key: String, id: String?) -> String? {
