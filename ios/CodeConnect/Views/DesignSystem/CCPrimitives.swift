@@ -307,19 +307,17 @@ struct CCProse: View {
     }
 
     private func font(for run: CCInlineCode.Run, at size: CGFloat) -> Font {
-        let design: Font.Design = run.isCode ? .monospaced : style.design
-        let base = Font.system(size: size, weight: style.weight, design: design)
+        let base = (run.isCode ? style.monospaced() : style).font(ofSize: size)
         return run.isCode || style.monospacedDigits ? base.monospacedDigit() : base
     }
 
     /// The same leading `.ccType` computes, measured against the **taller** of
-    /// the two fonts on the line. SF Mono's line box is a shade deeper than SF
-    /// Pro's at the same size, and measuring against the prose font alone would
-    /// let a line containing code grow past the token's line height.
+    /// the two fonts on the line. The code face's line box is not the words',
+    /// and measuring against the prose font alone would let a line containing
+    /// code grow past the token's line height.
     private func leading(at size: CGFloat, target: CGFloat) -> CGFloat {
-        let weight = style.weight.uiKit
-        let prose = UIFont.systemFont(ofSize: size, weight: weight)
-        let code = UIFont.monospacedSystemFont(ofSize: size, weight: weight)
+        let prose = style.uiFont(ofSize: size)
+        let code = style.monospaced().uiFont(ofSize: size)
         let tallest = CCInlineCode.runs(text).contains(where: \.isCode)
             ? max(prose.lineHeight, code.lineHeight)
             : prose.lineHeight

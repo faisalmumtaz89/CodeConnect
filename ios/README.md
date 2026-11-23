@@ -873,8 +873,21 @@ and `monoSmall` 12 both render smaller than the 11pt label above them).
 outer transform, so the environment change is discarded before it is read.
 `THIS PASS`'s `26s` measured two advances **inside one number** — 17.67 then
 19.33 — while `waiting 1m03s` two screens earlier was set in SF Mono. It also
-left the leading wrong, because `.ccType` derives that from `UIFont.systemFont`
-unless the style says monospaced.
+left the leading wrong, because `.ccType` derives that from the style's own face,
+and the dead modifier left the style proportional.
+
+**Words are set in Inter, code in Menlo.** Inter is Inter 4.1's variable file
+(`Resources/Fonts/InterVariable.ttf`, the bytes the Mac ships, OFL text in
+`Resources/Inter-OFL.txt`), registered by `UIAppFonts` and named by its instances
+`InterVariable`, `InterVariable-Medium` and `InterVariable-SemiBold`; Menlo is a
+system face, `Menlo-Regular` and, for a heavier run of code (it has no semibold),
+`Menlo-Bold`. `CCTextStyle.faceName` (`DesignKit.swift`) is the one mapping:
+`.ccType` and `CCProse` set `Font.custom(face, fixedSize:)` at the size their own
+`@ScaledMetric` has already scaled and capped, and measure leading and cap height
+from the same face. The diff grid draws `Menlo-Regular` at its pinch-set size and
+counts its columns in Menlo's advance. `FontFacesTests` holds each face to its
+weight on the device. What iOS draws itself keeps the system face: the system
+menus, switches and the SF Symbols beside text.
 
 **Three 11pt roles, not one token doing seven jobs.** `micro` shipped carrying
 section headers, row statuses, badge labels, card statuses, chips, field labels

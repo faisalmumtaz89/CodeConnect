@@ -389,7 +389,7 @@ struct CCMonoBlock: View {
     private var style: CCTextStyle { isInline ? inlineStyle : (isSmall ? CC.type.monoSmall : CC.type.mono) }
 
     private var uiFont: UIFont {
-        .monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        style.uiFont(ofSize: fontSize)
     }
 
     /// One character's width. A monospaced font has exactly one.

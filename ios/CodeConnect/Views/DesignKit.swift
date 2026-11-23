@@ -26,7 +26,7 @@ private struct CCTypeModifier: ViewModifier {
     }
 
     private func font(at size: CGFloat) -> Font {
-        let base = Font.system(size: size, weight: style.weight, design: style.design)
+        let base = style.font(ofSize: size)
         // Ages tick once a second; proportional digits make the whole row
         // jitter as 9 becomes 10.
         return style.monospacedDigits ? base.monospacedDigit() : base
@@ -40,31 +40,37 @@ private struct CCTypeModifier: ViewModifier {
     }
 }
 
-extension CCTextStyle {
-    /// The UIKit font this style draws at `size`, for its real metrics.
-    func uiFont(ofSize size: CGFloat) -> UIFont {
-        design == .monospaced
-            ? .monospacedSystemFont(ofSize: size, weight: weight.uiKit)
-            : .systemFont(ofSize: size, weight: weight.uiKit)
-    }
+/// The app's two faces: Inter for words (the variable file in the app's
+/// resources, by its named instances) and Menlo for code (a system face).
+enum CCFace {
+    static let code = "Menlo-Regular"
+    static let codeBold = "Menlo-Bold"
 }
 
-extension Font.Weight {
-    /// The UIKit twin, for the places the kit has to ask UIKit for a font's
-    /// real metrics — `.ccType`'s leading, `CCProse`'s, which measures the
-    /// taller of a mixed prose/mono line, and `.ccMark`'s cap height.
-    var uiKit: UIFont.Weight {
-        switch self {
-        case .ultraLight: return .ultraLight
-        case .thin: return .thin
-        case .light: return .light
-        case .medium: return .medium
-        case .semibold: return .semibold
-        case .bold: return .bold
-        case .heavy: return .heavy
-        case .black: return .black
-        default: return .regular
+extension CCTextStyle {
+    /// The face this style is set in. The type uses regular, medium and
+    /// semibold; Menlo has no semibold, so a heavier run of code is its bold.
+    var faceName: String {
+        if design == .monospaced {
+            return weight == .semibold || weight == .bold ? CCFace.codeBold : CCFace.code
         }
+        switch weight {
+        case .medium: return "InterVariable-Medium"
+        case .semibold: return "InterVariable-SemiBold"
+        default: return "InterVariable"
+        }
+    }
+
+    /// The style's face at `size`, already scaled: the caller's `@ScaledMetric`
+    /// has applied Dynamic Type and the style's cap, so the size is fixed here.
+    func font(ofSize size: CGFloat) -> Font {
+        .custom(faceName, fixedSize: size)
+    }
+
+    /// The UIKit font this style draws at `size`, for its real metrics. The
+    /// face is bundled or the system's (`FontFacesTests`).
+    func uiFont(ofSize size: CGFloat) -> UIFont {
+        UIFont(name: faceName, size: size)!
     }
 }
 
