@@ -88,6 +88,7 @@ The daemon, `ccd`, logs every session's events. Claude Code reports to it throug
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the pieces fit together
+- [docs/claude-code.md](docs/claude-code.md): Claude Code sessions and their accounts
 - [docs/codex.md](docs/codex.md): Codex sessions in detail
 - [mac/README.md](mac/README.md): the daemon, pairing, TLS and configuration
 - [ios/README.md](ios/README.md): the app, its honesty rules and design system
