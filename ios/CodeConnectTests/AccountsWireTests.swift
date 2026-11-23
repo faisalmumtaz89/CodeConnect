@@ -405,6 +405,23 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertNil(model.accountSwitch(for: .codex), "another agent's sessions aren't counted")
     }
 
+    /// A failed move is about the session: its line names the session and points to its conversation, never an account.
+    /// The account chosen since (here B, after the daemon's recorded failure) is not the one it failed on.
+    func testAFailedMoveNamesNoAccount() async throws {
+        let (model, _) = try model()
+        let url = try XCTUnwrap(
+            Bundle(for: type(of: self)).url(forResource: "switch-failed-then-recovered-claude-wire", withExtension: "json"))
+        let frames = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).arrayValue)
+        let book = #"{"type": "accounts", "accounts": [{"agent": "claude", "id": "B1", "label": "B", "signed_in": true, "facts": {"email": "b@example.test", "read_at": "2026-11-23T03:00:00Z"}}], "active": [{"agent": "claude", "account_id": "B1"}], "defaults": []}"#
+        model.connection.injectForTesting(try JSONDecoder().decode(ServerMessage.self, from: Data(book.utf8)))
+        model.connection.injectForTesting(
+            try JSONDecoder().decode(ServerMessage.self, from: Data(frames[3].canonicalJSONString.utf8)))
+        await waitUntil({ model.accountSwitch(for: .claude)?.failure != nil }, "the failed listing to be read")
+        XCTAssertEqual(
+            model.accountSwitch(for: .claude)?.failure,
+            "cch2.D8GXVZ8M48 couldn't switch accounts. Its conversation says why.")
+    }
+
     /// A window's caption is its own length, as the service names it: never a guess at "5-hour" or "Week".
     func testAWindowIsCaptionedByItsOwnLength() {
         XCTAssertEqual(AccountSwitchWords.caption(minutes: 300), "5-hour")
