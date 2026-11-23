@@ -128,7 +128,7 @@
       "type": "accounts_refused",
       "request_id": "fx-a6",
       "code": "bad_request",
-      "message": "an account's name is 1 to 64 characters"
+      "message": "An account's name is 1 to 64 characters."
     }
   },
   "activate_codex_default": {

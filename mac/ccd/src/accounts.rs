@@ -232,14 +232,14 @@ pub(crate) fn answer(
             if variable(agent.as_str()).is_none() {
                 return refused(
                     request_id,
-                    format!("{} has no accounts here", agent.as_str()),
+                    "This agent has no accounts on this computer.".into(),
                 );
             }
             let label = label.trim();
             if label.is_empty() || label.chars().count() > LABEL_MAX {
                 return refused(
                     request_id,
-                    format!("an account's name is 1 to {LABEL_MAX} characters"),
+                    format!("An account's name is 1 to {LABEL_MAX} characters."),
                 );
             }
             if let Err(err) = store.add_account(agent.as_str(), label) {
@@ -249,7 +249,7 @@ pub(crate) fn answer(
         ClientMessage::ActivateAccount { agent, .. } if variable(agent.as_str()).is_none() => {
             return refused(
                 request_id,
-                format!("{} has no accounts here", agent.as_str()),
+                "This agent has no accounts on this computer.".into(),
             );
         }
         ClientMessage::ActivateAccount {
@@ -259,7 +259,10 @@ pub(crate) fn answer(
             Ok(false) => {
                 return refused(
                     request_id,
-                    format!("that is not one of {}'s accounts", agent.as_str()),
+                    format!(
+                        "That account isn't one of {}'s accounts on this computer.",
+                        product(agent.as_str())
+                    ),
                 )
             }
             Err(err) => return unavailable(request_id, "choose the account", err),
@@ -778,14 +781,14 @@ pub(crate) async fn sign_in(
         return (
             refused(
                 request_id,
-                "that is not one of this computer's accounts".into(),
+                "That account is no longer on this computer.".into(),
             ),
             None,
         );
     };
     let Some(program) = agents.path(&account.agent) else {
         let missing = format!(
-            "{} isn't installed on this computer",
+            "{} isn't installed on this computer.",
             product(&account.agent)
         );
         return (refused(request_id, missing), None);
@@ -796,14 +799,14 @@ pub(crate) async fn sign_in(
             return (
                 refused(
                     request_id,
-                    "this account's agent has no sign-in here".into(),
+                    "This account's agent can't be signed in from here.".into(),
                 ),
                 None,
             )
         }
         Err(err) => {
             return (
-                unavailable(request_id, "make the account's home", err.into()),
+                unavailable(request_id, "set up the account's folder", err.into()),
                 None,
             )
         }
@@ -958,7 +961,7 @@ pub(crate) async fn remove_with(
     let Some(account) = account else {
         return refused(
             request_id,
-            "that is not one of this computer's accounts".into(),
+            "That account is no longer on this computer.".into(),
         );
     };
     match store.account_in_use(&account.id) {
@@ -976,7 +979,7 @@ pub(crate) async fn remove_with(
     sign_ins.end_for(&account.id).await;
     let Some(program) = agents.path(&account.agent) else {
         let missing = format!(
-            "{} isn't installed on this computer",
+            "{} isn't installed on this computer.",
             product(&account.agent)
         );
         return refused(request_id, missing);
@@ -986,10 +989,10 @@ pub(crate) async fn remove_with(
         Ok(None) => {
             return refused(
                 request_id,
-                "this account's agent has no sign-in here".into(),
+                "This account's agent can't be signed in from here.".into(),
             )
         }
-        Err(err) => return unavailable(request_id, "find the account's home", err.into()),
+        Err(err) => return unavailable(request_id, "find the account's folder", err.into()),
     };
     let mut logout = crate::start_session::agent_command(
         environment,
@@ -1014,7 +1017,7 @@ pub(crate) async fn remove_with(
             request_id,
             "accounts_unavailable",
             format!(
-                "{} could not sign the account out, so nothing was removed",
+                "{} couldn't sign the account out, so nothing was removed. Try removing it again.",
                 product(&account.agent)
             ),
         );
@@ -1055,7 +1058,8 @@ pub(crate) fn unavailable(
     protocol::ws::ServerMessage::AccountsRefused {
         request_id,
         code: "accounts_unavailable".into(),
-        message: format!("could not {what}: {err}"),
+        // What failed, in a whole sentence; the error itself is the log's.
+        message: format!("CodeConnect couldn't {what}. Try again."),
     }
 }
 

@@ -126,7 +126,11 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                 tokio::task::spawn_blocking(move || crate::accounts::answer(&store, message))
                     .await
                     .unwrap_or_else(|err| {
-                        crate::accounts::unavailable(request_id, "answer", anyhow::anyhow!("{err}"))
+                        crate::accounts::unavailable(
+                            request_id,
+                            "answer the request",
+                            anyhow::anyhow!("{err}"),
+                        )
                     });
             reply
         }
