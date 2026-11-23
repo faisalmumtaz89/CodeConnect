@@ -111,6 +111,8 @@ private struct Composer: View {
     /// Whether the slash palette is closed on the draft as it stands (Kit's `SlashPalette.Latch`).
     @State private var slashLatch = SlashPalette.Latch()
     @State private var slashHeight: CGFloat = 0
+    /// The pointer is on the usage figures, and their card shows over the bar.
+    @State private var usageHovered = false
 
     private struct Running: Equatable {
         let command: NativeCommand
@@ -252,7 +254,7 @@ private struct Composer: View {
 
     private var box: some View {
         let agent = summary?.agent.displayName ?? "the agent"
-        return InputBox(barHeight: 46) {
+        return InputBox(barHeight: 46, trailingOpen: usageHovered) {
             TextField(
                 "", text: $kept.reply, selection: $selection,
                 prompt: Text(SessionWords.replyPrompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
@@ -327,6 +329,7 @@ private struct Composer: View {
                     .accessibilityIdentifier("session.composer.count")
             }
         } trailing: {
+            ReplyUsage(model: model, key: key, hovered: $usageHovered)
             sendButton
         }
         .coordinateSpace(.named(Self.space))
