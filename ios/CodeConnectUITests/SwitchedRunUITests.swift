@@ -32,6 +32,15 @@ final class SwitchedRunUITests: XCTestCase {
         app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix))
     }
 
+    /// How many rows draw a phrase: a row read as one and its title carry the same words, so a match inside another
+    /// match is the same row.
+    private func rows(_ app: XCUIApplication, beginningWith prefix: String) -> Int {
+        let frames = texts(app, beginningWith: prefix).allElementsBoundByIndex.map(\.frame)
+        return frames.enumerated().filter { index, frame in
+            !frames.enumerated().contains { other, outer in other != index && outer != frame && outer.contains(frame) }
+        }.count
+    }
+
     private var replyBox: (XCUIApplication) -> Bool {
         { $0.textViews.firstMatch.exists || $0.textFields.firstMatch.exists }
     }
@@ -62,7 +71,7 @@ final class SwitchedRunUITests: XCTestCase {
     private func movedRun(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let switched = texts(app, beginningWith: "Switched to")
         XCTAssertTrue(switched.firstMatch.waitForExistence(timeout: 25), "the Switched to row", file: file, line: line)
-        XCTAssertEqual(switched.count, 1, "one row", file: file, line: line)
+        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 1, "one row", file: file, line: line)
         XCTAssertFalse(texts(app, beginningWith: "Run ended").firstMatch.exists, "no Run ended", file: file, line: line)
         XCTAssertTrue(replyBox(app), "its reply box", file: file, line: line)
         XCTAssertTrue(
@@ -73,9 +82,9 @@ final class SwitchedRunUITests: XCTestCase {
 
     func testAMoveThatCouldNotStartReadsEndedWithOneWarningAndKeepsItsReplyBox() {
         let app = open("switch-failed-then-recovered-claude", step: 4, session: Self.failed)
-        let warning = texts(app, beginningWith: "Couldn")
+        let warning = texts(app, beginningWith: "Couldn’t move to")
         XCTAssertTrue(warning.firstMatch.waitForExistence(timeout: 25), "the warning row")
-        XCTAssertEqual(warning.count, 1, "one warning row")
+        XCTAssertEqual(rows(app, beginningWith: "Couldn’t move to"), 1, "one warning row")
         XCTAssertTrue(replyBox(app), "its reply box: the next message starts it")
         app.navigationBars.buttons.firstMatch.tap()
         let ended = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'ended'")).firstMatch
@@ -86,7 +95,7 @@ final class SwitchedRunUITests: XCTestCase {
         let app = open("relaunch-plan-default-codex", session: Self.planLacksModel)
         let row = texts(app, beginningWith: "Now on")
         XCTAssertTrue(row.firstMatch.waitForExistence(timeout: 25), "the model-changed row")
-        XCTAssertEqual(row.count, 1, "one row")
+        XCTAssertEqual(rows(app, beginningWith: "Now on"), 1, "one row")
         XCTAssertTrue(row.firstMatch.label.contains("isn’t in"), row.firstMatch.label)
         XCTAssertTrue(replyBox(app), "its reply box")
     }
@@ -96,7 +105,7 @@ final class SwitchedRunUITests: XCTestCase {
         XCTAssertTrue(
             app.descendants(matching: .any).matching(identifier: "session-ended-line").firstMatch
                 .waitForExistence(timeout: 25), "the ended line")
-        XCTAssertEqual(texts(app, beginningWith: "Switched to").count, 1, "the move")
+        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 1, "the move")
         XCTAssertTrue(texts(app, beginningWith: "Run ended").firstMatch.exists, "then Run ended")
         XCTAssertFalse(replyBox(app), "no reply box")
     }
