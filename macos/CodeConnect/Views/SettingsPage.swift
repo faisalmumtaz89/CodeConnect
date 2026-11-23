@@ -675,14 +675,17 @@ private struct AccountRow: View {
     /// where its agent says none apply (`limitsAvailable` false), else "Not reported yet".
     @ViewBuilder private var figures: some View {
         if let facts, !facts.windows.isEmpty {
-            TimelineView(.everyMinute) { context in
+            // Redrawn each minute while shown; each countdown is from the time of that drawing, since the schedule's own
+            // date is the minute's start, up to 59 s earlier.
+            TimelineView(.everyMinute) { _ in
+                let now = Date.now
                 HStack(spacing: 0) {
                     ForEach(columns, id: \.self) { minutes in
                         let window = facts.windows.first { $0.windowMinutes == minutes }
                         VStack(alignment: .trailing, spacing: 2) {
                             Text(window.map { "\($0.usedPercent)%" } ?? " ").font(Theme.ui(13)).monospacedDigit()
                                 .foregroundStyle((window?.usedPercent ?? 0) >= 90 ? Theme.amber : Theme.text2)
-                            Text(window.flatMap { AccountSwitchWords.resets($0, now: context.date) } ?? " ")
+                            Text(window.flatMap { AccountSwitchWords.resets($0, now: now) } ?? " ")
                                 .font(Theme.ui(11.5)).monospacedDigit().foregroundStyle(Theme.text3).lineLimit(1)
                         }
                         .frame(width: Self.column, alignment: .trailing)
