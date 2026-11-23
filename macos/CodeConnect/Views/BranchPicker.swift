@@ -264,8 +264,6 @@ struct BranchMenu: View {
     /// A section's heading, a hairline over it after the first.
     private func header(_ text: String, divided: Bool) -> some View {
         MenuHeader(text: text)
-            .padding(.horizontal, 10)
-            .padding(.bottom, 3)
             .frame(maxWidth: .infinity, minHeight: Self.rowHeight, maxHeight: Self.rowHeight, alignment: .bottomLeading)
             .overlay(alignment: .top) {
                 if divided { MenuDivider().padding(.top, 3) }

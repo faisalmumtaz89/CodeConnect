@@ -499,11 +499,16 @@ extension View {
     }
 }
 
-/// A menu card's section heading: 11 pt medium, muted.
+/// A menu card's section heading: 11 pt medium, muted, 8 pt above it, 10 in, 6 below.
 struct MenuHeader: View {
     let text: String
 
-    var body: some View { Text(text).font(Theme.ui(11, .medium)).foregroundStyle(Theme.text3) }
+    var body: some View {
+        Text(text).font(Theme.ui(11, .medium)).foregroundStyle(Color(themeHex: 0x8A8A93))
+            .padding(.top, 8)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 6)
+    }
 }
 
 /// A menu card's divider: a fine white line.

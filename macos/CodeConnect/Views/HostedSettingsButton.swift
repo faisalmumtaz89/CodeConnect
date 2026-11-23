@@ -215,9 +215,6 @@ struct HostedSettingsButton: View {
 
     private func header(_ text: String) -> some View {
         MenuHeader(text: text)
-            .padding(.horizontal, 10)
-            .padding(.top, 5)
-            .padding(.bottom, 3)
     }
 
     private var divider: some View {
