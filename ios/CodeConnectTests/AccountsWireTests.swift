@@ -465,6 +465,27 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertEqual(AccountRowAct.remove.title, "Remove…")
     }
 
+    /// Under each figure, how long until its window resets, from the window's own `resets_at` (account D's 5-hour window
+    /// on the recording): whole days from two days on, hours and minutes under that ("0m" dropped), minutes under an
+    /// hour (at least 1), and nothing once the time has come.
+    func testAWindowSaysWhenItResets() throws {
+        let window = try XCTUnwrap(account("D", in: answerThenPush(15)).facts?.windows.first)
+        XCTAssertEqual(window.resetsAt, 1_795_900_000)
+        func words(_ secondsLeft: Int) -> String? {
+            AccountSwitchWords.resets(window, now: Date(timeIntervalSince1970: TimeInterval(window.resetsAt - secondsLeft)))
+        }
+        XCTAssertEqual(words(59), "resets in 1 min")
+        XCTAssertEqual(words(60), "resets in 1 min")
+        XCTAssertEqual(words(59 * 60), "resets in 59 min")
+        XCTAssertEqual(words(60 * 60), "resets in 1h")
+        XCTAssertEqual(words(2 * 3600 + 10 * 60 + 30), "resets in 2h 10m")
+        XCTAssertEqual(words(47 * 3600 + 59 * 60), "resets in 47h 59m")
+        XCTAssertEqual(words(48 * 3600), "resets in 2 days")
+        XCTAssertEqual(words(3 * 86400 + 23 * 3600), "resets in 3 days")
+        XCTAssertNil(words(0), "at the reset time")
+        XCTAssertNil(words(-60), "past it")
+    }
+
     /// A window's caption is its own length, as the service names it: never a guess at "5-hour" or "Week".
     func testAWindowIsCaptionedByItsOwnLength() {
         XCTAssertEqual(AccountSwitchWords.caption(minutes: 300), "5-hour")
