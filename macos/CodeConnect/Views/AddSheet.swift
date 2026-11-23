@@ -91,8 +91,8 @@ extension EnvironmentValues {
     @Entry var startBox: CGRect = .zero
 }
 
-/// Where a panel of the start form stands across its pane: as wide as `widest` where the pane has the room, 8 pt
-/// clear of each of its sides, and its leading edge at `leading` moved only as far as it must to stay inside.
+/// Where a panel of the start form stands across its box: as wide as `widest` where the box has the room, never past
+/// either of its sides, and its leading edge at `leading` moved only as far as it must to stay inside.
 enum StartPanel {
     /// The least a panel keeps from the pane's top.
     static let margin: CGFloat = 8
