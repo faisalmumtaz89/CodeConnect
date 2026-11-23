@@ -171,12 +171,13 @@ public enum AccountSwitchWords {
     }
 
     /// In amber under the group: the sessions that couldn't switch, named when one; nil with none. No account is
-    /// named: the one a session failed on may since be removed or replaced, and its conversation says which and why.
+    /// named: the one a session failed on may since be removed or replaced, and its conversation says which and what
+    /// to do (the service keeps no raw reason there).
     public static func failure(sessions: [String]) -> String? {
         switch sessions.count {
         case 0: return nil
-        case 1: return "\(sessions[0]) couldn't switch accounts. Its conversation says why."
-        default: return "\(sessions.count) sessions couldn't switch accounts. Their conversations say why."
+        case 1: return "\(sessions[0]) couldn't switch accounts. Its conversation says what to do."
+        default: return "\(sessions.count) sessions couldn't switch accounts. Their conversations say what to do."
         }
     }
 
