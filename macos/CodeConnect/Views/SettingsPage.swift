@@ -597,13 +597,24 @@ private struct AccountRow: View {
                         }
                     }
                     .frame(width: Self.lead, height: 16)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(facts?.email ?? label).font(Theme.ui(13)).foregroundStyle(Theme.text)
-                            .lineLimit(1).truncationMode(.middle)
-                            .accessibilityIdentifier("\(rowID).email")
-                        Text(secondLine).font(Theme.ui(11.5)).foregroundStyle(signedOut ? Theme.amber : Theme.text3)
-                            .lineLimit(1)
-                            .accessibilityIdentifier("\(rowID).line")
+                    // Every row stands two lines tall; one with no second line centres its name on the row, as
+                    // its figures are.
+                    ZStack(alignment: .leading) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(" ").font(Theme.ui(13))
+                            Text(" ").font(Theme.ui(11.5))
+                        }
+                        .hidden()
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(facts?.email ?? label).font(Theme.ui(13)).foregroundStyle(Theme.text)
+                                .lineLimit(1).truncationMode(.middle)
+                                .accessibilityIdentifier("\(rowID).email")
+                            if !secondLine.isEmpty {
+                                Text(secondLine).font(Theme.ui(11.5)).foregroundStyle(signedOut ? Theme.amber : Theme.text3)
+                                    .lineLimit(1)
+                                    .accessibilityIdentifier("\(rowID).line")
+                            }
+                        }
                     }
                     Spacer(minLength: 12)
                     figures
