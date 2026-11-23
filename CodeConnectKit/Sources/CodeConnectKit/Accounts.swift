@@ -192,6 +192,20 @@ public enum AccountSwitchWords {
         }
     }
 
+    /// Beneath a window's figure, how long until it resets: "resets in N days" from two days on (whole days, rounded
+    /// down), "resets in Nh Mm" from an hour ("resets in 5h" on the hour), "resets in N min" under an hour (at least 1);
+    /// nil once the time has come, until the computer reads the window again.
+    public static func resets(_ window: UsageWindow, now: Date) -> String? {
+        let left = window.resetsAt - Int(now.timeIntervalSince1970.rounded(.down))
+        guard left > 0 else { return nil }
+        if left >= 2 * 86400 { return "resets in \(left / 86400) days" }
+        if left >= 3600 {
+            let minutes = left % 3600 / 60
+            return "resets in \(left / 3600)h" + (minutes > 0 ? " \(minutes)m" : "")
+        }
+        return "resets in \(max(1, left / 60)) min"
+    }
+
     /// In a row's figures' place: its agent says the plan has no limits.
     public static let noPlanLimits = "No plan limits"
     /// In a row's figures' place: its agent hasn't said yet.

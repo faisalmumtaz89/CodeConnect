@@ -583,7 +583,9 @@ private struct AccountRow: View {
     @State private var moreFrame: CGRect = .zero
 
     static let lead: CGFloat = 16
-    static let column: CGFloat = 76
+    /// A figure's column: its longest countdown line ("resets in 47h 59m", 99 pt at 11.5 pt) and a 16 pt gap before
+    /// the next, so two long lines side by side never read as one.
+    static let column: CGFloat = 116
     /// The "…"'s slot and its gap, kept on every row so nothing moves.
     static let trailing: CGFloat = 6 + 10 + 30
     /// The "…"'s slot in the row, which its button stands centred over: as wide as the one it replaced, so the figures
@@ -668,16 +670,27 @@ private struct AccountRow: View {
         }
     }
 
-    /// Its share used of each column's window, right-aligned, an empty cell where it names no such window; or, in
-    /// their place, "No plan limits" where its agent says none apply (`limitsAvailable` false), else "Not reported yet".
+    /// Its share used of each column's window, right-aligned, on the name's line, and beneath it, on the plan's, how long
+    /// until that window resets (`AccountSwitchWords.resets`, kept current each minute while the page is shown); an
+    /// empty cell where it names no such window. Or, in their place, "No plan limits" where its agent says none apply
+    /// (`limitsAvailable` false), else "Not reported yet".
     @ViewBuilder private var figures: some View {
         if let facts, !facts.windows.isEmpty {
-            HStack(spacing: 0) {
-                ForEach(columns, id: \.self) { minutes in
-                    let used = facts.windows.first { $0.windowMinutes == minutes }?.usedPercent
-                    Text(used.map { "\($0)%" } ?? "").font(Theme.ui(13)).monospacedDigit()
-                        .foregroundStyle((used ?? 0) >= 90 ? Theme.amber : Theme.text2)
-                        .frame(minWidth: Self.column, alignment: .trailing)
+            // Redrawn each minute while shown; each countdown is from the time of that drawing, since the schedule's own
+            // date is the minute's start, up to 59 s earlier.
+            TimelineView(.everyMinute) { _ in
+                let now = Date.now
+                HStack(spacing: 0) {
+                    ForEach(columns, id: \.self) { minutes in
+                        let window = facts.windows.first { $0.windowMinutes == minutes }
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(window.map { "\($0.usedPercent)%" } ?? " ").font(Theme.ui(13)).monospacedDigit()
+                                .foregroundStyle((window?.usedPercent ?? 0) >= 90 ? Theme.amber : Theme.text2)
+                            Text(window.flatMap { AccountSwitchWords.resets($0, now: now) } ?? " ")
+                                .font(Theme.ui(11.5)).monospacedDigit().foregroundStyle(Theme.text3).lineLimit(1)
+                        }
+                        .frame(width: Self.column, alignment: .trailing)
+                    }
                 }
             }
             .accessibilityIdentifier("\(rowID).usage")
