@@ -157,6 +157,10 @@
     "item_id": "61f8c56d-1709-42a3-8a42-6dda2fa0ef23",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 32474
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.16724119999999998,
       "usage": {
         "cache_creation": {
@@ -357,6 +361,10 @@
     "item_id": "0c89ad96-6f76-41cf-802c-645f523dadeb",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 32778
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.18839219999999995,
       "usage": {
         "cache_creation": {
@@ -525,6 +533,10 @@
     "item_id": "5b3b90f6-6aed-43d3-816e-6f2487d89710",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 33222
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.20865319999999996,
       "usage": {
         "cache_creation": {
@@ -1072,6 +1084,10 @@
     "item_id": "1833719f-bbc6-48b6-8f75-0319cee93089",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 38660
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.33002499999999996,
       "usage": {
         "cache_creation": {
@@ -1255,6 +1271,10 @@
     "item_id": "7a99e6d8-8a3b-4f10-8944-a2102a622d3b",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 39534
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.4868635999999999,
       "usage": {
         "cache_creation": {
@@ -1463,6 +1483,10 @@
     "item_id": "c6b8875e-3f4d-4d1c-9ebd-9cea02c57f55",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 40302
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.5220809999999999,
       "usage": {
         "cache_creation": {
@@ -1617,6 +1641,10 @@
     "item_id": "f26adfab-da22-4a63-9f4e-3460886795b8",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 40361
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.5333651999999999,
       "usage": {
         "cache_creation": {
@@ -1771,6 +1799,10 @@
     "item_id": "b8d9d59c-a40f-48db-8df6-bc0018a927b2",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 40720
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.5467413999999998,
       "usage": {
         "cache_creation": {
@@ -1895,6 +1927,10 @@
     "item_id": "45332944-d5bd-4139-bf0a-d4bebc2bbd33",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 40963
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.5587453999999998,
       "usage": {
         "cache_creation": {
@@ -2012,6 +2048,10 @@
     "item_id": "0ca07c68-75f5-4afe-936a-815aec5df552",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 41119
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.6731905999999999,
       "usage": {
         "cache_creation": {
@@ -2212,6 +2252,10 @@
     "item_id": "591e0875-cb02-4e03-ac60-d98707d8d554",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 34905
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.8638136999999998,
       "usage": {
         "cache_creation": {
@@ -2313,6 +2357,10 @@
     "item_id": "fd6a7d23-ba4a-4efa-8b8b-3ee2cb460e9b",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 35762
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.9355947999999998,
       "usage": {
         "cache_creation": {
@@ -2605,6 +2653,10 @@
     "item_id": "4619615a-1338-425d-a67b-c835e570262b",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 31668
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.0697623,
       "usage": {
         "cache_creation": {
@@ -2729,6 +2781,10 @@
     "item_id": "3bf2045f-f24c-4274-a4b9-a3d3e1cf9966",
     "kind": "usage",
     "payload": {
+      "last": {
+        "totalTokens": 31872
+      },
+      "modelContextWindow": 1000000,
       "total_cost_usd": 0.0743485,
       "usage": {
         "cache_creation": {
