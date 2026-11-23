@@ -35,9 +35,8 @@ struct ReplyUsage: View {
     private func figures(_ bar: ReplyBar) -> some View {
         HStack(spacing: 10) {
             if let context = bar.context {
-                (Text(context.used).foregroundStyle(Theme.text2)
-                    + Text(" / \(context.window)").foregroundStyle(Theme.text3))
-                    .font(Theme.mono(11))
+                let window = Text(" / \(context.window)").foregroundStyle(Theme.text3)
+                Text("\(Text(context.used).foregroundStyle(Theme.text2))\(window)").font(Theme.mono(11))
             }
             if bar.context != nil && !bar.limits.isEmpty {
                 Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 14)
