@@ -879,7 +879,9 @@ and the dead modifier left the style proportional.
 **Words are set in Inter, code in Menlo.** Inter is Inter 4.1's variable file
 (`Resources/Fonts/InterVariable.ttf`, the bytes the Mac ships, OFL text in
 `Resources/Inter-OFL.txt`), registered by `UIAppFonts` and named by its instances
-`InterVariable`, `InterVariable-Medium` and `InterVariable-SemiBold`; Menlo is a
+`InterVariable`, `InterVariable-Medium` and `InterVariable-SemiBold`, with its
+italic file (`InterVariable-Italic.ttf`) beside it so a reply's markdown italic
+and bold italic find a slanted instance instead of being set upright; Menlo is a
 system face, `Menlo-Regular` and, for a heavier run of code (it has no semibold),
 `Menlo-Bold`. `CCTextStyle.faceName` (`DesignKit.swift`) is the one mapping:
 `.ccType` and `CCProse` set `Font.custom(face, fixedSize:)` at the size their own
