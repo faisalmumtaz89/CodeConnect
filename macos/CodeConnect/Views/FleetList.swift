@@ -262,9 +262,10 @@ struct FleetList: View {
             }
         }
         .background(Theme.window)
-        // Leaving the Ended runs leaves the choosing, and so does having nothing left to choose.
+        // Leaving the Ended runs leaves the choosing, and so does no removable run being left at all. A run only
+        // folded away or filtered out is still there: it stays chosen and is picked again once shown.
         .onChange(of: scope) { endSelection() }
-        .onChange(of: selectableKeys(rows).isEmpty) { _, none in if none { endSelection() } }
+        .onChange(of: scope.rows(machines.fleet).contains(where: removable)) { _, any in if !any { endSelection() } }
         #if DEBUG
             .task(id: rows.first?.id) {
                 guard let row = rows.first else { return }
