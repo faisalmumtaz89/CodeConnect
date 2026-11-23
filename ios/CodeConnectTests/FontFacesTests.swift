@@ -1,3 +1,5 @@
+import CoreText
+import SwiftUI
 import UIKit
 import XCTest
 
@@ -40,6 +42,20 @@ final class FontFacesTests: XCTestCase {
     func testTheCodeMeasuresMenlo() {
         XCTAssertEqual(CC.type.mono.uiFont(ofSize: 14).fontName, "Menlo-Regular")
         XCTAssertEqual(CC.type.headline.monospaced().uiFont(ofSize: 17).fontName, "Menlo-Bold")
+    }
+
+    /// A reply's markdown emphasis is drawn by SwiftUI on the prose face: italic and bold italic must find an italic
+    /// instance of Inter, or the emphasis is set upright and lost.
+    @available(iOS 26.0, *)
+    func testProseEmphasisFindsInterItalic() {
+        let prose = CC.type.reading.font(ofSize: 15)
+        let context = EnvironmentValues().fontResolutionContext
+        let italic = prose.italic().resolve(in: context)
+        let boldItalic = prose.bold().italic().resolve(in: context)
+        XCTAssertEqual(CTFontCopyPostScriptName(italic.ctFont) as String, "InterVariableItalic")
+        XCTAssertTrue(CTFontGetSymbolicTraits(italic.ctFont).contains(.traitItalic), "italic slants")
+        XCTAssertEqual(CTFontCopyPostScriptName(boldItalic.ctFont) as String, "InterVariableItalic-Bold")
+        XCTAssertTrue(CTFontGetSymbolicTraits(boldItalic.ctFont).contains(.traitItalic), "bold italic slants")
     }
 
     /// The diff's columns are counted in Menlo's advance.
