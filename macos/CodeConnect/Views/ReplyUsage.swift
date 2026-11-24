@@ -29,6 +29,9 @@ struct ReplyUsage: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(bar.spoken)
                     .accessibilityIdentifier("session.composer.usage")
+                    // As far from Send as the bar's chips stand from each other, label to label: 8 + 2 + 8 pt, of
+                    // which the bar's own spacing gives 6.
+                    .padding(.trailing, 12)
             }
         }
     }
