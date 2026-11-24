@@ -9271,6 +9271,125 @@ mod tests {
         }
     }
 
+    /// **Two sessions on one computer message each other without Tailscale.** With no reading this computer's runs
+    /// are addressed `<run id>@this.computer`; a reply reaches its sender here whichever name its address carries and
+    /// whether Tailscale came up or went down since; an ended run is told apart from Tailscale; a message filed just
+    /// before a stop is delivered by the next sweep. Another computer still needs Tailscale, a known computer's name
+    /// still goes to that computer, and a tagged computer still takes part in no messages.
+    #[tokio::test]
+    async fn sessions_on_one_computer_message_each_other_without_tailscale() {
+        use protocol::ipc::MailState;
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let (a, b) = (protocol::uid::new().unwrap(), protocol::uid::new().unwrap());
+        seed_codex_session(&daemon, &a, "cc-1");
+        daemon.mail_run_live(&a).await;
+        seed_codex_session(&daemon, &b, "cc-2");
+        daemon.mail_run_live(&b).await;
+        let ended = protocol::uid::new().unwrap();
+        seed_codex_session(&daemon, &ended, "cc-3");
+        let read = |run: &str, offer: &str| {
+            daemon
+                .store
+                .offer_mail(run, offer, protocol::time::now_unix_ms())
+                .unwrap()
+                .messages
+        };
+
+        let (you, agents, unreachable) = daemon
+            .list_agents(&a)
+            .await
+            .expect("listed without Tailscale");
+        assert_eq!(you.address, format!("{a}@this.computer"));
+        let listed: Vec<_> = agents.iter().map(|e| e.address.clone()).collect();
+        assert_eq!(listed, [format!("{b}@this.computer")]);
+        assert_eq!(unreachable, ["other computers (Tailscale is unavailable)"]);
+
+        // Sent with no reading, answered with one.
+        let sent = daemon
+            .send_agent_message_on(None, &a, &format!("{b}@this.computer"), "one", None)
+            .await;
+        assert_eq!(sent.state, MailState::Waiting, "{sent:?}");
+        let got = read(&b, "o1");
+        assert_eq!(
+            (got[0].from.as_str(), got[0].text.as_str()),
+            (format!("{a}@this.computer").as_str(), "one")
+        );
+        let reply = daemon
+            .send_agent_message_on(
+                Some(&tailnet),
+                &b,
+                &got[0].from,
+                "two",
+                Some(&got[0].message_id),
+            )
+            .await;
+        assert_eq!(reply.state, MailState::Waiting, "{reply:?}");
+        assert_eq!(read(&a, "o2")[0].text, "two");
+
+        // Sent with a reading, answered with none.
+        let sent = daemon
+            .send_agent_message_on(Some(&tailnet), &a, &format!("{b}@studio"), "three", None)
+            .await;
+        assert_eq!(sent.state, MailState::Waiting, "{sent:?}");
+        let got = read(&b, "o3");
+        assert_eq!(got[0].from, format!("{a}@studio"));
+        let reply = daemon
+            .send_agent_message_on(None, &b, &got[0].from, "four", Some(&got[0].message_id))
+            .await;
+        assert_eq!(reply.state, MailState::Waiting, "{reply:?}");
+        assert_eq!(read(&a, "o4")[0].text, "four");
+
+        // An ended run here is not blamed on Tailscale, with a reading or without.
+        for reading in [None, Some(&tailnet)] {
+            let status = daemon
+                .send_agent_message_on(reading, &a, &format!("{ended}@this.computer"), "x", None)
+                .await;
+            assert!(
+                refusal(status).contains("not a running session"),
+                "{reading:?}"
+            );
+        }
+
+        // Filed just before a stop: the next sweep with no reading delivers it.
+        let filed = crate::store::SentMail {
+            message_id: protocol::uid::new().unwrap(),
+            context_id: protocol::uid::new().unwrap(),
+            in_reply_to: None,
+            session_uid: a.clone(),
+            recipient: format!("{b}@this.computer"),
+            recipient_computer: String::new(),
+            text: "five".into(),
+        };
+        daemon
+            .store
+            .file_sent_mail(&filed, protocol::time::now_unix_ms())
+            .unwrap();
+        daemon.sweep_mail_on(None).await;
+        assert_eq!(
+            read(&b, "o5")
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>(),
+            ["five"]
+        );
+
+        // Must-keeps.
+        let elsewhere = protocol::uid::new().unwrap();
+        let status = daemon
+            .send_agent_message_on(None, &a, &format!("{elsewhere}@laptop"), "x", None)
+            .await;
+        assert!(refusal(status).contains("Tailscale"));
+        let status = daemon
+            .send_agent_message_on(Some(&tailnet), &a, &format!("{b}@linux-box"), "x", None)
+            .await;
+        assert!(
+            refusal(status).contains("linux-box is offline"),
+            "a known computer's name goes to that computer"
+        );
+        assert!(read(&b, "o6").is_empty());
+    }
+
     /// **What an agent's message is told, case by case**, on this computer as the
     /// recorded tailnet names it (`studio`; `desktop` online, `linux-box` offline).
     #[tokio::test]
