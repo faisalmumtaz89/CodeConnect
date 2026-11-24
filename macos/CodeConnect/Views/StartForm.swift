@@ -392,7 +392,8 @@ struct StartForm: View {
                         choose($0)
                         browsing = false
                     },
-                    recent: { browsing = false }
+                    recent: { browsing = false },
+                    listHeight: min(170, listMost), listShown: $listShown
                 )
                 .id(context.id)
             } else if context.starter.projects == nil {
