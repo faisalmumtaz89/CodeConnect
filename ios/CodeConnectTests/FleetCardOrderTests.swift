@@ -282,12 +282,42 @@ final class FleetCardOrderTests: XCTestCase {
         XCTAssertTrue(before.spoken.localizedCaseInsensitiveContains("last known state"), before.spoken)
 
         model.connection.simulateConnectedForTesting()
-        let live = [runJSON(alpha, "alpha", updated: "10:03"), runJSON(bravo, "bravo", updated: "10:02")]
-        let frame = #"{"type":"sessions","sessions":["# + live.joined(separator: ",") + "]}"
-        model.connection.injectForTesting(try JSONDecoder().decode(ServerMessage.self, from: Data(frame.utf8)))
+        try answer(
+            model,
+            [
+                runJSON(alpha, "alpha", updated: "10:03"), runJSON(bravo, "bravo", updated: "10:02"),
+                runJSON(charlie, "charlie", updated: "10:01"),
+            ])
         let after = try await screen(window)
         XCTAssertFalse(after.spoken.localizedCaseInsensitiveContains("last known state"), after.spoken)
+        XCTAssertEqual(after.cards, before.cards, "a project new in the computer's answer waits for the owner")
+        XCTAssertTrue(after.spoken.contains("1 new project"), after.spoken)
         assertNoRunMoved(before.rows, after.rows)
+    }
+
+    /// A list on screen before its only computer has said anything, as on a first pairing, takes the computer's first
+    /// answer whole: its projects in their cards and nothing held back, an ended run among them or not.
+    func testAComputersFirstAnswerFillsAListThatHadNothing() async throws {
+        let (model, window) = try drawn(EventCache(root: temporaryRoot()))
+        let before = try await screen(window)
+        XCTAssertTrue(before.spoken.contains("Nothing has arrived yet"), before.spoken)
+
+        model.connection.simulateConnectedForTesting()
+        try answer(
+            model,
+            [
+                runJSON(alpha, "alpha", updated: "10:03"), runJSON(bravo, "bravo", updated: "10:02"),
+                runJSON(charlie, "charlie", updated: "10:01", ended: true),
+            ])
+        let after = try await screen(window)
+        XCTAssertEqual(Set(after.cards), ["alpha", "bravo"], after.spoken)
+        XCTAssertFalse(after.spoken.contains("new project"), after.spoken)
+    }
+
+    /// The computer's `sessions` answer, as it sends it.
+    private func answer(_ model: AppModel, _ runs: [String]) throws {
+        let frame = #"{"type":"sessions","sessions":["# + runs.joined(separator: ",") + "]}"
+        model.connection.injectForTesting(try JSONDecoder().decode(ServerMessage.self, from: Data(frame.utf8)))
     }
 
     /// The screen as a picture, kept with the test's results. Taken on the
