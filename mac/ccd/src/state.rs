@@ -6118,6 +6118,12 @@ mod tests {
     // ---------------------------------------------------- daemon harness
 
     /// A daemon with a private database and no agent hosts.
+    /// The reason a kept message's sender is told, by the switch of the CodeConnect home these tests run under,
+    /// whatever it is set to; what each answer of the switch gives is `mail.rs`'s and `ipc.rs`'s to prove.
+    fn shown_only() -> Option<&'static str> {
+        (!protocol::ipc::mail_acts(&protocol::root_dir())).then_some(protocol::ipc::MAIL_SHOW_ONLY)
+    }
+
     fn test_daemon() -> Arc<Daemon> {
         daemon_with(Config::default())
     }
@@ -9390,6 +9396,67 @@ mod tests {
         assert!(read(&b, "o6").is_empty());
     }
 
+    /// **The refusals a session is shown speak of sessions and messages**: a pair over its hourly limit, and a store
+    /// that cannot be read, whether for a reply, a read, or another computer saying where a message stands.
+    #[tokio::test]
+    async fn a_pair_over_its_limit_and_an_unreadable_store_are_refused_in_sessions_words() {
+        use protocol::peer::{PeerReply, PeerRequest};
+        let (store, db) = shared_store_on_disk();
+        let daemon = daemon_on(store, Config::default());
+        let tailnet = six_nodes();
+        let (sender, codex) = (protocol::uid::new().unwrap(), protocol::uid::new().unwrap());
+        seed_codex_session(&daemon, &sender, "cc-2");
+        daemon.mail_run_live(&sender).await;
+        seed_codex_session(&daemon, &codex, "cc-1");
+        daemon.mail_run_live(&codex).await;
+        let to = format!("{codex}@studio");
+        let send = |reply_to: Option<&str>| {
+            let (daemon, tailnet, sender, to) = (
+                Arc::clone(&daemon),
+                tailnet.clone(),
+                sender.clone(),
+                to.clone(),
+            );
+            let reply_to = reply_to.map(str::to_string);
+            async move {
+                daemon
+                    .send_agent_message_on(Some(&tailnet), &sender, &to, "hi", reply_to.as_deref())
+                    .await
+            }
+        };
+        for _ in 0..crate::mail::LIMITS.per_pair_per_hour {
+            assert_eq!(send(None).await.state, protocol::ipc::MailState::Waiting);
+        }
+        assert!(refusal(send(None).await)
+            .contains("the most CodeConnect takes from one session for another"));
+
+        rusqlite::Connection::open(db.path())
+            .unwrap()
+            .execute_batch("DROP TABLE mail; DROP TABLE mail_sent;")
+            .unwrap();
+        let reply_to = protocol::uid::new().unwrap();
+        assert_eq!(
+            refusal(send(Some(&reply_to)).await),
+            "CodeConnect could not read its messages"
+        );
+        assert_eq!(
+            daemon.offer_agent_messages(&codex).await.unwrap_err(),
+            "CodeConnect could not read its messages"
+        );
+        let asked = PeerRequest::PeerMailState {
+            message_id: reply_to,
+            state: protocol::ipc::MailState::Read,
+        };
+        assert_eq!(
+            daemon
+                .serve_peer_on(Some(&tailnet), "100.64.0.2".parse().unwrap(), asked)
+                .await,
+            PeerReply::PeerRefused {
+                reason: "the receiving computer could not read its messages".into()
+            }
+        );
+    }
+
     /// **What an agent's message is told, case by case**, on this computer as the
     /// recorded tailnet names it (`studio`; `desktop` online, `linux-box` offline).
     #[tokio::test]
@@ -9604,8 +9671,8 @@ mod tests {
         assert_eq!(question.state, protocol::ipc::MailState::Waiting);
         assert_eq!(
             question.reason.as_deref(),
-            None,
-            "this computer's switch was never set, so its sessions act on messages: no show-only reason"
+            shown_only(),
+            "the sender is told only what this computer's switch says"
         );
         let (offer, batch) = daemon.offer_agent_messages(&answerer).await.unwrap();
         let received = batch.messages[0].clone();
@@ -9736,9 +9803,12 @@ mod tests {
                     )
                     .await
                 ),
-                (protocol::ipc::MailState::Waiting, String::new()),
-                "a retried id is answered with where the first one stands (a switch never set acts, so no \
-                 show-only reason); labels are data"
+                (
+                    protocol::ipc::MailState::Waiting,
+                    shown_only().unwrap_or_default().to_string()
+                ),
+                "a retried id is answered with where the first one stands, and only what this computer's \
+                 switch says; labels are data"
             );
         }
         assert!(

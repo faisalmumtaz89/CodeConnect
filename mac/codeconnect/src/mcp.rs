@@ -909,15 +909,19 @@ mod tests {
         for old in ["list_agents", "send_message", "read_messages", "agents"] {
             assert!(!described.contains(old), "{old}");
         }
-        let old = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}"#;
-        let refused = reply(old, |_: &ClientFrame| {
-            panic!("an old tool name reached the daemon")
-        });
-        assert_eq!(refused["result"]["isError"], true);
-        assert_eq!(
-            refused["result"]["content"][0]["text"],
-            "no such tool: list_agents"
-        );
+        for old in ["list_agents", "send_message", "read_messages"] {
+            let call = format!(
+                r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"{old}","arguments":{{"to":"a@b","text":"hi"}}}}}}"#
+            );
+            let refused = reply(&call, |_: &ClientFrame| {
+                panic!("{old}, an old tool name, reached the daemon")
+            });
+            assert_eq!(refused["result"]["isError"], true, "{old}");
+            assert_eq!(
+                refused["result"]["content"][0]["text"],
+                format!("no such tool: {old}")
+            );
+        }
         let call = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"msg_sessions","arguments":{}}}"#;
         let me = || AgentEntry {
             address: "01K1B3XQ8ZC0DE5FGH7JKMNPQR@studio".into(),
