@@ -893,13 +893,14 @@ public final class AppModel {
         /// The fixture answer to `start_session`. `-CC_START_OUTCOME` names a
         /// failure to end in, `trust` for the folder question (asked once: the answered resend starts), or `pending` to stay starting; otherwise the start
         /// succeeds and the new session arrives as a real one does: listed,
-        /// then its first events.
+        /// then its first events. `instant` answers and lists it at once, before the starting screen appears, as a
+        /// computer that answers faster than the start sheet closes does.
         func answerFixtureStart(_ requestID: String) {
             guard let start = starter.starts[requestID] else { return }
             let wanted = UserDefaults.standard.string(forKey: "CC_START_OUTCOME")
             if wanted == "pending" { return }
             Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(wanted == nil ? 1500 : 600))
+                if wanted != "instant" { try? await Task.sleep(for: .milliseconds(wanted == nil ? 1500 : 600)) }
                 guard let self else { return }
                 if wanted == "trust", start.trust == nil {
                     self.starter.resolve(requestID, .needsTrust(path: start.project.path))
@@ -912,7 +913,7 @@ public final class AppModel {
                 }
                 let uid = "01K1START" + String(requestID.prefix(8)).uppercased()
                 self.starter.resolve(requestID, .started(sessionUID: uid))
-                try? await Task.sleep(for: .milliseconds(400))
+                if wanted != "instant" { try? await Task.sleep(for: .milliseconds(400)) }
                 for message in Fixtures.startedSessionFrames(start, uid: uid, listed: self.summaries) {
                     self.connection.injectForTesting(message)
                 }

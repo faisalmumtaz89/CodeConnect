@@ -47,7 +47,8 @@ struct StartingSessionView: View {
         .onChange(of: needsTrustPath, initial: true) { _, path in
             if let path, let start { onNeedsTrust(start, path) }
         }
-        .onChange(of: liveKey) { _, key in if let key { onLive(key, start?.prompt == nil) } }
+        // `initial`: a computer can answer and list the run before this screen first draws, and that key hands over too.
+        .onChange(of: liveKey, initial: true) { _, key in if let key { onLive(key, start?.prompt == nil) } }
     }
 
     /// The folder's path when the start came back `needsTrust`, else nil.
