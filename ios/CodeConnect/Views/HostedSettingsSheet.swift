@@ -68,7 +68,7 @@ struct HostedSettingsSheet: View {
 
     @ViewBuilder
     private func liveSections(_ live: HostedSettings) -> some View {
-        if Self.usageFirst { usage }
+        usage
         CCSectionHeader("Model")
         card {
             ForEach(Array(live.models.enumerated()), id: \.element.value) { index, entry in
@@ -113,13 +113,9 @@ struct HostedSettingsSheet: View {
                 }
             }
         }
-        if !Self.usageFirst { usage }
     }
 
     // MARK: Usage
-
-    /// Where the Usage section stands: first, above Model, or last, after the last section.
-    private static let usageFirst = true
 
     /// **What the run's usage is, in full** (`ReplyBar`, the Mac's card): the conversation's size against its
     /// model's window, each window of its account with its share and when it resets, the words for an account with
@@ -199,7 +195,7 @@ struct HostedSettingsSheet: View {
 
     @ViewBuilder
     private func readOnly(_ modelFact: RunModelName?) -> some View {
-        if Self.usageFirst { usage }
+        usage
         CCSectionHeader("Model")
         card {
             if let modelFact, !modelFact.text.isEmpty {
@@ -222,7 +218,6 @@ struct HostedSettingsSheet: View {
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
             .fixedSize(horizontal: false, vertical: true)
-        if !Self.usageFirst { usage }
     }
 
     @ViewBuilder
