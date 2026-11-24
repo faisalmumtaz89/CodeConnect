@@ -38,7 +38,7 @@ const argvOf = (log: any[]) => log.find((event) => event.argv)!.argv as string[]
 const stdinOf = (log: any[]) => log.filter((event) => event.stdin).map((event) => event.stdin);
 const noUnexpected = (log: any[]) => expect(log.filter((event) => event.unexpected)).toStrictEqual([]);
 
-test("a trusted folder's options reach claude: no mode when none is named, the SDK's guard for Bypass permissions, the worktree, the mail server, the echo, and the SDK's own setting sources", async () => {
+test("a trusted folder's options reach claude: no mode when none is named, the SDK's guard for Bypass permissions, the worktree, the mail server, its two reading tools allowed, the echo, and the SDK's own setting sources", async () => {
   const { start, stub } = await run(trustedStart);
   const argv = argvOf(stub());
   expect(start.options.permission_mode).toBeUndefined();
@@ -50,10 +50,14 @@ test("a trusted folder's options reach claude: no mode when none is named, the S
   expect(JSON.parse(mcp)).toStrictEqual({ mcpServers: { codeconnect: { type: 'stdio', ...start.options.mail } } });
   expect(argv.filter((arg) => arg.startsWith('--setting-sources') || arg === '--strict-mcp-config')).toStrictEqual([]);
   expect(argv.filter((arg) => arg.startsWith('--resume') || arg.startsWith('--model') || arg.startsWith('--effort'))).toStrictEqual([]);
+  // CodeConnect's two reading tools need no card in a trusted folder (R-3); sending one still asks.
+  expect(argv.filter((arg) => arg.startsWith('--allowedTools'))).toStrictEqual([
+    '--allowedTools=mcp__codeconnect__list_agents,mcp__codeconnect__read_messages',
+  ]);
   noUnexpected(stub());
 }, 10_000);
 
-test("a folder not trusted reads only the person's settings and only CodeConnect's MCP server; resume, model and effort reach claude", async () => {
+test("a folder not trusted reads only the person's settings and only CodeConnect's MCP server, allowing none of its tools; resume, model and effort reach claude", async () => {
   const { start, stub } = await run(untrustedStart);
   const argv = argvOf(stub());
   expect(argv).toContain('--setting-sources=user');
@@ -66,6 +70,8 @@ test("a folder not trusted reads only the person's settings and only CodeConnect
   expect(argv.filter((arg) => arg.startsWith('--permission-mode'))).toHaveLength(1);
   expect(argv).toContain('--allow-dangerously-skip-permissions');
   expect(argv).not.toContain('--worktree');
+  // A folder not trusted keeps every card, CodeConnect's own tools' included.
+  expect(argv.filter((arg) => arg.startsWith('--allowedTools'))).toStrictEqual([]);
 }, 10_000);
 
 test("the initialize request asks for Claude Code's own system prompt, not an empty one", async () => {
