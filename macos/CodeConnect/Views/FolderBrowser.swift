@@ -10,6 +10,9 @@ struct FolderBrowser: View {
     let use: (String) -> Void
     /// Back to the recent folders, with nothing chosen.
     let recent: () -> Void
+    /// The list's one height (`StartForm`'s, as its recent list's), and the height it was drawn at, for the form's room.
+    let listHeight: CGFloat
+    @Binding var listShown: CGFloat
 
     /// The folder shown; nil is the computer's home, until it names it.
     @State private var path: String?
@@ -23,10 +26,15 @@ struct FolderBrowser: View {
     @State private var refusal: String?
     @FocusState private var focused: Bool
 
-    init(context: StartContext, use: @escaping (String) -> Void, recent: @escaping () -> Void) {
+    init(
+        context: StartContext, use: @escaping (String) -> Void, recent: @escaping () -> Void, listHeight: CGFloat,
+        listShown: Binding<CGFloat>
+    ) {
         self.context = context
         self.use = use
         self.recent = recent
+        self.listHeight = listHeight
+        _listShown = listShown
         #if DEBUG
             _path = State(initialValue: RenderWindow.browsed.flatMap { $0 == "~" ? nil : $0 })
             _showsHidden = State(initialValue: RenderWindow.browsesHidden)
@@ -58,8 +66,10 @@ struct FolderBrowser: View {
                 .task(id: selected) { list.scrollTo(selected) }
             }
             // One height whatever the folder holds, so the panel stays still while you browse: 170 pt, giving way first
-            // in a short window. A short folder's rows sit at its top.
-            .frame(minHeight: 44, idealHeight: 170, maxHeight: 170)
+            // in a short window. A short folder's rows sit at its top. An exact height: the panel is offered only its
+            // chip's height, and a range would collapse the list to its least.
+            .frame(height: listHeight)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listShown = $0 }
             .focusable()
             .focusEffectDisabled()
             .focused($focused)

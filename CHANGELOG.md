@@ -7,6 +7,7 @@ User-facing changes, newest first. Mac releases are cut per
 
 - On the Mac, /diff in a Claude Code session's reply box opens the session's Changes tab, as it does on the iPhone.
 - On the Mac, ⌫ in the folder browser goes up a level, as ← does.
+- On the Mac, the folder browser shows its folders: the list was drawn about one row high.
 - On the iPhone, a session you start opens even when its computer answers before the starting screen has appeared;
   before, the phone could stay on "Starting…" while its list already showed the session.
 - On the Mac and Linux, a Codex session is woken for its CodeConnect mail only between its turns, so a turn that
