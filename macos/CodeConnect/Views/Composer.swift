@@ -153,9 +153,10 @@ private struct Composer: View {
             if let line { note(line) }
             box
         }
-        // Docked under the conversation, 20 pt in from the pane's sides and its foot.
+        // Docked under the conversation, 20 pt in from the pane's sides and its foot; 16 pt under the conversation's last
+        // line at its end (its row's 7 pt inset and the column's 1 pt end, then these 8).
         .padding(.horizontal, 20)
-        .padding(.top, 4)
+        .padding(.top, 8)
         .padding(.bottom, 20)
         .onChange(of: kept.reply) { old, new in
             // If the draft has moved off the words it held — the same normalisation the send's mutation key uses, so a
