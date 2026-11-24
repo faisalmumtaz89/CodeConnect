@@ -57,8 +57,8 @@ pub fn request_at(
 }
 
 /// One connection to the daemon, for an exchange of more than one frame: the
-/// `codeconnect` tool's `read_messages` confirms on the same connection that the
-/// agent was given what it read.
+/// `codeconnect` tool's `msg_read` confirms on the same connection that the
+/// session was given what it read.
 /// **ccd took a frame and no reply came back**: it closed, or stopped answering,
 /// after the frame was written to it, so what the frame asked may have been done.
 #[derive(Debug)]

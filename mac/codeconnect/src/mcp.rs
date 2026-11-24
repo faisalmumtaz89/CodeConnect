@@ -9,9 +9,9 @@
 //! read from `CODECONNECT_HOME`, because Codex starts its MCP servers with an
 //! environment of its own.
 //!
-//! It offers three tools, `list_agents`, `send_message` and `read_messages`, and
+//! It offers three tools, `msg_sessions`, `msg_send` and `msg_read`, and
 //! each call is one round trip to the daemon. Everything the agent is told comes
-//! from the daemon's answer; this process decides nothing. `read_messages` says
+//! from the daemon's answer; this process decides nothing. `msg_read` says
 //! one thing more on the same connection: that its answer was written to the
 //! agent, which is what makes the messages read.
 
@@ -83,7 +83,7 @@ fn parse(args: &[String], launcher: Option<String>) -> Result<(String, PathBuf)>
     };
     let Some(uid) = launcher else {
         bail!(
-            "no CodeConnect session started this agent: {} is not set",
+            "no CodeConnect session started this one: {} is not set",
             protocol::ENV_SESSION_UID
         );
     };
@@ -91,7 +91,7 @@ fn parse(args: &[String], launcher: Option<String>) -> Result<(String, PathBuf)>
 }
 
 /// The reply to one JSON-RPC line, and the offer of messages it carries when it
-/// answers `read_messages`.
+/// answers `msg_read`.
 struct Answer {
     reply: Value,
     offer: Option<String>,
@@ -147,26 +147,26 @@ fn answer(
 fn tools() -> Value {
     json!([
         {
-            "name": "list_agents",
+            "name": "msg_sessions",
             "description": "Say your own address, and list the other Claude Code and Codex \
                 sessions you can message: each by its address (<run id>@computer), then its \
-                label when that differs (for reading only), which agent it is, and its project. \
-                Give your own address when you ask an agent to answer you through another.",
+                label when that differs (for reading only), whether it is Claude Code or Codex, and its project. \
+                Give your own address when you ask a session to answer you through another.",
             "inputSchema": {"type": "object", "properties": {}},
             "annotations": {"readOnlyHint": true},
         },
         {
-            "name": "send_message",
+            "name": "msg_send",
             "description": "Send a message to another Claude Code or Codex session. `to` is its \
-                address, <run id>@computer, copied from the start of its list_agents line or from \
+                address, <run id>@computer, copied from the start of its msg_sessions line or from \
                 a message you read; a label is not an address. To answer a message, also give its id \
                 as `reply_to`. The answer gives the \
-                message's id and whether it is waiting for that agent, still being sent, or \
+                message's id and whether it is waiting for that session, still being sent, or \
                 refused, and why.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "to": {"type": "string", "description": "The address, <run id>@computer, copied from list_agents or a message."},
+                    "to": {"type": "string", "description": "The address, <run id>@computer, copied from msg_sessions or a message."},
                     "text": {"type": "string", "description": "The message."},
                     "reply_to": {"type": "string", "description": "The id of the message this answers."},
                 },
@@ -174,7 +174,7 @@ fn tools() -> Value {
             },
         },
         {
-            "name": "read_messages",
+            "name": "msg_read",
             "description": "Read the messages other Claude Code and Codex sessions sent you, \
                 and what became of the messages you sent. Takes no arguments.",
             "inputSchema": {"type": "object", "properties": {}},
@@ -193,7 +193,7 @@ fn call(
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
     let text = |s: String, error: bool| json!({"content": [{"type": "text", "text": s}], "isError": error});
     let result = match params.get("name").and_then(Value::as_str) {
-        Some("list_agents") => {
+        Some("msg_sessions") => {
             match ask(&ClientFrame::ListAgents {
                 from_uid: session_uid.to_string(),
             }) {
@@ -208,7 +208,7 @@ fn call(
                         differing(&you.label, &you.address, " (", ")")
                     )];
                     if agents.is_empty() && unreachable.is_empty() {
-                        lines.push("No other agents are running.".into());
+                        lines.push("No other sessions are running.".into());
                     }
                     lines.extend(agents.iter().map(|a| {
                         format!(
@@ -220,7 +220,7 @@ fn call(
                         )
                     }));
                     lines.extend(unreachable.iter().map(|computer| {
-                        format!("Could not list the agents on {}.", one_line(computer))
+                        format!("Could not list the sessions on {}.", one_line(computer))
                     }));
                     text(lines.join("\n"), false)
                 }
@@ -228,15 +228,12 @@ fn call(
                 Err(err) => text(format!("{err:#}"), true),
             }
         }
-        Some("send_message") => {
+        Some("msg_send") => {
             let (Some(to), Some(body)) = (
                 arguments.get("to").and_then(Value::as_str),
                 arguments.get("text").and_then(Value::as_str),
             ) else {
-                return (
-                    text("send_message needs `to` and `text`.".into(), true),
-                    None,
-                );
+                return (text("msg_send needs `to` and `text`.".into(), true), None);
             };
             match ask(&ClientFrame::SendAgentMessage {
                 from_uid: session_uid.to_string(),
@@ -254,7 +251,7 @@ fn call(
                 Err(err) if err.is::<crate::daemon::NoAnswer>() => text(
                     format!(
                         "{err:#}, so the message may have been delivered. Before sending it \
-                         again, call read_messages: it says where the message stands once \
+                         again, call msg_read: it says where the message stands once \
                          that changes."
                     ),
                     true,
@@ -262,7 +259,7 @@ fn call(
                 Err(err) => text(format!("{err:#}"), true),
             }
         }
-        Some("read_messages") => {
+        Some("msg_read") => {
             match ask(&ClientFrame::ReadAgentMessages {
                 from_uid: session_uid.to_string(),
             }) {
@@ -286,18 +283,18 @@ fn call(
     (result, None)
 }
 
-/// What `send_message` tells the agent.
+/// What `msg_send` tells the agent.
 fn status_sentence(status: &MailStatus, to: &str) -> String {
     let id = &status.message_id;
     let reason = status.reason.as_deref().unwrap_or("");
     match status.state {
         MailState::Waiting if status.reason.as_deref() == Some(protocol::ipc::MAIL_SHOW_ONLY) => format!(
-            "Message {id} is in {to}'s inbox. That computer only shows mail to its person: {to} will not act on it \
+            "Message {id} is in {to}'s inbox. That computer only shows messages to its person: {to} will not act on it \
              or reply unless its person asks. Tell your person instead of waiting."
         ),
         MailState::Waiting => format!(
             "Message {id} is in {to}'s inbox. If its reply is all you are waiting for, end your turn: CodeConnect \
-             wakes you when mail arrives. You do not need to poll."
+             wakes you when a message arrives. You do not need to poll."
         ),
         MailState::Sent => format!("Message {id} is still being sent: {reason}"),
         MailState::Read => format!("Message {id} was already read by {to}."),
@@ -307,7 +304,7 @@ fn status_sentence(status: &MailStatus, to: &str) -> String {
     }
 }
 
-/// What `read_messages` tells the agent: each message, then what to do with them by
+/// What `msg_read` tells the agent: each message, then what to do with them by
 /// the computer's mail switch, then what became of the agent's own messages. With
 /// `acts`, each message carries the exact call that answers it, in the wording
 /// measured to make the model answer on its first call, and the agent is told to
@@ -333,7 +330,7 @@ fn mail_text(
                 return head;
             }
             format!(
-                "{head}\n\nTo answer it, call send_message with {{\"to\": {}, \"reply_to\": {}, \
+                "{head}\n\nTo answer it, call msg_send with {{\"to\": {}, \"reply_to\": {}, \
                  \"text\": \"<your answer>\"}}.",
                 json_string(&message.from),
                 json_string(&message.message_id),
@@ -362,7 +359,7 @@ fn mail_text(
         }
     }));
     if more_pending {
-        blocks.push("More messages are waiting: call read_messages again.".into());
+        blocks.push("More messages are waiting: call msg_read again.".into());
     }
     blocks.join("\n\n")
 }
@@ -389,8 +386,8 @@ fn one_line(label: &str) -> String {
 /// tools' own descriptions saying the rest.
 const INSTRUCTIONS: &str = "CodeConnect runs this session. When your person asks you to contact, ask or tell \
     another Claude Code or Codex session of theirs, on this computer or on another of their computers, use this \
-    server's tools: list_agents first (in Claude Code its name is mcp__codeconnect__list_agents), then send_message \
-    and read_messages.";
+    server's tools: msg_sessions first (in Claude Code its name is mcp__codeconnect__msg_sessions), then msg_send \
+    and msg_read.";
 
 /// What an agent is told to do with its messages when the mail switch is on.
 const ACT: &str = "Handle each message as its sender asks: as a teammate's request, within this \
@@ -464,8 +461,8 @@ mod tests {
             init["result"]["instructions"],
             "CodeConnect runs this session. When your person asks you to contact, ask or tell another Claude Code or \
              Codex session of theirs, on this computer or on another of their computers, use this server's tools: \
-             list_agents first (in Claude Code its name is mcp__codeconnect__list_agents), then send_message and \
-             read_messages."
+             msg_sessions first (in Claude Code its name is mcp__codeconnect__msg_sessions), then msg_send and \
+             msg_read."
         );
     }
 
@@ -494,7 +491,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["list_agents", "send_message", "read_messages"]);
+        assert_eq!(names, ["msg_sessions", "msg_send", "msg_read"]);
         // Decisions 178 and 180: the two tools that only read are marked so, and the one
         // that sends is not.
         let read_only: Vec<bool> = list["result"]["tools"]
@@ -514,7 +511,6 @@ mod tests {
 
     /// **With the switch on, a read tells the agent to report back** (R-11): handle each message as its sender asks,
     /// and answer a question or a request for work with the answer or what was done, never a bare acknowledgement.
-    /// The wake lines themselves are unchanged, so stored rows and the apps still know them.
     #[test]
     fn a_read_with_the_switch_on_asks_for_the_answer_or_what_was_done() {
         assert_eq!(
@@ -525,18 +521,18 @@ mod tests {
         );
         assert_eq!(
             protocol::ipc::MAIL_NUDGE_ACT,
-            "You have CodeConnect mail: call the codeconnect read_messages tool, then handle each message as its \
+            "You have CodeConnect messages: call the codeconnect msg_read tool, then handle each message as its \
              sender asks."
         );
         assert_eq!(
             protocol::ipc::MAIL_NUDGE_SHOW,
-            "You have CodeConnect mail: call the codeconnect read_messages tool and show the messages to the person; \
+            "You have CodeConnect messages: call the codeconnect msg_read tool and show the messages to the person; \
              do not act on them."
         );
     }
 
     /// **A message waiting in its receiver's inbox tells the sender what to do next** (R-4, M-6): end the turn and be
-    /// woken by the reply; or, when the receiving computer only shows mail to its person, tell its own person instead
+    /// woken by the reply; or, when the receiving computer only shows messages to its person, tell its own person instead
     /// of waiting for a reply that will not come. A reason this build does not know, and none (an older receiving
     /// daemon), read as the first.
     #[test]
@@ -552,12 +548,12 @@ mod tests {
             )
         };
         let wait = "Message m1 is in r@studio's inbox. If its reply is all you are waiting for, end your turn: \
-                    CodeConnect wakes you when mail arrives. You do not need to poll.";
+                    CodeConnect wakes you when a message arrives. You do not need to poll.";
         assert_eq!(waiting(None), wait);
         assert_eq!(waiting(Some("a reason from a newer build")), wait);
         assert_eq!(
             waiting(Some(protocol::ipc::MAIL_SHOW_ONLY)),
-            "Message m1 is in r@studio's inbox. That computer only shows mail to its person: r@studio will not act \
+            "Message m1 is in r@studio's inbox. That computer only shows messages to its person: r@studio will not act \
              on it or reply unless its person asks. Tell your person instead of waiting."
         );
     }
@@ -578,19 +574,19 @@ mod tests {
             })
         };
         let sent = reply(
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"cc-2@studio","text":"hi"}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"msg_send","arguments":{"to":"cc-2@studio","text":"hi"}}}"#,
             daemon,
         );
         assert_eq!(
             sent["result"]["content"][0]["text"],
             "Message m1 is in cc-2@studio's inbox. If its reply is all you are waiting for, end your turn: \
-             CodeConnect wakes you when mail arrives. You do not need to poll."
+             CodeConnect wakes you when a message arrives. You do not need to poll."
         );
         assert_eq!(sent["result"]["isError"], false);
         // A `from` the agent passes is not a parameter: the sender is the run this
         // server was started for, whatever the call says.
         reply(
-            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"cc-2@studio","text":"yes","reply_to":"m0","from":"cc-9@other"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"msg_send","arguments":{"to":"cc-2@studio","text":"yes","reply_to":"m0","from":"cc-9@other"}}}"#,
             daemon,
         );
         assert_eq!(
@@ -603,7 +599,7 @@ mod tests {
             ]
         );
         let missing = reply(
-            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"cc-2@studio"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"msg_send","arguments":{"to":"cc-2@studio"}}}"#,
             daemon,
         );
         assert_eq!(missing["result"]["isError"], true);
@@ -615,7 +611,7 @@ mod tests {
     /// could not be reached took nothing, and is not told so.
     #[test]
     fn a_send_cut_off_after_it_reached_the_daemon_may_have_been_delivered() {
-        let send = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"cc-2@studio","text":"hi"}}}"#;
+        let send = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"msg_send","arguments":{"to":"cc-2@studio","text":"hi"}}}"#;
         let socket = std::env::temp_dir().join(format!(
             "cc-mcp-cut-{}-{}.sock",
             std::process::id(),
@@ -635,6 +631,9 @@ mod tests {
             crate::daemon::DaemonLink::connect(&socket, Duration::from_secs(5))?.request(frame)
         };
         let cut = reply(send, link);
+        // Should the send never reach the stand-in daemon (a red), connect once ourselves so its accept() returns and
+        // the test fails on the assertion below instead of waiting for a connection that never comes.
+        let _ = std::os::unix::net::UnixStream::connect(&socket);
         assert!(daemon.join().unwrap().contains("send_agent_message"));
         let said = cut["result"]["content"][0]["text"].as_str().unwrap();
         assert!(said.contains("may have been delivered"), "{said}");
@@ -670,7 +669,7 @@ mod tests {
                 unreachable: Vec::new(),
             })
         };
-        let call = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}"#;
+        let call = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"msg_sessions","arguments":{}}}"#;
         assert_eq!(
             reply(call, daemon)["result"]["content"][0]["text"],
             "You are 01K1B3XQ8ZC0DE5FGH7JKMNPQR@studio (cc-1@studio).\n\
@@ -697,14 +696,14 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(said.contains("desktop (no answer in 3 s)"), "{said}");
-        assert!(!said.contains("No other agents are running"), "{said}");
+        assert!(!said.contains("No other sessions are running"), "{said}");
     }
 
-    /// **What `read_messages` tells the agent**: each message in the measured
+    /// **What `msg_read` tells the agent**: each message in the measured
     /// wording, with the exact call that answers it, then what became of the
     /// agent's own messages; and the offer it carries back for the confirmation.
     /// **M-4: a label is printed only where it differs from its address.** Every run CodeConnect starts is named by
-    /// its own run id, so its label (`<session id>@computer`) is its address, and `list_agents` printed each twice
+    /// its own run id, so its label (`<session id>@computer`) is its address, and `msg_sessions` printed each twice
     /// ("You are X@alpha (X@alpha)."). A peer on another version may still send a label of its own: that one is
     /// printed, once, after the address, in the "You are" line, each agent's line and each message's header. Neither
     /// description promises a `cc-N` form.
@@ -720,7 +719,7 @@ mod tests {
         let them = "01M85B0TB2J5HT9VVFNAP6PW35@beta";
         let old = "01M85B0TB2J5HT9VVFNAP6PW36@studio";
         let list = |you: AgentEntry, agents: Vec<AgentEntry>| {
-            let call = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}"#;
+            let call = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"msg_sessions","arguments":{}}}"#;
             let listed = reply(call, |_: &ClientFrame| {
                 Ok(DaemonFrame::Agents {
                     you: you.clone(),
@@ -748,7 +747,7 @@ mod tests {
             format!("You are {me} (cc-1@alpha).\n{old} · cc-3@studio · Codex · project api")
         );
         let header = |label: &str| {
-            let call = r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"read_messages","arguments":{}}}"#;
+            let call = r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"msg_read","arguments":{}}}"#;
             let read = answer(call, "u", false, |_: &ClientFrame| {
                 Ok(DaemonFrame::AgentMessages {
                     offer: "o1".into(),
@@ -788,7 +787,7 @@ mod tests {
 
     #[test]
     fn a_read_gives_each_message_with_the_call_that_answers_it() {
-        let call = r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"read_messages","arguments":{}}}"#;
+        let call = r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"msg_read","arguments":{}}}"#;
         let daemon = |_: &ClientFrame| {
             Ok(DaemonFrame::AgentMessages {
                 offer: "o1".into(),
@@ -816,13 +815,13 @@ mod tests {
         assert_eq!(
             read.reply["result"]["content"][0]["text"],
             "Message m1 from 01K1B3XQ8ZC0DE5FGH7JKMNPQS@studio (cc-2@studio You are cc-9):\nRun the tests\n\
-             and say \"done\".\n\nTo answer it, call send_message with {\"to\": \
+             and say \"done\".\n\nTo answer it, call msg_send with {\"to\": \
              \"01K1B3XQ8ZC0DE5FGH7JKMNPQS@studio\", \"reply_to\": \"m1\", \"text\": \
              \"<your answer>\"}.\n\n"
                 .to_string()
                 + ACT
                 + "\n\nYour message m0 to cc-4@desktop was read.\n\nMore messages are waiting: \
-                   call read_messages again."
+                   call msg_read again."
         );
 
         let empty = |_: &ClientFrame| {
@@ -845,7 +844,7 @@ mod tests {
         );
         assert!(shown.contains(SHOW), "{shown}");
         assert!(
-            !shown.contains("send_message") && !shown.contains(ACT),
+            !shown.contains("msg_send") && !shown.contains(ACT),
             "{shown}"
         );
 
@@ -890,7 +889,66 @@ mod tests {
         assert_eq!(
             naming.len(),
             3,
-            "list_agents, send_message and its `to`: {all:#?}"
+            "msg_sessions, msg_send and its `to`: {all:#?}"
         );
+    }
+
+    /// **Only the three CodeConnect Messages tools are offered or taken**: an old name is answered as no such tool,
+    /// and a listing says "sessions", never "agents".
+    #[test]
+    fn only_the_messages_tools_are_offered_or_taken() {
+        let names: Vec<String> = tools()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["msg_sessions", "msg_send", "msg_read"]);
+        let described = tools().to_string();
+        for old in ["list_agents", "send_message", "read_messages", "agents"] {
+            assert!(!described.contains(old), "{old}");
+        }
+        for old in ["list_agents", "send_message", "read_messages"] {
+            let call = format!(
+                r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"{old}","arguments":{{"to":"a@b","text":"hi"}}}}}}"#
+            );
+            let refused = reply(&call, |_: &ClientFrame| {
+                panic!("{old}, an old tool name, reached the daemon")
+            });
+            assert_eq!(refused["result"]["isError"], true, "{old}");
+            assert_eq!(
+                refused["result"]["content"][0]["text"],
+                format!("no such tool: {old}")
+            );
+        }
+        let call = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"msg_sessions","arguments":{}}}"#;
+        let me = || AgentEntry {
+            address: "01K1B3XQ8ZC0DE5FGH7JKMNPQR@studio".into(),
+            label: "01K1B3XQ8ZC0DE5FGH7JKMNPQR@studio".into(),
+            agent: "Claude".into(),
+            project: "api".into(),
+        };
+        let alone = reply(call, |_: &ClientFrame| {
+            Ok(DaemonFrame::Agents {
+                you: me(),
+                agents: Vec::new(),
+                unreachable: Vec::new(),
+            })
+        });
+        assert!(alone["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("No other sessions are running."));
+        let apart = reply(call, |_: &ClientFrame| {
+            Ok(DaemonFrame::Agents {
+                you: me(),
+                agents: Vec::new(),
+                unreachable: vec!["desktop (offline)".into()],
+            })
+        });
+        assert!(apart["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("Could not list the sessions on desktop (offline)."));
     }
 }

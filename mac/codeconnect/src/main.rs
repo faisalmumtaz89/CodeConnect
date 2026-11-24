@@ -56,7 +56,8 @@ fn main() -> Result<()> {
     }
 
     match command {
-        "mail-trust" => mail_trust::command(rest),
+        // `mail-trust` is the verb's name before CodeConnect Messages, still taken and no longer in the help.
+        "msg-act" | "mail-trust" => mail_trust::command(rest),
         "sessions" => sessions::command(rest),
         "token" => token(rest),
         "pair" => pair::pair(rest),
@@ -120,7 +121,7 @@ codeconnect — host coding agents your iPhone can see and answer
   codeconnect sessions            list every session the daemon knows, live or ended
   codeconnect sessions prune      remove ended sessions and their history (--dry-run first)
 
-  codeconnect mail-trust on|off    let your agents act on each other's messages, or not
+  codeconnect msg-act on|off      let your sessions act on each other's CodeConnect messages, or not
 
   codeconnect update              install the latest release (the daemon restarts)
   codeconnect --version           print the installed version
@@ -440,6 +441,17 @@ mod tests {
                 "`codeconnect {command} {words:?}` must reach the explanation"
             );
         }
+    }
+
+    /// **The help names CodeConnect Messages' verb**, `msg-act`, and not the one before it, which is still taken.
+    #[test]
+    fn the_help_names_msg_act_and_not_mail_trust() {
+        assert!(
+            usage_text().contains("codeconnect msg-act on|off"),
+            "{}",
+            usage_text()
+        );
+        assert!(!usage_text().contains("mail-trust"), "{}", usage_text());
     }
 
     /// The diversion is surgical: every command that still exists runs.

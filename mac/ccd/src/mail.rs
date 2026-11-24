@@ -1,11 +1,11 @@
-//! **CodeConnect Mail: messages between hosted agents.**
+//! **CodeConnect Messages: messages between hosted sessions.**
 //!
-//! An agent names another by its address, `<run uid>@<computer>`: the run of the
+//! A session names another by its address, `<run uid>@<computer>`: the run of the
 //! session it means and no other, and the computer that runs it, by its Tailscale
 //! name ([`protocol::tailnet`]), or `this.computer` while Tailscale gives no reading. A
 //! run this computer knows is delivered here whatever name its address carries, unless
 //! that name is another computer Tailscale knows. It sends with the `codeconnect` tool's
-//! `send_message` and reads its own with `read_messages`. A session's
+//! `msg_send` and reads its own with `msg_read`. A session's
 //! `cc-N@<computer>` is its label, for reading only: another run, later, can carry
 //! the same one. Only a run CodeConnect started is listed and sent to, from the moment
 //! it goes live ([`Daemon::mail_run_live`]); any other is neither listed nor sent to.
@@ -17,12 +17,12 @@
 //!
 //! **Where a message stands** ([`MailState`]): `sent` once the sender's daemon has
 //! it, `waiting` once the receiver's keeps it, `read` once the receiving session's
-//! own `read_messages` answer reached it, and otherwise `refused`, `expired` or
-//! `ended`. A sender reads the changes in its next `read_messages`, each once.
+//! own `msg_read` answer reached it, and otherwise `refused`, `expired` or
+//! `ended`. A sender reads the changes in its next `msg_read`, each once.
 //!
 //! **Waking the agent.** The daemon never hands an agent a message: it wakes the
 //! agent with one fixed line ([`nudge`]), which carries nothing of any message,
-//! and the agent calls `read_messages`. Claude is woken through its agent host's
+//! and the session calls `msg_read`. Claude is woken through its agent host's
 //! link ([`crate::claude_host::wake`]); Codex through its own queue
 //! ([`crate::codex_wake`]); each only between its turns, so a turn that reads its mail
 //! itself is followed by no wake. The wake rule ([`Daemon::wake_if_due`])
@@ -81,7 +81,7 @@ const PEER_CONNECT_WAIT: Duration = Duration::from_secs(3);
 /// How long another computer's daemon gets to say what became of a message.
 const PEER_MESSAGE_WAIT: Duration = Duration::from_secs(20);
 
-/// How long another computer gets to list its agents before `list_agents` goes on
+/// How long another computer gets to list its sessions before `msg_sessions` goes on
 /// without it.
 const PEER_LIST_WAIT: Duration = Duration::from_secs(3);
 
@@ -136,7 +136,7 @@ impl Daemon {
             .filter(|(run, c)| protocol::uid::is_well_formed(run) && !c.is_empty())
         else {
             return refuse(
-                "address an agent by its address, <run id>@computer, as list_agents or a \
+                "address a session by its address, <run id>@computer, as msg_sessions or a \
                  message you read gives it",
             );
         };
@@ -179,7 +179,7 @@ impl Daemon {
                     crate::log_error!(
                         "agent message from {from_uid}: reply lookup failed: {err:#}"
                     );
-                    return refuse("CodeConnect could not read its mail");
+                    return refuse("CodeConnect could not read its messages");
                 }
             },
         };
@@ -300,7 +300,7 @@ impl Daemon {
             ));
         };
         let label = display(&target.session_id);
-        // As `list_agents` leaves the asker out.
+        // As `msg_sessions` leaves the asker out.
         if from.computer.is_empty() && target.session_uid == from.uid {
             return refuse("that is this session's own address".into());
         }
@@ -334,7 +334,7 @@ impl Daemon {
             Ok(MailTaken::Known(state)) => (state, None),
             Ok(MailTaken::RateLimited) => refuse(format!(
                 "rate limit: {} has left {label} {} messages in the last hour, the most \
-                 CodeConnect takes from one agent for another; send again later",
+                 CodeConnect takes from one session for another; send again later",
                 display(&from.label),
                 LIMITS.per_pair_per_hour
             )),
@@ -393,7 +393,7 @@ impl Daemon {
             Err(Dial::Older) => (
                 MailState::Refused,
                 Some(format!(
-                    "{peer} runs an older CodeConnect, which takes no messages from agents"
+                    "{peer} runs an older CodeConnect, which takes no messages from other sessions"
                 )),
             ),
             Err(Dial::Unreachable(why)) | Err(Dial::NoAnswer(why)) => not_yet(why),
@@ -409,7 +409,7 @@ impl Daemon {
     ) -> Result<(String, MailOffer), String> {
         let offer = protocol::uid::new().map_err(|err| {
             crate::log_error!("read_messages for {from_uid}: no offer id: {err:#}");
-            "CodeConnect could not read its mail".to_string()
+            "CodeConnect could not read its messages".to_string()
         })?;
         let batch = self
             .db
@@ -421,7 +421,7 @@ impl Daemon {
             .await
             .map_err(|err| {
                 crate::log_error!("read_messages for {from_uid}: {err:#}");
-                "CodeConnect could not read its mail".to_string()
+                "CodeConnect could not read its messages".to_string()
             })?;
         Ok((offer, batch))
     }
@@ -627,7 +627,7 @@ impl Daemon {
                 match self.db.sent_mail_computer(message_id.clone()).await {
                     Ok(Some(went_to)) if went_to == computer => {}
                     Ok(_) => return refuse("this computer sent you no such message"),
-                    Err(_) => return refuse("the receiving computer could not read its mail"),
+                    Err(_) => return refuse("the receiving computer could not read its messages"),
                 }
                 match self.db.note_sent_mail(message_id, state, None, false).await {
                     Ok(()) => PeerReply::PeerMailStateTaken,
@@ -745,9 +745,9 @@ impl Daemon {
     }
 }
 
-/// **The line that wakes an agent for its mail**, by this computer's mail switch,
-/// read afresh for every wake: on, to read and handle each message as its sender
-/// asks; off, or never answered, to read and show them to the person.
+/// **The line that wakes a session for its messages**, by this computer's act-on-messages switch, read afresh for
+/// every wake: on, or never set, to read and handle each message as its sender asks; off, to read and show them to
+/// the person.
 pub(crate) fn nudge() -> &'static str {
     protocol::ipc::mail_nudge(protocol::ipc::mail_acts(&protocol::root_dir()))
 }
@@ -958,7 +958,7 @@ impl Daemon {
     }
 }
 
-/// A run as `list_agents` gives it.
+/// A run as `msg_sessions` gives it.
 fn entry(row: &crate::store::SessionRow, this_computer: &str) -> AgentEntry {
     AgentEntry {
         address: format!("{}@{this_computer}", row.session_uid),
@@ -1177,8 +1177,8 @@ mod tests {
 
     use tokio_tungstenite::tungstenite::Message;
 
-    /// **A message kept for a run says, by the receiving computer's mail switch, whether its agent acts on it**: on,
-    /// no reason; off (or never answered), [`protocol::ipc::MAIL_SHOW_ONLY`], which the sender's tool turns into
+    /// **A message kept for a run says, by the receiving computer's act-on-messages switch, whether its session acts on
+    /// it**: on (or never set), no reason; off, [`protocol::ipc::MAIL_SHOW_ONLY`], which the sender's tool turns into
     /// "tell your person instead of waiting".
     #[test]
     fn a_kept_message_names_a_show_only_computer() {

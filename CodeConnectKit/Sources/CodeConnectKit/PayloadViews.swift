@@ -109,7 +109,7 @@ extension Event {
         }
     }
 
-    /// **A Codex MCP tool call, drawn as one row.** ccd files `read_messages`/`send_message` whole
+    /// **A Codex MCP tool call, drawn as one row.** ccd files `msg_read`/`msg_send` whole
     /// under `EventKind.other("codex_mcpToolCall")` (`codex_adapter.rs`) — the call, its arguments and
     /// its result ride in ONE event, unlike Claude's call/result split. The result is an MCP
     /// content-block array, read with the shared `mcpBlocksText`. Nil for any other kind.

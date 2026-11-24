@@ -179,7 +179,7 @@ pub(crate) enum Family {
     Command,
     FileChange,
     /// An MCP tool call Codex asks to run, by elicitation (P7-6b): a server's tool, such as
-    /// CodeConnect's own `send_message`.
+    /// CodeConnect's own `msg_send`.
     McpTool,
     /// Questions Codex's model asks the person in Plan mode, on a run started from an app
     /// (X7b). The card offers no approval choices: each question carries its own options, and

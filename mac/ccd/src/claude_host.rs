@@ -5956,7 +5956,7 @@ mod tests {
     /// them to an app, in seq order: the run's first turn, mail from another run, the wake
     /// line ccd hands its host and its `mail_nudge` notice, then the turn the wake starts as a
     /// stand-in claude plays it: its echo of the line (a replayed user message), its init, its
-    /// reply, its read of the mail (as `read_messages` reads it) and its end. The run's uid is written [`MAIL_WAKE_UID`], each clock read
+    /// reply, its read of the messages (as `msg_read` reads them) and its end. The run's uid is written [`MAIL_WAKE_UID`], each clock read
     /// [`MAIL_WAKE_AT`], the start's and the wake's uuids [`MAIL_WAKE_START`] and
     /// [`MAIL_WAKE_LINE`], and the line itself as the mail switch's `show` line, whichever the
     /// switch picked.
@@ -5997,7 +5997,7 @@ mod tests {
             sdk(&mut played.write, seq, message).await;
             assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
         }
-        // The woken turn reads its mail, as claude's `read_messages` does, so its end wakes
+        // The woken turn reads its messages, as claude's `msg_read` does, so its end wakes
         // nothing more.
         let (offer, _) = rig.daemon.offer_agent_messages(&uid).await.unwrap();
         rig.daemon.read_offered_mail(&offer).await;

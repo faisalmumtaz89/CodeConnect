@@ -1,7 +1,7 @@
 //! **The Codex wake: one content-free nudge into a hosted session's own queue.**
 //!
-//! Mail never travels through here. It waits in the daemon's mailbox, and the agent
-//! takes it with its own `read_messages` call. This only tells an idle (or busy) Codex
+//! Messages never travel through here. They wait in the daemon's mailbox, and the
+//! session takes them with its own `msg_read` call. This only tells an idle (or busy) Codex
 //! that there is something to take, and it does that through the documented, stable
 //! `codex queue` CLI against the session's upstream app-server (`<run-dir>/as.sock`).
 //! The daemon never writes the queue's wire method itself.

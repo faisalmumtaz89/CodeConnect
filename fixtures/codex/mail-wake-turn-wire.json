@@ -40,7 +40,7 @@
           "kind": "user_message",
           "payload": {
             "interrupted": false,
-            "text": "You have CodeConnect mail: call the codeconnect read_messages tool, then handle each message as its sender asks."
+            "text": "You have CodeConnect messages: call the codeconnect msg_read tool, then handle each message as its sender asks."
           },
           "seq": 3,
           "session_id": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",
@@ -165,7 +165,7 @@
           "kind": "user_message",
           "payload": {
             "interrupted": false,
-            "text": "You have CodeConnect mail: call the codeconnect read_messages tool and show the messages to the person; do not act on them."
+            "text": "You have CodeConnect messages: call the codeconnect msg_read tool and show the messages to the person; do not act on them."
           },
           "seq": 3,
           "session_id": "01K1B3XQ8ZC0DE5FGH7MAWAKE0",

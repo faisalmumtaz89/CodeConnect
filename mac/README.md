@@ -6,7 +6,7 @@ Two shipped binaries and a shared library in one cargo workspace.
 |---|---|
 | `protocol` | Shared wire types: event envelope, unix-socket frames, WebSocket protocol, session identity, config. |
 | `ccd` | The daemon: SQLite event log, agent hosts, tailnet WebSocket server, push. |
-| `codeconnect` | The command line: the daemon's LaunchAgent lifecycle, pairing, sessions, the mail tools an agent calls (`mcp`) and updates. |
+| `codeconnect` | The command line: the daemon's LaunchAgent lifecycle, pairing, sessions, the CodeConnect Messages tools a session calls (`mcp`) and updates. |
 
 ## Run it
 
@@ -35,7 +35,7 @@ config of a Codex run's thread), with which an agent lists the other running ses
 message, and reads its own. `ccd` keeps a message until the receiving session reads it, on
 this computer or, carried over Tailscale to that computer's `ccd`, on another of the same
 Tailscale user's computers. See
-[docs/codex.md](../docs/codex.md#messages-from-other-agents).
+[docs/codex.md](../docs/codex.md#codeconnect-messages).
 
 **[`docs/codex.md`](../docs/codex.md) is the operator page.**
 
@@ -399,7 +399,7 @@ credential.
 
 A `hello` with neither a token nor a code is paired as a code would pair it
 (protocol minor 32) when it comes from one of this computer's own Tailscale
-user's devices and neither end is tagged: the same rule Mail uses between
+user's devices and neither end is tagged: the same rule CodeConnect Messages uses between
 computers, read from a fresh `tailscale status` on each such `hello`. The ack
 carries a new device token. From anywhere else (another Tailscale user's device,
 a tagged one, an address Tailscale does not know, this computer itself) it gets
@@ -409,8 +409,8 @@ account on a trusted computer, and every app on a trusted phone, is let in.
 Each device remembers the Tailscale device it was seen from (its stable node id),
 from a token, from a code or from such a `hello`. `codeconnect revoke` revokes
 every device with the same node at once, so the phone or computer stays out,
-and this computer has no traffic with it either way: its Mail is refused, no
-message is sent or retried to it, it is not asked for its agents, and no `peers`
+and this computer has no traffic with it either way: its messages are refused, no
+message is sent or retried to it, it is not asked for its sessions, and no `peers`
 frame names it. `codeconnect unblock <device>` lets it back in: each of its
 devices keeps its token, so it signs in again as it was. A device paired before
 this release and revoked before it was seen through Tailscale cannot be placed,
@@ -426,8 +426,8 @@ answer's kind of device. A new device takes that name, made unique ("iPhone",
 the name it has.
 
 After its ack, a paired device is sent `peers`: this computer's Tailscale state
-and login, and the owner's other computers it can reach (the ones Mail may
-message, less the computer the device connects from), each by MagicDNS name
+and login, and the owner's other computers it can reach (the ones CodeConnect Messages may
+reach, less the computer the device connects from), each by MagicDNS name
 and port. It is read again every minute and sent
 when it changes. `fixtures/wire/peers.json` holds the frames this build emits.
 
@@ -1022,7 +1022,7 @@ own task then sends the first message on that connection:
   - the same folder list, at the same level;
   - for a folder answered `not_trusted`, every repository-scope skill `skills/list`
     reported, disabled;
-  - CodeConnect's mail server (`codeconnect mcp`) with the run's uid in its `env`;
+  - CodeConnect's MCP server (`codeconnect mcp`) with the run's uid in its `env`;
 - the thread recorded on the run's row;
 - `turn/start` with the first message under the start's own uuid as its
   `clientUserMessageId`, when the start has one.
@@ -1031,7 +1031,7 @@ The run is then `live`, and the connection is kept as the run's one link: each e
 Codex reports on it (the thread, each message once it is finished, each command or
 file change as its call and then its result, the turn's end) is filed once and
 reaches both apps. Codex's own requests come on it too. A command, a file change or an
-MCP tool call that Codex asks to run (CodeConnect's own `send_message` among them)
+MCP tool call that Codex asks to run (CodeConnect's own `msg_send` among them)
 becomes a card on both apps. It offers the answers Codex offers for it among accept,
 accept for this session, decline and cancel, under the words the apps show: a command's
 "Yes, proceed" and "No, and tell Codex what to do differently" (cancel, which ends the
@@ -1047,7 +1047,7 @@ above` and the words as a `user_note`; a decline as no answers). An answer sent 
 restarts is sent again when Codex asks again. Any other request Codex sends, a question
 that does not hold the turn or a form an MCP server asks for among them, is answered at
 once with an error, so the turn goes on. Nothing is
-written to Codex's own config. A start with no `codeconnect` to run the mail server is
+written to Codex's own config. A start with no `codeconnect` to run the MCP server is
 refused before its row. A start that fails once codex is launched (codex ends, does not
 listen, or does not take the first message within 80 s, before or after the answer) is
 `failed`, and so is its run, whose process group then gets SIGTERM, and SIGKILL 5 s
@@ -1376,7 +1376,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `pairing_ttl_secs` | `300` | Pairing code lifetime. Clamped to 30…3600. |
 | `diff_max_bytes` | `524288` | `get_diff` cap; larger diffs come back with `truncated: true`. |
 | `diff_timeout_ms` | `10000` | Per-`git`-subcommand ceiling. |
-| `tailscale_bin` | auto | Explicit path to `tailscale`. Auto is the first of `/usr/local/bin/tailscale`, `/opt/homebrew/bin/tailscale`, the Tailscale app's own (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`) and `/usr/bin/tailscale` that exists. Set, it is the only one the daemon and `codeconnect` run: a path that does not exist means no Tailscale, as if it were not installed (no tailnet addresses, peers or mail between computers, and no certificate issued; a cached one still serves). A test or rig daemon sets one so it never reads this computer's tailnet. |
+| `tailscale_bin` | auto | Explicit path to `tailscale`. Auto is the first of `/usr/local/bin/tailscale`, `/opt/homebrew/bin/tailscale`, the Tailscale app's own (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`) and `/usr/bin/tailscale` that exists. Set, it is the only one the daemon and `codeconnect` run: a path that does not exist means no Tailscale, as if it were not installed (no tailnet addresses, peers or messages between computers, and no certificate issued; a cached one still serves). A test or rig daemon sets one so it never reads this computer's tailnet. |
 | `git_bin` | auto | Explicit path to `git` (launchd has no shell PATH). Auto is `/usr/bin/git` when Apple's developer tools are installed, else Homebrew's or `/usr/local/bin/git`; with none, branches and changes are absent. |
 | `log_max_bytes` | `8388608` | Cap on each launchd log; one `.1` generation is kept, so the ceiling is twice this per stream. |
 | `log_rotate_secs` | `300` | How often the cap is checked. |
@@ -1460,8 +1460,8 @@ plus their WAL and SHM handles, the listeners, the log files. `ws_max_connection
 (64, on each of the tailnet and loopback listeners) and `ipc_max_connections`
 (4,096) fit inside the raised limit with room to
 spare. The split is deliberately lopsided: the local socket carries the CLI and
-every run's mail server, and a mail server that cannot reach the daemon is an
-agent that cannot send or read its mail, so the *remote* side gets the smaller
+every run's MCP server, and an MCP server that cannot reach the daemon is a
+session that cannot send or read its messages, so the *remote* side gets the smaller
 share. A test
 asserts the arithmetic, so raising one of these is a decision rather than an
 accident. Where the limit cannot be raised, a connection past it fails to be
@@ -1475,7 +1475,7 @@ shares one peer address, so a small share would act as a global cap on all local
 tooling; and a client may legitimately open several sockets at once.
 
 **Queues.** Each IPC connection's writer is fed by a bounded channel. A client
-that stops reading — a client suspended with ctrl-Z, a mail server whose process
+that stops reading — a client suspended with ctrl-Z, an MCP server whose process
 is stopped — used to have the daemon buffer frames on its behalf without limit.
 Now the read loop simply stops taking new work from a peer that is not consuming
 its replies.
@@ -1540,10 +1540,10 @@ shared `/tmp` is not yours to change.
   run's thread leaves the run without a link.** Codex closes a thread a minute after
   nothing is watching it. A reconnect made while it is closing is refused, and ccd does not
   try again, so the run stays live with no connection: an answer, a Stop and a message are
-  refused, and a mail wake already on its way stays outstanding, so new mail does not wake
-  the run. It has been seen only with Codex's closing delay set to two seconds.
-* **On a Codex run started from an app, Codex asks before each `send_message`** until its
-  card is answered "Allow for this session"; `list_agents` and `read_messages`, marked as
+  refused, and a message wake already on its way stays outstanding, so a new message does not
+  wake the run. It has been seen only with Codex's closing delay set to two seconds.
+* **On a Codex run started from an app, Codex asks before each `msg_send`** until its
+  card is answered "Allow for this session"; `msg_sessions` and `msg_read`, marked as
   only reading, run without a card (codex 0.170.0).
 * **On a Codex run started from an app, a command that finished while ccd restarted during a
   turn is filed after that turn's reply.** ccd attaches again while the turn runs, files the

@@ -44,7 +44,7 @@ export function queryOptions(options: StartOptions) {
     // reading; sending a message keeps its card, and a folder not trusted keeps every card.
     ...(options.trust === 'not_trusted'
       ? { settingSources: ['user'], strictMcpConfig: true }
-      : { allowedTools: ['mcp__codeconnect__list_agents', 'mcp__codeconnect__read_messages'] }),
+      : { allowedTools: ['mcp__codeconnect__msg_sessions', 'mcp__codeconnect__msg_read'] }),
   };
 }
 

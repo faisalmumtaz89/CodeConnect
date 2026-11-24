@@ -492,9 +492,9 @@ public enum TimelineBuilder {
                                 isTruncated: event.isTruncated))))
 
             case .other("codex_mcpToolCall"):
-                // A Codex MCP call (read_messages/send_message) is call+result in one event, filed as
-                // Other by ccd; without this it drew no row (the person never saw what mail Codex read
-                // or sent). Its result is an MCP content-block array, read via the shared mcpBlocksText.
+                // A Codex MCP call (msg_read/msg_send) is call+result in one event, filed as
+                // Other by ccd; without this it drew no row (the person never saw what messages Codex
+                // read or sent). Its result is an MCP content-block array, read via the shared mcpBlocksText.
                 guard let call = event.codexMcpToolCall else { break }
                 items.append(
                     event.item(
