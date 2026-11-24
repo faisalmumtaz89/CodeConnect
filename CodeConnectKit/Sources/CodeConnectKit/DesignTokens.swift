@@ -44,7 +44,9 @@ private enum Hex {
     // Text. The three greys, and the semantic colours below, are shared with
     // the Mac app, whose `Theme` reads them from here; the grounds are each
     // app's own.
-    static let text: UInt32 = 0xE4E4E7
+    /// 85% white, macOS's own label level, with the greys' slight cool tint: 14.78:1 on `bg`, 13.27 on the Mac's
+    /// window #111113.
+    static let text: UInt32 = 0xD8D8DC
     static let textSecondary: UInt32 = 0x9C9CA3
     /// The dimmest grey that still clears AA on every ground of both apps:
     /// 5.58 / 5.26 / 4.94 / 4.62 on the four surfaces here, 4.52 on the Mac's
@@ -75,7 +77,7 @@ private enum Hex {
     // Diff tints, composited once and pinned here as literals so a row tint
     // cannot drift with an opacity change somewhere.
     // Row tint = semantic @ 12% over `bg`; word tint = semantic @ 22%.
-    // `text` on all four measures 12.30:1 or better.
+    // `text` on all four measures 10.98:1 or better.
     static let successMuted: UInt32 = 0x091610
     static let dangerMuted: UInt32 = 0x1B0C0D
     static let successWord: UInt32 = 0x11281D
@@ -96,7 +98,7 @@ private enum Hex {
     /// #909090 clears AA on the *darkest* background a syntax token can land
     /// on, which is not `bg` but the 22% word-diff tint
     /// `successWord` #11281D: 4.89 there, 5.21 on `dangerWord`, 6.58 on `bg`.
-    /// Still unmistakably quieter than code at `text` (16.55).
+    /// Still unmistakably quieter than code at `text` (14.78).
     static let syntaxComment: UInt32 = 0x909090
 }
 
