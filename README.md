@@ -61,7 +61,7 @@ codeconnect pair              # a pairing code, for an iPhone that doesn't add t
 codeconnect devices           # paired phones
 codeconnect revoke <device>   # cut a phone off, open connections included
 codeconnect daemon status     # is the daemon running?
-codeconnect msg-act on        # let your sessions act on each other's CodeConnect messages (off: they show them to you)
+codeconnect msg-act off       # sessions show each other's CodeConnect messages to you instead of acting on them (on: the default)
 ```
 
 ## Update and uninstall
@@ -82,7 +82,7 @@ The daemon, `ccd`, logs every session's events. Claude Code reports to it throug
 
 - Sessions go directly between your computer and your phone, over Tailscale by default; no CodeConnect server sees them.
 - A notification passes through Apple and, unless your daemon has its own Apple push key, CodeConnect's push relay, which receives no session content.
-- Your agents' messages to each other travel only between your own computers, over Tailscale, and only between computers of the same Tailscale user (sessions on one computer message each other without Tailscale too, unless it is a tagged device); any program on one of those computers can send one, with no further credential. Whether an agent acts on one is your choice, off until you set it with `codeconnect mail-trust on` on that computer; it is guidance to the agent, and its own permission mode still governs what it may do.
+- Your sessions' messages to each other travel only between your own computers, over Tailscale, and only between computers of the same Tailscale user (sessions on one computer message each other without Tailscale too, unless it is a tagged device); any program on one of those computers can send one, with no further credential. A session acts on one unless you set that computer to only show them with `codeconnect msg-act off`; it is guidance to the session, and its own permission mode still governs what it may do.
 - A paired phone can send your sessions messages and answer their approvals. [SECURITY.md](SECURITY.md) covers the trust boundaries and reporting a vulnerability privately; the [privacy policy](https://codeconnect.sh/privacy) lists every connection.
 
 ## Documentation

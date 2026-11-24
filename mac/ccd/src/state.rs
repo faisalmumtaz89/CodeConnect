@@ -9604,8 +9604,8 @@ mod tests {
         assert_eq!(question.state, protocol::ipc::MailState::Waiting);
         assert_eq!(
             question.reason.as_deref(),
-            Some(protocol::ipc::MAIL_SHOW_ONLY),
-            "this computer's switch is off (never answered): the sender is told it only shows mail"
+            None,
+            "this computer's switch was never set, so its sessions act on messages: no show-only reason"
         );
         let (offer, batch) = daemon.offer_agent_messages(&answerer).await.unwrap();
         let received = batch.messages[0].clone();
@@ -9736,12 +9736,9 @@ mod tests {
                     )
                     .await
                 ),
-                (
-                    protocol::ipc::MailState::Waiting,
-                    protocol::ipc::MAIL_SHOW_ONLY.to_string()
-                ),
-                "a retried id is answered with where the first one stands, and this computer only shows mail; \
-                 labels are data"
+                (protocol::ipc::MailState::Waiting, String::new()),
+                "a retried id is answered with where the first one stands (a switch never set acts, so no \
+                 show-only reason); labels are data"
             );
         }
         assert!(

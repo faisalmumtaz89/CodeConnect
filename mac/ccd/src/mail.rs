@@ -745,9 +745,9 @@ impl Daemon {
     }
 }
 
-/// **The line that wakes an agent for its mail**, by this computer's mail switch,
-/// read afresh for every wake: on, to read and handle each message as its sender
-/// asks; off, or never answered, to read and show them to the person.
+/// **The line that wakes a session for its messages**, by this computer's act-on-messages switch, read afresh for
+/// every wake: on, or never set, to read and handle each message as its sender asks; off, to read and show them to
+/// the person.
 pub(crate) fn nudge() -> &'static str {
     protocol::ipc::mail_nudge(protocol::ipc::mail_acts(&protocol::root_dir()))
 }
@@ -1177,8 +1177,8 @@ mod tests {
 
     use tokio_tungstenite::tungstenite::Message;
 
-    /// **A message kept for a run says, by the receiving computer's mail switch, whether its agent acts on it**: on,
-    /// no reason; off (or never answered), [`protocol::ipc::MAIL_SHOW_ONLY`], which the sender's tool turns into
+    /// **A message kept for a run says, by the receiving computer's act-on-messages switch, whether its session acts on
+    /// it**: on (or never set), no reason; off, [`protocol::ipc::MAIL_SHOW_ONLY`], which the sender's tool turns into
     /// "tell your person instead of waiting".
     #[test]
     fn a_kept_message_names_a_show_only_computer() {

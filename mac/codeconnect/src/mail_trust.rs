@@ -4,7 +4,7 @@
 //! `codeconnect` tool's `msg_read` tells the session to handle each message as its
 //! sender asks, as a teammate's request within the session's own permissions; off,
 //! it tells the agent to show the messages to the person and not act on them.
-//! Never set, it is off; `codeconnect msg-act on|off` sets it (`mail-trust`, the verb's name before CodeConnect
+//! Never set, sessions act; `codeconnect msg-act on|off` sets it (`mail-trust`, the verb's name before CodeConnect
 //! Messages, is still taken).
 //!
 //! It is guidance to the agent, written into what it reads, not enforcement: the
@@ -50,17 +50,16 @@ fn keep(on: bool, root: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// **Only an answer of on says agents act**; off, and no answer at all, say they
-    /// do not.
+    /// **Sessions act unless the answer is off**: no answer at all, and on, say they act; off says they do not.
     #[test]
-    fn agents_act_only_when_the_answer_is_on() {
+    fn sessions_act_unless_the_answer_is_off() {
         let root = std::env::temp_dir().join(format!(
             "cc-mail-trust-{}-{}",
             std::process::id(),
             protocol::time::now_unix_ms()
         ));
         let acts = protocol::ipc::mail_acts;
-        assert!(!acts(&root), "never asked");
+        assert!(acts(&root), "never asked");
         keep(true, &root).unwrap();
         assert!(acts(&root));
         keep(false, &root).unwrap();
