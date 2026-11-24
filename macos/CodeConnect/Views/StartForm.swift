@@ -277,6 +277,9 @@ struct StartForm: View {
     /// Not as the form merely appears: a run closed from the list keeps the list's keys.
     private func takeKeyboard() {
         guard draft.takeKeyboardRequest() else { return }
+        // Each computer is asked again what it offers (`StartDraft.asksAgain`): a Claude Code signed out or removed
+        // while the form stayed open is no longer offered.
+        if draft.asksAgain() { contexts.forEach { $0.load() } }
         folderOpen = false
         computerMenuOpen = false
         menuOpen = false

@@ -164,4 +164,15 @@ public final class StartDraft {
         defer { wantsKeyboard = false }
         return wantsKeyboard
     }
+
+    /// When an opening last asked the form's computers again (`asksAgain`).
+    @ObservationIgnored private var askedAt: Date?
+
+    /// Whether this opening asks the form's computers again what they offer: each New Agent does, at most once every
+    /// 2 s, so a held ⌘N, which repeats, asks once.
+    public func asksAgain(now: Date = .now) -> Bool {
+        if let askedAt, now.timeIntervalSince(askedAt) < 2 { return false }
+        askedAt = now
+        return true
+    }
 }

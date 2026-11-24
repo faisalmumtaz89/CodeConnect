@@ -101,6 +101,18 @@ final class StartDraftTests: XCTestCase {
         XCTAssertFalse(draft.takeKeyboardRequest())
     }
 
+    /// Each New Agent asks the form's computers again, at most once every 2 s: presses inside 2 s ask once, a press
+    /// after them asks again.
+    func testNewAgentAsksTheComputersAgainAtMostEveryTwoSeconds() {
+        let draft = StartDraft()
+        let first = Date(timeIntervalSinceReferenceDate: 1000)
+        XCTAssertTrue(draft.asksAgain(now: first))
+        XCTAssertFalse(draft.asksAgain(now: first.addingTimeInterval(0.1)))
+        XCTAssertFalse(draft.asksAgain(now: first.addingTimeInterval(1.9)))
+        XCTAssertTrue(draft.asksAgain(now: first.addingTimeInterval(2)))
+        XCTAssertFalse(draft.asksAgain(now: first.addingTimeInterval(3)))
+    }
+
     /// The started run opened: its message and place are spent, its folder stays chosen.
     func testOpeningTheStartedRunSpendsTheMessageAndPlace() {
         let draft = StartDraft()
