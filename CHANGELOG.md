@@ -15,6 +15,8 @@ User-facing changes, newest first. Mac releases are cut per
   under it; on the Mac, an approval no longer shows its risk line.
 - On the iPhone and the Mac, the row for a session reading its messages now says "Reading CodeConnect messages".
 - On the Mac, the Add sheet opened from New Agent, before any computer is added, shows Computer chosen.
+- On the Mac, the start form asks a computer again each time it is opened, so a Claude Code that was signed out or
+  removed meanwhile is no longer offered.
 
 ## CodeConnect 0.19.18, with the iPhone app 1.1.35
 

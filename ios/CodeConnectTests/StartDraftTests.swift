@@ -101,6 +101,29 @@ final class StartDraftTests: XCTestCase {
         XCTAssertFalse(draft.takeKeyboardRequest())
     }
 
+    /// A New Agent on a form already on screen asks its computers again, at most once every 2 s: presses inside 2 s ask
+    /// once, a press after them asks again.
+    func testNewAgentOnAnOpenFormAsksAtMostEveryTwoSeconds() {
+        let draft = StartDraft()
+        let first = Date(timeIntervalSinceReferenceDate: 1000)
+        XCTAssertTrue(draft.asksAgain(formShown: true, now: first))
+        XCTAssertFalse(draft.asksAgain(formShown: true, now: first.addingTimeInterval(0.1)))
+        XCTAssertFalse(draft.asksAgain(formShown: true, now: first.addingTimeInterval(1.9)))
+        XCTAssertTrue(draft.asksAgain(formShown: true, now: first.addingTimeInterval(2)))
+        XCTAssertFalse(draft.asksAgain(formShown: true, now: first.addingTimeInterval(3)))
+    }
+
+    /// A New Agent that draws the form does not ask again: the form's first appearance asked. A held ⌘N's repeats on
+    /// the form it drew ask no more inside 2 s; a press after them asks.
+    func testNewAgentThatDrawsTheFormAsksOnlyThroughItsAppearance() {
+        let draft = StartDraft()
+        let first = Date(timeIntervalSinceReferenceDate: 1000)
+        XCTAssertFalse(draft.asksAgain(formShown: false, now: first))
+        XCTAssertFalse(draft.asksAgain(formShown: true, now: first.addingTimeInterval(0.5)))
+        XCTAssertFalse(draft.asksAgain(formShown: true, now: first.addingTimeInterval(1.9)))
+        XCTAssertTrue(draft.asksAgain(formShown: true, now: first.addingTimeInterval(2)))
+    }
+
     /// The started run opened: its message and place are spent, its folder stays chosen.
     func testOpeningTheStartedRunSpendsTheMessageAndPlace() {
         let draft = StartDraft()
