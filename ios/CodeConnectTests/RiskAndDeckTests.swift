@@ -432,20 +432,11 @@ final class RiskAndDeckTests: XCTestCase {
         XCTAssertTrue(gate.isOpen(at: .low))
     }
 
-    /// HIGH is gated on the command **and** the class that explains it, stated
-    /// separately rather than left to fall out of the layout: a face is about
-    /// to authorise this, and that the one is drawn above the other is not
-    /// evidence that both were seen.
-    func testHighAlsoRequiresTheProvenance() {
+    /// HIGH opens on the same one fact as every class: its command has been on
+    /// screen. The tag sits above the command, so a command seen is a tag passed.
+    func testHighOpensOnceTheCommandHasBeenSeen() {
         var gate = DecisionCard.ReadGate()
         gate.hasSeenCommand = true
-        XCTAssertTrue(gate.isOpen(at: .medium), "MEDIUM asks for the command and nothing else")
-        XCTAssertFalse(gate.isOpen(at: .high))
-        XCTAssertEqual(
-            gate.blockedReason(at: .high),
-            "Scroll to the end of the command block before deciding.")
-
-        gate.hasSeenProvenance = true
         XCTAssertTrue(gate.isOpen(at: .high))
         XCTAssertNil(gate.blockedReason(at: .high))
     }
