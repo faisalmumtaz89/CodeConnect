@@ -556,7 +556,7 @@ struct StartForm: View {
         InputBox(barHeight: 50, trailingOpen: menuOpen) {
             TextField(
                 "", text: $draft.message, selection: $messageSelection,
-                prompt: Text("First message").foregroundStyle(Theme.text3), axis: .vertical
+                prompt: Text("What do you want to work on?").foregroundStyle(Theme.text.opacity(0.5)), axis: .vertical
             )
                 .accessibilityLabel("First message")
                 .accessibilityIdentifier("start.message")
