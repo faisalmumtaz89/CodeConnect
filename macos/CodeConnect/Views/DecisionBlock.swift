@@ -1,12 +1,12 @@
 import CodeConnectKit
 import SwiftUI
 
-/// A decision where it happened: what the agent asks to do, word for word as it was hashed, how risky Kit rates it
-/// and why, the edit a Codex card carries, and the answers this Mac may give, or why it can give none. Every rule is
-/// Kit's (`DecisionCard`, `AppModel.answer`); this view draws them and measures that the command and its risk were on
-/// screen before an answer that says yes. At the pane's foot what is asked is read in its own scroll, and its answers
-/// take the reply box's place: the reason a Deny carries, then Deny and Allow, each with the key it answers to. In the
-/// conversation it is what was asked and what became of it.
+/// A decision where it happened: what the agent asks to do, word for word as it was hashed, the edit a Codex card
+/// carries, and the answers this Mac may give, or why it can give none. Every rule is Kit's (`DecisionCard`,
+/// `AppModel.answer`); this view draws them and measures that the command was on screen before an answer that says yes.
+/// At the pane's foot what is asked is read in its own scroll, and its answers take the reply box's place: the reason a
+/// Deny carries, then Deny and Allow, each with the key it answers to. In the conversation it is what was asked and
+/// what became of it.
 struct DecisionBlock: View {
     let approval: ApprovalItem
     let model: AppModel
@@ -52,7 +52,7 @@ struct DecisionBlock: View {
 
     /// Why no answer can go now, in Kit's order: refusals stop here.
     private var refusalBlocked: String? { model.answerBlockedReason(for: approval, inFlight: inFlight) }
-    /// …and an answer that says yes also waits for the command, and at HIGH its risk, to have been on screen.
+    /// …and an answer that says yes also waits for the command to have been on screen.
     private var assentBlocked: String? { refusalBlocked ?? gate.blockedReason }
 
     /// This Mac can answer it now, so at the foot its answers take the reply box's place.
@@ -133,7 +133,7 @@ struct DecisionBlock: View {
     }
 
     /// What the agent asks: who and which tool (waiting on you while it can be answered), the command as it was
-    /// hashed, what it was given, a Codex edit, the risk, then what became of it, or why it can't be answered here.
+    /// hashed, what it was given, a Codex edit, then what became of it, or why it can't be answered here.
     /// The command as it was hashed: what the block shows and what its Copy takes.
     private var command: String {
         approval.card.primaryText(verification: approval.card.verification, agent: summary?.agent)
