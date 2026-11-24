@@ -376,8 +376,9 @@ public final class SessionState {
         // first difference, and the timeline is the costly one.
         public var drawnThrough: UInt64 = 0
         var lastPromptSeq: UInt64 = 0
-        /// When the run last did something: its newest event that is not a link fact. A daemon restart files a
-        /// `link_state` for every run it finds still running, and that is not the run doing anything.
+        /// When the run last did something: its newest event that is not a fact the daemon keeps about it. A daemon
+        /// restart files a `link_state` for every run it finds still running, and a Codex run's reattach files its
+        /// settings (`codex_settings`) again; neither is the run doing anything.
         var lastActivityAt: Date?
         public var gap: GapNotice?
         public var windowStart: UInt64?
@@ -432,7 +433,7 @@ public final class SessionState {
         let turns = codexTurns()
         return Shown(
             drawnThrough: drawnThrough, lastPromptSeq: lastPromptSeq,
-            lastActivityAt: events.last(where: { $0.kind != .linkState })?.date,
+            lastActivityAt: events.last(where: { $0.kind != .linkState && $0.kind != .other("codex_settings") })?.date,
             gap: gap,
             windowStart: windowStart, headTruncated: headTruncated,
             loadingPage: pageRequest != nil,

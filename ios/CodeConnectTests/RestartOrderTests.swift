@@ -16,6 +16,9 @@ final class RestartOrderTests: XCTestCase {
     private let a = "01K1B3XQ8ZC0DE5FGH7JKMNPQR"
     private let b = "01K1B3XQ8ZC0DE5FGH7JKMNPQS"
     private let c = "01K1B3XQ8ZC0DE5FGH7JKMNPQT"
+    /// `restart-reattach-wire.json`'s Codex runs: A in proj-alpha, B in proj-notes.
+    private let codexA = "01M87AXA2PJ0TKMX3KZT5YKJZY"
+    private let codexB = "01M87AXAS9BEYEWMZEH2FFTTP2"
 
     private final class Sent {
         var subscribed: Set<String> = []
@@ -41,6 +44,28 @@ final class RestartOrderTests: XCTestCase {
         try await deliver(wire, "activity", to: model, sent: sent, list: false)
         XCTAssertEqual(order(model), [a, b], "A's tool call after the restart did not move it up")
         XCTAssertEqual(row(a, model)?.lastActive, stamp(8))
+    }
+
+    /// **A Codex run's reattach is not activity either.** `restart-reattach-wire.json`, the daemon's own frames: Codex
+    /// runs A and B each finish a turn, B last; the daemon restarts and files, for each, its settings again
+    /// (`codex_settings`) and a link fact, at the restart's time; then A finishes another turn.
+    func testACodexReattachLeavesTheOrderAndTheAgesWhereActivityPutThem() async throws {
+        let wire = try XCTUnwrap(WireRecording.json("restart-reattach-wire") as? [String: Any])
+        let (model, sent) = model()
+        let runs = [codexA, codexB]
+
+        try await deliver(wire, "before_restart", to: model, sent: sent, list: true)
+        XCTAssertEqual(order(model, among: runs), [codexB, codexA], "B's turn is the newer")
+        let ageA = row(codexA, model)?.lastActive
+        let ageB = row(codexB, model)?.lastActive
+
+        try await deliver(wire, "restart", to: model, sent: sent, list: true)
+        XCTAssertEqual(row(codexA, model)?.lastActive, ageA, "the reattach moved A's age")
+        XCTAssertEqual(row(codexB, model)?.lastActive, ageB, "the reattach moved B's age")
+        XCTAssertEqual(order(model, among: runs), [codexB, codexA], "the reattach reordered the runs")
+
+        try await deliver(wire, "activity", to: model, sent: sent, list: false)
+        XCTAssertEqual(order(model, among: runs), [codexA, codexB], "A's turn after the restart did not move it up")
     }
 
     /// **A link fact or an end the list has not seen asks for the fleet at once**, and one the list already holds asks
@@ -88,7 +113,7 @@ final class RestartOrderTests: XCTestCase {
             if case .sessions = message { MainActor.assumeIsolated { sent.fleetAsks += 1 } }
         }
         addTeardownBlock { @MainActor in model.scenePhaseChanged(to: .background) }
-        for key in [a, b, c] { addTeardownBlock { ReviewMarks.forget(sessionKey: key) } }
+        for key in [a, b, c, codexA, codexB] { addTeardownBlock { ReviewMarks.forget(sessionKey: key) } }
         return (model, sent)
     }
 
@@ -100,7 +125,8 @@ final class RestartOrderTests: XCTestCase {
         let stage = try XCTUnwrap(wire[name] as? [String: Any], "no stage \(name)")
         if list {
             try self.list(wire, name, to: model)
-            try await until("\(name): every run subscribed") { [a, b, c].allSatisfy(sent.subscribed.contains) }
+            let runs = (stage["sessions"] as? [[String: Any]] ?? []).compactMap { $0["session_uid"] as? String }
+            try await until("\(name): every run subscribed") { runs.allSatisfy(sent.subscribed.contains) }
         }
         let events = try WireRecording.decode(try XCTUnwrap(stage["events"] as? [[String: Any]]))
         XCTAssertFalse(events.isEmpty, "\(name) has no events; the stage proves nothing")
@@ -126,9 +152,11 @@ final class RestartOrderTests: XCTestCase {
         XCTFail("timed out: \(what)")
     }
 
-    /// The running band's order: A and B start tool calls, and C, which never does, is idle.
-    private func order(_ model: AppModel) -> [String] {
-        model.fleet.map(\.summary.sessionKey).filter { [a, b].contains($0) }
+    /// The fleet's order of `runs`: by default the running band's, where A and B start tool calls and C, which never
+    /// does, is idle.
+    private func order(_ model: AppModel, among runs: [String]? = nil) -> [String] {
+        let runs = runs ?? [a, b]
+        return model.fleet.map(\.summary.sessionKey).filter { runs.contains($0) }
     }
 
     private func row(_ key: String, _ model: AppModel) -> FleetRow? {
