@@ -36,7 +36,12 @@ export async function printUsage(claude: string): Promise<void> {
   const input = (async function* (): AsyncGenerator<never> {
     await new Promise<never>(() => {});
   })();
-  const run = query({ prompt: input, options: { pathToClaudeCodeExecutable: claude, cwd: process.cwd(), settingSources: [] } });
+  // Restricted (Claude Code's --restricted; the SDK has no typed option for it), so this short claude opens no
+  // cross-session messaging socket and never appears as a peer in the person's own Claude sessions' ListAgents.
+  const run = query({
+    prompt: input,
+    options: { pathToClaudeCodeExecutable: claude, cwd: process.cwd(), settingSources: [], extraArgs: { restricted: null } },
+  });
   try {
     const answer = await run.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true });
     process.stdout.write(`${JSON.stringify(keptUsage(answer))}\n`);

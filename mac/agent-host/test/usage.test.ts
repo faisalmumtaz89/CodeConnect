@@ -44,6 +44,17 @@ test("--usage prints only whether plan limits apply, the plan and each plan-wide
   expect(stubLog(dir).filter((event) => event.stdin?.type === 'user')).toStrictEqual([]);
 }, 30_000);
 
+// A restricted launch (Claude Code's own --restricted) opens no cross-session messaging socket, so this short helper
+// never shows in a person's own Claude sessions' ListAgents as a peer they could message (B-1).
+test('--usage launches claude restricted, so it opens no messaging socket', () => {
+  const dir = runDir();
+  const claude = writeStub(dir, { init: recordedInit, usage: answer });
+  const run = spawnSync(executable, ['--usage', claude], { cwd: dir, encoding: 'utf8', timeout: 20_000, env: { TMPDIR: dir } });
+  expect(run.status).toBe(0);
+  const argv = stubLog(dir).find((event) => event.argv)!.argv as string[];
+  expect(argv.filter((arg) => arg === '--restricted' || arg.startsWith('--restricted='))).toStrictEqual(['--restricted']);
+}, 30_000);
+
 test('--usage of a sign-in without plan limits prints that, with no window', () => {
   const dir = runDir();
   const claude = writeStub(dir, { init: recordedInit, usage: { subscription_type: null, rate_limits_available: false, rate_limits: null } });
