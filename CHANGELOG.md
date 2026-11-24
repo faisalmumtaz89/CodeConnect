@@ -3,14 +3,21 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
-## CodeConnect 0.19.20, with the iPhone app 1.1.37
+## CodeConnect 0.19.20
 
-- On the iPhone and the Mac, a Codex session no longer jumps to the top of the list when CodeConnect restarts.
+- On the Mac, a Codex session no longer jumps to the top of the list when CodeConnect restarts; the iPhone's next
+  build follows.
 - On the Mac, VoiceOver no longer reads two icons as bare symbol names.
 - On the Mac, the new-agent box asks "What do you want to work on?" where it said "First message".
 - On the Mac, the new-agent box has no line under it: a folder not yet chosen is the bar's highlighted "Choose folder", and why
   Start can't be pressed is its tooltip.
-- On the Mac, text is a little less bright: 85% white, macOS's own level for text on a dark window.
+- On the Mac, text is a little less bright: 85% white, macOS's own level for text on a dark window, where it was
+  89%; the iPhone's next build follows.
+- On the Mac, the reply box's model, mode and ⋯ panels, and a session row's menu, open lined up with the left edge
+  of the button that opened them, instead of the right edge of the box or button.
+- On the Mac, the usage figures in the reply box stand clear of Send, as far from it as the bar's chips stand from
+  each other.
+- On the Mac, the reply box sits 16 pt under the conversation's last line, where it was 12.
 - On the Mac and Linux, sessions message each other through CodeConnect Messages: the tools a session is given are now
   msg_sessions, msg_send and msg_read.
 - On the Mac and Linux, a session acts on a CodeConnect message from your other sessions by default, within its own
