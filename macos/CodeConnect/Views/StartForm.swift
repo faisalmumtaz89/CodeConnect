@@ -248,7 +248,8 @@ struct StartForm: View {
     }
 
     /// The box: the first message, and in its bar the computer, the folder and where in the repository, the model and
-    /// Start. Under it, why Start can't be pressed yet, or what it does.
+    /// Start. What is still missing shows where it is chosen (a folder not chosen is the bar's lit chip, the message
+    /// its placeholder), and why Start can't be pressed is Start's tooltip.
     private var form: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let context {
@@ -256,10 +257,6 @@ struct StartForm: View {
                 composer(context)
                     // Its menus open over what is above and below it: the last modifier, so they draw over the rest.
                     .zIndex(folderOpen || computerMenuOpen || branchMenuOpen || menuOpen ? 1 : 0)
-                if let note = blocked ?? pick.map(StartContext.starts) {
-                    Text(note).font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1)
-                        .accessibilityIdentifier("start.note")
-                }
             } else {
                 // Its computer's link is down: why, where the box stands. What was typed and chosen stays in the
                 // form, and the box comes back with the computer.
@@ -349,14 +346,15 @@ struct StartForm: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "folder").font(.system(size: 11)).accessibilityHidden(true)
-                Text(folder?.name ?? "Choose a folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
+                Text(folder?.name ?? "Choose folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
-            .foregroundStyle(folder == nil ? Theme.text2 : Theme.text)
-            .inputBoxChip(open: folderOpen)
+            // While none is chosen, the folder is the piece still missing: the bar's one lit, bordered chip.
+            .foregroundStyle(Theme.text)
+            .inputBoxChip(open: folderOpen, bordered: folder == nil)
         }
         .buttonStyle(.hover(radius: 8, id: "start.folder"))
-        .help(folder?.path ?? "Choose a folder")
+        .help(folder?.path ?? "Choose folder")
         .accessibilityIdentifier("start.folder")
         .accessibilityValue(folderOpen ? "open" : "closed")
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { folderChip = $0 }
