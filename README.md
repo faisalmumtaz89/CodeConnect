@@ -20,7 +20,7 @@ CodeConnect brings the Claude Code and Codex sessions on your Mac or Linux compu
 - **Diffs you can read on a phone.** Word-level highlighting, and a comment on any hunk goes to the agent.
 - **Talk to the agent.** Type or dictate a message; dictation uses Apple's speech recognition, and nothing is sent until you send it.
 - **Claude Code and Codex.** Everything above works with Claude Code; on a Codex session the phone answers approvals with Codex's own options, stops a turn, and sends a message ([details](docs/codex.md)).
-- **Agents message each other.** A Claude Code or Codex session can message any other session on your computers, through a `codeconnect` tool CodeConnect gives it; the message waits until that session reads it, and the agent is woken to read it ([details](docs/codex.md#messages-from-other-agents)).
+- **Sessions message each other: CodeConnect Messages.** A Claude Code or Codex session can message any other session on your computers through the tools CodeConnect gives it (`msg_sessions`, `msg_send`, `msg_read`); the message waits until that session reads it, and the session is woken to read it ([details](docs/codex.md#codeconnect-messages)).
 - **Honest about what it knows.** A session shows the age of its last event, and a stale connection disables actions and says why.
 
 ## Requirements

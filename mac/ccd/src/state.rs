@@ -9416,6 +9416,7 @@ mod tests {
         let to = |computer: &str| format!("{codex}@{computer}");
 
         assert!(refusal(send("cc-1@studio".into(), hi()).await).contains("<run id>@computer"));
+        assert!(refusal(send("cc-1@studio".into(), hi()).await).contains("as msg_sessions"));
         assert!(refusal(send(format!("{codex}@"), hi()).await).contains("<run id>@computer"));
         assert!(refusal(send(to("studio"), String::new()).await).contains("empty"));
         assert!(refusal(send(to("studio"), "a\u{1b}[2Jb".into()).await).contains("control"));

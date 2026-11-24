@@ -52,7 +52,7 @@ test("a trusted folder's options reach claude: no mode when none is named, the S
   expect(argv.filter((arg) => arg.startsWith('--resume') || arg.startsWith('--model') || arg.startsWith('--effort'))).toStrictEqual([]);
   // CodeConnect's two reading tools need no card in a trusted folder (R-3); sending one still asks.
   expect(argv.filter((arg) => arg.startsWith('--allowedTools'))).toStrictEqual([
-    '--allowedTools=mcp__codeconnect__list_agents,mcp__codeconnect__read_messages',
+    '--allowedTools=mcp__codeconnect__msg_sessions,mcp__codeconnect__msg_read',
   ]);
   noUnexpected(stub());
 }, 10_000);

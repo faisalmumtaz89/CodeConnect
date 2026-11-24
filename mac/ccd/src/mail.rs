@@ -136,7 +136,7 @@ impl Daemon {
             .filter(|(run, c)| protocol::uid::is_well_formed(run) && !c.is_empty())
         else {
             return refuse(
-                "address an agent by its address, <run id>@computer, as list_agents or a \
+                "address a session by its address, <run id>@computer, as msg_sessions or a \
                  message you read gives it",
             );
         };
@@ -179,7 +179,7 @@ impl Daemon {
                     crate::log_error!(
                         "agent message from {from_uid}: reply lookup failed: {err:#}"
                     );
-                    return refuse("CodeConnect could not read its mail");
+                    return refuse("CodeConnect could not read its messages");
                 }
             },
         };
@@ -334,7 +334,7 @@ impl Daemon {
             Ok(MailTaken::Known(state)) => (state, None),
             Ok(MailTaken::RateLimited) => refuse(format!(
                 "rate limit: {} has left {label} {} messages in the last hour, the most \
-                 CodeConnect takes from one agent for another; send again later",
+                 CodeConnect takes from one session for another; send again later",
                 display(&from.label),
                 LIMITS.per_pair_per_hour
             )),
@@ -393,7 +393,7 @@ impl Daemon {
             Err(Dial::Older) => (
                 MailState::Refused,
                 Some(format!(
-                    "{peer} runs an older CodeConnect, which takes no messages from agents"
+                    "{peer} runs an older CodeConnect, which takes no messages from other sessions"
                 )),
             ),
             Err(Dial::Unreachable(why)) | Err(Dial::NoAnswer(why)) => not_yet(why),
@@ -409,7 +409,7 @@ impl Daemon {
     ) -> Result<(String, MailOffer), String> {
         let offer = protocol::uid::new().map_err(|err| {
             crate::log_error!("read_messages for {from_uid}: no offer id: {err:#}");
-            "CodeConnect could not read its mail".to_string()
+            "CodeConnect could not read its messages".to_string()
         })?;
         let batch = self
             .db
@@ -421,7 +421,7 @@ impl Daemon {
             .await
             .map_err(|err| {
                 crate::log_error!("read_messages for {from_uid}: {err:#}");
-                "CodeConnect could not read its mail".to_string()
+                "CodeConnect could not read its messages".to_string()
             })?;
         Ok((offer, batch))
     }
@@ -627,7 +627,7 @@ impl Daemon {
                 match self.db.sent_mail_computer(message_id.clone()).await {
                     Ok(Some(went_to)) if went_to == computer => {}
                     Ok(_) => return refuse("this computer sent you no such message"),
-                    Err(_) => return refuse("the receiving computer could not read its mail"),
+                    Err(_) => return refuse("the receiving computer could not read its messages"),
                 }
                 match self.db.note_sent_mail(message_id, state, None, false).await {
                     Ok(()) => PeerReply::PeerMailStateTaken,

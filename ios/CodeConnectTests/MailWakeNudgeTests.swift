@@ -28,24 +28,18 @@ final class MailWakeNudgeTests: XCTestCase {
         try fixture(replacing: nil)
     }
 
-    /// The same recording with its wake line swapped for `line`: no daemon sends the new lines yet, so the turn that
-    /// carries one is today's turn with the new words in it.
+    /// The same recording with its wake line swapped for `line`: a computer whose CodeConnect still sends the old
+    /// words wakes Codex with this turn carrying them.
     private func fixture(replacing line: (old: String, new: String)?) throws -> Fixture {
         let url = try XCTUnwrap(
             Bundle(for: type(of: self)).url(forResource: "mail-wake-turn-wire", withExtension: "json"))
         var text = try String(contentsOf: url, encoding: .utf8)
         if let line {
-            XCTAssertEqual(text.components(separatedBy: line.old).count, 2, "the recording carries the old line once")
+            XCTAssertEqual(text.components(separatedBy: line.old).count, 2, "the recording carries the line once")
             text = text.replacingOccurrences(of: line.old, with: line.new)
         }
         return try JSONDecoder().decode(Fixture.self, from: Data(text.utf8))
     }
-
-    /// The daemon's renamed wake lines, byte for byte as it will send them.
-    private static let messagesAct =
-        "You have CodeConnect messages: call the codeconnect msg_read tool, then handle each message as its sender asks."
-    private static let messagesShow =
-        "You have CodeConnect messages: call the codeconnect msg_read tool and show the messages to the person; do not act on them."
 
     private func events(_ run: Run) -> [Event] {
         run.frames.compactMap { if case .event(let event) = $0 { return event } else { return nil } }
@@ -108,28 +102,28 @@ final class MailWakeNudgeTests: XCTestCase {
         }
     }
 
-    func testTheActWakeDrawsAsTheMailNotice() async throws {
-        try await check(fixture().act, wakeLine: MailNudge.act, "act")
+    func testTheActWakeDrawsAsTheMessagesNotice() async throws {
+        try await check(fixture().act, wakeLine: MailNudge.messagesAct, "act")
     }
 
-    func testTheShowWakeDrawsAsTheMailNotice() async throws {
-        try await check(fixture().show, wakeLine: MailNudge.show, "show")
+    func testTheShowWakeDrawsAsTheMessagesNotice() async throws {
+        try await check(fixture().show, wakeLine: MailNudge.messagesShow, "show")
     }
 
-    func testARenamedActWakeBuiltFromTheDaemonsLineDrawsAsTheMessagesNotice() async throws {
-        let run = try fixture(replacing: (MailNudge.act, Self.messagesAct)).act
-        try await check(run, wakeLine: Self.messagesAct, "renamed act")
+    func testAnOldActWakeBuiltFromTheOldLineStillDrawsAsTheMessagesNotice() async throws {
+        let run = try fixture(replacing: (MailNudge.messagesAct, MailNudge.act)).act
+        try await check(run, wakeLine: MailNudge.act, "old act")
     }
 
-    func testARenamedShowWakeBuiltFromTheDaemonsLineDrawsAsTheMessagesNotice() async throws {
-        let run = try fixture(replacing: (MailNudge.show, Self.messagesShow)).show
-        try await check(run, wakeLine: Self.messagesShow, "renamed show")
+    func testAnOldShowWakeBuiltFromTheOldLineStillDrawsAsTheMessagesNotice() async throws {
+        let run = try fixture(replacing: (MailNudge.messagesShow, MailNudge.show)).show
+        try await check(run, wakeLine: MailNudge.show, "old show")
     }
 
     /// The match is exact: a line that only nearly matches is somebody's words, drawn as theirs.
     func testANearMissOfAWakeLineDrawsAsThePersonsWords() async throws {
-        for near in [Self.messagesAct + " ", Self.messagesAct.replacingOccurrences(of: "handle", with: "answer")] {
-            let all = events(try fixture(replacing: (MailNudge.act, near)).act)
+        for near in [MailNudge.messagesAct + " ", MailNudge.messagesAct.replacingOccurrences(of: "handle", with: "answer")] {
+            let all = events(try fixture(replacing: (MailNudge.messagesAct, near)).act)
             let drawn = await state(all)
             XCTAssertTrue(
                 drawn.timeline.contains { if case .userMessage(near, _) = $0.content { true } else { false } },

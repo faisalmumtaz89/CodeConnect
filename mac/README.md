@@ -35,7 +35,7 @@ config of a Codex run's thread), with which an agent lists the other running ses
 message, and reads its own. `ccd` keeps a message until the receiving session reads it, on
 this computer or, carried over Tailscale to that computer's `ccd`, on another of the same
 Tailscale user's computers. See
-[docs/codex.md](../docs/codex.md#messages-from-other-agents).
+[docs/codex.md](../docs/codex.md#codeconnect-messages).
 
 **[`docs/codex.md`](../docs/codex.md) is the operator page.**
 
@@ -1031,7 +1031,7 @@ The run is then `live`, and the connection is kept as the run's one link: each e
 Codex reports on it (the thread, each message once it is finished, each command or
 file change as its call and then its result, the turn's end) is filed once and
 reaches both apps. Codex's own requests come on it too. A command, a file change or an
-MCP tool call that Codex asks to run (CodeConnect's own `send_message` among them)
+MCP tool call that Codex asks to run (CodeConnect's own `msg_send` among them)
 becomes a card on both apps. It offers the answers Codex offers for it among accept,
 accept for this session, decline and cancel, under the words the apps show: a command's
 "Yes, proceed" and "No, and tell Codex what to do differently" (cancel, which ends the
@@ -1542,8 +1542,8 @@ shared `/tmp` is not yours to change.
   try again, so the run stays live with no connection: an answer, a Stop and a message are
   refused, and a mail wake already on its way stays outstanding, so new mail does not wake
   the run. It has been seen only with Codex's closing delay set to two seconds.
-* **On a Codex run started from an app, Codex asks before each `send_message`** until its
-  card is answered "Allow for this session"; `list_agents` and `read_messages`, marked as
+* **On a Codex run started from an app, Codex asks before each `msg_send`** until its
+  card is answered "Allow for this session"; `msg_sessions` and `msg_read`, marked as
   only reading, run without a card (codex 0.170.0).
 * **On a Codex run started from an app, a command that finished while ccd restarted during a
   turn is filed after that turn's reply.** ccd attaches again while the turn runs, files the
