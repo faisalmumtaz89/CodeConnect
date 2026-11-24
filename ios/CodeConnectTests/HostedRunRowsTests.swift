@@ -119,7 +119,7 @@ final class HostedRunRowsTests: XCTestCase {
         let expected: [(through: UInt64, status: FleetStatus, preview: String)] = [
             (3, .running, "notice:Run started"),
             (4, .doneUnreviewed, "notice:Turn complete"),
-            (7, .running, "notice:Reading CodeConnect mail"),
+            (7, .running, "notice:Reading CodeConnect messages"),
             (8, .running, "reply:I read my mail."),
             (9, .doneUnreviewed, "notice:Turn complete"),
         ]

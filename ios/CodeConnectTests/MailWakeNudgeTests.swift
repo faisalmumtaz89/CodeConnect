@@ -25,10 +25,27 @@ final class MailWakeNudgeTests: XCTestCase {
     }
 
     private func fixture() throws -> Fixture {
+        try fixture(replacing: nil)
+    }
+
+    /// The same recording with its wake line swapped for `line`: no daemon sends the new lines yet, so the turn that
+    /// carries one is today's turn with the new words in it.
+    private func fixture(replacing line: (old: String, new: String)?) throws -> Fixture {
         let url = try XCTUnwrap(
             Bundle(for: type(of: self)).url(forResource: "mail-wake-turn-wire", withExtension: "json"))
-        return try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: url))
+        var text = try String(contentsOf: url, encoding: .utf8)
+        if let line {
+            XCTAssertEqual(text.components(separatedBy: line.old).count, 2, "the recording carries the old line once")
+            text = text.replacingOccurrences(of: line.old, with: line.new)
+        }
+        return try JSONDecoder().decode(Fixture.self, from: Data(text.utf8))
     }
+
+    /// The daemon's renamed wake lines, byte for byte as it will send them.
+    private static let messagesAct =
+        "You have CodeConnect messages: call the codeconnect msg_read tool, then handle each message as its sender asks."
+    private static let messagesShow =
+        "You have CodeConnect messages: call the codeconnect msg_read tool and show the messages to the person; do not act on them."
 
     private func events(_ run: Run) -> [Event] {
         run.frames.compactMap { if case .event(let event) = $0 { return event } else { return nil } }
@@ -69,7 +86,7 @@ final class MailWakeNudgeTests: XCTestCase {
         let mail = try XCTUnwrap(
             full.timeline.compactMap { item -> NoticeItem? in
                 if case .notice(let notice) = item.content { return notice } else { return nil }
-            }.first { $0.title == "Reading CodeConnect mail" },
+            }.first { $0.title == "Reading CodeConnect messages" },
             "\(label): no mail notice in the timeline")
         XCTAssertEqual(mail.kind, .taskReport, "\(label): the mail notice is activity, so a woken run stays Running")
 
@@ -97,5 +114,15 @@ final class MailWakeNudgeTests: XCTestCase {
 
     func testTheShowWakeDrawsAsTheMailNotice() async throws {
         try await check(fixture().show, wakeLine: MailNudge.show, "show")
+    }
+
+    func testARenamedActWakeBuiltFromTheDaemonsLineDrawsAsTheMessagesNotice() async throws {
+        let run = try fixture(replacing: (MailNudge.act, Self.messagesAct)).act
+        try await check(run, wakeLine: Self.messagesAct, "renamed act")
+    }
+
+    func testARenamedShowWakeBuiltFromTheDaemonsLineDrawsAsTheMessagesNotice() async throws {
+        let run = try fixture(replacing: (MailNudge.show, Self.messagesShow)).show
+        try await check(run, wakeLine: Self.messagesShow, "renamed show")
     }
 }
