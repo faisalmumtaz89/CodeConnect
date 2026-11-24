@@ -121,7 +121,8 @@ struct FleetView: View {
     /// it. A project or a run that arrives or leaves waits here, named by the
     /// header's pill, until the owner lets it in (the pill, a pull, coming back
     /// to the screen), so nothing moves under a finger. Nil, or empty, until
-    /// there is a card to hold.
+    /// there is a card to hold; an empty hold takes the computer's first answer
+    /// whole, as on a first pairing.
     @State private var held: [ProjectKey: Set<String>]?
     /// The last row of every run the list holds, drawn once the fleet no longer
     /// has it.
@@ -280,6 +281,11 @@ struct FleetView: View {
             // no Ended band), is let in at once: there is nothing to move.
             .onChange(of: screen.live, initial: true) { _, live in
                 if held == nil || (held?.isEmpty == true && screen.ended == nil) { held = live }
+            }
+            // The computer's first answer is the first fleet too when the list was on screen before it, holding
+            // nothing, as on a first pairing: an Ended band in that answer is no card to keep in place.
+            .onChange(of: screen.hasLiveFleet) { _, isLive in
+                if isLive, held?.isEmpty == true { applyHeld() }
             }
             .onChange(of: screen.rows, initial: true) { _, rows in
                 guard let held else { return }
