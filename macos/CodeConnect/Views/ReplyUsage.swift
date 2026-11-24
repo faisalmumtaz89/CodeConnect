@@ -81,7 +81,7 @@ struct ReplyUsage: View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(label).font(Theme.ui(12)).foregroundStyle(Card.muted)
             Spacer(minLength: 24)
-            if let value { Text(value).font(Theme.mono(12)).foregroundStyle(Color(themeHex: 0xE4E4E7)) }
+            if let value { Text(value).font(Theme.mono(12)).foregroundStyle(Theme.text) }
             if let rest { Text(rest).font(Theme.ui(12)).foregroundStyle(Card.muted) }
         }
         .padding(.vertical, 4)
