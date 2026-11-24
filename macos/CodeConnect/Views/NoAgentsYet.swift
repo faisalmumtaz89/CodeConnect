@@ -24,6 +24,8 @@ struct NoAgentsYet: View {
                 action: newAgent)
                 .padding(.top, 6)
         }
+        // A container: flat under the window, the hidden image above was still read by VoiceOver.
+        .accessibilityElement(children: .contain)
     }
 }
 

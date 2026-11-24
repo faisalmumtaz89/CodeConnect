@@ -3,6 +3,10 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.20
+
+- On the Mac, VoiceOver no longer reads two icons as bare symbol names.
+
 ## CodeConnect 0.19.19, with the iPhone app 1.1.36
 
 - On the iPhone, the Projects list shows your first computer's sessions as soon as it answers; before, they could wait

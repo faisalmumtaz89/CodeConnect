@@ -959,6 +959,8 @@ private struct EmptyFleet: View {
                 }
                 .padding(.top, 6)
             }
+            // A container: flat under the window, the hidden image above was still read by VoiceOver.
+            .accessibilityElement(children: .contain)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Theme.window)
