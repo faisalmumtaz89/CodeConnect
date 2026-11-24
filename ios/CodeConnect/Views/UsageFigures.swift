@@ -34,8 +34,8 @@ struct UsageFigures: View {
     private func share(_ limit: ReplyBar.Limit) -> some View {
         HStack(spacing: CC.space.xxs) {
             UsageRing(percent: limit.usedPercent)
-            // As wide as "100%", so which form fits never changes with the value.
-            ZStack(alignment: .trailing) {
+            // As wide as "100%", so which form fits never changes with the value; the value starts at the ring.
+            ZStack(alignment: .leading) {
                 Text(verbatim: "100%").hidden()
                 Text(verbatim: "\(limit.usedPercent)%").foregroundStyle(CC.text.secondary)
             }

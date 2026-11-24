@@ -12,6 +12,10 @@ import SwiftUI
 /// **At accessibility sizes the label is two lines**: the model — which may truncate — over the mode — which may not,
 /// because the mode is the one thing this label exists to show. A run with no menus shows its model as a read-only
 /// fact; a run these controls do not own (`deferToOtherPath`) shows nothing.
+///
+/// **The run's usage** (`ReplyBar`) stands at the row's leading edge, part of the same button, in the first form that
+/// fits beside the whole line: its context and every window, the fullest window's ring alone, or none; at
+/// accessibility sizes none. Its sentence is always the button's value, so VoiceOver reads it whichever form is drawn.
 struct HostedSettingsBar: View {
     let model: AppModel
     let key: String
@@ -54,7 +58,8 @@ struct HostedSettingsBar: View {
                     row { settingsButton(settings, usage: bar) { line(settings) } }
                 }
             } else {
-                // At accessibility sizes the line alone fills the row; the usage is still the button's value.
+                // No usage held, or an accessibility size, where the line alone fills the row; any usage held is
+                // still the button's value.
                 row { settingsButton(settings, usage: usage) { line(settings) } }
             }
         }

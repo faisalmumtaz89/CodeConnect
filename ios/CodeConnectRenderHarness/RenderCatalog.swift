@@ -1190,7 +1190,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-sheet-claude",
-            purpose: "the settings sheet as a tap on the line opens it, its Usage section first, for a Claude run",
+            purpose: "the settings sheet's Usage section for a Claude run: first as a tap opens it, last at AX5",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
@@ -1198,13 +1198,27 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.require(
                     app.buttons["session.composer.settings"], "the composer settings control").tap()
-                // Its top, as it opens: found without scrolling, so the picture is the sheet as a tap leaves it.
+                // As it opens where Usage stands first (scrolled not at all); at accessibility sizes, where it stands
+                // last, scrolled down to it.
                 try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
-                try driver.requireExists(driver.text(containing: "Usage", in: app), "the sheet's Usage section")
+                try driver.require(driver.text(containing: "Usage", in: app), "the sheet's Usage section")
+            }),
+        RenderScenario(
+            name: "session-usage-sheet-no-plan-limits",
+            purpose: "the settings sheet's Usage section for an account its agent says has no plan limits",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", noPlanLimitsAccounts,
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control").tap()
+                try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
+                try driver.require(driver.text(containing: "No plan limits", in: app), "the no-limits row")
             }),
         RenderScenario(
             name: "session-usage-sheet-codex",
-            purpose: "the settings sheet as a tap on the line opens it, its Usage section first, for a Codex run",
+            purpose: "the settings sheet's Usage section for a Codex run: first as a tap opens it, last at AX5",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
@@ -1212,9 +1226,10 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.require(
                     app.buttons["session.composer.settings"], "the composer settings control").tap()
-                // Its top, as it opens: found without scrolling, so the picture is the sheet as a tap leaves it.
+                // As it opens where Usage stands first (scrolled not at all); at accessibility sizes, where it stands
+                // last, scrolled down to it.
                 try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
-                try driver.requireExists(driver.text(containing: "Usage", in: app), "the sheet's Usage section")
+                try driver.require(driver.text(containing: "Usage", in: app), "the sheet's Usage section")
             }),
         RenderScenario(
             name: "session-settings-over-a-long-reply",
@@ -1501,8 +1516,16 @@ enum RenderCatalog {
         from: Calendar.current.date(bySettingHour: 9, minute: 41, second: 0, of: Date())!)
 
     /// An `accounts` reply for `-CC_ACCOUNTS_WIRE`: each agent's Default signed in as you@example.com, its 5-hour window
-    /// at `fullest` percent and resetting in two hours, its week at 4% and resetting in three days: below every
-    /// `fullest` a scene names, so the 5-hour window is the fullest.
+    /// at `fullest` percent, its week at 4%: below every `fullest` a scene names, so the 5-hour window is the fullest.
+    /// They reset two hours and three days from when the catalog is read, which a picture taken moments later draws as
+    /// "1h 59m" and "2 days".
+    /// An `accounts` reply whose Claude Default is signed in as you@example.com with no plan limits.
+    static let noPlanLimitsAccounts = """
+        {"type":"accounts","request_id":"fx-usage","accounts":[],"active":[],"defaults":[\
+        {"agent":"claude","facts":{"email":"you@example.com","limits_available":false,\
+        "read_at":"2026-11-24T09:00:00Z","windows":[]}}]}
+        """
+
     static func usageAccounts(fullest: Int) -> String {
         let now = Int(Date().timeIntervalSince1970)
         let read = ISO8601DateFormatter().string(from: Date())

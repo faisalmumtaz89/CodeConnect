@@ -3,7 +3,7 @@ import SwiftUI
 
 /// **The model, effort and permission-mode controls for a hosted Claude run** (B8, minor 39).
 ///
-/// One sheet, three sections, one outcome line — reached from `/model` and `/effort`, because a run
+/// One sheet, three menus and the run's usage, one outcome line — reached from `/model` and `/effort`, because a run
 /// CodeConnect started offers all three as structured menus the daemon validates, not as typed
 /// commands. `SessionDetailView` sends every run's `/model` and `/effort` here.
 ///
@@ -19,6 +19,7 @@ struct HostedSettingsSheet: View {
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     /// A mode the menu marks `confirm`, tapped and awaiting the person's confirmation before it is sent.
     @State private var confirmingMode: MenuMode?
@@ -68,7 +69,7 @@ struct HostedSettingsSheet: View {
 
     @ViewBuilder
     private func liveSections(_ live: HostedSettings) -> some View {
-        usage
+        if !typeSize.isAccessibilitySize { usage }
         CCSectionHeader("Model")
         card {
             ForEach(Array(live.models.enumerated()), id: \.element.value) { index, entry in
@@ -113,6 +114,7 @@ struct HostedSettingsSheet: View {
                 }
             }
         }
+        if typeSize.isAccessibilitySize { usage }
     }
 
     // MARK: Usage
@@ -121,19 +123,26 @@ struct HostedSettingsSheet: View {
     /// model's window, each window of its account with its share and when it resets, the words for an account with
     /// no plan limits, and the account; each row only where the app holds it, the section only where it holds any.
     /// It asks the computer nothing: drawn from what the app holds, again once a minute while the sheet is open, so
-    /// a reset's "resets in" stays current.
+    /// a reset's "resets in" stays current. It stands first where the settings line can draw the figures, so a tap on
+    /// them opens on their details, and last at accessibility sizes, where the line never draws them and the sheet
+    /// opens on its settings as before.
+    @ViewBuilder
     private var usage: some View {
-        TimelineView(.everyMinute) { context in
-            if let bar = model.replyBar(for: sessionKey, now: context.date) {
-                let rows = Self.usageRows(bar)
-                if !rows.isEmpty {
-                    VStack(alignment: .leading, spacing: CC.space.md) {
-                        CCSectionHeader("Usage")
-                        card {
-                            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+        if let bar = model.replyBar(for: sessionKey, now: Date()), !Self.usageRows(bar).isEmpty {
+            TimelineView(.everyMinute) { context in
+                let rows = model.replyBar(for: sessionKey, now: context.date).map(Self.usageRows) ?? []
+                VStack(alignment: .leading, spacing: CC.space.md) {
+                    CCSectionHeader("Usage")
+                    card {
+                        ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                            if let value = row.value {
                                 CCFactRow(
-                                    row.label, value: row.value, age: row.resets,
+                                    row.label, value: value, age: row.resets,
                                     separator: index < rows.count - 1)
+                            } else {
+                                CCFactRow(
+                                    row.label, separator: index < rows.count - 1,
+                                    value: { EmptyView() }, detail: { EmptyView() })
                             }
                         }
                     }
@@ -142,12 +151,13 @@ struct HostedSettingsSheet: View {
         }
     }
 
-    /// The card's rows, in the Mac card's order: Context, each window, the no-limits words, Account.
-    private static func usageRows(_ bar: ReplyBar) -> [(label: String, value: String, resets: String?)] {
-        var rows: [(label: String, value: String, resets: String?)] = []
+    /// The card's rows, in the Mac card's order: Context, each window, the no-limits words (a row with no value),
+    /// Account.
+    private static func usageRows(_ bar: ReplyBar) -> [(label: String, value: String?, resets: String?)] {
+        var rows: [(label: String, value: String?, resets: String?)] = []
         if let context = bar.context { rows.append(("Context", "\(context.used) of \(context.window)", nil)) }
         rows += bar.limits.map { ($0.caption, "\($0.usedPercent)%", $0.resets) }
-        if let note = bar.limitsNote { rows.append((note, "", nil)) }
+        if let note = bar.limitsNote { rows.append((note, nil, nil)) }
         if let account = bar.account { rows.append(("Account", account, nil)) }
         return rows
     }
@@ -195,7 +205,7 @@ struct HostedSettingsSheet: View {
 
     @ViewBuilder
     private func readOnly(_ modelFact: RunModelName?) -> some View {
-        usage
+        if !typeSize.isAccessibilitySize { usage }
         CCSectionHeader("Model")
         card {
             if let modelFact, !modelFact.text.isEmpty {
@@ -218,6 +228,7 @@ struct HostedSettingsSheet: View {
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
             .fixedSize(horizontal: false, vertical: true)
+        if typeSize.isAccessibilitySize { usage }
     }
 
     @ViewBuilder
@@ -231,7 +242,7 @@ struct HostedSettingsSheet: View {
 
     // MARK: Outcome
 
-    /// **Pinned, not scrolled** — the one line the reader has to see, below the three sections. While a
+    /// **Pinned, not scrolled** — the one line the reader has to see, below the sections. While a
     /// call is in flight it says so once (the menus above are disabled); then the Kit's own wording for
     /// what the daemon answered, for as long as the Kit keeps it (`HostedSettings.lastOutcome`).
     @ViewBuilder
