@@ -3,6 +3,19 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.18, with the iPhone app 1.1.35
+
+- On the Mac and Linux, a Codex session is woken for its CodeConnect mail only between its turns, so a turn that
+  already read its mail is not followed by a second wake.
+- A session now finds CodeConnect's mail from a plain request, such as "tell the session on my other computer…",
+  without your naming a tool. A Claude Code session in a folder you trust lists your other sessions and reads its mail
+  without asking; sending a message still asks, and a folder you don't trust asks for each.
+- A session whose message is waiting is told to end its turn and be woken by the reply, or, when the other computer
+  only shows its mail, to tell you instead of waiting.
+- With a computer's mail switch on, an agent answers a question or a request for work with the answer or what it did,
+  not only an acknowledgement.
+- Each computer's mail switch is off until you run `codeconnect mail-trust on` on it; nothing asks you any more.
+
 ## CodeConnect 0.19.17, with the iPhone app 1.1.34
 
 - On the Mac and the iPhone, when you have not chosen an effort for a Claude Code session, it says Default and no
