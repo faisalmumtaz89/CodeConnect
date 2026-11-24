@@ -3,6 +3,10 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.19, with the iPhone app 1.1.36
+
+- On the Mac, the folder browser's buttons show their whole names: Show hidden folders now sits beside the folder's path.
+
 ## CodeConnect 0.19.18, with the iPhone app 1.1.35
 
 - On the Mac, /diff in a Claude Code session's reply box opens the session's Changes tab, as it does on the iPhone.

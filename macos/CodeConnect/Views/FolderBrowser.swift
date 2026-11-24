@@ -4,7 +4,8 @@ import SwiftUI
 /// Any folder on a computer that is not this Mac, found as in a terminal, in the start form's folder menu: the
 /// folder's path, ".." and the folders in it. A click chooses a row, a double-click or Return goes into it, ← or ⌫ goes
 /// up; Use This Folder starts in the folder shown, Recent Folders goes back to the recent ones. New Folder… names one
-/// in the app's own card and goes into it. What it says is the Kit's, as on the iPhone's browse step.
+/// in the app's own card and goes into it. Show hidden folders sits beside the path it changes, so the bar's three
+/// buttons keep their whole words in the menu's width. What it says is the Kit's, as on the iPhone's browse step.
 struct FolderBrowser: View {
     let context: StartContext
     let use: (String) -> Void
@@ -53,12 +54,21 @@ struct FolderBrowser: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(verbatim: listing?.path ?? path ?? " ")
-                .font(Theme.mono(11))
-                .foregroundStyle(Theme.text2)
-                .lineLimit(1)
-                .truncationMode(.head)
-                .accessibilityIdentifier("start.browse.path")
+            HStack(spacing: 8) {
+                Text(verbatim: listing?.path ?? path ?? " ")
+                    .font(Theme.mono(11))
+                    .foregroundStyle(Theme.text2)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .accessibilityIdentifier("start.browse.path")
+                Spacer(minLength: 8)
+                Toggle(StartWords.showHiddenFolders, isOn: $showsHidden)
+                    .toggleStyle(.checkbox)
+                    .font(Theme.ui(11.5))
+                    .foregroundStyle(Theme.text2)
+                    .fixedSize()
+                    .accessibilityIdentifier("start.browse.hidden")
+            }
             ScrollViewReader { list in
                 ScrollView {
                     VStack(spacing: 0) { rows }
@@ -171,12 +181,6 @@ struct FolderBrowser: View {
                 naming = true
             }
             .disabled(!readable)
-            Toggle(StartWords.showHiddenFolders, isOn: $showsHidden)
-                .toggleStyle(.checkbox)
-                .font(Theme.ui(11.5))
-                .foregroundStyle(Theme.text2)
-                .padding(.leading, 4)
-                .accessibilityIdentifier("start.browse.hidden")
             Spacer(minLength: 8)
             ActionButton(title: "Recent Folders", key: nil, prominent: false, id: "start.browse.recent", action: recent)
             ActionButton(title: StartWords.useThisFolder, key: nil, prominent: true, id: "start.browse.use") {
