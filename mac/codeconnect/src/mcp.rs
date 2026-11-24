@@ -291,7 +291,14 @@ fn status_sentence(status: &MailStatus, to: &str) -> String {
     let id = &status.message_id;
     let reason = status.reason.as_deref().unwrap_or("");
     match status.state {
-        MailState::Waiting => format!("Message {id} is waiting for {to}."),
+        MailState::Waiting if status.reason.as_deref() == Some(protocol::ipc::MAIL_SHOW_ONLY) => format!(
+            "Message {id} is in {to}'s inbox. That computer only shows mail to its person: {to} will not act on it \
+             or reply unless its person asks. Tell your person instead of waiting."
+        ),
+        MailState::Waiting => format!(
+            "Message {id} is in {to}'s inbox. If its reply is all you are waiting for, end your turn: CodeConnect \
+             wakes you when mail arrives. You do not need to poll."
+        ),
         MailState::Sent => format!("Message {id} is still being sent: {reason}"),
         MailState::Read => format!("Message {id} was already read by {to}."),
         MailState::Refused => format!("Message {id} was refused: {reason}"),
@@ -495,6 +502,33 @@ mod tests {
         assert_eq!(reply("{", no_daemon)["error"]["code"], -32700);
     }
 
+    /// **A message waiting in its receiver's inbox tells the sender what to do next** (R-4, M-6): end the turn and be
+    /// woken by the reply; or, when the receiving computer only shows mail to its person, tell its own person instead
+    /// of waiting for a reply that will not come. A reason this build does not know, and none (an older receiving
+    /// daemon), read as the first.
+    #[test]
+    fn a_waiting_message_says_whether_to_wait_for_its_reply() {
+        let waiting = |reason: Option<&str>| {
+            status_sentence(
+                &MailStatus {
+                    message_id: "m1".into(),
+                    state: MailState::Waiting,
+                    reason: reason.map(str::to_string),
+                },
+                "r@studio",
+            )
+        };
+        let wait = "Message m1 is in r@studio's inbox. If its reply is all you are waiting for, end your turn: \
+                    CodeConnect wakes you when mail arrives. You do not need to poll.";
+        assert_eq!(waiting(None), wait);
+        assert_eq!(waiting(Some("a reason from a newer build")), wait);
+        assert_eq!(
+            waiting(Some(protocol::ipc::MAIL_SHOW_ONLY)),
+            "Message m1 is in r@studio's inbox. That computer only shows mail to its person: r@studio will not act \
+             on it or reply unless its person asks. Tell your person instead of waiting."
+        );
+    }
+
     #[test]
     fn a_send_is_one_daemon_round_trip_and_its_answer_is_what_the_agent_reads() {
         let asked = RefCell::new(Vec::new());
@@ -516,7 +550,8 @@ mod tests {
         );
         assert_eq!(
             sent["result"]["content"][0]["text"],
-            "Message m1 is waiting for cc-2@studio."
+            "Message m1 is in cc-2@studio's inbox. If its reply is all you are waiting for, end your turn: \
+             CodeConnect wakes you when mail arrives. You do not need to poll."
         );
         assert_eq!(sent["result"]["isError"], false);
         // A `from` the agent passes is not a parameter: the sender is the run this

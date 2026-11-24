@@ -323,6 +323,10 @@ pub fn is_mail_nudge(text: &str) -> bool {
     text == MAIL_NUDGE_ACT || text == MAIL_NUDGE_SHOW
 }
 
+/// The `reason` a receiving computer gives with a message it keeps (`waiting`) when its mail switch is off: its
+/// agents show mail to their person and do not act on it, so the sender is told not to wait for a reply. An older
+/// receiving daemon gives none.
+pub const MAIL_SHOW_ONLY: &str = "show_only";
 /// The file in CodeConnect's folder that keeps the mail switch.
 pub const MAIL_TRUST_FILE: &str = "mail-trust";
 

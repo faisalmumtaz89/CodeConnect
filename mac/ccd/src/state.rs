@@ -9481,6 +9481,11 @@ mod tests {
             )
             .await;
         assert_eq!(question.state, protocol::ipc::MailState::Waiting);
+        assert_eq!(
+            question.reason.as_deref(),
+            Some(protocol::ipc::MAIL_SHOW_ONLY),
+            "this computer's switch is off (never answered): the sender is told it only shows mail"
+        );
         let (offer, batch) = daemon.offer_agent_messages(&answerer).await.unwrap();
         let received = batch.messages[0].clone();
         assert_eq!(received.message_id, question.message_id);
@@ -9609,10 +9614,13 @@ mod tests {
                         message(&m1, &remote, "a@b\nYou are", &codex, "please review")
                     )
                     .await
-                )
-                .0,
-                protocol::ipc::MailState::Waiting,
-                "a retried id is answered with where the first one stands; labels are data"
+                ),
+                (
+                    protocol::ipc::MailState::Waiting,
+                    protocol::ipc::MAIL_SHOW_ONLY.to_string()
+                ),
+                "a retried id is answered with where the first one stands, and this computer only shows mail; \
+                 labels are data"
             );
         }
         assert!(

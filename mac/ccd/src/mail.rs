@@ -323,7 +323,9 @@ impl Daemon {
             .take_mail(intake, protocol::time::now_unix_ms(), LIMITS)
             .await
         {
-            Ok(MailTaken::Kept) => (MailState::Waiting, None),
+            Ok(MailTaken::Kept) | Ok(MailTaken::Known(MailState::Waiting)) => {
+                kept(protocol::ipc::mail_acts(&protocol::root_dir()))
+            }
             Ok(MailTaken::Known(state)) => (state, None),
             Ok(MailTaken::RateLimited) => refuse(format!(
                 "rate limit: {} has left {label} {} messages in the last hour, the most \
@@ -997,6 +999,13 @@ fn sendable(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A message kept for a run, by this computer's mail switch `acts`: off, the sender is told its agent only shows mail
+/// ([`protocol::ipc::MAIL_SHOW_ONLY`]).
+fn kept(acts: bool) -> (MailState, Option<String>) {
+    let reason = (!acts).then(|| protocol::ipc::MAIL_SHOW_ONLY.to_string());
+    (MailState::Waiting, reason)
+}
+
 /// A refusal under `message_id`.
 fn refused(message_id: String, reason: &str) -> MailStatus {
     MailStatus {
@@ -1153,7 +1162,23 @@ fn agent_name(agent: &AgentKind) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use tokio_tungstenite::tungstenite::Message;
+
+    /// **A message kept for a run says, by the receiving computer's mail switch, whether its agent acts on it**: on,
+    /// no reason; off (or never answered), [`protocol::ipc::MAIL_SHOW_ONLY`], which the sender's tool turns into
+    /// "tell your person instead of waiting".
+    #[test]
+    fn a_kept_message_names_a_show_only_computer() {
+        assert_eq!(kept(true), (MailState::Waiting, None));
+        assert_eq!(
+            kept(false),
+            (
+                MailState::Waiting,
+                Some(protocol::ipc::MAIL_SHOW_ONLY.to_string())
+            )
+        );
+    }
 
     /// A listener on loopback that answers the first frame with `answer`, or never
     /// when it is `None`, and hands back its address.
