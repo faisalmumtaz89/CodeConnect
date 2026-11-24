@@ -457,6 +457,22 @@ final class DeckUITests: XCTestCase {
         attach(app, "deck-fleet-clear")
     }
 
+    /// A HIGH card is allowed with one tap, like any other: no hold and no identity check, and the stack moves on.
+    func testAHighRiskApprovalIsOneTap() {
+        let app = launch(biometrics: "deny")
+        openDeck(app)
+
+        let allowBash = allowButton(app, tool: "Bash")
+        XCTAssertTrue(allowBash.waitForExistence(timeout: 20), "the HIGH card offers Allow")
+        XCTAssertTrue(allowBash.isEnabled, "the command is on screen at this size")
+        allowBash.tap()
+
+        XCTAssertTrue(allowButton(app, tool: "Write").waitForExistence(timeout: 20), "one tap answered it")
+        XCTAssertFalse(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Not approved'")).firstMatch.exists,
+            "nothing stood between the tap and the answer")
+    }
+
     /// **`THIS PASS` is past tense, so it stops when the pass does.**
     ///
     /// It was wired to the model's one-second tick. Four captures of a single

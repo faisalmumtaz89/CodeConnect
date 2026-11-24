@@ -249,6 +249,19 @@ final class RiskAndDeckTests: XCTestCase {
     /// the question card for its answers; neither for a refusal, and a Codex
     /// card's "No" (`cancel`) is one. One rule answers both cards. The option ids
     /// are every one the daemon puts on a Codex card.
+    /// A refusal is the safe direction: Deny, Deny with a reason, Decline and a Codex card's "No" (`cancel`), the one
+    /// refusal among the options the daemon offers. The Mac draws a refusing option as one.
+    func testARefusalIsDenyDeclineOrCancel() {
+        let refusals: [AnswerDecision] = [.deny, .text("not that"), .decline, .optionId("cancel")]
+        let affirmative: [AnswerDecision] = [
+            .allow, .option(index: 1), .optionId("accept"), .optionId("acceptForSession"),
+            .optionId("acceptWithExecpolicyAmendment"), .optionId("Cancel"), .answers([QuestionAnswer()]),
+            .unrecognised("x"),
+        ]
+        for decision in refusals { XCTAssertTrue(DecisionCard.isRefusal(decision), "\(decision)") }
+        for decision in affirmative { XCTAssertFalse(DecisionCard.isRefusal(decision), "\(decision)") }
+    }
+
     func testASecondFactorIsAskedOnlyForAnAffirmativeAnswerAtHigh() {
         let affirmative: [AnswerDecision] = [
             .allow, .option(index: 1), .optionId("accept"), .optionId("acceptForSession"),
