@@ -851,7 +851,7 @@ struct ApprovalRow: View {
 ///
 /// Its own row rather than an `ApprovalRow`, because a question is not a
 /// command waiting on a verdict: it has no tool name to put in the command
-/// column, no execution risk worth a badge unless it would take Face ID, and an
+/// column, no execution risk worth a badge unless it is HIGH, and an
 /// ending that is an answer rather than Allowed or Denied. One status treatment
 /// while it waits — its glyph, amber — where the approval row also tints its
 /// border, pulses a dot and prints NEEDS YOU.
@@ -939,8 +939,8 @@ struct QuestionRow: View {
                         .accessibilityHidden(true)
                 }
             CCAdaptiveSpacer(minLength: 0)
-            // Face ID is asked of a HIGH question's answer, so the row says so;
-            // any lower class gates nothing a question does.
+            // A HIGH question's class is on its row, as on its card; a lower
+            // class marks nothing a question does.
             if risk == .high { CCRiskTag(risk) }
         }
     }

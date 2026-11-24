@@ -441,7 +441,7 @@ struct DecisionBlock: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(CardWords.chooseOne).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.text2)
                 ForEach(Array(options.enumerated()), id: \.element.id) { index, option in
-                    let refusal = !DecisionCard.needsSecondFactor(risk: .high, decision: .optionId(option.id))
+                    let refusal = DecisionCard.isRefusal(.optionId(option.id))
                     let blocked = refusal ? refusalBlocked : assentBlocked
                     let number = keyed && index < 9 ? Character(String(index + 1)) : nil
                     Button { send(.optionId(option.id), from: option.id) } label: {

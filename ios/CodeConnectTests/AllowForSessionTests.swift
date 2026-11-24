@@ -73,15 +73,6 @@ final class AllowForSessionTests: XCTestCase {
         XCTAssertEqual(encoded["option_id"]?.stringValue, expected["option_id"]?.stringValue)
     }
 
-    /// An affirmative takes the tier's control, so a session-wide grant never asks less than a single-use
-    /// Allow: a hold at HIGH, a tap below. The view uses this one rule for both Allow and "Allow for this
-    /// session", so their control kind is equal at every tier.
-    func testAnAffirmativeIsAHoldAtHighAndATapBelow() {
-        XCTAssertEqual(DecisionCard.affirmativeControl(at: .high), .hold)
-        XCTAssertEqual(DecisionCard.affirmativeControl(at: .medium), .tap)
-        XCTAssertEqual(DecisionCard.affirmativeControl(at: .low), .tap)
-    }
-
     /// The caption wraps before it truncates: a one-line cap would hide the broader-than-command part of a
     /// rule, which is the whole reason the caption exists.
     func testTheCaptionWrapsBeforeTruncating() {

@@ -14,10 +14,11 @@ import Foundation
 /// > gate; it can never loosen one below what this build's own reading of the
 /// > command justifies.**
 ///
-/// That asymmetry is deliberate. Escalating costs a hold and a Face ID on a
-/// command that turned out to be harmless. De-escalating would turn
-/// `git push --force` into a single tap because a rule file said so — and the
-/// whole product is the promise that that cannot happen.
+/// That asymmetry is deliberate. Escalating costs a closer read (a HIGH card
+/// waits until its class is on screen too) and a higher place in the queue for a
+/// command that turned out to be harmless. De-escalating would show
+/// `git push --force` as routine because a rule file said so — and the whole
+/// product is the promise that that cannot happen.
 ///
 /// The contract's "absent means medium" applies only when the daemon is known
 /// to classify: on an older daemon nothing is absent, because nothing was ever

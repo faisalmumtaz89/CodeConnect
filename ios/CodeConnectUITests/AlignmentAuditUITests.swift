@@ -32,7 +32,6 @@ final class AlignmentAuditUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = [
             "-CC_FIXTURE", fixture,
-            "-CC_BIOMETRICS", "allow",
             "-UIPreferredContentSizeCategoryName", size.rawValue,
         ]
         if let deeplink {

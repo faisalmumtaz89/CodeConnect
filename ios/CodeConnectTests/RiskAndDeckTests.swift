@@ -245,10 +245,6 @@ final class RiskAndDeckTests: XCTestCase {
 
     // MARK: One approval policy, read by every card
 
-    /// The decision card asks a face for Allow and a Codex option that says yes,
-    /// the question card for its answers; neither for a refusal, and a Codex
-    /// card's "No" (`cancel`) is one. One rule answers both cards. The option ids
-    /// are every one the daemon puts on a Codex card.
     /// A refusal is the safe direction: Deny, Deny with a reason, Decline and a Codex card's "No" (`cancel`), the one
     /// refusal among the options the daemon offers. The Mac draws a refusing option as one.
     func testARefusalIsDenyDeclineOrCancel() {
@@ -260,25 +256,6 @@ final class RiskAndDeckTests: XCTestCase {
         ]
         for decision in refusals { XCTAssertTrue(DecisionCard.isRefusal(decision), "\(decision)") }
         for decision in affirmative { XCTAssertFalse(DecisionCard.isRefusal(decision), "\(decision)") }
-    }
-
-    func testASecondFactorIsAskedOnlyForAnAffirmativeAnswerAtHigh() {
-        let affirmative: [AnswerDecision] = [
-            .allow, .option(index: 1), .optionId("accept"), .optionId("acceptForSession"),
-            .optionId("acceptWithExecpolicyAmendment"), .answers([QuestionAnswer()]), .unrecognised("x"),
-        ]
-        let refusals: [AnswerDecision] = [.deny, .text("not that"), .decline, .optionId("cancel")]
-        for risk in [RiskClass.low, .medium] {
-            for decision in affirmative + refusals {
-                XCTAssertFalse(DecisionCard.needsSecondFactor(risk: risk, decision: decision), "\(risk) \(decision)")
-            }
-        }
-        for decision in affirmative {
-            XCTAssertTrue(DecisionCard.needsSecondFactor(risk: .high, decision: decision), "\(decision)")
-        }
-        for decision in refusals {
-            XCTAssertFalse(DecisionCard.needsSecondFactor(risk: .high, decision: decision), "\(decision)")
-        }
     }
 
     /// The wait while an answer is on the way names the computer the agents
@@ -514,9 +491,9 @@ final class RiskAndDeckTests: XCTestCase {
     /// frame opened the gate permanently.
     ///
     /// Measured on an iPhone Air at AX5: a MEDIUM `Write` with 13 characters of
-    /// its path on screen and `Allow` drawn as the enabled white primary. At
-    /// MEDIUM there is no hold and no Face ID, so this gate was the only thing
-    /// in the way. HIGH survived only because it also needs the provenance.
+    /// its path on screen and `Allow` drawn as the enabled white primary. This
+    /// gate was the only thing in the way. HIGH survived only because it also
+    /// needs the provenance.
     ///
     /// "Not measured yet" and "measures zero" must therefore be different
     /// values, exactly as they already are for every edge on this probe.

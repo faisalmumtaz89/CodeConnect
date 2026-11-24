@@ -94,7 +94,6 @@ import SwiftUI
                 proseSection
             case .buttons:
                 buttonSection
-                holdSection
                 actionPairSection
             case .rows:
                 rowSection
@@ -436,45 +435,6 @@ import SwiftUI
                                 })
                         }
                     }
-                }
-            }
-        }
-
-        // MARK: Hold
-
-        private var holdSection: some View {
-            section("CCHoldButton") {
-                VStack(alignment: .leading, spacing: CC.space.sm) {
-                    Text(
-                        "Press and hold, the ring traces the perimeter in 1.2s. Tap without holding: the ring rewinds and the button says why, rather than looking like nothing happened."
-                    )
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    CCHoldButton("Hold to allow", action: { lastAction = "held allow" })
-                    CCHoldButton(
-                        "Hold to force push", icon: "arrow-square-up-right-fill",
-                        tone: .warning, action: { lastAction = "held push" })
-                    CCHoldButton("Submitting", isLoading: true, action: {})
-
-                    Text("DISABLED - THE REASON IS DRAWN, NOT ONLY HINTED")
-                        .ccType(CC.type.micro)
-                        .foregroundStyle(CC.text.tertiary)
-                        .padding(.top, CC.space.xs)
-                    CCHoldButton(
-                        "Hold to allow",
-                        disabledReason: CCDisabledReason(
-                            "The text on this card does not match its hash."),
-                        action: {})
-                    // The HIGH-risk stale-link case that makes this mandatory: at HIGH
-                    // the hold button *is* Allow, so a silent one leaves the
-                    // card with no sentence anywhere on it.
-                    CCHoldButton(
-                        "Hold to allow",
-                        disabledReason: CCDisabledReason(
-                            "2m since the daemon last spoke. Actions are disabled until it answers."
-                        ),
-                        action: {})
                 }
             }
         }
@@ -1367,7 +1327,7 @@ import SwiftUI
                             }
                         } allow: {
                             CCButton(
-                                "Hold to allow", variant: .primary, size: .lg,
+                                "Allow", variant: .primary, size: .lg,
                                 fullWidth: true
                             ) { lastAction = "allow" }
                         }
@@ -1782,7 +1742,7 @@ import SwiftUI
                                     "Deny", variant: .secondary, size: .lg, fullWidth: true,
                                     action: {})
                             }
-                            CCHoldButton("Hold to allow", action: {})
+                            CCButton("Allow", variant: .primary, size: .lg, fullWidth: true, action: {})
                         }
                     }
                 }

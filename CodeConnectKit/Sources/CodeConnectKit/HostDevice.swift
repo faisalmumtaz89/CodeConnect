@@ -8,10 +8,6 @@ public struct HostDevice: Sendable, Equatable {
     public let name: String
     /// The device as a sentence says it: "this phone", "from the phone".
     public let noun: String
-    /// What a high-risk approval asks for first.
-    public let biometric: String
-    /// What it falls back to.
-    public let secret: String
     /// How a computer that will not let this device in without its code is
     /// added: the iPhone scans the code, a Mac has it entered.
     public let addWithCode: String
@@ -19,11 +15,11 @@ public struct HostDevice: Sendable, Equatable {
     public let codeAgain: String
 
     public static let iPhone = HostDevice(
-        name: "iPhone", noun: "phone", biometric: "Face ID", secret: "passcode",
+        name: "iPhone", noun: "phone",
         addWithCode: "Scan this computer’s code to add it.",
         codeAgain: "Show a new code on your computer and scan it (codeconnect.sh/support shows how).")
     public static let mac = HostDevice(
-        name: "Mac", noun: "Mac", biometric: "Touch ID", secret: "password",
+        name: "Mac", noun: "Mac",
         addWithCode: "Add it with its pairing code.",
         codeAgain: "Enter the current pairing code from that computer again.")
 

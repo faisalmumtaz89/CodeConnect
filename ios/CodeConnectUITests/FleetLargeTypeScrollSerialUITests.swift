@@ -31,7 +31,7 @@ final class FleetLargeTypeScrollSerialUITests: XCTestCase {
     private func scrollsBothWays(at size: String) {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "ended",
             "-CC_RENDER_PROBE", "YES",
             "-UIPreferredContentSizeCategoryName", size,
         ]

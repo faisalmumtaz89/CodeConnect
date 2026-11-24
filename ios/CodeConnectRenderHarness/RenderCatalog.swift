@@ -637,7 +637,7 @@ enum RenderCatalog {
             // and its label-predicate tap resolves to a container whose centre
             // misses the control. The bar itself is rendered by `fleet`.
             arguments: [
-                "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
+                "-CC_FIXTURE", "deck",
                 "-CC_DEEPLINK", "codeconnect://deck/toolu_fixture_high",
             ],
             reach: { app, driver in
@@ -651,35 +651,16 @@ enum RenderCatalog {
 
         RenderScenario(
             name: "deck-high-read",
-            purpose: "the same card with the read gate satisfied — the hold target armed",
+            purpose: "the same card with the read gate satisfied — Allow armed",
             arguments: [
-                "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
+                "-CC_FIXTURE", "deck",
                 "-CC_DEEPLINK", "codeconnect://deck/toolu_fixture_high",
             ],
             reach: { app, driver in
                 try driver.require(app.navigationBars["Waiting for you"], "the named HIGH card")
-                let hold = app.buttons.matching(identifier: "Hold to allow").firstMatch
-                try driver.require(hold, "the hold-to-allow control")
-                try driver.scrollUntil(app, "the read gate arms") { hold.isEnabled }
-            }),
-
-        RenderScenario(
-            name: "deck-biometrics-refused",
-            purpose:
-                "a refused Face ID must explain itself **above** the action bar, not under it",
-            arguments: [
-                "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "deny",
-                "-CC_DEEPLINK", "codeconnect://deck/toolu_fixture_high",
-            ],
-            reach: { app, driver in
-                try driver.require(app.navigationBars["Waiting for you"], "the named HIGH card")
-                let hold = app.buttons.matching(identifier: "Hold to allow").firstMatch
-                try driver.require(hold, "the hold-to-allow control")
-                try driver.scrollUntil(app, "the read gate arms") { hold.isEnabled }
-                hold.press(forDuration: 1.6)
-                try driver.require(
-                    driver.element(containing: "Not approved", in: app),
-                    "the refused-biometric notice")
+                let allow = app.buttons.matching(identifier: "Allow this Bash call").firstMatch
+                try driver.require(allow, "the Allow control")
+                try driver.scrollUntil(app, "the read gate arms") { allow.isEnabled }
             }),
 
         RenderScenario(

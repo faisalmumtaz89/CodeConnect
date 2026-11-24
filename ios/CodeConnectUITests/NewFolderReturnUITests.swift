@@ -10,7 +10,7 @@ final class NewFolderReturnUITests: XCTestCase {
 
     func testReturnInTheNameMakesTheFolder() {
         let app = XCUIApplication()
-        app.launchArguments = ["-CC_FIXTURE", "deck", "-CC_FIXTURE_REAL_NAMES", "YES", "-CC_BIOMETRICS", "allow"]
+        app.launchArguments = ["-CC_FIXTURE", "deck", "-CC_FIXTURE_REAL_NAMES", "YES"]
         app.launch()
 
         let entry = app.buttons["start-entry"]

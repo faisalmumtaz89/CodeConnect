@@ -8,8 +8,8 @@ import SwiftUI
 /// the other is worse than no gate, because it is the one you stop checking for.
 ///
 /// **The read gate is not one of the tiers.** Every class waits until the
-/// command has been on screen; what the class decides is how much *friction*
-/// comes after that — a tap, a hold, a face. At reading sizes a LOW command fits
+/// command has been on screen; what the class decides is what else must be seen
+/// first — at HIGH, the class itself. At reading sizes a LOW command fits
 /// above the action bar on the first frame, so its gate is already open by the
 /// time the card is drawn and the reader never meets it. At AX5 it is the only
 /// thing standing between one tap and approving a path the product never
@@ -21,12 +21,11 @@ import SwiftUI
 ///     filled white primary.
 ///   * **MEDIUM** — the same gate, and a fill morph and haptic at the moment it
 ///     opens, because at MEDIUM the reader usually had to scroll for it.
-///   * **HIGH** — a 1.2-second hold *and* Face ID (passcode fallback). The
-///     controls look exactly as they do at LOW: Allow is the filled white
-///     affirmative, Deny the bordered alternative. What changes is the *effort*,
-///     not the colour.
+///   * **HIGH** — the same tap, once the command *and* its class have been
+///     shown. The controls look exactly as they do at LOW: Allow is the filled
+///     white affirmative, Deny the bordered alternative.
 ///
-/// **Risk changes friction, never chrome.** An earlier version inverted the
+/// **Risk never changes chrome.** An earlier version inverted the
 /// hierarchy at HIGH — Deny took the white fill, Allow was drawn in `danger` —
 /// on the reasoning that the safe action should carry the weight when the stakes
 /// are highest. It reads well and it is wrong twice: it moves the primary
@@ -84,8 +83,6 @@ struct DecisionCardView: View {
     /// actually in flight lives on the model, keyed by request id, so dismissing
     /// and re-presenting this card cannot start a second one.
     @State private var spinningControl: String?
-    /// Why the biometric check did not pass. Shown, never swallowed.
-    @State private var authNotice: String?
     /// What a tap in the sample fleet would have done. See `submit`.
     @State private var sampleNotice: String?
     /// When the answer left, so an unconfirmed one can say how long it has been
@@ -986,7 +983,7 @@ struct DecisionCardView: View {
     /// `ViewBuilder`.
     ///
     /// A hash mismatch outranks a resolution, which outranks an
-    /// already-resolved notice, which outranks a refused biometric. Choosing it
+    /// already-resolved notice, which outranks the sample fleet's. Choosing it
     /// here rather than in the body is what lets `pinnedFooter` ask *whether
     /// there is one* — `some View` cannot be asked that, and the answer decides
     /// whether the card reserves a strip above the action bar at all.
@@ -1029,7 +1026,6 @@ struct DecisionCardView: View {
         case .unavailable: return .unavailable
         case .none: break
         }
-        if let authNotice { return .authRefused(authNotice) }
         if let sampleNotice { return .sample(sampleNotice) }
         return nil
     }
@@ -1043,8 +1039,6 @@ struct DecisionCardView: View {
         case codex(CodexResolution)
         /// No live state backs this card — a decision that is no longer available.
         case unavailable
-        /// Why the biometric check did not pass, in the gate's own words.
-        case authRefused(String)
         /// What this tap would have done, had there been a Mac to send it to.
         case sample(String)
     }
@@ -1070,11 +1064,6 @@ struct DecisionCardView: View {
         case .unavailable:
             let banner = DecisionCard.unavailableBanner()
             CCBanner(banner.title, message: banner.message, tone: banner.tone.ccTone, icon: banner.icon)
-        case .authRefused(let notice):
-            // The gate's own words in the message, never a paraphrase, and never
-            // swallowed: a biometric check that failed silently is
-            // indistinguishable from a tap that did nothing.
-            CCBanner("Face ID", message: notice, tone: .warning, icon: "scan-smiley")
         case .sample(let notice):
             // The fleet banner's own title and glyph: this is the same fact,
             // arriving where the reader is looking.
@@ -1088,19 +1077,17 @@ struct DecisionCardView: View {
     ///
     /// The banner used to live in the scroll content, as the seventh child of a
     /// document the reader has already scrolled to the end of — so it appeared
-    /// *underneath* the bar that had just refused them. Measured on a render of
-    /// the refused-biometric state: the banner box at y=613.33 h=53.00 against a
-    /// bar top edge of y=631.00, which hides 66.6% of it, and its message — the
-    /// only part that says *what went wrong* — at y=640.33 h=14.00, **100%
-    /// occluded**. A refused Face ID that cannot state its reason is, measured,
-    /// indistinguishable from a tap that did nothing.
+    /// *underneath* the bar. Measured on a render of a refused answer's banner: the
+    /// banner box at y=613.33 h=53.00 against a bar top edge of y=631.00, which
+    /// hides 66.6% of it, and its message — the only part that says *what went
+    /// wrong* — at y=640.33 h=14.00, **100% occluded**. A banner that cannot state
+    /// its reason is, measured, indistinguishable from a tap that did nothing.
     ///
     /// The link-failure banner is already pinned above the bar. This puts the
     /// card's whole banner slot in the same place, so the fix is structural
-    /// rather than one case's: a hash mismatch, a resolution receipt, an
-    /// already-resolved notice and a refused biometric all arrive at the moment
-    /// the reader is looking at the bottom of the card, and all four were in the
-    /// same trap.
+    /// rather than one case's: a hash mismatch, a resolution receipt and an
+    /// already-resolved notice all arrive at the moment the reader is looking at
+    /// the bottom of the card, and all were in the same trap.
     ///
     /// Pinned as a **sibling of the bar rather than inside it**, because the bar
     /// disappears the moment an answer is terminal (`actionBar` draws nothing
@@ -1133,8 +1120,8 @@ struct DecisionCardView: View {
             GeometryReader { proxy in
                 // How much of the document the pinned footer is covering, and so
                 // what the command block has to clear to count as read. The
-                // banner is part of that: a command hidden behind a Face ID
-                // notice has not been seen either.
+                // banner is part of that: a command hidden behind a notice has
+                // not been seen either.
                 Color.clear.preference(
                     key: ActionBarHeightKey.self, value: CGFloat?.some(proxy.size.height))
             }
@@ -1405,10 +1392,8 @@ struct DecisionCardView: View {
             // broader than the one command on the card and a person must not
             // grant more than they can read — so it wraps to three lines before
             // it truncates, at the tail, never the middle. It is an affirmative
-            // that outlives the card, so it takes the SAME control as Allow at
-            // every tier (`affirmativeControl`): a hold at HIGH, a tap below,
-            // over the read gate and the HIGH second factor — never less than a
-            // one-time Allow.
+            // that outlives the card, so it waits on the same read gate as
+            // Allow — never less than a one-time Allow.
             if offersAllowForSession {
                 if let caption = DecisionCard.sessionRuleCaption(card: approval.card) {
                     // The whole sentence on screen, as the Mac shows it: the
@@ -1420,27 +1405,15 @@ struct DecisionCardView: View {
                         .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                switch DecisionCard.affirmativeControl(at: risk) {
-                case .hold:
-                    CCHoldButton(
-                        "Hold to allow for this session", emphasis: .outline,
-                        isLoading: inFlight == "acceptForSession",
-                        disabledReason: CCDisabledReason(blockedReason)
-                    ) {
-                        submit(.optionId("acceptForSession"), key: "acceptForSession")
-                    }
-                    .accessibilityIdentifier("allow-for-session")
-                case .tap:
-                    CCButton(
-                        CardWords.allowForSession, icon: "clock", variant: .ghost, size: .md,
-                        fullWidth: true,
-                        isLoading: inFlight == "acceptForSession",
-                        disabledReason: CCDisabledReason(blockedReason)
-                    ) {
-                        submit(.optionId("acceptForSession"), key: "acceptForSession")
-                    }
-                    .accessibilityIdentifier("allow-for-session")
+                CCButton(
+                    CardWords.allowForSession, icon: "clock", variant: .ghost, size: .md,
+                    fullWidth: true,
+                    isLoading: inFlight == "acceptForSession",
+                    disabledReason: CCDisabledReason(blockedReason)
+                ) {
+                    submit(.optionId("acceptForSession"), key: "acceptForSession")
                 }
+                .accessibilityIdentifier("allow-for-session")
             }
             if !denyFieldShown {
                 CCButton(
@@ -1523,35 +1496,20 @@ struct DecisionCardView: View {
         .accessibilityLabel("Deny this \(approval.card.toolName) call")
     }
 
-    @ViewBuilder
     private var allowControl: some View {
-        switch DecisionCard.affirmativeControl(at: risk) {
-        case .hold:
-            CCHoldButton(
-                "Hold to allow",
-                // Filled white, like the tap `Allow` it replaces. What makes
-                // HIGH different is the 1.2s hold and Face ID, not the colour.
-                emphasis: .primary,
-                isLoading: inFlight == "allow",
-                disabledReason: CCDisabledReason(blockedReason)
-            ) {
-                submit(.allow, key: "allow")
-            }
-        case .tap:
-            CCButton(
-                CardWords.allow,
-                variant: .primary,
-                size: .lg,
-                fullWidth: true,
-                isLoading: inFlight == "allow",
-                disabledReason: CCDisabledReason(blockedReason)
-            ) {
-                submit(.allow, key: "allow")
-            }
-            // The arming morph: the fill animates in when the gate opens.
-            .ccAnimation(CC.motion.medium, value: gate)
-            .accessibilityLabel("Allow this \(approval.card.toolName) call")
+        CCButton(
+            CardWords.allow,
+            variant: .primary,
+            size: .lg,
+            fullWidth: true,
+            isLoading: inFlight == "allow",
+            disabledReason: CCDisabledReason(blockedReason)
+        ) {
+            submit(.allow, key: "allow")
         }
+        // The arming morph: the fill animates in when the gate opens.
+        .ccAnimation(CC.motion.medium, value: gate)
+        .accessibilityLabel("Allow this \(approval.card.toolName) call")
     }
 
     private var denyReasonField: some View {
@@ -1615,28 +1573,12 @@ struct DecisionCardView: View {
         model.answerBlockedReason(for: approval, inFlight: inFlight != nil)
     }
 
-    /// What became of a send: refused at the face check, or answered.
-    enum Sent {
-        case faceRefused(String?)
-        case answered(AnswerAttempt)
-    }
-
-    /// Send `decision` as every surface that answers a card sends one: a face
-    /// first when `needsFace`, then the daemon, each outcome with its haptic.
-    static func send(
-        _ decision: AnswerDecision, for approval: ApprovalItem, model: AppModel, needsFace: Bool
-    ) async -> Sent {
-        if needsFace {
-            let outcome = await BiometricGate.confirm(
-                reason: BiometricGate.reason(for: approval.card.toolName))
-            guard outcome.isAuthenticated else {
-                CCHaptic.warning.fire()
-                return .faceRefused(outcome.message)
-            }
-        }
+    /// Send `decision` as every surface that answers a card sends one: to the
+    /// daemon, the outcome with its haptic.
+    static func send(_ decision: AnswerDecision, for approval: ApprovalItem, model: AppModel) async -> AnswerAttempt {
         let result = await model.answer(item: approval, decision: decision)
         report(result)
-        return .answered(result)
+        return result
     }
 
     // MARK: Submission
@@ -1666,11 +1608,9 @@ struct DecisionCardView: View {
         // of a control can answer a card no daemon would accept.
         guard isActionable else { return }
         guard inFlight == nil else { return }
-        // **Before the biometric gate and before the model**, because in the
-        // sample fleet there is nothing on the other end of either: no Mac to
-        // send to, so the card says what the tap would have done rather than
-        // resolving an answer no daemon ever asked for. Asking for Face ID first
-        // would be theatre in front of a send that never happens.
+        // **Before the model**, because in the sample fleet there is nothing on
+        // the other end: no Mac to send to, so the card says what the tap would
+        // have done rather than resolving an answer no daemon ever asked for.
         if model.sampleFleetActive {
             withAnimation(CC.motion.small) { sampleNotice = Self.sampleNotice(for: decision) }
             CCHaptic.warning.fire()
@@ -1679,25 +1619,16 @@ struct DecisionCardView: View {
         spinningControl = key
         sentAt = Date()
         Task {
-            let sent = await Self.send(
-                decision, for: approval, model: model,
-                needsFace: DecisionCard.needsSecondFactor(risk: risk, decision: decision))
+            let result = await Self.send(decision, for: approval, model: model)
             spinningControl = nil
-            switch sent {
-            case .faceRefused(let message):
-                sentAt = nil
-                withAnimation(CC.motion.small) { authNotice = message }
-            case .answered(let result):
-                authNotice = nil
-                // `.sentUnconfirmed` closes the controls but must NOT settle the
-                // card off the Deck — the agent may still be blocked waiting. The
-                // person did answer it, so the Deck records it and counts it when
-                // the computer's confirmation removes it from the queue.
-                if result.settlesCard {
-                    onSettled?()
-                } else if case .sentUnconfirmed = result {
-                    onSent?()
-                }
+            // `.sentUnconfirmed` closes the controls but must NOT settle the
+            // card off the Deck — the agent may still be blocked waiting. The
+            // person did answer it, so the Deck records it and counts it when
+            // the computer's confirmation removes it from the queue.
+            if result.settlesCard {
+                onSettled?()
+            } else if case .sentUnconfirmed = result {
+                onSent?()
             }
         }
     }

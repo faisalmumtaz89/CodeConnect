@@ -28,7 +28,7 @@ final class SessionFollowUITests: XCTestCase {
     private func launchSession() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "stacked",
             "-CC_DEEPLINK", "codeconnect://session/fx-5",
         ]
         app.launch()
@@ -334,7 +334,7 @@ final class SessionFollowUITests: XCTestCase {
     func testTheComposerIsEmptyAfterASendTypedOnTheKeyboard() throws {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "stacked",
             "-cc.debug.sendText", "sent",
             "-CC_DEEPLINK", "codeconnect://session/fx-5",
         ]

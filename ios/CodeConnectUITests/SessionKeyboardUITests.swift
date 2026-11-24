@@ -15,7 +15,7 @@ final class SessionKeyboardUITests: XCTestCase {
     private func launchSession() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "stacked",
             "-CC_DEEPLINK", "codeconnect://session/fx-5",
         ]
         app.launch()

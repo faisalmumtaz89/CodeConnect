@@ -12,7 +12,7 @@ final class SendIsStopUITests: XCTestCase {
     private func open(_ state: String) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_CODEX", state, "-CC_BIOMETRICS", "allow",
+            "-CC_CODEX", state,
             "-CC_DEEPLINK", "codeconnect://session/cx-1",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ]

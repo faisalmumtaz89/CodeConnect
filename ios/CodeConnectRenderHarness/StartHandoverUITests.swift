@@ -14,7 +14,7 @@ final class StartHandoverUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments =
             scene.arguments + [
-                "-CC_START_OUTCOME", "instant", "-CC_BIOMETRICS", "allow",
+                "-CC_START_OUTCOME", "instant",
                 "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
             ]
         app.launch()

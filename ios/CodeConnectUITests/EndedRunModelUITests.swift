@@ -13,7 +13,7 @@ final class EndedRunModelUITests: XCTestCase {
     private func open(_ uid: String) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "ended",
             "-CC_ENDED_MODEL", "claude-sonnet-5-5", "-CC_ENDED_MODEL_LABEL", "Sonnet 5.5", "-CC_ENDED_EFFORT", "high",
             "-CC_DEEPLINK", "codeconnect://session/\(uid)",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",

@@ -12,7 +12,7 @@ final class SwipeToRemoveSerialUITests: SwipeToRemoveUITestsBase {
     /// from "an animation" to "a stall".
     func testExpandingFortyFiveEndedRowsIsNotAStall() {
         let app = XCUIApplication()
-        app.launchArguments = ["-CC_FIXTURE", "ended45", "-CC_BIOMETRICS", "allow"]
+        app.launchArguments = ["-CC_FIXTURE", "ended45"]
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30))
 

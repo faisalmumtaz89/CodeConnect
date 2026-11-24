@@ -30,9 +30,9 @@ enum CCButtonVariant: String, CaseIterable, Hashable {
     /// `secondary` carries a full-strength `text` label, `ghost` a
     /// `textSecondary` one that lifts to full only under the finger.
     case ghost
-    /// `danger` border and label. Deliberately *not* filled: a filled red
-    /// button is the last confirmation, and in this product that is a
-    /// `CCHoldButton`, whose fill is the hold's own progress.
+    /// `danger` border and label. Deliberately *not* filled: red marks what
+    /// destroys something, and a filled red button would read as the ordinary
+    /// affirmative.
     case destructive
 }
 

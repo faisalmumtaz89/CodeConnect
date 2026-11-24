@@ -186,7 +186,6 @@ release build:
 | `-CC_ROW_RENDER_PROBE YES` | adds a 1pt invisible element (`cc-row-render-probe`) listing, per fleet row, how many times it has drawn other than on its own clock's tick, and how many times it has been made anew. `FleetRowRenderSerialUITests` reads it to prove one session's event redraws that session's row and no other |
 | `-CC_DEEPLINK codeconnect://…` | delivers a deep link at launch, the same way a tapped notification does. `…/deck/<request-id>` opens a **named** card — a URL can name one; a notification cannot, and does not try — which is the only way to assert the read gate on one card without three drags and a postpone standing between the test and the assertion |
 | `-CC_OPEN_LINK https://codeconnect.sh/p#…` | opens a link at launch through the handler `onOpenURL` calls. A pairing link, the one a `codeconnect pair` QR code holds, arrives on iOS as a universal link only once codeconnect.sh vouches for the build, which a simulator run cannot arrange; this is how `PairingLinkUITests` and the render harness reach its sheet |
-| `-CC_BIOMETRICS allow\|deny\|cancel\|unavailable` | injects the Face ID *outcome*; the system sheet cannot be driven by XCUITest |
 | `-cc.debug.diff sample` | renders a diff shaped to exercise every part of the diff grid at once — all three syntax roles, word-level tints, a wrapped line, a hunk header — without a daemon or a dirty worktree |
 | `-cc.debug.diff truncated` | a capture the daemon cut short, longer than the grid draws in one pass — the truncation banner, the per-hunk `N more lines` marker, `Draw more`, and the terminal `Cut short by your computer` marker. Reaching this state for real took a generated 13,000-line file and a live Mac, which is why it shipped as a blank black rectangle |
 | `-cc.debug.diffRows <n>` | lowers the grid's per-hunk row budget from 400, so the held-back marker is on screen without dragging through 400 rows |
@@ -499,10 +498,8 @@ is enforced.
 * **A fleet row opens its session, whatever its status.** A Done row's turn
   may have been watched at the Mac or changed nothing, so its diff is one tap
   away on the session screen, never where the tap lands.
-* **HIGH-risk approvals need `biometryCurrentSet`,** not
-  `deviceOwnerAuthentication` — the flag that invalidates when the enrolled set
-  changes. A phone with no passcode cannot approve a HIGH card at all; it says
-  so and sends you to the Mac.
+* **A HIGH-risk approval is one tap, like any other,** once both its command
+  and its class have been on screen.
 
 ## Transport
 
@@ -721,7 +718,7 @@ advertises `question_card` (`DaemonProfile.answersQuestions`) gets
 falls back to the approval layout, read-only):
 
 * the sheet is titled "Question" (or "4 questions") and the card names the run
-  (`RunLabel.inline`), with a HIGH card's Face ID requirement and its reason;
+  (`RunLabel.inline`), with a HIGH card's risk tag;
 * one step per question — header chip, question, options — then a **Review** step
   listing every answer; with one question, Submit sits on the question itself;
 * single choice: radio rows plus **Other**, which opens a text field; several
@@ -732,8 +729,7 @@ falls back to the approval layout, read-only):
 * **Submit** (live only when every question has an answer, which a neutral line under
   the buttons says; it keeps its place once met, so the bar does not move) and **Decline** (the
   main conversation's turn stops, as Escape at the Mac does; a background agent's
-  question is denied). A HIGH card's Submit takes Face ID,
-  as Allow does.
+  question is denied).
 
 The answer is option **indices**, never labels: `{"type":"answers","answers":
 [{"selected":[…],"other"?,"notes"?}, …]}` or `{"type":"decline"}`
@@ -761,7 +757,7 @@ two lines at most, and the same status as the card (`QuestionCardStatus.recorded
 **Answer** while the phone can answer it, otherwise the status's own words — *Answer at
 the Mac*, *Closed*, an answer from the phone as what was chosen —
 with **View**, and once it has ended how long ago. It carries no risk tag unless the class
-is HIGH, where Submit takes Face ID.
+is HIGH.
 
 | Fixture | Where it runs | What it pins |
 |---|---|---|
@@ -927,7 +923,6 @@ haptic is not motion, and removing it removes information.
 | Component | API sketch |
 |---|---|
 | `CCButton` | `CCButton("Allow", icon:, variant: .primary/.secondary/.ghost/.destructive, size: .sm/.md/.lg, fullWidth:, isLoading:, disabledReason:) { }` |
-| `CCHoldButton` | `CCHoldButton("Hold to allow", tone: .danger, duration: 1.2, isLoading:, disabledReason:) { }` — ring around the button's own rect, soft ticks at 25/50/75%, rigid on commit, plus a VoiceOver activation |
 | `CCCard` | `CCCard { }` · `CCCard(header:content:)` · `CCCard(header:content:footer:)` — `padding:`, `contentColumn:`, `radius:`, `border:`. Its default puts content on the 52pt column; `contentColumn: false` gives a **centred** card four even edges |
 | `CCRow` | `CCRow(title, titleStyle:, subtitle:, meta:, titleTruncation:, subtitleLineLimit:, showsChevron:, separator:, density:, isDimmed:, disabledReason:, accessibilityLabelText:, action:) { leading } trailing: { } meta: { }` — 64pt min, full-row target. **`meta` spans the whole row**, under the trailing accessory rather than beside it |
 | `CCFactRow` | `CCFactRow(label, value:, labelStyle: .prose/.identifier/.key, tone:, isUnmeasured:, age:, separator:)` · `CCFactRow(label) { value }` · `CCFactRow(label, detail: { })` — 48pt. Lands its own text on the 52pt column; no call site adds anything |
@@ -1101,7 +1096,7 @@ block at a fraction of the viewport and scrolls the overflow. Use it on anything
 that grows without limit at accessibility sizes — a bar list, a stat column, an
 action bar. Rendering a HIGH card at AX5 shows the alternative: the bar
 grew until it owned the bottom 45% of the screen and then kept going, and **zero
-characters of the command were visible while `Hold to allow` was fully armed**.
+characters of the command were visible while its Allow was fully armed**.
 
 A `ScrollView` takes every point it is offered, so the cap is a measured height,
 not a `maxHeight`: below the cap the block is exactly as tall as its content and
@@ -1266,8 +1261,7 @@ as a tall portrait box with a word wedged into it.
 
 **VoiceOver** — every interactive component carries a label, the right traits
 (`.isButton`, `.isSelected`, `.isHeader`), and a value where state exists
-(`"Busy"` while loading). `CCHoldButton` exposes a plain activation because
-VoiceOver cannot express a hold.
+(`"Busy"` while loading).
 
 ## Reviewing the system
 

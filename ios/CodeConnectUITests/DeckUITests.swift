@@ -50,16 +50,12 @@ final class DeckUITests: XCTestCase {
     private static let lowRequestID = "toolu_fixture_low"
 
     private func launch(
-        biometrics: String = "allow", size: TypeSize = .medium,
+        size: TypeSize = .medium,
         fixture: String = "deck", openingCard requestID: String? = nil
     ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
             "-CC_FIXTURE", fixture,
-            // The system biometric sheet cannot be driven by XCUITest, so the
-            // *outcome* is injected. What is being tested is that the app asks
-            // and honours the answer, which is exactly what this exercises.
-            "-CC_BIOMETRICS", biometrics,
             "-UIPreferredContentSizeCategoryName", size.rawValue,
         ]
         if let requestID {
@@ -198,9 +194,9 @@ final class DeckUITests: XCTestCase {
     ///
     /// It used to arm on `onAppear` of a marker nested inside an
     /// already-materialised `LazyVStack` child, which fires on creation and not
-    /// on scroll. A HIGH card at AX5 then showed `Hold to allow`
+    /// on scroll. A HIGH card at AX5 then showed its Allow
     /// fully armed with the command's header as the last thing on screen
-    /// and **zero characters of the command rendered** — a face authenticating a
+    /// and **zero characters of the command rendered** — an approval of a
     /// command the product never showed.
     ///
     /// Nothing in either test target referenced `hasSeenCommand`, `armGate` or
@@ -209,12 +205,12 @@ final class DeckUITests: XCTestCase {
         let app = launch(size: .ax5)
         openDeck(app)
 
-        let hold = app.buttons.matching(identifier: "Hold to allow").firstMatch
-        XCTAssertTrue(hold.waitForExistence(timeout: 25))
+        let allow = allowButton(app, tool: "Bash")
+        XCTAssertTrue(allow.waitForExistence(timeout: 25))
         attach(app, "gate-high-ax5-shut")
         XCTAssertFalse(
-            hold.isEnabled,
-            "the command is below the fold at AX5; the hold must not be armed")
+            allow.isEnabled,
+            "the command is below the fold at AX5; Allow must not be armed")
         XCTAssertTrue(
             app.staticTexts[Self.readGateReason].firstMatch.exists,
             "a disabled control states its reason as visible text")
@@ -223,25 +219,22 @@ final class DeckUITests: XCTestCase {
     /// The transition the screenshots never reached: scroll, and the gate opens.
     ///
     /// HIGH asks for two things and says so in order — first the command, then
-    /// the class the command was given — because a face is about to authorise
+    /// the class the command was given — because one tap is about to allow
     /// both. The intermediate sentence is the proof that the two halves are
     /// measured separately rather than one implying the other.
     func testHighCardArmsAfterScrollingToTheCommandAtAX5() {
         let app = launch(size: .ax5)
         openDeck(app)
 
-        let hold = app.buttons.matching(identifier: "Hold to allow").firstMatch
-        XCTAssertTrue(hold.waitForExistence(timeout: 25))
-        XCTAssertFalse(hold.isEnabled)
+        let allow = allowButton(app, tool: "Bash")
+        XCTAssertTrue(allow.waitForExistence(timeout: 25))
+        XCTAssertFalse(allow.isEnabled)
         XCTAssertTrue(app.staticTexts[Self.readGateReason].exists)
 
         scrollUntil(app, "the command clears the fold") {
-            app.staticTexts[Self.readGateHighReason].exists
-                || app.buttons.matching(identifier: "Hold to allow").firstMatch.isEnabled
+            app.staticTexts[Self.readGateHighReason].exists || allow.isEnabled
         }
-        scrollUntil(app, "the read gate arms") {
-            app.buttons.matching(identifier: "Hold to allow").firstMatch.isEnabled
-        }
+        scrollUntil(app, "the read gate arms") { allow.isEnabled }
 
         attach(app, "gate-high-ax5-armed")
         XCTAssertFalse(app.staticTexts[Self.readGateReason].exists)
@@ -255,14 +248,14 @@ final class DeckUITests: XCTestCase {
         let app = launch(size: .medium)
         openDeck(app)
 
-        let hold = app.buttons.matching(identifier: "Hold to allow").firstMatch
-        XCTAssertTrue(hold.waitForExistence(timeout: 25))
-        XCTAssertTrue(hold.isEnabled, "the command and its class are both on screen")
+        let allow = allowButton(app, tool: "Bash")
+        XCTAssertTrue(allow.waitForExistence(timeout: 25))
+        XCTAssertTrue(allow.isEnabled, "the command and its class are both on screen")
         XCTAssertFalse(app.staticTexts[Self.readGateReason].exists)
     }
 
-    /// **MEDIUM is where this matters most.** There is no hold and no Face ID at
-    /// MEDIUM, so the read gate is the only thing between one tap on a 52pt
+    /// **MEDIUM is where this matters most.** At MEDIUM the read gate is the
+    /// only thing between one tap on a 52pt
     /// white button and a write to an arbitrary path outside the worktree —
     /// which is exactly what a MEDIUM card at AX5 showed, with thirteen
     /// characters of that path on screen.
@@ -276,7 +269,7 @@ final class DeckUITests: XCTestCase {
         let allow = allowButton(app, tool: "Write")
         XCTAssertTrue(allow.waitForExistence(timeout: 25), "the Write card opened")
         attach(app, "gate-medium-ax5-shut")
-        XCTAssertFalse(allow.isEnabled, "one tap, no hold, no Face ID — this is the whole gate")
+        XCTAssertFalse(allow.isEnabled, "one tap — this is the whole gate")
         XCTAssertTrue(
             app.staticTexts[Self.readGateReason].firstMatch.exists,
             "a disabled control states its reason as visible text")
@@ -303,9 +296,8 @@ final class DeckUITests: XCTestCase {
     /// characters** of `/Users/dev/app/README.md` on screen. No fade, no `…`, no
     /// `↳`: nothing anywhere on the card said the string continued.
     ///
-    /// Risk decides friction, never visibility. The tier is why this card is one
-    /// tap rather than a hold and a face; it is not a reason to answer something
-    /// the product declined to show.
+    /// Risk never decides visibility. A low tier is not a reason to answer
+    /// something the product declined to show.
     func testLowCardIsGatedWhenTheCommandIsBelowTheFoldAtAX5() {
         let app = launch(size: .ax5, openingCard: Self.lowRequestID)
 
@@ -354,7 +346,7 @@ final class DeckUITests: XCTestCase {
     private func assertTheSessionSheetArms(at size: TypeSize) {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "deck",
             "-UIPreferredContentSizeCategoryName", size.rawValue,
             "-CC_DEEPLINK", "codeconnect://session/fx-2",
         ]
@@ -375,7 +367,7 @@ final class DeckUITests: XCTestCase {
     func testAnUnconfirmedAnswerSpeaksHowLongItHasWaited() {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "deck",
             "-UIPreferredContentSizeCategoryName", TypeSize.medium.rawValue,
             // Held until the test sends `answer`, which it never does: the answer stays on its way.
             "-CC_FIXTURE_ANSWER_HELD", "YES",
@@ -423,19 +415,17 @@ final class DeckUITests: XCTestCase {
     // MARK: Risk gates
 
     /// The queue, emptied in its documented order: HIGH first because urgency
-    /// ranks the stack, then MEDIUM, then LOW; a hold and a biometric check at
-    /// the top, a single tap at the bottom; and the pass ends on fleet-clear.
+    /// ranks the stack, then MEDIUM, then LOW; a single tap on each; and the
+    /// pass ends on fleet-clear.
     func testTapToAdvanceThroughTheQueueToFleetClear() {
         let app = launch()
         openDeck(app)
 
-        // 1 — HIGH: a hold, not a tap, plus the biometric check.
-        let hold = app.buttons.matching(identifier: "Hold to allow").firstMatch
-        XCTAssertTrue(hold.waitForExistence(timeout: 20), "a HIGH card swaps the tap for a hold")
-        XCTAssertFalse(
-            allowButton(app, tool: "Bash").exists, "a HIGH card must not offer a plain Allow")
+        // 1 — HIGH: a single tap, as at every tier.
+        let allowBash = allowButton(app, tool: "Bash")
+        XCTAssertTrue(allowBash.waitForExistence(timeout: 20), "the HIGH card is on top")
         attach(app, "deck-high-card")
-        hold.press(forDuration: 1.6)
+        allowBash.tap()
 
         // 2 — MEDIUM: the command has to be seen first, and at this type size it
         // already has been.
@@ -459,7 +449,7 @@ final class DeckUITests: XCTestCase {
 
     /// A HIGH card is allowed with one tap, like any other: no hold and no identity check, and the stack moves on.
     func testAHighRiskApprovalIsOneTap() {
-        let app = launch(biometrics: "deny")
+        let app = launch()
         openDeck(app)
 
         let allowBash = allowButton(app, tool: "Bash")
@@ -488,7 +478,9 @@ final class DeckUITests: XCTestCase {
         let app = launch()
         openDeck(app)
 
-        app.buttons.matching(identifier: "Hold to allow").firstMatch.press(forDuration: 1.6)
+        let allowBash = allowButton(app, tool: "Bash")
+        XCTAssertTrue(allowBash.waitForExistence(timeout: 20))
+        allowBash.tap()
         let allowWrite = allowButton(app, tool: "Write")
         XCTAssertTrue(allowWrite.waitForExistence(timeout: 20))
         allowWrite.tap()
@@ -520,66 +512,6 @@ final class DeckUITests: XCTestCase {
         XCTAssertEqual(
             second, first,
             "a completed measurement must not tick: read \(first), then \(second)")
-    }
-
-    /// The HIGH gate is the trust promise made physical: refuse the biometric
-    /// check and nothing is sent.
-    func testHighRiskApprovalIsRefusedWhenBiometricsFail() {
-        let app = launch(biometrics: "deny")
-        openDeck(app)
-
-        // Urgency-ranked, so the HIGH card is already on top.
-        let hold = app.buttons.matching(identifier: "Hold to allow").firstMatch
-        XCTAssertTrue(hold.waitForExistence(timeout: 20))
-        hold.press(forDuration: 1.6)
-
-        let refusal = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'Not approved'")
-        ).firstMatch
-        XCTAssertTrue(
-            refusal.waitForExistence(timeout: 25),
-            "a failed biometric check must say so, not silently do nothing")
-        XCTAssertTrue(hold.exists, "and the card must still be unanswered")
-        attach(app, "deck-biometric-refusal")
-    }
-
-    /// **A refused Face ID has to be readable, and it was 100% behind the bar.**
-    ///
-    /// The banner was the seventh child of the card's scroll content — a
-    /// document the reader has already scrolled to the end of to reach the hold
-    /// — so the instant it appeared it was drawn *underneath* the bar that had
-    /// just refused them. Measured: banner box y=613.33 h=53.00 against an
-    /// action bar whose top hairline is y=631.00, so 66.6% of the banner was
-    /// hidden; and its **message** — the sentence, the only part that says what
-    /// went wrong — at y=640.33 h=14.00, entirely behind it. What the reader saw
-    /// was a 17.67pt amber sliver with half a category label in it, which is
-    /// indistinguishable from a tap that did nothing.
-    ///
-    /// The assertion is geometric on purpose. "The element exists" was already
-    /// true in the frame that shipped; existing is not the property that failed.
-    func testRefusedFaceIDIsReadableAndNotBehindTheActionBar() {
-        let app = launch(biometrics: "deny")
-        openDeck(app)
-
-        let hold = app.buttons.matching(identifier: "Hold to allow").firstMatch
-        XCTAssertTrue(hold.waitForExistence(timeout: 20))
-        hold.press(forDuration: 1.6)
-
-        let refusal = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'Not approved'")
-        ).firstMatch
-        XCTAssertTrue(refusal.waitForExistence(timeout: 25))
-        attach(app, "face-id-banner-pinned")
-
-        // The edge that matters is the pinned control's own top — the same
-        // edge the read gate tests against.
-        let deny = app.buttons.matching(identifier: "Deny this Bash call").firstMatch
-        XCTAssertTrue(deny.exists)
-        XCTAssertTrue(
-            refusal.frame.maxY <= deny.frame.minY,
-            "the refusal's sentence must clear the action bar: "
-                + "banner ends \(refusal.frame.maxY), bar starts \(deny.frame.minY)")
-        XCTAssertTrue(refusal.isHittable, "and be on screen, not merely in the tree")
     }
 
     /// The daemon's own rule is shown, because a risk badge whose reason is

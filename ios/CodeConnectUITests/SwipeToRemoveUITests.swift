@@ -17,7 +17,7 @@ class SwipeToRemoveUITestsBase: XCTestCase {
 
     func launchFleet(_ extra: [String] = [], signals: FixtureSignals? = nil) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow"] + extra
+        app.launchArguments = ["-CC_FIXTURE", "ended"] + extra
         signals?.arm(app)
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30))

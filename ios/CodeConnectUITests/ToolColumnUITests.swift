@@ -16,7 +16,6 @@ final class ToolColumnUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = [
             "-CC_FIXTURE", "stacked",
-            "-CC_BIOMETRICS", "allow",
             "-UIPreferredContentSizeCategoryName", size,
         ]
         app.launch()
@@ -145,7 +144,7 @@ final class ToolColumnUITests: XCTestCase {
         for screen in ["fleet", "detail", "link-health", "settings"] {
             let app = XCUIApplication()
             app.launchArguments = [
-                "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
+                "-CC_FIXTURE", "stacked",
                 "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
             ]
             app.launch()

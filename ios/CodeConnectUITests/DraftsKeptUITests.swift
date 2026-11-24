@@ -13,7 +13,7 @@ final class DraftsKeptUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments =
             arguments + [
-                "-CC_BIOMETRICS", "allow", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
+                "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
             ]
         app.launch()
         return app

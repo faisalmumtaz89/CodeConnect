@@ -34,7 +34,6 @@ final class FleetOfflineUITests: XCTestCase {
             "-CC_HOST", "bogus-mac.tail9999.ts.net",
             "-CC_TOKEN", "junktoken",
             "-CC_RESET_CACHE", "YES",
-            "-CC_BIOMETRICS", "allow",
         ]
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30))
