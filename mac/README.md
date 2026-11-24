@@ -1542,9 +1542,9 @@ shared `/tmp` is not yours to change.
   try again, so the run stays live with no connection: an answer, a Stop and a message are
   refused, and a mail wake already on its way stays outstanding, so new mail does not wake
   the run. It has been seen only with Codex's closing delay set to two seconds.
-* **On a Codex run started from an app, every one of CodeConnect's mail tools asks
-  first.** `list_agents` and `read_messages` show a card like `send_message` until they
-  are marked as only reading.
+* **On a Codex run started from an app, Codex asks before each `send_message`** until its
+  card is answered "Allow for this session"; `list_agents` and `read_messages`, marked as
+  only reading, run without a card (codex 0.170.0).
 * **On a Codex run started from an app, a command that finished while ccd restarted during a
   turn is filed after that turn's reply.** ccd attaches again while the turn runs, files the
   reply and the turn's end as they arrive, and reads the command back once the turn has

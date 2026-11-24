@@ -7595,6 +7595,107 @@ mod tests {
         }
     }
 
+    /// An engine run whose `codex` (config.json's `codex_bin`) is a stand-in logging every call: its turn is filed up
+    /// to its end and running, mail arrives for it, the turn reads it itself when `read`, and the turn ends. The
+    /// stand-in's `queue` calls, by then, each a wake.
+    async fn wakes_around_a_running_turn(read: bool) -> Vec<String> {
+        let uid = protocol::uid::new().unwrap();
+        let root = PathBuf::from(format!("/tmp/ccx3.{}", &uid[16..]));
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::create_dir(root.join("project")).unwrap();
+        let codex = root.join("codex");
+        let calls = root.join("codex-calls");
+        std::fs::write(
+            &codex,
+            format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 0\n", calls.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rig = Rig {
+            daemon: daemon_with(&root, codex.to_str().unwrap()),
+            project: root.join("project").display().to_string(),
+            environment: HashMap::from([
+                (OsString::from("HOME"), root.join("home").into_os_string()),
+                (OsString::from("SHELL"), OsString::from("/bin/sh")),
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+            ]),
+            root,
+        };
+        let (uid, mut ws) = engine_run(&rig, "req-r10", LIFECYCLE_THREAD, "turn-1").await;
+        let turn = lifecycle_turn(LIFECYCLE_WORDS);
+        let (running, end) = turn.split_at(turn.len() - 2);
+        for frame in running {
+            tell(&mut ws, frame).await;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !rig
+            .daemon
+            .store
+            .events_after(&uid, 0, 200)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == EventKind::UserMessage)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the premise: the run's turn is filed and running"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+        mail_kept_for(&rig, &uid, "m1");
+        crate::mail::waiter_registered(&rig.daemon, &uid);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if read {
+            let offer = rig
+                .daemon
+                .store
+                .offer_mail(&uid, "r10-offer", protocol::time::now_unix_ms())
+                .unwrap();
+            assert_eq!(
+                offer.messages.len(),
+                1,
+                "the premise: the turn's own read takes the message"
+            );
+            assert_eq!(rig.daemon.store.read_mail("r10-offer").unwrap(), 1);
+        }
+        for frame in end {
+            tell(&mut ws, frame).await;
+        }
+        let ended = format!(":turn:{LIFECYCLE_TURN}");
+        filed_until(&rig.daemon, &uid, &ended).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        drop(ws);
+        end_run(&rig, &uid).await;
+        std::fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.starts_with("queue"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// **R-10: mail that a running Codex turn reads for itself is never followed by a wake** (the real messaging
+    /// pass, 2026-11-24, 4 of 4 Codex runs: T1-on, T4-on, C-xc, C-xx). A nudge put on Codex's queue during the turn
+    /// would run after it and find "No new messages", spending a turn and ending the run on those words.
+    #[tokio::test]
+    async fn mail_a_running_codex_turn_reads_for_itself_is_followed_by_no_wake() {
+        let _env = crate::ProcessEnvRead::take();
+        let queued = wakes_around_a_running_turn(true).await;
+        assert!(
+            queued.is_empty(),
+            "a wake reached Codex for mail its running turn read itself: {queued:?}"
+        );
+    }
+
+    /// **Mail a running Codex turn leaves unread is woken once, at that turn's end**: the turn's end decides again
+    /// from the mailbox, and one wake goes on Codex's queue.
+    #[tokio::test]
+    async fn mail_a_running_codex_turn_leaves_unread_is_woken_once_at_its_end() {
+        let _env = crate::ProcessEnvRead::take();
+        let queued = wakes_around_a_running_turn(false).await;
+        assert_eq!(queued.len(), 1, "{queued:?}");
+    }
+
     /// **Through the engine link, a turn that did not carry the nudge leaves the wake
     /// outstanding** (`codex_link.rs`'s M-07, and the design check's F1): Codex runs a nudge
     /// queued during a busy turn only after that turn ends, and counting the busy turn's end

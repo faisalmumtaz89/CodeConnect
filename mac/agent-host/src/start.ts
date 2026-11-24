@@ -40,7 +40,11 @@ export function queryOptions(options: StartOptions) {
     // Without replay-user-messages a typed message gets no echo. A worktree is one claude makes and starts in; the
     // run's real cwd is then the one its init names.
     extraArgs: { 'replay-user-messages': null, ...(options.worktree === undefined ? {} : { worktree: options.worktree }) },
-    ...(options.trust === 'not_trusted' ? { settingSources: ['user'], strictMcpConfig: true } : {}),
+    // In a trusted folder CodeConnect's two reading tools run without a card, as Codex runs tools marked as only
+    // reading; sending a message keeps its card, and a folder not trusted keeps every card.
+    ...(options.trust === 'not_trusted'
+      ? { settingSources: ['user'], strictMcpConfig: true }
+      : { allowedTools: ['mcp__codeconnect__list_agents', 'mcp__codeconnect__read_messages'] }),
   };
 }
 
