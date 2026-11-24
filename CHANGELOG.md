@@ -5,10 +5,16 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.17, with the iPhone app 1.1.34
 
-- When you have not chosen an effort for a Claude Code session, the reply row says Default and no level is marked:
-  Claude Code decides it, from your own settings or the model's default. Choosing a level sets it. Codex is unchanged:
-  it names its default.
-- On the Mac, a new worktree is named in the branch menu, under New branch…: Return keeps the name and closes the menu.
+- On the Mac and the iPhone, when you have not chosen an effort for a Claude Code session, it says Default and no
+  level is marked: Claude Code decides it, from your own settings or the model's default. Choosing a level sets it.
+  A Codex session still names its model's default.
+- On the iPhone, a session's settings line shows its usage where the line has room: how full the conversation is and
+  a ring for each of your account's limits, or only the fullest limit's ring. The Settings sheet's new Usage section
+  has every figure, when each limit resets, and the account, and VoiceOver reads them on the settings line. At the
+  largest text sizes the line keeps only its own words; the figure for the conversation appears once a turn has ended.
+- On the iPhone, a new session's first message is written in a box lit like the reply box.
+- On the Mac, a new worktree is now named in the branch menu, under New branch…: Return keeps the name, closes the
+  menu and puts you in the message.
 - On the Mac, choosing /diff in the slash list with only part of it typed no longer sends the typed part to the agent.
 
 ## CodeConnect 0.19.16, with the iPhone app 1.1.33
