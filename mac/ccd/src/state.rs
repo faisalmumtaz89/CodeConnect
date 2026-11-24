@@ -9421,7 +9421,8 @@ mod tests {
         assert!(refusal(send(to("studio"), "a\u{1b}[2Jb".into()).await).contains("control"));
         let long = "x".repeat(protocol::ipc::MAIL_TEXT_BYTES + 1);
         assert!(refusal(send(to("studio"), long).await).contains("too long"));
-        assert!(refusal(send(to("nowhere"), hi()).await).contains("not a computer"));
+        let stranger = format!("{}@nowhere", protocol::uid::new().unwrap());
+        assert!(refusal(send(stranger, hi()).await).contains("not a computer"));
         assert!(refusal(send(to("linux-box"), hi()).await).contains("offline"));
         for device in ["phone", "desktop"] {
             assert!(
@@ -9439,7 +9440,7 @@ mod tests {
         );
         assert!(refusal(
             daemon
-                .send_agent_message_on(None, &sender, &to("studio"), "hi", None)
+                .send_agent_message_on(None, &sender, &format!("{never}@studio"), "hi", None)
                 .await
         )
         .contains("Tailscale"));
@@ -10009,11 +10010,11 @@ mod tests {
             listed, expected,
             "a run not launched with mail is not listed"
         );
-        assert!(daemon
+        let (_, unread) = daemon
             .list_agents_on(None, &asker, Vec::new())
             .await
-            .unwrap_err()
-            .contains("Tailscale"));
+            .unwrap();
+        assert!(unread.iter().all(|a| a.address.ends_with("@this.computer")));
         let mut status: serde_json::Value = serde_json::from_str(include_str!(
             "../../../fixtures/tailscale/status-six-nodes.json"
         ))
