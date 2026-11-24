@@ -223,8 +223,8 @@ struct StartForm: View {
         .onChange(of: contexts.count) { _, count in if count < 2 { computerMenuOpen = false } }
         // New Agent: the first message takes the keyboard, a turn after the form draws, and no panel stays open. Taken
         // once, whether the form was there before the request or comes with it.
-        .onAppear { takeKeyboard() }
-        .onChange(of: draft.wantsKeyboard) { takeKeyboard() }
+        .onAppear { takeKeyboard(formShown: false) }
+        .onChange(of: draft.wantsKeyboard) { takeKeyboard(formShown: true) }
     }
 
     /// A sent start: the folder question when its computer asked it, else its progress.
@@ -275,11 +275,13 @@ struct StartForm: View {
 
     /// New Agent's request for the keyboard, taken once: the panels close and the first message has it a turn later.
     /// Not as the form merely appears: a run closed from the list keeps the list's keys.
-    private func takeKeyboard() {
+    /// `formShown`: the form was on screen before the request; else this press draws it, and its first appearance asks
+    /// the computers (`.task(id: contexts…)`).
+    private func takeKeyboard(formShown: Bool) {
         guard draft.takeKeyboardRequest() else { return }
-        // Each computer is asked again what it offers (`StartDraft.asksAgain`): a Claude Code signed out or removed
-        // while the form stayed open is no longer offered.
-        if draft.asksAgain() { contexts.forEach { $0.load() } }
+        // A form already open asks each computer again what it offers (`StartDraft.asksAgain`): a Claude Code signed
+        // out or removed while it stayed open is no longer offered.
+        if draft.asksAgain(formShown: formShown) { contexts.forEach { $0.load() } }
         folderOpen = false
         computerMenuOpen = false
         menuOpen = false

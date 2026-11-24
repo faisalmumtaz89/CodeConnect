@@ -165,12 +165,17 @@ public final class StartDraft {
         return wantsKeyboard
     }
 
-    /// When an opening last asked the form's computers again (`asksAgain`).
+    /// When an opening last asked the form's computers (`asksAgain`).
     @ObservationIgnored private var askedAt: Date?
 
-    /// Whether this opening asks the form's computers again what they offer: each New Agent does, at most once every
-    /// 2 s, so a held ⌘N, which repeats, asks once.
-    public func asksAgain(now: Date = .now) -> Bool {
+    /// Whether New Agent's opening asks the form's computers again what they offer. A form this press draws does not:
+    /// its first appearance asks them, and that counts. A form already on screen does, at most once every 2 s from the
+    /// last ask, so a held ⌘N, which repeats, asks once.
+    public func asksAgain(formShown: Bool, now: Date = .now) -> Bool {
+        guard formShown else {
+            askedAt = now
+            return false
+        }
         if let askedAt, now.timeIntervalSince(askedAt) < 2 { return false }
         askedAt = now
         return true
