@@ -4,7 +4,8 @@ import XCTest
 
 /// The website's conversation picture comes from the timeline fixture's `fx-7`: `-CC_FIXTURE_NOW` stamps the
 /// fixture against a fixed clock, so its message times read before the picture's 9:41 status bar, and
-/// `-CC_FIXTURE_PLAIN_CONVERSATION` ends `fx-7` on its last finished turn, without the follow-up a Stop cancelled.
+/// `-CC_FIXTURE_PLAIN_CONVERSATION` ends `fx-7` on its last finished turn, without the follow-up a Stop cancelled,
+/// and gives its run a hosted Claude run's settings so its settings line draws.
 final class FixtureShowcaseTests: XCTestCase {
 
     private let nine41 = "2026-11-24T09:41:00Z"
@@ -34,6 +35,20 @@ final class FixtureShowcaseTests: XCTestCase {
     func testThePlainConversationEndsOnItsLastTurn() {
         UserDefaults.standard.set(true, forKey: "CC_FIXTURE_PLAIN_CONVERSATION")
         XCTAssertEqual(conversation().map { Int($0.seq) }, Array(1...15))
+    }
+
+    func testThePlainConversationsRunDrawsItsSettingsLine() throws {
+        UserDefaults.standard.set(true, forKey: "CC_FIXTURE_PLAIN_CONVERSATION")
+        let run = try XCTUnwrap(
+            Fixtures.frames(variant: .timeline).lazy.compactMap { frame -> SessionSummary? in
+                guard case .sessions(let runs) = frame else { return nil }
+                return runs.first { $0.sessionID == "fx-7" }
+            }.first)
+        guard case .hostedLive(let settings) = RunSettings.of(summary: run) else {
+            return XCTFail("fx-7 carries no hosted settings: \(RunSettings.of(summary: run))")
+        }
+        XCTAssertEqual(settings.selectedEffort?.value, "high")
+        XCTAssertEqual(settings.selectedMode?.value, "default", "the asking mode, so no mode word on the line")
     }
 
     func testWithoutTheFlagsTheConversationKeepsItsStoppedFollowUp() {
