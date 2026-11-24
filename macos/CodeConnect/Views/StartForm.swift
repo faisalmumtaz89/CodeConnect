@@ -131,7 +131,7 @@ struct StartForm: View {
         if draft.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return StartWords.writeTheFirstMessage }
         if let name = newName?.trimmingCharacters(in: .whitespaces) {
             if name.isEmpty { return StartWords.nameTheWorktree }
-            // The rule is drawn in the branch menu, not above this line: the line says it.
+            // The rule is drawn in the branch menu, where the name is typed; this says it in Start's tooltip.
             if !StartPlace.isValidName(name) { return StartWords.worktreeNameBroken }
         }
         return nil
@@ -155,8 +155,7 @@ struct StartForm: View {
                     .frame(maxWidth: Self.column)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                // Room under the note as the folder chip's frame has above its words, so what is drawn is centred.
-                form.padding(.bottom, 5)
+                form
             }
         }
         .task(id: contexts.map(\.id)) { contexts.forEach { $0.load() } }

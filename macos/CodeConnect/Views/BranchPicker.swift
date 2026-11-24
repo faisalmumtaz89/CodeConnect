@@ -57,8 +57,8 @@ struct BranchRow: View {
 
     /// The menu, as tall as its rows up to `BranchMenu.mostRows`, ending inside the pane. It opens above the row,
     /// clear of the label, when all of it fits between the label and `top`; else on the side of the button
-    /// with more room, as many whole rows as fit there, the rest scrolled to. Cut short above, it hangs from `top`, so
-    /// its edge never lands inside a line there.
+    /// with more room, as many whole rows as fit there, the rest scrolled to. Either way it stands the panels' one gap
+    /// from its button.
     private func menu(_ git: StartGit) -> some View {
         let rows = BranchMenu.rows(git: git, folder: folder)
         let gap = Theme.panelGap
@@ -68,7 +68,6 @@ struct BranchRow: View {
         let below = startHeight - frame.minY - buttonBottom - gap - Self.margin - naming
         let opensAbove = BranchMenu.height(rows: rows) <= above || above > below
         let shown = BranchMenu.rows(fitting: opensAbove ? above : below, of: rows)
-        let cut = shown < min(rows, BranchMenu.mostRows)
         let placed = PanelPlace.place(widest: BranchMenu.width, leading: frame.minX, box: startBox)
         return BranchMenu(
             git: git, folder: folder, running: context.runningFolders, place: newName == nil ? place : nil,
@@ -94,9 +93,7 @@ struct BranchRow: View {
         .openPanel()
         .offset(
             x: placed.x - frame.minX,
-            y: !opensAbove
-                ? buttonBottom + gap
-                : cut ? highest - frame.minY : -(BranchMenu.height(rows: shown) + naming + gap))
+            y: opensAbove ? -(BranchMenu.height(rows: shown) + naming + gap) : buttonBottom + gap)
     }
 
     /// The chosen place, a button that opens the menu.

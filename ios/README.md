@@ -1183,7 +1183,7 @@ actually produce was checked.
 **Semantic on surface** — all ✅: success #4CB782 8.40 / info 5.71 / warning
 #E9A23B 9.70 / danger #E5636A 6.32 on `bg`; the tightest is info on
 `surfaceOverlay` at 4.73. Semantic-on-its-own-12%-wash on `surface`: success
-6.80, warning 7.74, danger 5.30, info 4.84. Diff tints carry `text` at 12.30:1
+6.80, warning 7.74, danger 5.30, info 4.84. Diff tints carry `text` at 10.98:1
 or better. Primary button: `#000` on `#EDEDED`
 = 17.94, pressed `#D4D4D4` = 14.17.
 
