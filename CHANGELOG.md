@@ -17,6 +17,9 @@ User-facing changes, newest first. Mac releases are cut per
 - On the Mac, the Add sheet opened from New Agent, before any computer is added, shows Computer chosen.
 - On the Mac, the start form asks a computer again each time it is opened, so a Claude Code that was signed out or
   removed meanwhile is no longer offered.
+- On the Mac and Linux, sessions on one computer message each other even when Tailscale is not connected.
+- On the Mac and Linux, CodeConnect's check of your Claude plan no longer appears for a moment as a session in Claude
+  Code's own list of sessions (with Claude Code 2.1.290 or later).
 
 ## CodeConnect 0.19.18, with the iPhone app 1.1.35
 
