@@ -21,8 +21,9 @@
 //! **Waking the agent.** The daemon never hands an agent a message: it wakes the
 //! agent with one fixed line ([`nudge`]), which carries nothing of any message,
 //! and the agent calls `read_messages`. Claude is woken through its agent host's
-//! link ([`crate::claude_host::wake`]), only between its turns; Codex through its
-//! own queue ([`crate::codex_wake`]). The wake rule ([`Daemon::wake_if_due`])
+//! link ([`crate::claude_host::wake`]); Codex through its own queue
+//! ([`crate::codex_wake`]); each only between its turns, so a turn that reads its mail
+//! itself is followed by no wake. The wake rule ([`Daemon::wake_if_due`])
 //! decides, from the mailbox, whenever mail is taken, a turn ends, an agent host's
 //! link replays what it kept or a Codex link adopts its thread, and when the daemon
 //! starts: wake iff unread mail waits and no wake is outstanding. After
@@ -825,8 +826,7 @@ pub(crate) async fn note_filed_event(
             .as_str()
             .is_some_and(protocol::ipc::is_mail_nudge);
     // A message the person sent is their turn, as Claude's prompt is: wakes that had
-    // stopped start again, and the rule decides at once; Codex's own queue holds a
-    // wake until that turn ends.
+    // stopped start again, and the rule decides at the turn's end.
     if message_now && !nudge_now {
         prompt_submitted(daemon, run_uid).await;
         waiter_registered(daemon, run_uid);
@@ -847,6 +847,9 @@ pub(crate) async fn note_filed_event(
         Ok((true, nudges)) if (ended_now && nudges > 0) || (nudge_now && nudges == 1) => {
             turn_ended(daemon, run_uid)
         }
+        // Any other turn's end leaves an outstanding wake as it was, and the rule
+        // decides again from the mailbox as it now stands.
+        Ok(_) if ended_now => waiter_registered(daemon, run_uid),
         Ok(_) => {}
         Err(err) => crate::log_error!(
             "mail for {run_uid}: could not read whether a turn carried the mail nudge: {err:#}"
@@ -872,8 +875,8 @@ impl Daemon {
     }
 
     /// **The wake rule.** Wake `run_uid` when unread mail waits, no wake is
-    /// outstanding, wakes have not stopped, and, for Claude, no turn of it runs:
-    /// decided in one store transaction, then issued. A wake that cannot be issued
+    /// outstanding, wakes have not stopped, and no turn of it runs: decided in one
+    /// store transaction, then issued (Codex's turn read from its own events first). A wake that cannot be issued
     /// is released, and the next trigger decides again; nothing else ever reaches
     /// the agent. The wake carries nothing of any message.
     pub(crate) async fn wake_if_due(self: &Arc<Self>, run_uid: &str) {
@@ -889,6 +892,18 @@ impl Daemon {
                 return;
             }
         };
+        // A wake put on Codex's queue during a turn runs after it even when that turn
+        // read the mail itself (R-10): its turn's end decides instead.
+        if !claude {
+            match self.db.codex_turn_running(run_uid.to_string()).await {
+                Ok(false) => {}
+                Ok(true) => return,
+                Err(err) => {
+                    crate::log_error!("mail for {run_uid}: turn state unread: {err:#}");
+                    return;
+                }
+            }
+        }
         match self
             .db
             .claim_mail_wake(run_uid.to_string(), protocol::time::now_unix_ms(), claude)

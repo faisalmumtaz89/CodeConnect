@@ -423,6 +423,11 @@ impl Db {
             .await
     }
 
+    pub async fn codex_turn_running(&self, session_uid: String) -> Result<bool> {
+        self.run(move |store| store.codex_turn_running(&session_uid))
+            .await
+    }
+
     /// Remove one ended run. Small next to a prune, and off the runtime for the
     /// same reason: it is still a multi-table transaction on the write
     /// connection, and the phone is waiting on the answer.

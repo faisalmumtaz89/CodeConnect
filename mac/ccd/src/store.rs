@@ -2416,6 +2416,25 @@ impl Store {
         Ok(newest.as_deref() == Some(EventKind::SessionStart.as_str()))
     }
 
+    /// Whether the Codex run `session_uid` is in a turn: its newest user message, the
+    /// person's or a mail wake's, has no `turn_complete` after it.
+    pub fn codex_turn_running(&self, session_uid: &str) -> Result<bool> {
+        let conn = self.read();
+        let newest = conn
+            .query_row(
+                "SELECT kind FROM events WHERE session_uid = ?1 AND kind IN (?2, ?3)
+                  ORDER BY seq DESC LIMIT 1",
+                params![
+                    session_uid,
+                    EventKind::UserMessage.as_str(),
+                    EventKind::TurnComplete.as_str()
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(newest.as_deref() == Some(EventKind::UserMessage.as_str()))
+    }
+
     /// What the hosted run `session_uid`'s command menu is read from; `None` when the
     /// run has no `run_hosts` row.
     pub fn hosted_commands(&self, session_uid: &str) -> Result<Option<HostedCommands>> {
