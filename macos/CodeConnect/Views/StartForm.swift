@@ -131,7 +131,7 @@ struct StartForm: View {
         if draft.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return StartWords.writeTheFirstMessage }
         if let name = newName?.trimmingCharacters(in: .whitespaces) {
             if name.isEmpty { return StartWords.nameTheWorktree }
-            // The rule is drawn in the branch menu, not above this line: the line says it.
+            // The rule is drawn in the branch menu, where the name is typed; this says it in Start's tooltip.
             if !StartPlace.isValidName(name) { return StartWords.worktreeNameBroken }
         }
         return nil
@@ -155,8 +155,7 @@ struct StartForm: View {
                     .frame(maxWidth: Self.column)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                // Room under the note as the folder chip's frame has above its words, so what is drawn is centred.
-                form.padding(.bottom, 5)
+                form
             }
         }
         .task(id: contexts.map(\.id)) { contexts.forEach { $0.load() } }
@@ -248,7 +247,8 @@ struct StartForm: View {
     }
 
     /// The box: the first message, and in its bar the computer, the folder and where in the repository, the model and
-    /// Start. Under it, why Start can't be pressed yet, or what it does.
+    /// Start. What is still missing shows where it is chosen (a folder not chosen is the bar's lit chip, the message
+    /// its placeholder), and why Start can't be pressed is Start's tooltip.
     private var form: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let context {
@@ -256,10 +256,6 @@ struct StartForm: View {
                 composer(context)
                     // Its menus open over what is above and below it: the last modifier, so they draw over the rest.
                     .zIndex(folderOpen || computerMenuOpen || branchMenuOpen || menuOpen ? 1 : 0)
-                if let note = blocked ?? pick.map(StartContext.starts) {
-                    Text(note).font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1)
-                        .accessibilityIdentifier("start.note")
-                }
             } else {
                 // Its computer's link is down: why, where the box stands. What was typed and chosen stays in the
                 // form, and the box comes back with the computer.
@@ -349,20 +345,21 @@ struct StartForm: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "folder").font(.system(size: 11)).accessibilityHidden(true)
-                Text(folder?.name ?? "Choose a folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
+                Text(folder?.name ?? "Choose folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
-            .foregroundStyle(folder == nil ? Theme.text2 : Theme.text)
-            .inputBoxChip(open: folderOpen)
+            // While none is chosen, the folder is the piece still missing: the bar's one lit, bordered chip.
+            .foregroundStyle(Theme.text)
+            .inputBoxChip(open: folderOpen, bordered: folder == nil)
         }
         .buttonStyle(.hover(radius: 8, id: "start.folder"))
-        .help(folder?.path ?? "Choose a folder")
+        .help(folder?.path ?? "Choose folder")
         .accessibilityIdentifier("start.folder")
         .accessibilityValue(folderOpen ? "open" : "closed")
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { folderChip = $0 }
         .overlay(alignment: .topLeading) {
             if folderOpen {
-                let placed = StartPanel.place(widest: 520, leading: folderChip.minX, box: box)
+                let placed = PanelPlace.place(widest: 520, leading: folderChip.minX, box: box)
                 folderPanel(context, width: placed.width).openPanel()
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { folderPanelHeight = $0 }
                     .offset(x: placed.x - folderChip.minX, y: InputBoxChip.height + Theme.panelGap)
@@ -377,11 +374,11 @@ struct StartForm: View {
     private var listMost: CGFloat {
         guard folderPanelHeight > 0 else { return 260 }
         let others = folderPanelHeight - listShown
-        let room = startHeight - StartPanel.margin - folderChip.maxY - Theme.panelGap - others
+        let room = startHeight - PanelPlace.margin - folderChip.maxY - Theme.panelGap - others
         return min(260, max(room, 44))
     }
 
-    /// Up to 520 pt wide, inside the box (`StartPanel.place`).
+    /// Up to 520 pt wide, inside the box (`PanelPlace.place`).
     private func folderPanel(_ context: StartContext, width: CGFloat) -> some View {
         folderRows(context)
             .frame(width: width - 12)
@@ -556,7 +553,7 @@ struct StartForm: View {
         InputBox(barHeight: 50, trailingOpen: menuOpen) {
             TextField(
                 "", text: $draft.message, selection: $messageSelection,
-                prompt: Text("First message").foregroundStyle(Theme.text3), axis: .vertical
+                prompt: Text("What do you want to work on?").foregroundStyle(Theme.text.opacity(0.5)), axis: .vertical
             )
                 .accessibilityLabel("First message")
                 .accessibilityIdentifier("start.message")
@@ -851,7 +848,7 @@ private struct ComputerButton: View {
     @Environment(\.startBox) private var startBox
     /// The chip's leading edge in `StartForm.space`, where its panel starts when it fits.
     @State private var minX: CGFloat = 0
-    private var placed: (x: CGFloat, width: CGFloat) { StartPanel.place(widest: 260, leading: minX, box: startBox) }
+    private var placed: (x: CGFloat, width: CGFloat) { PanelPlace.place(widest: 260, leading: minX, box: startBox) }
 
     var body: some View {
         Button {

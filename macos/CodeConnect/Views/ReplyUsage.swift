@@ -29,6 +29,9 @@ struct ReplyUsage: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(bar.spoken)
                     .accessibilityIdentifier("session.composer.usage")
+                    // As far from Send as the bar's chips stand from each other, label to label: 8 + 2 + 8 pt, of
+                    // which the bar's own spacing gives 6.
+                    .padding(.trailing, 12)
             }
         }
     }
@@ -81,7 +84,7 @@ struct ReplyUsage: View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(label).font(Theme.ui(12)).foregroundStyle(Card.muted)
             Spacer(minLength: 24)
-            if let value { Text(value).font(Theme.mono(12)).foregroundStyle(Color(themeHex: 0xE4E4E7)) }
+            if let value { Text(value).font(Theme.mono(12)).foregroundStyle(Theme.text) }
             if let rest { Text(rest).font(Theme.ui(12)).foregroundStyle(Card.muted) }
         }
         .padding(.vertical, 4)

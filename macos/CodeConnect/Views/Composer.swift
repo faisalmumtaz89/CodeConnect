@@ -99,8 +99,8 @@ private struct Composer: View {
     @State private var panel: SettingsPanel?
     /// The box's content width, between its bar's insets: no panel is wider.
     @State private var rowWidth: CGFloat = 0
-    /// Where the run's settings controls end in the box: an open panel's trailing edge is the box's content edge.
-    @State private var controlsEnd: CGFloat = 0
+    /// Where the run's settings controls stand in the box, which places their panels inside its content.
+    @State private var controls: CGRect = .zero
     private nonisolated static let space = "composer.box"
     @State private var compacting = false
     @State private var instructions = ""
@@ -153,9 +153,10 @@ private struct Composer: View {
             if let line { note(line) }
             box
         }
-        // Docked under the conversation, 20 pt in from the pane's sides and its foot.
+        // Docked under the conversation, 20 pt in from the pane's sides and its foot; 16 pt under the conversation's last
+        // line at its end (its row's 7 pt inset and the column's 1 pt end, then these 8).
         .padding(.horizontal, 20)
-        .padding(.top, 4)
+        .padding(.top, 8)
         .padding(.bottom, 20)
         .onChange(of: kept.reply) { old, new in
             // If the draft has moved off the words it held — the same normalisation the send's mutation key uses, so a
@@ -310,12 +311,10 @@ private struct Composer: View {
                         opener = nil
                         clearing = true
                     },
-                    confirmMode: { confirmingMode = $0 }, reach: InputBoxLayout.barInset + rowWidth - controlsEnd,
-                    room: rowWidth)
+                    confirmMode: { confirmingMode = $0 },
+                    box: CGRect(x: InputBoxLayout.barInset - controls.minX, y: 0, width: rowWidth, height: 0))
                 .disabled(blocked != nil || busy)
-                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).maxX } action: {
-                    controlsEnd = $0
-                }
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { controls = $0 }
                 #if DEBUG
                     .task {
                         switch RenderWindow.confirm {

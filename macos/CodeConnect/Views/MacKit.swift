@@ -236,6 +236,23 @@ extension FocusedValues {
     @Entry var composerHoldsEscape: Bool?
 }
 
+/// Where a panel stands across its bounds, every panel's one rule: as wide as `widest` where the bounds have the room,
+/// never past either of their sides, and its leading edge on its control's (`leading`), moved only as far as it must to
+/// stay inside.
+enum PanelPlace {
+    /// The least a panel keeps from the pane's top and bottom.
+    static let margin: CGFloat = 8
+
+    /// A panel `widest` wide that would start at `leading`: as wide as the bounds allow, at `leading` where it fits,
+    /// else moved toward their leading side just enough to end at their trailing side.
+    static func place(widest: CGFloat, leading: CGFloat, box: CGRect) -> (x: CGFloat, width: CGFloat) {
+        // Before the bounds are measured, the panel as it is drawn.
+        guard box.width > 0 else { return (leading, widest) }
+        let width = min(widest, box.width)
+        return (min(max(leading, box.minX), box.maxX - width), width)
+    }
+}
+
 extension View {
     /// A control that opens a panel, and toggles it itself. While the panel is open, a click anywhere in the window
     /// outside the control and the panel closes it, and the click still does what it does there (another control's
@@ -746,8 +763,9 @@ private struct RightClick: NSViewRepresentable {
 }
 
 extension View {
-    /// The main window's row menu (`RowMenu`), drawn over everything in the window: below the rect it was opened by
-    /// where it fits, above it where it would cross the window's bottom, never past the window's sides. It closes as
+    /// The main window's row menu (`RowMenu`), drawn over everything in the window: its leading edge on the rect it was
+    /// opened by, below it where it fits, above it where it would cross the window's bottom, never past the window's
+    /// sides (`PanelPlace`). It closes as
     /// every panel does (`closesPanel`), the rect being its control.
     func rowMenuHost(_ menu: RowMenu) -> some View { modifier(RowMenuHost(menu: menu)) }
 }
@@ -792,16 +810,15 @@ private struct RowMenuHost: ViewModifier {
                 open: Binding(get: { menu.shown != nil }, set: { if !$0 { menu.close() } }), measuresControl: false))
     }
 
-    /// Its top leading corner: its trailing edge on the rect's, below it where it fits, above it where it would cross
+    /// Its top leading corner: its leading edge on the rect's, below it where it fits, above it where it would cross
     /// the window's bottom, inside the window's sides. A right-click's point: its top leading corner there.
     private func place(_ rect: CGRect, in bounds: CGRect) -> CGPoint {
         let point = rect.size == .zero
-        let x = point ? rect.minX : rect.maxX - size.width
         let gap = point ? 0 : Theme.rowMenuGap
         let below = rect.maxY + gap
         let above = rect.minY - gap - size.height
         let y = below + size.height <= bounds.maxY || above < bounds.minY ? below : above
-        return CGPoint(x: min(max(x, bounds.minX), bounds.maxX - size.width), y: y)
+        return CGPoint(x: PanelPlace.place(widest: size.width, leading: rect.minX, box: bounds).x, y: y)
     }
 }
 

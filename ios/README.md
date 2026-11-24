@@ -1156,7 +1156,7 @@ actually produce was checked.
 
 | | `bg` #000000 | `surface` #0A0A0A | `surfaceRaised` #131313 | `surfaceOverlay` #1A1A1A |
 |---|---|---|---|---|
-| `text` #E4E4E7 | 16.55 | 15.60 | 14.64 | 13.72 |
+| `text` #D8D8DC | 14.78 | 13.93 | 13.07 | 12.25 |
 | `textSecondary` #9C9CA3 | 7.70 | 7.26 | 6.81 | 6.38 |
 | `textTertiary` #83838A | 5.58 | 5.26 | 4.94 | 4.62 |
 | `textDisabled` #525252 | 2.69 | 2.53 | 2.38 | 2.23 — exempt |
@@ -1183,7 +1183,7 @@ actually produce was checked.
 **Semantic on surface** — all ✅: success #4CB782 8.40 / info 5.71 / warning
 #E9A23B 9.70 / danger #E5636A 6.32 on `bg`; the tightest is info on
 `surfaceOverlay` at 4.73. Semantic-on-its-own-12%-wash on `surface`: success
-6.80, warning 7.74, danger 5.30, info 4.84. Diff tints carry `text` at 12.30:1
+6.80, warning 7.74, danger 5.30, info 4.84. Diff tints carry `text` at 10.98:1
 or better. Primary button: `#000` on `#EDEDED`
 = 17.94, pressed `#D4D4D4` = 14.17.
 
