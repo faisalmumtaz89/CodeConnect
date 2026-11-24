@@ -14,6 +14,7 @@ User-facing changes, newest first. Mac releases are cut per
 - On the iPhone, an approval shows its command and, at medium or high risk, its tag, without the line of reasons
   under it; on the Mac, an approval no longer shows its risk line.
 - On the iPhone and the Mac, the row for a session reading its messages now says "Reading CodeConnect messages".
+- On the Mac, the Add sheet opened from New Agent, before any computer is added, shows Computer chosen.
 
 ## CodeConnect 0.19.18, with the iPhone app 1.1.35
 

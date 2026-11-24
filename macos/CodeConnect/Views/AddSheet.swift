@@ -43,7 +43,8 @@ struct AddSheet: View {
     @Binding private var address: String?
 
     init(kind: AddKind, address: Binding<String?> = .constant(nil)) {
-        _kind = State(initialValue: kind)
+        // An agent is started from the window: the sheet opened for one adds its computer, on the Computer side.
+        _kind = State(initialValue: kind == .agent ? .computer : kind)
         _address = address
     }
 
