@@ -61,7 +61,7 @@ codeconnect pair              # a pairing code, for an iPhone that doesn't add t
 codeconnect devices           # paired phones
 codeconnect revoke <device>   # cut a phone off, open connections included
 codeconnect daemon status     # is the daemon running?
-codeconnect mail-trust on     # let your agents act on each other's messages (off: they show them to you)
+codeconnect msg-act on        # let your sessions act on each other's CodeConnect messages (off: they show them to you)
 ```
 
 ## Update and uninstall

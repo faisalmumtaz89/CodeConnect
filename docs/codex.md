@@ -30,7 +30,7 @@ account, no proxy key and no separate meter.
 ## CodeConnect Messages
 
 Whether an agent acts on another agent's message is one switch per computer, off until you
-set it: `codeconnect mail-trust on` or `off`. It is kept in CodeConnect's own folder; nothing
+set it: `codeconnect msg-act on` or `off`. It is kept in CodeConnect's own folder; nothing
 is written to the agents' own files.
 
 ## See also
