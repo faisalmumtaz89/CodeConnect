@@ -171,8 +171,8 @@ struct FolderBrowser: View {
         .id(target)
     }
 
-    /// As the Mac's own folder panel lays its bar out: New Folder… at the leading edge, hidden folders beside it, and the
-    /// two ways out at the trailing edge, back to the recent folders or into the folder shown.
+    /// As the Mac's own folder panel lays its bar out: New Folder… at the leading edge, and the two ways out at the
+    /// trailing edge, back to the recent folders or into the folder shown. Show hidden folders sits by the path above.
     private var bar: some View {
         let readable = listing.map { $0.error == nil } ?? false
         return HStack(spacing: 8) {
