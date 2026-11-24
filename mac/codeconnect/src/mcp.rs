@@ -150,7 +150,7 @@ fn tools() -> Value {
             "name": "list_agents",
             "description": "Say your own address, and list the other Claude Code and Codex \
                 sessions you can message: each by its address (<run id>@computer), then its \
-                label (cc-N@computer, for reading only), which agent it is, and its project. \
+                label when that differs (for reading only), which agent it is, and its project. \
                 Give your own address when you ask an agent to answer you through another.",
             "inputSchema": {"type": "object", "properties": {}},
             "annotations": {"readOnlyHint": true},
@@ -158,8 +158,8 @@ fn tools() -> Value {
         {
             "name": "send_message",
             "description": "Send a message to another Claude Code or Codex session. `to` is its \
-                address, <run id>@computer, copied from list_agents or from a message you read; \
-                a cc-N@computer label is not an address. To answer a message, also give its id \
+                address, <run id>@computer, copied from the start of its list_agents line or from \
+                a message you read; a label is not an address. To answer a message, also give its id \
                 as `reply_to`. The answer gives the \
                 message's id and whether it is waiting for that agent, still being sent, or \
                 refused, and why.",
@@ -203,18 +203,18 @@ fn call(
                     unreachable,
                 }) => {
                     let mut lines = vec![format!(
-                        "You are {} ({}).",
+                        "You are {}{}.",
                         you.address,
-                        one_line(&you.label)
+                        differing(&you.label, &you.address, " (", ")")
                     )];
                     if agents.is_empty() && unreachable.is_empty() {
                         lines.push("No other agents are running.".into());
                     }
                     lines.extend(agents.iter().map(|a| {
                         format!(
-                            "{} · {} · {} · project {}",
+                            "{}{} · {} · project {}",
                             a.address,
-                            one_line(&a.label),
+                            differing(&a.label, &a.address, " · ", ""),
                             one_line(&a.agent),
                             one_line(&a.project)
                         )
@@ -323,10 +323,10 @@ fn mail_text(
         .iter()
         .map(|message| {
             let head = format!(
-                "Message {} from {} ({}):\n{}",
+                "Message {} from {}{}:\n{}",
                 message.message_id,
                 message.from,
-                one_line(&message.label),
+                differing(&message.label, &message.from, " (", ")"),
                 message.text,
             );
             if !acts {
@@ -365,6 +365,15 @@ fn mail_text(
         blocks.push("More messages are waiting: call read_messages again.".into());
     }
     blocks.join("\n\n")
+}
+
+/// A label between `before` and `after` where it differs from `address`, as it is shown ([`one_line`]); nothing
+/// where it is the address itself, as every run CodeConnect starts is named by its own id.
+fn differing(label: &str, address: &str, before: &str, after: &str) -> String {
+    if label == address {
+        return String::new();
+    }
+    format!("{before}{}{after}", one_line(label))
 }
 
 /// A label as it is shown: any control character, a newline included, is a
@@ -694,6 +703,89 @@ mod tests {
     /// **What `read_messages` tells the agent**: each message in the measured
     /// wording, with the exact call that answers it, then what became of the
     /// agent's own messages; and the offer it carries back for the confirmation.
+    /// **M-4: a label is printed only where it differs from its address.** Every run CodeConnect starts is named by
+    /// its own run id, so its label (`<session id>@computer`) is its address, and `list_agents` printed each twice
+    /// ("You are X@alpha (X@alpha)."). A peer on another version may still send a label of its own: that one is
+    /// printed, once, after the address, in the "You are" line, each agent's line and each message's header. Neither
+    /// description promises a `cc-N` form.
+    #[test]
+    fn a_label_is_printed_only_where_it_differs_from_its_address() {
+        let entry = |address: &str, label: &str, agent: &str, project: &str| AgentEntry {
+            address: address.into(),
+            label: label.into(),
+            agent: agent.into(),
+            project: project.into(),
+        };
+        let me = "01M85B0J6YVA964H4Z30F94QZ4@alpha";
+        let them = "01M85B0TB2J5HT9VVFNAP6PW35@beta";
+        let old = "01M85B0TB2J5HT9VVFNAP6PW36@studio";
+        let list = |you: AgentEntry, agents: Vec<AgentEntry>| {
+            let call = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}"#;
+            let listed = reply(call, |_: &ClientFrame| {
+                Ok(DaemonFrame::Agents {
+                    you: you.clone(),
+                    agents: agents.clone(),
+                    unreachable: Vec::new(),
+                })
+            });
+            listed["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            list(
+                entry(me, me, "Claude", "p"),
+                vec![entry(them, them, "Codex", "q")]
+            ),
+            format!("You are {me}.\n{them} · Codex · project q")
+        );
+        assert_eq!(
+            list(
+                entry(me, "cc-1@alpha", "Claude", "p"),
+                vec![entry(old, "cc-3@studio", "Codex", "api")]
+            ),
+            format!("You are {me} (cc-1@alpha).\n{old} · cc-3@studio · Codex · project api")
+        );
+        let header = |label: &str| {
+            let call = r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"read_messages","arguments":{}}}"#;
+            let read = answer(call, "u", false, |_: &ClientFrame| {
+                Ok(DaemonFrame::AgentMessages {
+                    offer: "o1".into(),
+                    messages: vec![MailEnvelope {
+                        message_id: "m1".into(),
+                        context_id: "c1".into(),
+                        in_reply_to: None,
+                        from: them.into(),
+                        label: label.into(),
+                        agent: "Codex".into(),
+                        project: "q".into(),
+                        text: "hi".into(),
+                    }],
+                    updates: Vec::new(),
+                    more_pending: false,
+                })
+            })
+            .unwrap();
+            read.reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(header(them), format!("Message m1 from {them}:"));
+        assert_eq!(
+            header("cc-3@beta"),
+            format!("Message m1 from {them} (cc-3@beta):")
+        );
+        assert!(
+            !tools().to_string().contains("cc-N"),
+            "the descriptions promise no cc-N form"
+        );
+    }
+
     #[test]
     fn a_read_gives_each_message_with_the_call_that_answers_it() {
         let call = r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"read_messages","arguments":{}}}"#;
@@ -769,8 +861,7 @@ mod tests {
     }
 
     /// **The tools name an address in the one form the daemon takes**,
-    /// `<run id>@computer`; a `cc-N@computer` appears only as a label, which is
-    /// refused as an address.
+    /// `<run id>@computer`, and no other form.
     #[test]
     fn the_tools_describe_addresses_in_the_form_the_daemon_takes() {
         fn descriptions(value: &Value, out: &mut Vec<String>) {
@@ -790,10 +881,7 @@ mod tests {
         let mut all = Vec::new();
         descriptions(&tools(), &mut all);
         for text in &all {
-            let unlabelled = text
-                .replace("label (cc-N@computer", "")
-                .replace("a cc-N@computer label", "");
-            assert!(!unlabelled.contains("cc-N@computer"), "{text}");
+            assert!(!text.contains("cc-N@computer"), "{text}");
         }
         let naming: Vec<_> = all
             .iter()
