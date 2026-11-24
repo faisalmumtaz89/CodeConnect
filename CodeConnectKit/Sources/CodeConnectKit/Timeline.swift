@@ -107,10 +107,10 @@ public struct NoticeItem: Sendable, Hashable {
         self.severity = severity
     }
 
-    /// An agent woken to read its CodeConnect mail: a Codex wake line, or ccd's `mail_nudge` notice on a Claude run.
+    /// An agent woken to read its CodeConnect messages: a Codex wake line, or ccd's `mail_nudge` notice on a Claude run.
     /// A task report, so a woken run reads Running until the agent replies.
     static let mailWake = NoticeItem(
-        kind: .taskReport, symbol: "chat-text", title: "Reading CodeConnect mail", detail: nil, severity: .info)
+        kind: .taskReport, symbol: "chat-text", title: "Reading CodeConnect messages", detail: nil, severity: .info)
 
     /// The conversation was reset: a terminal run's `/clear` invocation, or ccd's `conversation_cleared` notice on a
     /// hosted run.
@@ -398,7 +398,7 @@ public enum TimelineBuilder {
                                         severity: notification.severity))))
                     }
                 } else if event.source == .codex, let text = event.userText,
-                    text == MailNudge.act || text == MailNudge.show {
+                    MailNudge.all.contains(text) {
                     // ccd files a Codex mail wake (protocol::ipc MAIL_NUDGE_*) as the turn's
                     // user message, but it is not the person speaking — so it draws as the
                     // mail notice, like `/clear` above, never a `you:` bubble. `.taskReport`

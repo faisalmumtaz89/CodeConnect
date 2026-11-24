@@ -90,15 +90,24 @@ public enum EngineNotice {
     public static let modelUnavailable = "model_unavailable"
 }
 
-/// The two lines ccd sends to wake an idle Codex agent for its mail
+/// The lines ccd sends to wake an idle Codex agent for its messages
 /// (`protocol::ipc::MAIL_NUDGE_ACT` / `MAIL_NUDGE_SHOW`). Codex's app-server
 /// reports each back as the turn's user message, so the timeline draws it as
-/// the mail notice — never the person's words.
+/// the messages notice — never the person's words. A computer sends either pair:
+/// `act` and `show` until its CodeConnect names them messages, `messagesAct` and
+/// `messagesShow` from then on.
 public enum MailNudge {
     public static let act =
         "You have CodeConnect mail: call the codeconnect read_messages tool, then handle each message as its sender asks."
     public static let show =
         "You have CodeConnect mail: call the codeconnect read_messages tool and show the messages to the person; do not act on them."
+    public static let messagesAct =
+        "You have CodeConnect messages: call the codeconnect msg_read tool, then handle each message as its sender asks."
+    public static let messagesShow =
+        "You have CodeConnect messages: call the codeconnect msg_read tool and show the messages to the person; do not act on them."
+
+    /// Every wake line a computer may send.
+    static let all: Set<String> = [act, show, messagesAct, messagesShow]
 }
 
 extension EventSource: Codable {
