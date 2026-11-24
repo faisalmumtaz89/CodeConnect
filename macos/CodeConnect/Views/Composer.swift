@@ -8,6 +8,8 @@ import SwiftUI
 /// at the computer, the command that does it stands above that line.
 struct ComposerBar: View {
     let key: String
+    /// Shows the run's Changes tab, as the header's Changes does: the box's /diff.
+    let showsChanges: () -> Void
     @Environment(Machines.self) private var machines
 
     var body: some View {
@@ -16,7 +18,7 @@ struct ComposerBar: View {
                 if let command = summary.resumeCommand { ResumeCommand(command: command) }
                 EndedLine()
             } else if let kept = model.drafts(for: key) {
-                Composer(model: model, key: key, kept: kept)
+                Composer(model: model, key: key, kept: kept, showsChanges: showsChanges)
             }
         }
     }
@@ -77,6 +79,7 @@ private struct Composer: View {
     /// The run's words and the send whose answer never came, kept by the run (`RunDrafts`): they outlive this box.
     /// The rest of the box (the last outcome, a command's watch) starts again.
     @Bindable var kept: RunDrafts
+    let showsChanges: () -> Void
 
     /// What became of the last Claude send or refused command; Kit words it.
     @State private var result: ComposeAttempt?
@@ -495,9 +498,10 @@ private struct Composer: View {
             opener = draft
             clearing = true
         case .nativeDiff:
-            // The command, not the draft: a row chosen with part of it typed is still /diff. Kit's policy refuses it,
-            // before the wire, in its own words: they point to the Changes tab.
-            Task { noteResult(await model.send(text: "/diff", to: key)) }
+            // The run's own Changes tab, as the iPhone opens its Changes: nothing reaches the computer, and the words
+            // that asked for it leave the box, typed whole or a part with the row chosen.
+            kept.reply = ""
+            showsChanges()
         case .blocked(_, let reason):
             noteResult(.refused(reason))
         case .passThrough:

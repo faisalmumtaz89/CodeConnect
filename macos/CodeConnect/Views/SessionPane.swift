@@ -42,7 +42,7 @@ struct SessionPane: View {
                         // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its
                         // way are kept. It takes no room, no click, no keyboard (Tab can't reach it) and no reading.
                         // Not clipped: its command list opens above it.
-                        ComposerBar(key: row.id)
+                        ComposerBar(key: row.id) { tab = .changes }
                             .frame(height: boxTaken ? 0 : nil, alignment: .top)
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { replyHeight = $0 }
                             .opacity(boxTaken ? 0 : 1)
