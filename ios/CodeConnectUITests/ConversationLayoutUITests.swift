@@ -39,7 +39,7 @@ final class ConversationLayoutUITests: XCTestCase {
         for x in 0..<width {
             for y in 0..<height {
                 let i = (y * width + x) * 4
-                // Primary text is #E4E4E7; the surfaces and tertiary labels stay
+                // Primary text is #D8D8DC; the surfaces and tertiary labels stay
                 // well under this.
                 if Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2]) > 3 * 200 {
                     return element.frame.minX + CGFloat(x) / scale

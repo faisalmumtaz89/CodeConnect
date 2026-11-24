@@ -86,11 +86,12 @@ extension Color {
 }
 
 /// The root of every SwiftUI hierarchy the app hosts (its window, the update window, and the AppKit-hosted rows and
-/// tables): its text is Inter at 13 pt, macOS's body size, what a Text with no font of its own drew before.
+/// tables): its text is Inter at 13 pt, macOS's body size, what a Text with no font of its own drew before, in the
+/// primary text token (`Theme.text`) where it names no colour of its own, never the system's label colour.
 struct ThemeRoot<Content: View>: View {
     let content: Content
 
-    var body: some View { content.font(Theme.ui(13)) }
+    var body: some View { content.font(Theme.ui(13)).foregroundStyle(Theme.text) }
 }
 
 /// A key as a hint prints it: a small raised cap.

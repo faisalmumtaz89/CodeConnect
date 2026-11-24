@@ -1156,7 +1156,7 @@ actually produce was checked.
 
 | | `bg` #000000 | `surface` #0A0A0A | `surfaceRaised` #131313 | `surfaceOverlay` #1A1A1A |
 |---|---|---|---|---|
-| `text` #E4E4E7 | 16.55 | 15.60 | 14.64 | 13.72 |
+| `text` #D8D8DC | 14.78 | 13.93 | 13.07 | 12.25 |
 | `textSecondary` #9C9CA3 | 7.70 | 7.26 | 6.81 | 6.38 |
 | `textTertiary` #83838A | 5.58 | 5.26 | 4.94 | 4.62 |
 | `textDisabled` #525252 | 2.69 | 2.53 | 2.38 | 2.23 — exempt |
