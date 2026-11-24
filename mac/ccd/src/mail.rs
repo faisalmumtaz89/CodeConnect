@@ -2,7 +2,9 @@
 //!
 //! An agent names another by its address, `<run uid>@<computer>`: the run of the
 //! session it means and no other, and the computer that runs it, by its Tailscale
-//! name ([`protocol::tailnet`]). It sends with the `codeconnect` tool's
+//! name ([`protocol::tailnet`]), or `this.computer` while Tailscale gives no reading. A
+//! run this computer knows is delivered here whatever name its address carries, unless
+//! that name is another computer Tailscale knows. It sends with the `codeconnect` tool's
 //! `send_message` and reads its own with `read_messages`. A session's
 //! `cc-N@<computer>` is its label, for reading only: another run, later, can carry
 //! the same one. Only a run CodeConnect started is listed and sent to, from the moment
@@ -129,7 +131,7 @@ impl Daemon {
         };
         let refuse = |reason: &str| refused(message_id.clone(), reason);
 
-        let Some((_, computer)) = to
+        let Some((run, computer)) = to
             .rsplit_once('@')
             .filter(|(run, c)| protocol::uid::is_well_formed(run) && !c.is_empty())
         else {
@@ -141,14 +143,14 @@ impl Daemon {
         if let Err(reason) = sendable(text) {
             return refuse(&reason);
         }
-        let Some(tailnet) = tailnet else {
-            return refuse(
-                "this computer is not connected to Tailscale, so it has no name to send from",
-            );
-        };
-        let place = match tailnet.locate(computer) {
-            Ok(place) => place,
-            Err(refusal) => return refuse(&refusal_sentence(refusal, computer)),
+        // A run this computer knows is here, whatever name its address was written with while
+        // Tailscale came and went; only a computer's name Tailscale knows is looked up first.
+        let here = || async { matches!(self.db.get_session(run.to_string()).await, Ok(Some(_))) };
+        let place = match tailnet.map(|tailnet| tailnet.locate(computer)) {
+            Some(Ok(place)) => place,
+            Some(Err(Refusal::Unknown)) | None if here().await => Place::Here,
+            Some(Err(refusal)) => return refuse(&refusal_sentence(refusal, computer)),
+            None => return refuse(NO_TAILSCALE),
         };
         let sender = match self.db.get_session(from_uid.to_string()).await {
             Ok(Some(row)) => row,
@@ -228,7 +230,7 @@ impl Daemon {
     /// keeps one copy however many times it is handed over.
     async fn dispatch(
         self: &Arc<Self>,
-        tailnet: &Tailnet,
+        tailnet: Option<&Tailnet>,
         mail: &SentMail,
         sender: &crate::store::SessionRow,
     ) -> (MailState, Option<String>) {
@@ -236,6 +238,9 @@ impl Daemon {
             return (MailState::Refused, Some("the address names no run".into()));
         };
         if !mail.recipient_computer.is_empty() {
+            let Some(tailnet) = tailnet else {
+                return (MailState::Sent, None);
+            };
             return match tailnet.locate(&mail.recipient_computer) {
                 Ok(Place::Peer { name: peer, ip }) => self.carry(mail, sender, run, peer, ip).await,
                 // Not reachable this time: still sent, and offered again at the next sweep.
@@ -245,8 +250,8 @@ impl Daemon {
         let from = Sender {
             computer: String::new(),
             uid: mail.session_uid.clone(),
-            address: format!("{}@{}", mail.session_uid, tailnet.name()),
-            label: format!("{}@{}", sender.session_id, tailnet.name()),
+            address: format!("{}@{}", mail.session_uid, this_computer(tailnet)),
+            label: format!("{}@{}", sender.session_id, this_computer(tailnet)),
             agent: agent_name(&sender.agent).to_string(),
             project: crate::project_label::project_label(&sender.cwd),
         };
@@ -466,9 +471,6 @@ impl Daemon {
         {
             crate::log_error!("mail sweep: {err:#}");
         }
-        let Some(tailnet) = tailnet else {
-            return;
-        };
         match self.db.unsent_mail().await {
             Ok(unsent) => {
                 for mail in unsent {
@@ -477,11 +479,13 @@ impl Daemon {
             }
             Err(err) => crate::log_error!("mail sweep: could not read the outbox: {err:#}"),
         }
-        self.tell_senders(tailnet).await;
+        if let Some(tailnet) = tailnet {
+            self.tell_senders(tailnet).await;
+        }
     }
 
     /// Hand one `sent` message over again, and keep where it stands now.
-    async fn carry_again(self: &Arc<Self>, tailnet: &Tailnet, mail: &SentMail) {
+    async fn carry_again(self: &Arc<Self>, tailnet: Option<&Tailnet>, mail: &SentMail) {
         let sender = match self.db.get_session(mail.session_uid.clone()).await {
             Ok(Some(row)) => row,
             _ => return,
@@ -643,7 +647,10 @@ impl Daemon {
         let tailnet = self.read_tailnet().await;
         let (peers, unreachable) = match &tailnet {
             Some(tailnet) => self.ask_peers(tailnet).await,
-            None => (Vec::new(), Vec::new()),
+            None => (
+                Vec::new(),
+                vec!["other computers (Tailscale is unavailable)".into()],
+            ),
         };
         let (you, agents) = self
             .list_agents_on(tailnet.as_ref(), from_uid, peers)
@@ -691,16 +698,11 @@ impl Daemon {
         from_uid: &str,
         peers: Vec<AgentEntry>,
     ) -> Result<(AgentEntry, Vec<AgentEntry>), String> {
-        let Some(tailnet) = tailnet else {
-            return Err(
-                "this computer is not connected to Tailscale, so it has no name to send from"
-                    .into(),
-            );
-        };
         // As for a send: a computer that takes part in no messages lists no one.
-        if let Err(refusal) = tailnet.locate(tailnet.name()) {
-            return Err(refusal_sentence(refusal, tailnet.name()));
+        if let Some(Err(refusal)) = tailnet.map(|tailnet| tailnet.locate(tailnet.name())) {
+            return Err(refusal_sentence(refusal, this_computer(tailnet)));
         }
+        let name = this_computer(tailnet);
         let unreadable = |err: anyhow::Error| {
             crate::log_error!("listing agents for {from_uid}: {err:#}");
             "CodeConnect could not read its sessions".to_string()
@@ -711,11 +713,11 @@ impl Daemon {
             .await
             .map_err(unreadable)?
         {
-            Some(row) => entry(&row, tailnet.name()),
+            Some(row) => entry(&row, name),
             None => return Err("the asking session is not known to CodeConnect".into()),
         };
         let mut agents = self
-            .local_agents(tailnet.name(), Some(from_uid))
+            .local_agents(name, Some(from_uid))
             .await
             .map_err(unreadable)?;
         agents.extend(peers);
@@ -1135,6 +1137,16 @@ impl Daemon {
             Tailnet::parse(&String::from_utf8_lossy(&output.stdout))
         }
     }
+}
+
+/// Why a message to another computer is refused when Tailscale gives no reading.
+const NO_TAILSCALE: &str =
+    "Tailscale is unavailable here, so this computer can message only its own sessions";
+
+/// This computer's name in an address: its tailnet name, or, with no reading, a name no tailnet
+/// computer can have (a tailnet name is the first label of its DNS name, so it has no dot).
+fn this_computer(tailnet: Option<&Tailnet>) -> &str {
+    tailnet.map_or("this.computer", Tailnet::name)
 }
 
 fn refusal_sentence(refusal: Refusal, computer: &str) -> String {
