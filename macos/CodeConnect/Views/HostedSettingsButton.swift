@@ -14,8 +14,8 @@ enum SettingsPanel {
 /// times, a mode the menu marks `confirm` (one that lets the agent work without asking) in red; its list ends such a
 /// mode in "…", which asks first in the reply box's confirmation. On a Claude run "⋯" holds Compact… and Clear…, which
 /// type Claude Code's commands; a Codex run takes neither and has no "⋯". One panel is open at a time, above the
-/// controls, its trailing edge on the reply box's content edge (the send button's) whichever button opened it, and no
-/// wider than that content; Esc or a click anywhere else closes it. The checks follow the run's facts, never a guess
+/// controls, its leading edge on the button that opened it and inside the reply box's content (`PanelPlace`); Esc or a
+/// click anywhere else closes it. The checks follow the run's facts, never a guess
 /// between a click and its answer; while one of its calls is in flight every control is disabled and a small spinner
 /// stands in the model button's chevron, and what became of the call is the reply box's note line.
 struct HostedSettingsButton: View {
@@ -32,11 +32,12 @@ struct HostedSettingsButton: View {
     let clear: () -> Void
     /// A mode the menu marks `confirm` was chosen: nothing is sent until the reply box's confirmation is.
     let confirmMode: (MenuMode) -> Void
-    /// How far past these controls' trailing edge the reply box's content ends, where an open panel's trailing edge
-    /// stands.
-    let reach: CGFloat
-    /// The reply box's content width, which no panel is wider than; 0 until measured.
-    let room: CGFloat
+    /// The reply box's content, in these controls' coordinates: no panel reaches past its sides. Empty until measured.
+    let box: CGRect
+
+    /// Each control's leading edge, in these controls' coordinates, where its panel starts.
+    @State private var leading: [SettingsPanel: CGFloat] = [:]
+    private nonisolated static let space = "hosted.controls"
 
     private var name: String { settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay }
     /// The effort in use beside the model, by Kit's one rule (`RunSettings.effortName`).
@@ -48,12 +49,13 @@ struct HostedSettingsButton: View {
             if !settings.modes.isEmpty { modeButton }
             if agent == .claude { moreButton }
         }
-        .overlay(alignment: .bottomTrailing) {
+        .coordinateSpace(.named(Self.space))
+        .overlay(alignment: .bottomLeading) {
             if let open {
                 panel(open)
                     .openPanel()
                     // Clear of the bar's chips by the panels' one gap.
-                    .offset(x: reach, y: -(InputBoxChip.height + Theme.panelGap))
+                    .offset(x: placed(open).x, y: -(InputBoxChip.height + Theme.panelGap))
             }
         }
         .closesPanel(Binding(get: { open != nil }, set: { if !$0 { open = nil } }))
@@ -123,6 +125,7 @@ struct HostedSettingsButton: View {
         .accessibilityLabel(label)
         .accessibilityIdentifier(id)
         .accessibilityValue(isOpen ? "open" : "closed")
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).minX } action: { leading[which] = $0 }
     }
 
     // MARK: The panels
@@ -131,9 +134,9 @@ struct HostedSettingsButton: View {
     private func panel(_ which: SettingsPanel) -> some View {
         switch which {
         case .model: modelPanel
-        case .mode: card(width: 240) { modeRows }
+        case .mode: card(.mode) { modeRows }
         case .more:
-            card(width: 180) {
+            card(.more) {
                 PanelItem(index: 0, title: "Compact…", symbol: PanelSymbol.compact, id: "session.composer.compact") {
                     open = nil
                     compact()
@@ -150,7 +153,7 @@ struct HostedSettingsButton: View {
 
     /// The models, one line each, then the selected model's efforts.
     private var modelPanel: some View {
-        card(width: 420) {
+        card(.model) {
             header("Model")
             ForEach(Array(settings.models.enumerated()), id: \.element.value) { index, entry in
                 let marked = entry == settings.selectedModel
@@ -200,11 +203,22 @@ struct HostedSettingsButton: View {
         }
     }
 
-    /// A panel: the menus' one card (`menuCard`).
-    private func card<Content: View>(width: CGFloat, @ViewBuilder _ content: () -> Content) -> some View {
+    /// Where `which`'s panel stands, and how wide it is: at most its own width, inside the box.
+    private func placed(_ which: SettingsPanel) -> (x: CGFloat, width: CGFloat) {
+        let widest: CGFloat =
+            switch which {
+            case .model: 420
+            case .mode: 240
+            case .more: 180
+            }
+        return PanelPlace.place(widest: widest, leading: leading[which] ?? 0, box: box)
+    }
+
+    /// `which`'s panel: the menus' one card (`menuCard`).
+    private func card<Content: View>(_ which: SettingsPanel, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) { content() }
             .disabled(settings.inFlight)
-            .frame(width: (room > 0 ? min(width, room) : width) - 12)
+            .frame(width: placed(which).width - 12)
             .fixedSize(horizontal: false, vertical: true)
             .menuCard()
             // The card takes every click inside it: one on its checked or disabled rows, a header or a gap does
