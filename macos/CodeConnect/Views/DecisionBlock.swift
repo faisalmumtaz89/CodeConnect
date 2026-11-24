@@ -31,8 +31,6 @@ struct DecisionBlock: View {
     /// The card as the fleet holds it now; nil once nothing backs it.
     private var live: ApprovalItem? { model.shownApproval(sessionKey: approval.sessionKey, id: approval.id) }
     private var summary: SessionSummary? { model.shownSummary(for: approval.sessionKey) }
-    private var assessment: RiskAssessment { approval.assessment(profile: model.daemonProfile) }
-    private var risk: RiskClass { assessment.effective }
     private var attempt: AnswerAttempt? { model.lastAttempt(for: approval) }
     private var outcome: AnswerOutcome? { DecisionCard.effectiveOutcome(live: live?.outcome, snapshot: approval.outcome) }
     private var codexEnding: CodexResolution? { live?.codexResolution ?? approval.codexResolution }
@@ -55,7 +53,7 @@ struct DecisionBlock: View {
     /// Why no answer can go now, in Kit's order: refusals stop here.
     private var refusalBlocked: String? { model.answerBlockedReason(for: approval, inFlight: inFlight) }
     /// …and an answer that says yes also waits for the command, and at HIGH its risk, to have been on screen.
-    private var assentBlocked: String? { refusalBlocked ?? gate.blockedReason(at: risk) }
+    private var assentBlocked: String? { refusalBlocked ?? gate.blockedReason }
 
     /// This Mac can answer it now, so at the foot its answers take the reply box's place.
     private var answerable: Bool {
@@ -179,15 +177,6 @@ struct DecisionBlock: View {
                 Text(why).font(Theme.ui(12)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
             }
             changes
-            VStack(alignment: .leading, spacing: 0) {
-                Text("\(risk.label.capitalized) risk · \(assessment.provenance)")
-                    .font(Theme.ui(11.5))
-                    .foregroundStyle(risk == .high ? Theme.red : Theme.text3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("\(id).risk")
-                Color.clear.frame(height: 1)
-                    .onScrollVisibilityChange(threshold: 1) { if $0 { gate.hasSeenProvenance = true } }
-            }
             if let banner { banner.accessibilityIdentifier("\(id).banner") }
             // The banner says how a Codex question ended; this says what was chosen, as far as the record proves it.
             if let codexEnding {
@@ -441,7 +430,7 @@ struct DecisionBlock: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(CardWords.chooseOne).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.text2)
                 ForEach(Array(options.enumerated()), id: \.element.id) { index, option in
-                    let refusal = !DecisionCard.needsSecondFactor(risk: .high, decision: .optionId(option.id))
+                    let refusal = DecisionCard.isRefusal(.optionId(option.id))
                     let blocked = refusal ? refusalBlocked : assentBlocked
                     let number = keyed && index < 9 ? Character(String(index + 1)) : nil
                     Button { send(.optionId(option.id), from: option.id) } label: {

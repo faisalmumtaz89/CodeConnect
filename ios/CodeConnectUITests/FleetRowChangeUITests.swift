@@ -16,7 +16,6 @@ final class FleetRowChangeUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments =
             arguments + [
-                "-CC_BIOMETRICS", "allow",
                 "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
             ]
         signals?.arm(app)

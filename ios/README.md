@@ -186,7 +186,6 @@ release build:
 | `-CC_ROW_RENDER_PROBE YES` | adds a 1pt invisible element (`cc-row-render-probe`) listing, per fleet row, how many times it has drawn other than on its own clock's tick, and how many times it has been made anew. `FleetRowRenderSerialUITests` reads it to prove one session's event redraws that session's row and no other |
 | `-CC_DEEPLINK codeconnect://…` | delivers a deep link at launch, the same way a tapped notification does. `…/deck/<request-id>` opens a **named** card — a URL can name one; a notification cannot, and does not try — which is the only way to assert the read gate on one card without three drags and a postpone standing between the test and the assertion |
 | `-CC_OPEN_LINK https://codeconnect.sh/p#…` | opens a link at launch through the handler `onOpenURL` calls. A pairing link, the one a `codeconnect pair` QR code holds, arrives on iOS as a universal link only once codeconnect.sh vouches for the build, which a simulator run cannot arrange; this is how `PairingLinkUITests` and the render harness reach its sheet |
-| `-CC_BIOMETRICS allow\|deny\|cancel\|unavailable` | injects the Face ID *outcome*; the system sheet cannot be driven by XCUITest |
 | `-cc.debug.diff sample` | renders a diff shaped to exercise every part of the diff grid at once — all three syntax roles, word-level tints, a wrapped line, a hunk header — without a daemon or a dirty worktree |
 | `-cc.debug.diff truncated` | a capture the daemon cut short, longer than the grid draws in one pass — the truncation banner, the per-hunk `N more lines` marker, `Draw more`, and the terminal `Cut short by your computer` marker. Reaching this state for real took a generated 13,000-line file and a live Mac, which is why it shipped as a blank black rectangle |
 | `-cc.debug.diffRows <n>` | lowers the grid's per-hunk row budget from 400, so the held-back marker is on screen without dragging through 400 rows |
@@ -493,16 +492,14 @@ is enforced.
 * **Risk is reconciled by taking the stricter reading** (`RiskAssessment`). The
   daemon sees the repo and can tighten a gate; it can never loosen one below
   what this build's own reading of the command justifies. `git push --force`
-  cannot become a single tap because a rule file said `low`.
+  is never shown as routine because a rule file said `low`.
 * **Nothing in the Deck is a swipe.** Advancing is a button and answering is a
   button.
 * **A fleet row opens its session, whatever its status.** A Done row's turn
   may have been watched at the Mac or changed nothing, so its diff is one tap
   away on the session screen, never where the tap lands.
-* **HIGH-risk approvals need `biometryCurrentSet`,** not
-  `deviceOwnerAuthentication` — the flag that invalidates when the enrolled set
-  changes. A phone with no passcode cannot approve a HIGH card at all; it says
-  so and sends you to the Mac.
+* **A HIGH-risk approval is one tap, like any other,** once its command has
+  been on screen. The card shows the class as its tag and no line of reasons.
 
 ## Transport
 
@@ -721,7 +718,7 @@ advertises `question_card` (`DaemonProfile.answersQuestions`) gets
 falls back to the approval layout, read-only):
 
 * the sheet is titled "Question" (or "4 questions") and the card names the run
-  (`RunLabel.inline`), with a HIGH card's Face ID requirement and its reason;
+  (`RunLabel.inline`), with a HIGH card's risk tag;
 * one step per question — header chip, question, options — then a **Review** step
   listing every answer; with one question, Submit sits on the question itself;
 * single choice: radio rows plus **Other**, which opens a text field; several
@@ -732,8 +729,7 @@ falls back to the approval layout, read-only):
 * **Submit** (live only when every question has an answer, which a neutral line under
   the buttons says; it keeps its place once met, so the bar does not move) and **Decline** (the
   main conversation's turn stops, as Escape at the Mac does; a background agent's
-  question is denied). A HIGH card's Submit takes Face ID,
-  as Allow does.
+  question is denied).
 
 The answer is option **indices**, never labels: `{"type":"answers","answers":
 [{"selected":[…],"other"?,"notes"?}, …]}` or `{"type":"decline"}`
@@ -761,7 +757,7 @@ two lines at most, and the same status as the card (`QuestionCardStatus.recorded
 **Answer** while the phone can answer it, otherwise the status's own words — *Answer at
 the Mac*, *Closed*, an answer from the phone as what was chosen —
 with **View**, and once it has ended how long ago. It carries no risk tag unless the class
-is HIGH, where Submit takes Face ID.
+is HIGH.
 
 | Fixture | Where it runs | What it pins |
 |---|---|---|
@@ -830,7 +826,7 @@ CC.text    primary secondary tertiary disabled onAccent
 
 CC.space   xxs 4 · xs 8 · sm 12 · md 16 · lg 20 · xl 24 · xxl 32 · xxxl 48
 CC.radius  sm 6 · md 8 · lg 12 · xl 16 · pill
-CC.stroke  hairline 1 · emphasis 1.5 · focus 2 · ring 3
+CC.stroke  hairline 1 · emphasis 1.5 · focus 2
 CC.size    hitTarget 44 · controlSm 36 · controlMd 44 · controlLg 52
            rowMin 64 · rowRoomy 76 · factRow 48 · badge 20 · icon 16
            chip 32 · chipMaxScale 1.75
@@ -839,7 +835,7 @@ CC.size    hitTarget 44 · controlSm 36 · controlMd 44 · controlLg 52
 CC.opacity muted .12 · press .08 · disabled .45 · pulse .45
 
 CC.duration micro .12 · small .18 · medium .22 · exit .24 · draw .30
-            hold 1.2 · toast 1.4 · reduced .12
+            toast 1.4 · reduced .12
 CC.motion   micro small medium exit physical draw reduced standard linear(_:)
 
 CC.type    display title headline rowTitle body callout footnote
@@ -919,21 +915,20 @@ and `.ccScaleEffect` / `.ccPressScale` become no-ops. Haptics are unaffected: a
 haptic is not motion, and removing it removes information.
 
 **Haptics** are the closed set in `CCHaptic`: `rowPress` (silent),
-`openHeavy`, `light`, `decision`, `holdTick`, `commit`, `success`, `warning`,
-`failure`. There are no others.
+`openHeavy`, `light`, `decision`, `success`, `warning`, `failure`. There are
+no others.
 
 ## Components
 
 | Component | API sketch |
 |---|---|
 | `CCButton` | `CCButton("Allow", icon:, variant: .primary/.secondary/.ghost/.destructive, size: .sm/.md/.lg, fullWidth:, isLoading:, disabledReason:) { }` |
-| `CCHoldButton` | `CCHoldButton("Hold to allow", tone: .danger, duration: 1.2, isLoading:, disabledReason:) { }` — ring around the button's own rect, soft ticks at 25/50/75%, rigid on commit, plus a VoiceOver activation |
 | `CCCard` | `CCCard { }` · `CCCard(header:content:)` · `CCCard(header:content:footer:)` — `padding:`, `contentColumn:`, `radius:`, `border:`. Its default puts content on the 52pt column; `contentColumn: false` gives a **centred** card four even edges |
 | `CCRow` | `CCRow(title, titleStyle:, subtitle:, meta:, titleTruncation:, subtitleLineLimit:, showsChevron:, separator:, density:, isDimmed:, disabledReason:, accessibilityLabelText:, action:) { leading } trailing: { } meta: { }` — 64pt min, full-row target. **`meta` spans the whole row**, under the trailing accessory rather than beside it |
 | `CCFactRow` | `CCFactRow(label, value:, labelStyle: .prose/.identifier/.key, tone:, isUnmeasured:, age:, separator:)` · `CCFactRow(label) { value }` · `CCFactRow(label, detail: { })` — 48pt. Lands its own text on the 52pt column; no call site adds anything |
 | `CCBadge` | `CCBadge(text, icon:, tone:, count:, isSelected:, action:)` · `CCBadge(status:count:)` · `CCBadge(capability:)` — **one construction**, and no `style:` to pick another: tint@12 fill, tint@40 border, full-strength label, radius 6. A badge is **20pt**; the same construction **with an `action`** is a control and is `CC.size.chip` 32 with a wider inset, because a chip is a thing you press. `danger` takes a 1.5pt edge; nothing takes a saturated fill |
 | `CCTag` | `CCTag(text, accessibilityText:)` · `CCTag(agent:)` — which agent a session is (`Claude Code`, `Codex`, or an unsupported agent's own word), on an ended fleet row; a run in a project card is titled with the same word instead. No fill, 1pt `borderStrong`, 9pt semibold uppercase `textTertiary`, **15pt** tall, radius 4; wraps at accessibility sizes like `CCBadge` |
-| `CCRiskTag` | `CCRiskTag(risk)` — `CCTag`'s construction for risk, **without colour**: HIGH is a solid `text` chip with a bold `onAccent` label, MEDIUM an outline with a `textSecondary` label, LOW draws nothing. VoiceOver: `Risk HIGH. <rationale>` |
+| `CCRiskTag` | `CCRiskTag(risk)` — `CCTag`'s construction for risk, **without colour**: HIGH is a solid `text` chip with a bold `onAccent` label, MEDIUM an outline with a `textSecondary` label, LOW draws nothing. VoiceOver: `Risk HIGH` |
 | `CCCountChip` | `CCCountChip(3)` — the same construction with a number in it. Used by `CCSectionHeader`; never hand-rolled |
 | `CCStatusDot` | `CCStatusDot(color:size:isHollow:pulses:)` · `CCStatusDot(tone:…)` · `CCStatusDot(status:size:isCached:)` — scales with Dynamic Type to `CC.size.dotMaxScale` (8 → 14 at AX5) |
 | `CCMachineLabel` | `CCMachineLabel(name:level:word:lineLimit:)` — a computer and whether it answers: a dot, the name, and a word only while the link is not live: `Stale`, `Connecting`, `Offline` or `Blocked`, and for a refused link its cause's own word, `Different version` or `Pair again`. The home screen's project cards wrap it. The dot and the level's word are `LinkHealth.Level.machineMark`; `word` takes the link's own, `LinkHealth.machineWord`, where the caller has the link |
@@ -1101,7 +1096,7 @@ block at a fraction of the viewport and scrolls the overflow. Use it on anything
 that grows without limit at accessibility sizes — a bar list, a stat column, an
 action bar. Rendering a HIGH card at AX5 shows the alternative: the bar
 grew until it owned the bottom 45% of the screen and then kept going, and **zero
-characters of the command were visible while `Hold to allow` was fully armed**.
+characters of the command were visible while its Allow was fully armed**.
 
 A `ScrollView` takes every point it is offered, so the cap is a measured height,
 not a `maxHeight`: below the cap the block is exactly as tall as its content and
@@ -1266,8 +1261,7 @@ as a tall portrait box with a word wedged into it.
 
 **VoiceOver** — every interactive component carries a label, the right traits
 (`.isButton`, `.isSelected`, `.isHeader`), and a value where state exists
-(`"Busy"` while loading). `CCHoldButton` exposes a plain activation because
-VoiceOver cannot express a hold.
+(`"Busy"` while loading).
 
 ## Reviewing the system
 

@@ -6,7 +6,7 @@ import XCTest
 ///
 /// When ccd wakes a Claude run CodeConnect started for its mail, it files its own `mail_nudge` notification, whose
 /// message is the wake line, and hands the line to the host; claude's echo of the line files nothing. The builder draws
-/// the notice as "Reading CodeConnect mail", a task report, so the woken run reads Running until it replies, and never
+/// the notice as "Reading CodeConnect messages", a task report, so the woken run reads Running until it replies, and never
 /// as a row named after the notice's type. No row reads the line as the person's words.
 ///
 /// Pinned to `fixtures/claude/mail-wake-wire.json` (copied byte for byte): a hosted run's events as the wire delivers
@@ -30,7 +30,7 @@ final class ClaudeMailWakeTests: XCTestCase {
     /// The row a Codex wake draws (Timeline.swift); `MailWakeNudgeTests` pins its title and kind for Codex.
     private let mailRow = TimelineItem.Content.notice(
         NoticeItem(
-            kind: .taskReport, symbol: "chat-text", title: "Reading CodeConnect mail", detail: nil, severity: .info))
+            kind: .taskReport, symbol: "chat-text", title: "Reading CodeConnect messages", detail: nil, severity: .info))
 
     /// Where ccd's notice is, and the wake line it carries.
     private func wake(in events: [Event]) throws -> (index: Int, line: String) {

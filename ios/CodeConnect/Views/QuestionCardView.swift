@@ -32,8 +32,6 @@ struct QuestionCardView: View {
     /// Which control is spinning. Whether an answer is really in flight lives
     /// on the model, keyed by request id.
     @State private var spinningControl: String?
-    /// Why the biometric check did not pass. Shown, never swallowed.
-    @State private var authNotice: String?
     /// What a tap in the sample fleet would have done.
     @State private var sampleNotice: String?
 
@@ -124,15 +122,6 @@ struct QuestionCardView: View {
                             if isReview { reviewList } else { questionStep(step) }
                         }
                         .disabled(!Self.acceptsEdits(status: status, inFlight: inFlight))
-                        // After the question, beside the bar it is about: above
-                        // it, at AX5 this took the screen and the question
-                        // started below the fold.
-                        if risk == .high {
-                            Text("Submitting takes Face ID. \(risk.rationale)")
-                                .ccType(CC.type.footnote)
-                                .foregroundStyle(CC.text.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
                         // At accessibility sizes the subordinate controls leave the
                         // pinned bar, as on the decision card: stacked there they
                         // own the screen and leave the question unreadable.
@@ -167,8 +156,7 @@ struct QuestionCardView: View {
     // MARK: Header
 
     /// Which run is asking — the whole run label, so two runs of one project
-    /// stay apart — and, on a HIGH card, its tag. Why the answer takes Face ID
-    /// is said after the question, not here. No title: the sheet's own says
+    /// stay apart — and, on a HIGH card, its tag. No title: the sheet's own says
     /// "Question", and the question itself is the heading that matters.
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
@@ -452,12 +440,9 @@ struct QuestionCardView: View {
     }
 
     /// What an answerable card says above its controls: why the last answer
-    /// did not land, a refused Face ID, or the sample fleet.
+    /// did not land, or the sample fleet.
     private var notice: AnyView? {
         if let attempt { return AnyView(ResolutionBanner(attempt: attempt)) }
-        if let authNotice {
-            return AnyView(CCBanner("Face ID", message: authNotice, tone: .warning, icon: "scan-smiley"))
-        }
         if let sampleNotice {
             return AnyView(CCBanner("Sample fleet", message: sampleNotice, tone: .info, icon: "eye"))
         }
@@ -574,22 +559,12 @@ struct QuestionCardView: View {
             return
         }
         spinningControl = key
-        // A HIGH card's affirmative answer takes a face, as Allow does on the
-        // decision card. Declining never does.
-        let needsFace = DecisionCard.needsSecondFactor(risk: risk, decision: decision)
         Task {
-            let sent = await DecisionCardView.send(
-                decision, for: approval, model: model, needsFace: needsFace)
+            let result = await DecisionCardView.send(decision, for: approval, model: model)
             spinningControl = nil
-            switch sent {
-            case .faceRefused(let message):
-                withAnimation(CC.motion.small) { authNotice = message }
-            case .answered(let result):
-                authNotice = nil
-                // `.sentUnconfirmed` closes the controls but must NOT settle the
-                // card off the Deck — the agent may still be blocked waiting.
-                if result.settlesCard { onSettled?() }
-            }
+            // `.sentUnconfirmed` closes the controls but must NOT settle the
+            // card off the Deck — the agent may still be blocked waiting.
+            if result.settlesCard { onSettled?() }
         }
     }
 }

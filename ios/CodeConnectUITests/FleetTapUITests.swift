@@ -13,7 +13,7 @@ final class FleetTapUITests: XCTestCase {
 
     func testTappingADoneRowOpensTheSessionNotTheDiff() {
         let app = XCUIApplication()
-        app.launchArguments = ["-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow"]
+        app.launchArguments = ["-CC_FIXTURE", "deck"]
         app.launch()
 
         let row = app.descendants(matching: .any).matching(identifier: "session-fx-4").firstMatch

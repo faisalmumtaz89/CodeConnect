@@ -34,8 +34,6 @@ final class RiskAndDeckTests: XCTestCase {
             tool: "Read", input: .object(["file_path": .string("/tmp/a")]),
             risk: WireRisk(cls: "low", matchedPattern: nil), profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .low)
-        XCTAssertEqual(assessment.source, .daemon)
-        XCTAssertFalse(assessment.escalatedLocally)
     }
 
     func testDaemonCanTightenTheGate() {
@@ -45,7 +43,6 @@ final class RiskAndDeckTests: XCTestCase {
             tool: "Bash", input: .object(["command": .string("ls /etc")]),
             risk: WireRisk(cls: "medium", matchedPattern: "outside worktree"), profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .medium)
-        XCTAssertEqual(assessment.matchedPattern, "outside worktree")
     }
 
     /// The load-bearing one: the daemon must never be able to *loosen* a gate
@@ -55,9 +52,6 @@ final class RiskAndDeckTests: XCTestCase {
             tool: "Bash", input: .object(["command": .string("sudo rm -rf /Users/me/work")]),
             risk: WireRisk(cls: "low", matchedPattern: nil), profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .high, "a destructive command cannot become one tap")
-        XCTAssertEqual(assessment.declared, .low)
-        XCTAssertTrue(assessment.escalatedLocally)
-        XCTAssertTrue(assessment.provenance.contains("stricter"))
     }
 
     /// Contract: on a classifying daemon, an absent class means medium.
@@ -66,7 +60,6 @@ final class RiskAndDeckTests: XCTestCase {
             tool: "Read", input: .object(["file_path": .string("/tmp/a")]), risk: nil,
             profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .medium)
-        XCTAssertEqual(assessment.source, .daemonSilent)
     }
 
     /// …but the floor is a floor, not a ceiling.
@@ -84,14 +77,12 @@ final class RiskAndDeckTests: XCTestCase {
             tool: "Read", input: .object(["file_path": .string("/tmp/a")]), risk: nil,
             profile: unknownDaemon)
         XCTAssertEqual(assessment.effective, .low)
-        XCTAssertEqual(assessment.source, .local)
     }
 
     func testUnparseableClassFallsBackRatherThanTrusting() {
         let assessment = assess(
             tool: "Bash", input: .object(["command": .string("echo hi")]),
             risk: WireRisk(cls: "catastrophic", matchedPattern: nil), profile: connectedDaemon)
-        XCTAssertNil(assessment.declared)
         XCTAssertEqual(assessment.effective, .medium, "unreadable means the medium floor applies")
     }
 
@@ -104,7 +95,6 @@ final class RiskAndDeckTests: XCTestCase {
             risk: WireRisk(cls: "high", matchedPattern: "pipe to shell"))
         let assessment = item.assessment(profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .high)
-        XCTAssertEqual(assessment.matchedPattern, "pipe to shell")
     }
 
     // MARK: Deck ordering
@@ -245,27 +235,17 @@ final class RiskAndDeckTests: XCTestCase {
 
     // MARK: One approval policy, read by every card
 
-    /// The decision card asks a face for Allow and a Codex option that says yes,
-    /// the question card for its answers; neither for a refusal, and a Codex
-    /// card's "No" (`cancel`) is one. One rule answers both cards. The option ids
-    /// are every one the daemon puts on a Codex card.
-    func testASecondFactorIsAskedOnlyForAnAffirmativeAnswerAtHigh() {
+    /// A refusal is the safe direction: Deny, Deny with a reason, Decline and a Codex card's "No" (`cancel`), the one
+    /// refusal among the options the daemon offers. The Mac answers a refusing option under its refusal's gate.
+    func testARefusalIsDenyDeclineOrCancel() {
+        let refusals: [AnswerDecision] = [.deny, .text("not that"), .decline, .optionId("cancel")]
         let affirmative: [AnswerDecision] = [
             .allow, .option(index: 1), .optionId("accept"), .optionId("acceptForSession"),
-            .optionId("acceptWithExecpolicyAmendment"), .answers([QuestionAnswer()]), .unrecognised("x"),
+            .optionId("acceptWithExecpolicyAmendment"), .optionId("Cancel"), .answers([QuestionAnswer()]),
+            .unrecognised("x"),
         ]
-        let refusals: [AnswerDecision] = [.deny, .text("not that"), .decline, .optionId("cancel")]
-        for risk in [RiskClass.low, .medium] {
-            for decision in affirmative + refusals {
-                XCTAssertFalse(DecisionCard.needsSecondFactor(risk: risk, decision: decision), "\(risk) \(decision)")
-            }
-        }
-        for decision in affirmative {
-            XCTAssertTrue(DecisionCard.needsSecondFactor(risk: .high, decision: decision), "\(decision)")
-        }
-        for decision in refusals {
-            XCTAssertFalse(DecisionCard.needsSecondFactor(risk: .high, decision: decision), "\(decision)")
-        }
+        for decision in refusals { XCTAssertTrue(DecisionCard.isRefusal(decision), "\(decision)") }
+        for decision in affirmative { XCTAssertFalse(DecisionCard.isRefusal(decision), "\(decision)") }
     }
 
     /// The wait while an answer is on the way names the computer the agents
@@ -380,11 +360,11 @@ final class RiskAndDeckTests: XCTestCase {
     /// worktree — had no test at any level. These are the assertions that
     /// would have caught it.
 
-    /// **A gate that has seen nothing is shut at every tier, and states why.**
+    /// **A gate that has seen nothing is shut at every class, and states why.**
     ///
     /// This assertion used to read `XCTAssertTrue(gate.isOpen(at: .low))`, and
-    /// it was wrong in the same way the code was: risk decides *friction* — a
-    /// tap, a hold, a face — and never whether the command has to be visible. A
+    /// it was wrong in the same way the code was: no class decides whether the
+    /// command has to be visible. A
     /// LOW `Read` at AX5 measured `Allow` enabled, as the filled white primary
     /// in the thumb zone, over **13 of the 24 characters** of
     /// `/Users/dev/app/README.md`; the eleven that were behind the action bar
@@ -396,16 +376,11 @@ final class RiskAndDeckTests: XCTestCase {
     /// gate is already open on the first measurement, so it costs no scroll at
     /// all. It only bites where the product would otherwise be approving
     /// something it had not shown.
-    func testUnreadCommandBlocksEveryTier() {
+    func testUnreadCommandBlocksEveryClass() {
         let gate = DecisionCard.ReadGate()
-        for risk in [RiskClass.low, .medium, .high] {
-            XCTAssertFalse(
-                gate.isOpen(at: risk),
-                "\(risk) must not be answerable before its command has been on screen")
-            XCTAssertEqual(
-                gate.blockedReason(at: risk), "Scroll the command into view before deciding.",
-                "and a shut gate says why, at every tier")
-        }
+        XCTAssertFalse(gate.isOpen, "no card is answerable before its command has been on screen")
+        XCTAssertEqual(
+            gate.blockedReason, "Scroll the command into view before deciding.", "and a shut gate says why")
     }
 
     /// **The LOW exemption, re-stated as the thing it was actually protecting.**
@@ -414,15 +389,12 @@ final class RiskAndDeckTests: XCTestCase {
     /// is exactly one geometry report — the command block's bottom edge is above
     /// the action bar on the first frame at any reading size, so `hasSeenCommand`
     /// is already true when the card is drawn and `Allow` is live to the first
-    /// tap. LOW and MEDIUM open on the same single fact; only HIGH asks for the
-    /// second.
+    /// tap. Every class opens on that single fact.
     func testLowGateCostsNothingWhenTheCommandFits() {
         var gate = DecisionCard.ReadGate()
-        gate = advance(gate, commandBottom: 400, provenanceBottom: 900, visibleBottom: 600)
-        XCTAssertTrue(gate.isOpen(at: .low), "a command that fits opens the gate on sight")
-        XCTAssertNil(gate.blockedReason(at: .low))
-        XCTAssertTrue(gate.isOpen(at: .medium), "LOW and MEDIUM open on the same single fact")
-        XCTAssertFalse(gate.isOpen(at: .high), "and HIGH still wants the class it was given")
+        gate = advance(gate, commandBottom: 400, visibleBottom: 600)
+        XCTAssertTrue(gate.isOpen, "a command that fits opens the gate on sight")
+        XCTAssertNil(gate.blockedReason)
     }
 
     /// The measured frame, as a value: the LOW card at AX5, where the block
@@ -430,34 +402,22 @@ final class RiskAndDeckTests: XCTestCase {
     /// against an action bar whose top edge is y=636.
     func testLowCardWithTheCommandBehindTheBarIsShut() {
         var gate = DecisionCard.ReadGate()
-        gate = advance(gate, commandBottom: 830, provenanceBottom: 1_100, visibleBottom: 636)
-        XCTAssertFalse(
-            gate.isOpen(at: .low),
-            "13 of 24 characters rendered is not a command anybody has read")
-        XCTAssertEqual(
-            gate.blockedReason(at: .low), "Scroll the command into view before deciding.")
+        gate = advance(gate, commandBottom: 830, visibleBottom: 636)
+        XCTAssertFalse(gate.isOpen, "13 of 24 characters rendered is not a command anybody has read")
+        XCTAssertEqual(gate.blockedReason, "Scroll the command into view before deciding.")
 
         // …and the same card, scrolled.
-        gate = advance(gate, commandBottom: 600, provenanceBottom: 870, visibleBottom: 636)
-        XCTAssertTrue(gate.isOpen(at: .low))
+        gate = advance(gate, commandBottom: 600, visibleBottom: 636)
+        XCTAssertTrue(gate.isOpen)
     }
 
-    /// HIGH is gated on the command **and** the class that explains it, stated
-    /// separately rather than left to fall out of the layout: a face is about
-    /// to authorise this, and that the one is drawn above the other is not
-    /// evidence that both were seen.
-    func testHighAlsoRequiresTheProvenance() {
+    /// HIGH opens on the same one fact as every class: its command has been on
+    /// screen. The tag sits above the command, so a command seen is a tag passed.
+    func testHighOpensOnceTheCommandHasBeenSeen() {
         var gate = DecisionCard.ReadGate()
         gate.hasSeenCommand = true
-        XCTAssertTrue(gate.isOpen(at: .medium), "MEDIUM asks for the command and nothing else")
-        XCTAssertFalse(gate.isOpen(at: .high))
-        XCTAssertEqual(
-            gate.blockedReason(at: .high),
-            "Scroll to the end of the command block before deciding.")
-
-        gate.hasSeenProvenance = true
-        XCTAssertTrue(gate.isOpen(at: .high))
-        XCTAssertNil(gate.blockedReason(at: .high))
+        XCTAssertTrue(gate.isOpen)
+        XCTAssertNil(gate.blockedReason)
     }
 
     /// The visibility test itself. A block counts as read when its **bottom
@@ -501,9 +461,8 @@ final class RiskAndDeckTests: XCTestCase {
     /// frame opened the gate permanently.
     ///
     /// Measured on an iPhone Air at AX5: a MEDIUM `Write` with 13 characters of
-    /// its path on screen and `Allow` drawn as the enabled white primary. At
-    /// MEDIUM there is no hold and no Face ID, so this gate was the only thing
-    /// in the way. HIGH survived only because it also needs the provenance.
+    /// its path on screen and `Allow` drawn as the enabled white primary. This
+    /// gate was the only thing in the way.
     ///
     /// "Not measured yet" and "measures zero" must therefore be different
     /// values, exactly as they already are for every edge on this probe.
@@ -534,8 +493,7 @@ final class RiskAndDeckTests: XCTestCase {
         XCTAssertFalse(
             DecisionCard.ReadGate.isVisible(bottom: 760, visibleBottom: 660),
             "760 is behind the bar; nobody has read it")
-        XCTAssertFalse(gate.isOpen(at: .low))
-        XCTAssertFalse(gate.isOpen(at: .medium))
+        XCTAssertFalse(gate.isOpen)
 
         // **The values the device actually reported**, captured at the instant
         // the flag latched: the bar said it was 1pt tall on an early layout
@@ -634,12 +592,8 @@ final class RiskAndDeckTests: XCTestCase {
 
         // …and a card whose geometry never arrives is a card that cannot be
         // approved **at all**, which is the safe direction. LOW used to be the
-        // exception here, which meant an unmeasured card was approvable at the
-        // one tier where a single tap is the whole interaction.
-        let gate = DecisionCard.ReadGate()
-        XCTAssertFalse(gate.isOpen(at: .low))
-        XCTAssertFalse(gate.isOpen(at: .medium))
-        XCTAssertFalse(gate.isOpen(at: .high))
+        // exception here, which meant an unmeasured card was approvable.
+        XCTAssertFalse(DecisionCard.ReadGate().isOpen)
     }
 
     /// The transition the AX5 screenshots never reached: scroll, and the gate
@@ -649,51 +603,27 @@ final class RiskAndDeckTests: XCTestCase {
         var gate = DecisionCard.ReadGate()
         let visibleBottom: CGFloat = 600
 
-        // First layout at a large type size: the command block starts below the
-        // fold and its provenance is far below that.
-        var commandBottom: CGFloat = 900
-        var provenanceBottom: CGFloat = 1_500
-        gate = advance(gate, commandBottom, provenanceBottom, visibleBottom)
-        XCTAssertFalse(gate.isOpen(at: .medium))
-        XCTAssertFalse(gate.isOpen(at: .high))
+        // First layout at a large type size: the command block ends below the fold.
+        gate = advance(gate, commandBottom: 900, visibleBottom: visibleBottom)
+        XCTAssertFalse(gate.isOpen)
 
-        // Scrolled 400pt: the command is now on screen, the provenance is not.
-        commandBottom -= 400
-        provenanceBottom -= 400
-        gate = advance(gate, commandBottom, provenanceBottom, visibleBottom)
-        XCTAssertTrue(gate.isOpen(at: .medium), "MEDIUM arms as soon as the command is on screen")
-        XCTAssertFalse(gate.isOpen(at: .high), "HIGH still wants the class it was given")
-
-        // Scrolled to the end of the block.
-        commandBottom -= 600
-        provenanceBottom -= 600
-        gate = advance(gate, commandBottom, provenanceBottom, visibleBottom)
-        XCTAssertTrue(gate.isOpen(at: .high))
+        // Scrolled 400pt: the command is now on screen.
+        gate = advance(gate, commandBottom: 500, visibleBottom: visibleBottom)
+        XCTAssertTrue(gate.isOpen, "the gate arms as soon as the command is on screen")
 
         // …and it stays armed once the block has scrolled off the top: reading
         // something twice is not a requirement.
-        gate = advance(gate, -200, -50, visibleBottom)
-        XCTAssertTrue(gate.isOpen(at: .high), "a flag, once set, stays set")
+        gate = advance(gate, commandBottom: -200, visibleBottom: visibleBottom)
+        XCTAssertTrue(gate.isOpen, "a flag, once set, stays set")
     }
 
     /// The view's `updateGate`, as a function.
     private func advance(
-        _ gate: DecisionCard.ReadGate, commandBottom: CGFloat?, provenanceBottom: CGFloat?,
-        visibleBottom: CGFloat
-    ) -> DecisionCard.ReadGate {
-        advance(gate, commandBottom, provenanceBottom, visibleBottom)
-    }
-
-    private func advance(
-        _ gate: DecisionCard.ReadGate, _ commandBottom: CGFloat?, _ provenanceBottom: CGFloat?,
-        _ visibleBottom: CGFloat
+        _ gate: DecisionCard.ReadGate, commandBottom: CGFloat?, visibleBottom: CGFloat
     ) -> DecisionCard.ReadGate {
         var next = gate
         if DecisionCard.ReadGate.isVisible(bottom: commandBottom, visibleBottom: visibleBottom) {
             next.hasSeenCommand = true
-        }
-        if DecisionCard.ReadGate.isVisible(bottom: provenanceBottom, visibleBottom: visibleBottom) {
-            next.hasSeenProvenance = true
         }
         return next
     }

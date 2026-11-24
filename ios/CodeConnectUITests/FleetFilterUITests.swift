@@ -19,7 +19,7 @@ final class FleetFilterUITests: XCTestCase {
     func testANarrowedListHoldsOnlyItsComputersRuns() {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "deck",
             "-CC_FIXTURE_SECOND_MACHINE", second, "-CC_FIXTURE_SECOND_LIVE", "YES",
             "-CC_FILTER", second,
         ]
@@ -41,7 +41,7 @@ final class FleetFilterUITests: XCTestCase {
     func testANarrowedListOfNoRunsShowsNoOtherCards() {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "deck",
             "-CC_FIXTURE_SECOND_MACHINE", second, "-CC_FILTER", second,
         ]
         app.launch()

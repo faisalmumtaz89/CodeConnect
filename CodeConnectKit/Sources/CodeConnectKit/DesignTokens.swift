@@ -284,8 +284,6 @@ extension CC {
         public static let emphasis: CGFloat = 1.5
         /// The focus ring. 2pt at `borderFocus` — 17.94:1, unmissable.
         public static let focus: CGFloat = 2
-        /// The hold-to-approve progress ring.
-        public static let ring: CGFloat = 3
     }
 
     /// Fixed dimensions. Control *heights* are deliberately not scaled by
@@ -364,8 +362,6 @@ extension CC {
         static let medium: Double = 0.22
         public static let exit: Double = 0.24
         static let draw: Double = 0.30
-        /// Hold-to-approve. Long enough that it cannot happen in a pocket.
-        public static let hold: Double = 1.2
         /// How long "Copied" stays on screen.
         public static let toast: Double = 1.4
         /// Reduce Motion collapses every class above to this cross-fade.
@@ -385,7 +381,7 @@ extension CC {
         public static let medium = Animation.easeOut(duration: CC.duration.medium)
         /// 240ms ease-*in*, so departures accelerate away.
         public static let exit = Animation.easeIn(duration: CC.duration.exit)
-        /// Physical gestures only: Deck card promotion, hold-ring release.
+        /// Physical gestures only: Deck card promotion.
         public static let physical = Animation.spring(response: 0.32, dampingFraction: 0.82)
         /// 300ms. Stroke-drawn checkmarks and progress rings.
         public static let draw = Animation.easeOut(duration: CC.duration.draw)

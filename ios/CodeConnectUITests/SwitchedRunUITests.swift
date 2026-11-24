@@ -21,7 +21,7 @@ final class SwitchedRunUITests: XCTestCase {
     private func open(_ recording: String, step: Int? = nil, session: String? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments =
-            ["-CC_SWITCH", recording, "-CC_BIOMETRICS", "allow"]
+            ["-CC_SWITCH", recording]
             + (step.map { ["-CC_SWITCH_STEP", "\($0)"] } ?? [])
             + (session.map { ["-CC_DEEPLINK", "codeconnect://session/\($0)"] } ?? [])
             + ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]

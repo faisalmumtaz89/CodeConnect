@@ -661,10 +661,8 @@ private struct CCDisabledModifier: ViewModifier {
     /// unconditionally.
     ///
     /// An outer `.accessibilityHint("")` *replaces* whatever hint the control
-    /// set for itself, so the enabled path was silently deleting it — which
-    /// cost `CCHoldButton` its "Hold for 1.2 seconds to confirm" the moment it
-    /// started routing through here. When there is no reason, this modifier has
-    /// nothing to say and says nothing.
+    /// set for itself, so the enabled path was silently deleting it. When there
+    /// is no reason, this modifier has nothing to say and says nothing.
     @ViewBuilder
     private func gated(_ content: Content) -> some View {
         if let reason {
@@ -751,7 +749,7 @@ enum CCViewport {
 /// action bar and the accessory bar each grew until they owned 45% of the
 /// screen and then kept going, pushing the content they were describing off the
 /// bottom — on a HIGH card rendered at AX5, *zero characters of the command* were
-/// on screen while `Hold to allow` was fully armed. A bar that has run out of
+/// on screen while its Allow was fully armed. A bar that has run out of
 /// room must give the room back and scroll, not annex the viewport.
 ///
 /// The cap is a height, not a `maxHeight`: a `ScrollView` takes every point it

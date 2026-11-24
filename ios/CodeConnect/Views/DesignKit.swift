@@ -323,9 +323,7 @@ extension View {
 /// pokes, so a screen cannot invent a new one without inventing a new trigger.
 ///
 /// Two standing rules:
-///  * Never two haptics inside 400ms — it reads as a glitch. (The hold ladder
-///    at 25/50/75% is the one deliberate exception: it is a single escalating
-///    event, not two unrelated ones.)
+///  * Never two haptics inside 400ms — it reads as a glitch.
 ///  * Never a haptic on entrance from a notification — the notification
 ///    already buzzed.
 ///
@@ -341,13 +339,9 @@ enum CCHaptic {
     case light
     /// Allow, Deny and numbered-option taps, on touch-up.
     case decision
-    /// Hold-to-approve passing 25 / 50 / 75%.
-    case holdTick
-    /// Hold-to-approve completing.
-    case commit
     /// The daemon confirmed an answer. A QR code was detected. Fleet cleared.
     case success
-    /// Face ID failed or was cancelled.
+    /// Something that did not go as asked: a tap in the sample fleet, an answer whose fate is not known.
     case warning
     /// The daemon rejected the answer, or the network failed.
     case failure
@@ -361,10 +355,6 @@ enum CCHaptic {
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         case .light:
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        case .holdTick:
-            UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.4)
-        case .commit:
-            UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
         case .success:
             UINotificationFeedbackGenerator().notificationOccurred(.success)
         case .warning:

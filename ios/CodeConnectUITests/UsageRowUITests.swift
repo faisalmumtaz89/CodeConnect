@@ -20,7 +20,7 @@ final class UsageRowUITests: XCTestCase {
     private func launch(usage: Bool) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "hostedSettings", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "hostedSettings",
             "-CC_DEEPLINK", "codeconnect://session/cx-1",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ] + (usage ? ["-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", accounts] : [])

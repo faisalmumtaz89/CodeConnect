@@ -172,34 +172,14 @@ public enum DecisionCard {
         "Waiting for \(host.computer("your computer")) to confirm…"
     }
 
-    /// **At HIGH, every answer but a refusal takes a second factor on the iPhone.** Allowing, choosing an option or
-    /// submitting a question's answers at HIGH waits for Face ID or the passcode; the Mac asks for none. Denying,
-    /// denying with a reason, declining and a Codex card's `cancel` option ("No, and tell Codex what to do
-    /// differently", the one refusal among the options the daemon offers) are the safe direction, and a product that
-    /// promises silence never decides anything cannot put friction in front of them.
-    public static func needsSecondFactor(risk: RiskClass, decision: AnswerDecision) -> Bool {
-        guard risk == .high else { return false }
+    /// **A refusal is the safe direction.** Denying, denying with a reason, declining and a Codex card's `cancel`
+    /// option ("No, and tell Codex what to do differently", the one refusal among the options the daemon offers).
+    public static func isRefusal(_ decision: AnswerDecision) -> Bool {
         switch decision {
-        case .deny, .text, .decline: return false
-        case .optionId(let id): return id != "cancel"
-        default: return true
+        case .deny, .text, .decline: return true
+        case .optionId(let id): return id == "cancel"
+        default: return false
         }
-    }
-
-    /// The control an affirmative takes at a tier — a 1.2s hold at HIGH, a tap
-    /// below — decided once so no two affirmatives on a card ask different
-    /// amounts for the same risk. A grant that outlives the card ("Allow for
-    /// this session") is an affirmative too, so it takes the SAME control as
-    /// Allow: an outline hold where Allow is a filled one, a ghost tap where
-    /// Allow is the primary. The second factor at HIGH is decided separately
-    /// (`needsSecondFactor`); this is the hold.
-    public enum AffirmativeControl: Sendable, Hashable {
-        case hold
-        case tap
-    }
-
-    public static func affirmativeControl(at risk: RiskClass) -> AffirmativeControl {
-        risk == .high ? .hold : .tap
     }
 
     /// The caption under "Allow for this session" wraps to this many lines
@@ -222,12 +202,11 @@ public enum DecisionCard {
     /// What that cost, read off the AX5 renders rather than off the code:
     ///
     ///  * A MEDIUM `Write` outside the worktree, with thirteen characters of the
-    ///    path on screen and `Allow` drawn as the enabled white primary. At MEDIUM
-    ///    there is no hold and no Face ID, so this gate is the *only* thing between
-    ///    one tap and a write to an arbitrary path.
+    ///    path on screen and `Allow` drawn as the enabled white primary. This gate
+    ///    is the *only* thing between one tap and a write to an arbitrary path.
     ///  * A HIGH `git push --force origin main` with **zero characters of the
-    ///    command rendered** and `Hold to allow` fully armed: a face authenticating
-    ///    a command the product never showed.
+    ///    command rendered** and its Allow fully armed: an approval of a command the
+    ///    product never showed.
     ///
     /// The rule lives here, apart from any view, so every app's card follows it and
     /// it can be tested without a viewport; each app measures the edges it reports.
@@ -235,8 +214,6 @@ public enum DecisionCard {
         /// The bottom edge of the block carrying the command has been inside
         /// the visible region at least once.
         public var hasSeenCommand = false
-        /// …and so has the bottom edge of the risk class and its provenance.
-        public var hasSeenProvenance = false
 
         public init() {}
 
@@ -254,44 +231,28 @@ public enum DecisionCard {
             return bottom <= visibleBottom
         }
 
-        /// Whether this class may be answered yet.
+        /// Whether the card may be answered yet: its command has been on screen.
         ///
-        /// **The gate applies at every tier**, and the reason is that risk governs
-        /// *friction* — tap, hold, Face ID — and never whether the command has to be
-        /// visible. LOW used to return `true` unconditionally on the argument that
-        /// "a `Read` that costs a scroll is a gate people learn to defeat". The
-        /// argument is sound and the implementation did not follow from it: at
-        /// reading sizes a LOW command fits above the bar on the first frame, so the
-        /// gate is already open by the time the card is drawn and costs the reader
-        /// nothing at all. It is only when the command does *not* fit that the two
-        /// behaviours differ, and that is precisely the case an AX5 render of a LOW
-        /// card measured: `Allow` enabled, in the thumb zone, over **13 of the 24
+        /// **The gate applies at every class.** LOW used to open unconditionally on
+        /// the argument that "a `Read` that costs a scroll is a gate people learn to
+        /// defeat". The argument is sound and the implementation did not follow from
+        /// it: at reading sizes a command fits above the bar on the first frame, so
+        /// the gate is already open by the time the card is drawn and costs the
+        /// reader nothing at all. It is only when the command does *not* fit that it
+        /// matters, and that is precisely the case an AX5 render of a LOW card
+        /// measured: `Allow` enabled, in the thumb zone, over **13 of the 24
         /// characters** of `/Users/dev/app/README.md` — the 11 that were missing
         /// being the ones that tell a README from `~/.aws/credentials`.
         ///
-        /// A tier-shaped exception here is not "less friction for a small risk", it
+        /// A class-shaped exception here is not "less friction for a small risk", it
         /// is "the product will let you approve something it never showed you", and
-        /// that is not a property any tier gets.
-        public func isOpen(at risk: RiskClass) -> Bool {
-            switch risk {
-            case .low:
-                return hasSeenCommand
-            case .medium:
-                return hasSeenCommand
-            // Stated separately rather than left to fall out of the layout: at HIGH
-            // a face is about to authorise this, and the two facts that say what it
-            // authorises are the command and the class it was given. That the one
-            // is drawn above the other is not evidence that both were seen.
-            case .high:
-                return hasSeenCommand && hasSeenProvenance
-            }
-        }
+        /// that is not a property any class gets. The class's tag sits above the
+        /// command, so a command seen is a tag passed.
+        public var isOpen: Bool { hasSeenCommand }
 
         /// What a closed gate says. Drawn as the control's disabled reason, never only hinted.
-        public func blockedReason(at risk: RiskClass) -> String? {
-            guard !isOpen(at: risk) else { return nil }
-            guard hasSeenCommand else { return "Scroll the command into view before deciding." }
-            return "Scroll to the end of the command block before deciding."
+        public var blockedReason: String? {
+            isOpen ? nil : "Scroll the command into view before deciding."
         }
     }
 }
@@ -356,8 +317,9 @@ extension DecisionCard {
                 ].compactMap { $0 }.joined(separator: " · "),
                 tone: .warning, icon: "question-fill")
         case .duplicate(let outcome, let stale):
-            // A card that closes unanswered between the tap and the end of a face check reaches here too and reads
-            // "Already answered" over its closure: an accepted miss, since it needs that race and is not seen on a run.
+            // A card that closes unanswered between the tap and its answer reaching the computer reaches here too and
+            // reads "Already answered" over its closure: an accepted miss, since it needs that race and is not seen on a
+            // run.
             let original =
                 "Original outcome: \(outcome.decisionLabel) \(outcome.provenance(on: host)), \(outcome.resolvedAt)."
             return Banner(

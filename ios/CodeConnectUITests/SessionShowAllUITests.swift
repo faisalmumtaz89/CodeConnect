@@ -20,7 +20,7 @@ final class SessionShowAllUITests: XCTestCase {
     func testShowAllAtTheTailKeepsLineOneWhereItWas() {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "longOutput", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "longOutput",
             "-CC_DEEPLINK", "codeconnect://session/fx-5",
             // The fixture holds its last event back until `late-1`, so the tap comes first and that event
             // arrives while the reader is reading.

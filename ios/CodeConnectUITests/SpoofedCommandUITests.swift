@@ -25,7 +25,7 @@ final class SpoofedCommandUITests: XCTestCase {
     private func launch(deeplink: String? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "spoofedCommand", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "spoofedCommand",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryM",
         ]
         if let deeplink { app.launchArguments += ["-CC_DEEPLINK", deeplink] }

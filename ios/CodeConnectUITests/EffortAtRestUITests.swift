@@ -13,7 +13,7 @@ final class EffortAtRestUITests: XCTestCase {
     private func settingsLine(_ session: String) -> XCUIElement {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "hostedSettings", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "hostedSettings",
             "-CC_DEEPLINK", "codeconnect://session/\(session)",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ]

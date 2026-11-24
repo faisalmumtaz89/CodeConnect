@@ -16,7 +16,7 @@ import SwiftUI
     //
     //  Pressed states are LIVE, not mocked. Press and hold any control in the
     //  canvas or the simulator: press is a 1.5% contraction plus a one-step
-    //  luminance change, and the hold button traces its ring in real time.
+    //  luminance change.
     // =========================================================================
 
     struct CCGallery: View {
@@ -94,7 +94,6 @@ import SwiftUI
                 proseSection
             case .buttons:
                 buttonSection
-                holdSection
                 actionPairSection
             case .rows:
                 rowSection
@@ -440,45 +439,6 @@ import SwiftUI
             }
         }
 
-        // MARK: Hold
-
-        private var holdSection: some View {
-            section("CCHoldButton") {
-                VStack(alignment: .leading, spacing: CC.space.sm) {
-                    Text(
-                        "Press and hold, the ring traces the perimeter in 1.2s. Tap without holding: the ring rewinds and the button says why, rather than looking like nothing happened."
-                    )
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    CCHoldButton("Hold to allow", action: { lastAction = "held allow" })
-                    CCHoldButton(
-                        "Hold to force push", icon: "arrow-square-up-right-fill",
-                        tone: .warning, action: { lastAction = "held push" })
-                    CCHoldButton("Submitting", isLoading: true, action: {})
-
-                    Text("DISABLED - THE REASON IS DRAWN, NOT ONLY HINTED")
-                        .ccType(CC.type.micro)
-                        .foregroundStyle(CC.text.tertiary)
-                        .padding(.top, CC.space.xs)
-                    CCHoldButton(
-                        "Hold to allow",
-                        disabledReason: CCDisabledReason(
-                            "The text on this card does not match its hash."),
-                        action: {})
-                    // The HIGH-risk stale-link case that makes this mandatory: at HIGH
-                    // the hold button *is* Allow, so a silent one leaves the
-                    // card with no sentence anywhere on it.
-                    CCHoldButton(
-                        "Hold to allow",
-                        disabledReason: CCDisabledReason(
-                            "2m since the daemon last spoke. Actions are disabled until it answers."
-                        ),
-                        action: {})
-                }
-            }
-        }
-
         // MARK: Rows
 
         private var rowSection: some View {
@@ -578,12 +538,12 @@ import SwiftUI
                             density: .comfortable,
                             // The shipped label, in the shipped order
                             // (`FleetView.accessibilityLabel`): place, agent,
-                            // status, class, the class's *rationale*, the
-                            // activity, the wait, and the capability — which is
+                            // status, class, the activity, the wait, and the
+                            // capability — which is
                             // announced on every row whether or not the badge is
                             // drawn.
                             accessibilityLabelText:
-                                "codeconnect, Claude Code session, Waiting for you, risk HIGH, Destructive, credentialed, or publishes something., Bash, git push --force origin main, waiting 4 minutes, control",
+                                "codeconnect, Claude Code session, Waiting for you, risk HIGH, Bash, git push --force origin main, waiting 4 minutes, control",
                             action: { lastAction = "fleet row" }
                         ) {
                             // **No dot, and no column.** A blocked row draws
@@ -785,12 +745,7 @@ import SwiftUI
                     CCCard {
                         CCSectionHeader("Command")
                     } content: {
-                        VStack(alignment: .leading, spacing: CC.space.xs) {
-                            CCMonoBlock("rm -rf node_modules && npm install")
-                            Text("Writes files, installs, or reaches the network.")
-                                .ccType(CC.type.footnote)
-                                .foregroundStyle(CC.text.secondary)
-                        }
+                        CCMonoBlock("rm -rf node_modules && npm install")
                     } footer: {
                         HStack {
                             Text("payload verified")
@@ -1367,7 +1322,7 @@ import SwiftUI
                             }
                         } allow: {
                             CCButton(
-                                "Hold to allow", variant: .primary, size: .lg,
+                                "Allow", variant: .primary, size: .lg,
                                 fullWidth: true
                             ) { lastAction = "allow" }
                         }
@@ -1782,7 +1737,7 @@ import SwiftUI
                                     "Deny", variant: .secondary, size: .lg, fullWidth: true,
                                     action: {})
                             }
-                            CCHoldButton("Hold to allow", action: {})
+                            CCButton("Allow", variant: .primary, size: .lg, fullWidth: true, action: {})
                         }
                     }
                 }

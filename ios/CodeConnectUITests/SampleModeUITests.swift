@@ -87,4 +87,32 @@ final class SampleModeUITests: XCTestCase {
             ).firstMatch.waitForExistence(timeout: 10),
             "Settings must say no computer is paired")
     }
+
+    /// A card's banner sits above its action bar, readable, never under it: here the sample fleet's own, which says
+    /// what an Allow would have sent. It shares the card's one banner slot with the hash-mismatch, resolution and
+    /// already-answered banners.
+    func testACardsBannerSitsAboveItsActionBar() {
+        let app = launchUnpaired()
+        let enter = app.buttons["pairing-sample-mode"]
+        XCTAssertTrue(enter.waitForExistence(timeout: 15))
+        enter.tap()
+        let bar = app.buttons["deck-bar"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 20))
+        bar.tap()
+
+        let allow = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Allow this '")).firstMatch
+        XCTAssertTrue(allow.waitForExistence(timeout: 20), "the top card's Allow")
+        allow.tap()
+
+        let notice = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH 'In a live session this would send'")
+        ).firstMatch
+        XCTAssertTrue(notice.waitForExistence(timeout: 10), "the sample fleet says what the tap would have sent")
+        let deny = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Deny this '")).firstMatch
+        XCTAssertTrue(deny.exists)
+        XCTAssertTrue(
+            notice.frame.maxY <= deny.frame.minY,
+            "the banner's sentence clears the action bar: ends \(notice.frame.maxY), bar starts \(deny.frame.minY)")
+        XCTAssertTrue(notice.isHittable, "and is on screen, not merely in the tree")
+    }
 }

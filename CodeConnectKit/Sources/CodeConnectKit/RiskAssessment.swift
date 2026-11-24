@@ -14,42 +14,18 @@ import Foundation
 /// > gate; it can never loosen one below what this build's own reading of the
 /// > command justifies.**
 ///
-/// That asymmetry is deliberate. Escalating costs a hold and a Face ID on a
-/// command that turned out to be harmless. De-escalating would turn
-/// `git push --force` into a single tap because a rule file said so — and the
-/// whole product is the promise that that cannot happen.
+/// That asymmetry is deliberate. Escalating costs a higher place in the queue
+/// and a stronger tag for a command that turned out to be harmless. De-escalating would show
+/// `git push --force` as routine because a rule file said so — and the whole
+/// product is the promise that that cannot happen.
 ///
 /// The contract's "absent means medium" applies only when the daemon is known
 /// to classify: on an older daemon nothing is absent, because nothing was ever
 /// offered, and forcing every `Read` to MEDIUM would be a regression dressed up
 /// as caution.
 public struct RiskAssessment: Sendable, Hashable {
-    /// Where the class this build is acting on came from.
-    enum Source: Sendable, Hashable {
-        /// The daemon named a class and this build agreed, or was less strict.
-        case daemon
-        /// The daemon classifies but said nothing about this card, so the
-        /// contract's medium floor applied.
-        case daemonSilent
-        /// The daemon does not classify at all; this is the phone's own reading.
-        case local
-    }
-
     /// The class the UI gates on.
     public var effective: RiskClass
-    /// What the daemon said, parsed. Nil when it said nothing.
-    var declared: RiskClass?
-    /// What this build makes of the command on its own.
-    var heuristic: RiskClass
-    /// The daemon's rule, when it named one.
-    public var matchedPattern: String?
-    var source: Source
-
-    /// True when the phone's own reading was stricter than the daemon's.
-    var escalatedLocally: Bool {
-        guard let declared else { return false }
-        return effective > declared
-    }
 
     static func parse(_ raw: String?) -> RiskClass? {
         switch raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
@@ -65,43 +41,15 @@ public struct RiskAssessment: Sendable, Hashable {
     ) -> RiskAssessment {
         let heuristic = ToolSummary.risk(tool: tool, input: input)
         let declared = parse(wire?.cls)
-        let matchedPattern = wire?.matchedPattern
 
         if let declared {
-            return RiskAssessment(
-                effective: max(declared, heuristic), declared: declared, heuristic: heuristic,
-                matchedPattern: matchedPattern, source: .daemon)
+            return RiskAssessment(effective: max(declared, heuristic))
         }
         if profile.classifiesRisk {
             // Contract: a classifying daemon that omits the field means medium.
             // Still a floor, never a ceiling.
-            return RiskAssessment(
-                effective: max(.medium, heuristic), declared: nil, heuristic: heuristic,
-                matchedPattern: matchedPattern, source: .daemonSilent)
+            return RiskAssessment(effective: max(.medium, heuristic))
         }
-        return RiskAssessment(
-            effective: heuristic, declared: nil, heuristic: heuristic,
-            matchedPattern: matchedPattern, source: .local)
-    }
-
-    /// One line saying where this class came from. Shown under the badge,
-    /// because a risk class whose provenance is invisible is a risk class the
-    /// user has to take on faith.
-    public var provenance: String {
-        switch source {
-        case .daemon:
-            if escalatedLocally {
-                return
-                    "\(HostDevice.current.computer("The computer")) classified this \(declared?.label ?? "-"); this app reads the command as \(heuristic.label) and applied the stricter one."
-            }
-            return "Classified at \(HostDevice.current.computer("the computer"))."
-        case .daemonSilent:
-            return
-                heuristic > .medium
-                ? "\(HostDevice.current.computer("The computer")) sent no class for this card. This app reads the command as \(heuristic.label)."
-                : "\(HostDevice.current.computer("The computer")) sent no class for this card, so it is treated as MEDIUM."
-        case .local:
-            return "\(HostDevice.current.computer("The computer")) doesn’t rate risk; this app read it from the command."
-        }
+        return RiskAssessment(effective: heuristic)
     }
 }

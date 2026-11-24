@@ -29,7 +29,7 @@ final class WideToolLabelUITests: XCTestCase {
     private func launch(_ fixture: String, deeplink: String? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", fixture, "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", fixture,
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryM",
         ]
         if let deeplink { app.launchArguments += ["-CC_DEEPLINK", deeplink] }

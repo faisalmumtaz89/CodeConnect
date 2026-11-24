@@ -31,7 +31,7 @@ final class FleetRowRenderSerialUITests: XCTestCase {
     func testAnEventRedrawsOnlyItsOwnRow() {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "stacked",
             "-CC_ROW_RENDER_PROBE", "YES",
             "-CC_FIXTURE_LATE_EVENTS", "1",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
@@ -121,7 +121,7 @@ final class FleetRowRenderSerialUITests: XCTestCase {
     func testEventsBehindTheDeckRunNoFleetBody() {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
+            "-CC_FIXTURE", "stacked",
             "-CC_ROW_RENDER_PROBE", "YES",
             "-CC_FIXTURE_LATE_EVENTS", "3",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
@@ -193,7 +193,7 @@ final class FleetRowRenderSerialUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments =
             [
-                "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
+                "-CC_FIXTURE", "stacked",
                 "-CC_ROW_RENDER_PROBE", "YES",
                 "-CC_FIXTURE_LATE_EVENTS", "3",
                 "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
@@ -255,7 +255,7 @@ final class FleetRowRenderSerialUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments =
             [
-                "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
+                "-CC_FIXTURE", "stacked",
                 "-CC_ROW_RENDER_PROBE", "YES",
                 "-CC_FIXTURE_LATE_EVENTS", "3",
                 "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",

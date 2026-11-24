@@ -2602,8 +2602,7 @@ struct FleetRowView: View {
     /// *replaces* what it gathered — which is correct, because the gathered
     /// version is a shuffled bag of fragments, but it means anything the
     /// children were publishing has to be re-stated here by hand. It was not:
-    /// the risk badge published "Risk HIGH. Destructive, credentialed, or
-    /// publishes something." and the parent threw it away, so a sighted reader
+    /// the risk badge published "Risk HIGH" and the parent threw it away, so a sighted reader
     /// saw a red chip and a VoiceOver user could not tell a `Read` from a
     /// `git push --force` without opening it. On an app whose subject is risk
     /// triage that was the most consequential accessibility defect in the build.
@@ -2618,7 +2617,6 @@ struct FleetRowView: View {
         ]
         if let blocked {
             parts.append("risk \(blocked.risk.label)")
-            parts.append(blocked.risk.rationale)
         }
         if row.cachedAt != nil { parts.append("from cache") }
         if row.blockedCount > 1 { parts.append(FleetCount.waitingForYou(row.blockedCount)) }

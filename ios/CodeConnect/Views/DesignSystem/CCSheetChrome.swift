@@ -283,11 +283,9 @@ extension View {
 /// The two-button decision row: **40 : 60, 12pt gap**, and no parameter
 /// that says otherwise.
 ///
-/// `Deny` is narrower than `Allow` because the two are not equals. has HIGH
-/// invert the hierarchy — Deny becomes the filled white primary, Allow the
-/// bordered hold-target — and *area* is one of the three variables specified to
-/// carry that inversion. Shipped equal, the one place the design deliberately
-/// says "this side is safer" said it in a third of the language it specified.
+/// `Deny` is narrower than `Allow` because the two are not equals: Allow is the
+/// primary, and *area* is one of the three variables specified to say so.
+/// Shipped equal, the row said it in a third of the language it specified.
 ///
 /// **Why this is a `Layout` and not a measured width.** It shipped as a
 /// `GeometryReader` in the action bar's `.background` writing a `PreferenceKey`

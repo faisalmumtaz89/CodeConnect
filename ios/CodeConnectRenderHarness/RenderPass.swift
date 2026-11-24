@@ -195,7 +195,7 @@ final class RenderPass: XCTestCase {
         // that put it there — so a caption replacing another caption in the
         // same slot photographs as both at once, and the render is evidence of
         // nothing. One wait, just past `CC.duration.draw` (0.30s), the longest
-        // class the product animates outside a deliberate hold.
+        // class the product animates.
         Thread.sleep(forTimeInterval: 0.35)
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = name
