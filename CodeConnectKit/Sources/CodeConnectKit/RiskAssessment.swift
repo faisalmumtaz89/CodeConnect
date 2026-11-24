@@ -14,9 +14,8 @@ import Foundation
 /// > gate; it can never loosen one below what this build's own reading of the
 /// > command justifies.**
 ///
-/// That asymmetry is deliberate. Escalating costs a closer read (a HIGH card
-/// waits until its class is on screen too) and a higher place in the queue for a
-/// command that turned out to be harmless. De-escalating would show
+/// That asymmetry is deliberate. Escalating costs a higher place in the queue
+/// and a stronger tag for a command that turned out to be harmless. De-escalating would show
 /// `git push --force` as routine because a rule file said so — and the whole
 /// product is the promise that that cannot happen.
 ///
@@ -27,10 +26,6 @@ import Foundation
 public struct RiskAssessment: Sendable, Hashable {
     /// The class the UI gates on.
     public var effective: RiskClass
-    /// What the daemon said, parsed. Nil when it said nothing.
-    var declared: RiskClass?
-    /// What this build makes of the command on its own.
-    var heuristic: RiskClass
 
     static func parse(_ raw: String?) -> RiskClass? {
         switch raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
@@ -48,13 +43,13 @@ public struct RiskAssessment: Sendable, Hashable {
         let declared = parse(wire?.cls)
 
         if let declared {
-            return RiskAssessment(effective: max(declared, heuristic), declared: declared, heuristic: heuristic)
+            return RiskAssessment(effective: max(declared, heuristic))
         }
         if profile.classifiesRisk {
             // Contract: a classifying daemon that omits the field means medium.
             // Still a floor, never a ceiling.
-            return RiskAssessment(effective: max(.medium, heuristic), declared: nil, heuristic: heuristic)
+            return RiskAssessment(effective: max(.medium, heuristic))
         }
-        return RiskAssessment(effective: heuristic, declared: nil, heuristic: heuristic)
+        return RiskAssessment(effective: heuristic)
     }
 }

@@ -745,12 +745,7 @@ import SwiftUI
                     CCCard {
                         CCSectionHeader("Command")
                     } content: {
-                        VStack(alignment: .leading, spacing: CC.space.xs) {
-                            CCMonoBlock("rm -rf node_modules && npm install")
-                            Text("Writes files, installs, or reaches the network.")
-                                .ccType(CC.type.footnote)
-                                .foregroundStyle(CC.text.secondary)
-                        }
+                        CCMonoBlock("rm -rf node_modules && npm install")
                     } footer: {
                         HStack {
                             Text("payload verified")

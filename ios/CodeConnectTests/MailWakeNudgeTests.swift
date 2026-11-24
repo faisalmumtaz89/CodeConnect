@@ -125,4 +125,20 @@ final class MailWakeNudgeTests: XCTestCase {
         let run = try fixture(replacing: (MailNudge.show, Self.messagesShow)).show
         try await check(run, wakeLine: Self.messagesShow, "renamed show")
     }
+
+    /// The match is exact: a line that only nearly matches is somebody's words, drawn as theirs.
+    func testANearMissOfAWakeLineDrawsAsThePersonsWords() async throws {
+        for near in [Self.messagesAct + " ", Self.messagesAct.replacingOccurrences(of: "handle", with: "answer")] {
+            let all = events(try fixture(replacing: (MailNudge.act, near)).act)
+            let drawn = await state(all)
+            XCTAssertTrue(
+                drawn.timeline.contains { if case .userMessage(near, _) = $0.content { true } else { false } },
+                "a near miss is the person's message: \(near)")
+            XCTAssertFalse(
+                drawn.timeline.contains {
+                    if case .notice(let notice) = $0.content { notice.title == "Reading CodeConnect messages" } else { false }
+                },
+                "and draws no messages row: \(near)")
+        }
+    }
 }

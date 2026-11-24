@@ -303,8 +303,7 @@ struct DecisionCardView: View {
                 CCAdaptiveSpacer(minLength: CC.space.xs)
                 CCRiskTag(risk)
                     // A tag is a piece of text that happens to have a border.
-                    // `CCRiskTag` publishes the spelled-out class ("Risk HIGH.
-                    // Destructive, credentialed, or publishes something.") but
+                    // `CCRiskTag` publishes the spelled-out class ("Risk HIGH") but
                     // its own element carries no trait, so assistive technology
                     // — and the approval tests, which read the same tree —
                     // classify it as an untyped container rather than as
@@ -1041,9 +1040,8 @@ struct DecisionCardView: View {
     ///
     /// The banner used to live in the scroll content, as the seventh child of a
     /// document the reader has already scrolled to the end of — so it appeared
-    /// *underneath* the bar. Measured on a render of a banner in that slot (a
-    /// refused identity check, since removed): the banner box at y=613.33
-    /// h=53.00 against a bar top edge of y=631.00, which
+    /// *underneath* the bar. Measured on a render of a banner in that slot: the
+    /// banner box at y=613.33 h=53.00 against a bar top edge of y=631.00, which
     /// hides 66.6% of it, and its message — the only part that says *what went
     /// wrong* — at y=640.33 h=14.00, **100% occluded**. A banner that cannot state
     /// its reason is, measured, indistinguishable from a tap that did nothing.

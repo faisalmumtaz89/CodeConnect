@@ -34,7 +34,6 @@ final class RiskAndDeckTests: XCTestCase {
             tool: "Read", input: .object(["file_path": .string("/tmp/a")]),
             risk: WireRisk(cls: "low", matchedPattern: nil), profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .low)
-        XCTAssertEqual(assessment.declared, .low)
     }
 
     func testDaemonCanTightenTheGate() {
@@ -53,7 +52,6 @@ final class RiskAndDeckTests: XCTestCase {
             tool: "Bash", input: .object(["command": .string("sudo rm -rf /Users/me/work")]),
             risk: WireRisk(cls: "low", matchedPattern: nil), profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .high, "a destructive command cannot become one tap")
-        XCTAssertEqual(assessment.declared, .low)
     }
 
     /// Contract: on a classifying daemon, an absent class means medium.
@@ -62,7 +60,6 @@ final class RiskAndDeckTests: XCTestCase {
             tool: "Read", input: .object(["file_path": .string("/tmp/a")]), risk: nil,
             profile: connectedDaemon)
         XCTAssertEqual(assessment.effective, .medium)
-        XCTAssertNil(assessment.declared)
     }
 
     /// …but the floor is a floor, not a ceiling.
@@ -86,7 +83,6 @@ final class RiskAndDeckTests: XCTestCase {
         let assessment = assess(
             tool: "Bash", input: .object(["command": .string("echo hi")]),
             risk: WireRisk(cls: "catastrophic", matchedPattern: nil), profile: connectedDaemon)
-        XCTAssertNil(assessment.declared)
         XCTAssertEqual(assessment.effective, .medium, "unreadable means the medium floor applies")
     }
 
