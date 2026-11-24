@@ -1,11 +1,11 @@
-//! **CodeConnect Mail: messages between hosted agents.**
+//! **CodeConnect Messages: messages between hosted sessions.**
 //!
-//! An agent names another by its address, `<run uid>@<computer>`: the run of the
+//! A session names another by its address, `<run uid>@<computer>`: the run of the
 //! session it means and no other, and the computer that runs it, by its Tailscale
 //! name ([`protocol::tailnet`]), or `this.computer` while Tailscale gives no reading. A
 //! run this computer knows is delivered here whatever name its address carries, unless
 //! that name is another computer Tailscale knows. It sends with the `codeconnect` tool's
-//! `send_message` and reads its own with `read_messages`. A session's
+//! `msg_send` and reads its own with `msg_read`. A session's
 //! `cc-N@<computer>` is its label, for reading only: another run, later, can carry
 //! the same one. Only a run CodeConnect started is listed and sent to, from the moment
 //! it goes live ([`Daemon::mail_run_live`]); any other is neither listed nor sent to.
@@ -17,12 +17,12 @@
 //!
 //! **Where a message stands** ([`MailState`]): `sent` once the sender's daemon has
 //! it, `waiting` once the receiver's keeps it, `read` once the receiving session's
-//! own `read_messages` answer reached it, and otherwise `refused`, `expired` or
-//! `ended`. A sender reads the changes in its next `read_messages`, each once.
+//! own `msg_read` answer reached it, and otherwise `refused`, `expired` or
+//! `ended`. A sender reads the changes in its next `msg_read`, each once.
 //!
 //! **Waking the agent.** The daemon never hands an agent a message: it wakes the
 //! agent with one fixed line ([`nudge`]), which carries nothing of any message,
-//! and the agent calls `read_messages`. Claude is woken through its agent host's
+//! and the session calls `msg_read`. Claude is woken through its agent host's
 //! link ([`crate::claude_host::wake`]); Codex through its own queue
 //! ([`crate::codex_wake`]); each only between its turns, so a turn that reads its mail
 //! itself is followed by no wake. The wake rule ([`Daemon::wake_if_due`])
@@ -81,7 +81,7 @@ const PEER_CONNECT_WAIT: Duration = Duration::from_secs(3);
 /// How long another computer's daemon gets to say what became of a message.
 const PEER_MESSAGE_WAIT: Duration = Duration::from_secs(20);
 
-/// How long another computer gets to list its agents before `list_agents` goes on
+/// How long another computer gets to list its sessions before `msg_sessions` goes on
 /// without it.
 const PEER_LIST_WAIT: Duration = Duration::from_secs(3);
 
@@ -300,7 +300,7 @@ impl Daemon {
             ));
         };
         let label = display(&target.session_id);
-        // As `list_agents` leaves the asker out.
+        // As `msg_sessions` leaves the asker out.
         if from.computer.is_empty() && target.session_uid == from.uid {
             return refuse("that is this session's own address".into());
         }
@@ -958,7 +958,7 @@ impl Daemon {
     }
 }
 
-/// A run as `list_agents` gives it.
+/// A run as `msg_sessions` gives it.
 fn entry(row: &crate::store::SessionRow, this_computer: &str) -> AgentEntry {
     AgentEntry {
         address: format!("{}@{this_computer}", row.session_uid),

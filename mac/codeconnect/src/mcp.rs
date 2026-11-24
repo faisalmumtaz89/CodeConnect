@@ -511,7 +511,6 @@ mod tests {
 
     /// **With the switch on, a read tells the agent to report back** (R-11): handle each message as its sender asks,
     /// and answer a question or a request for work with the answer or what was done, never a bare acknowledgement.
-    /// The wake lines themselves are unchanged, so stored rows and the apps still know them.
     #[test]
     fn a_read_with_the_switch_on_asks_for_the_answer_or_what_was_done() {
         assert_eq!(

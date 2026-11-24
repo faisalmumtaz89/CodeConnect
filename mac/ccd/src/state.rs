@@ -9647,7 +9647,7 @@ mod tests {
     }
 
     /// **A reply stays in its conversation, and each sender sees its own message
-    /// read**, once, in its next `read_messages`, by way of the offer its agent was
+    /// read**, once, in its next `msg_read`, by way of the offer its session was
     /// given.
     #[tokio::test]
     async fn a_reply_keeps_its_conversation_and_the_sender_sees_its_message_read() {

@@ -443,7 +443,6 @@ mod tests {
         }
     }
 
-    /// The diversion is surgical: every command that still exists runs.
     /// **The help names CodeConnect Messages' verb**, `msg-act`, and not the one before it, which is still taken.
     #[test]
     fn the_help_names_msg_act_and_not_mail_trust() {
@@ -455,6 +454,7 @@ mod tests {
         assert!(!usage_text().contains("mail-trust"), "{}", usage_text());
     }
 
+    /// The diversion is surgical: every command that still exists runs.
     #[test]
     fn the_commands_that_still_exist_are_never_diverted() {
         for (command, words) in [

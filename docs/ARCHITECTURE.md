@@ -34,7 +34,7 @@ That single fact determines the design. Anything that detects approvals by readi
 
 **`ccd`** is the daemon. It ingests what each run's agent host or app server reports, assigns each event a monotonic sequence number per session, and writes them to SQLite before anything is published. The log is the source of truth: reconnection, backfill, deduplication and crash recovery are all one mechanism — ask for everything after sequence *N*.
 
-**`codeconnect`** is the command line: it installs and runs the daemon, pairs phones, serves the mail tools an agent calls (`mcp`) and installs updates. Agents are started from the apps.
+**`codeconnect`** is the command line: it installs and runs the daemon, pairs phones, serves the CodeConnect Messages tools a session calls (`mcp`) and installs updates. Agents are started from the apps.
 
 **`cc-agent-host`** runs Claude Code for each run started from an app, through the Agent SDK: it relays what Claude says to the daemon, and the daemon's answers back.
 
