@@ -82,7 +82,7 @@ The daemon, `ccd`, logs every session's events. Claude Code reports to it throug
 
 - Sessions go directly between your computer and your phone, over Tailscale by default; no CodeConnect server sees them.
 - A notification passes through Apple and, unless your daemon has its own Apple push key, CodeConnect's push relay, which receives no session content.
-- Your agents' messages to each other travel only between your own computers, over Tailscale, and only between computers of the same Tailscale user (sessions on one computer message each other without Tailscale); any program on one of those computers can send one, with no further credential. Whether an agent acts on one is your choice, off until you set it with `codeconnect mail-trust on` on that computer; it is guidance to the agent, and its own permission mode still governs what it may do.
+- Your agents' messages to each other travel only between your own computers, over Tailscale, and only between computers of the same Tailscale user (sessions on one computer message each other without Tailscale too, unless it is a tagged device); any program on one of those computers can send one, with no further credential. Whether an agent acts on one is your choice, off until you set it with `codeconnect mail-trust on` on that computer; it is guidance to the agent, and its own permission mode still governs what it may do.
 - A paired phone can send your sessions messages and answer their approvals. [SECURITY.md](SECURITY.md) covers the trust boundaries and reporting a vulnerability privately; the [privacy policy](https://codeconnect.sh/privacy) lists every connection.
 
 ## Documentation
