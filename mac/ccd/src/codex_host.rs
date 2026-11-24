@@ -7664,6 +7664,18 @@ mod tests {
         let ended = format!(":turn:{LIFECYCLE_TURN}");
         filed_until(&rig.daemon, &uid, &ended).await;
         tokio::time::sleep(Duration::from_millis(500)).await;
+        // The wake is spawned at the turn's end, through a login shell, and on a loaded machine that can take longer
+        // than any fixed wait: the unread case waits for its queue call, up to 5 s. The read case gives none to come.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !read
+            && Instant::now() < deadline
+            && !std::fs::read_to_string(&calls)
+                .unwrap_or_default()
+                .lines()
+                .any(|line| line.starts_with("queue"))
+        {
+            tokio::time::sleep(POLL).await;
+        }
         drop(ws);
         end_run(&rig, &uid).await;
         std::fs::read_to_string(&calls)
