@@ -3837,7 +3837,7 @@ public final class AppModel {
     /// What became of this card by now, as the truth has it, or nil while it is
     /// still open there.
     ///
-    /// Read after the reader's tap and any face check, never from what was
+    /// Read after the reader's tap, never from what was
     /// drawn when they tapped: an answer the Mac recorded meanwhile — arrived
     /// and not yet drawn, or held back by a catch-up — leaves nothing to send.
     /// Rebuilt first, so an event ingested and not yet built still counts.

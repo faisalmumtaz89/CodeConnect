@@ -655,14 +655,4 @@ public enum RiskClass: Int, Sendable, Hashable, Comparable {
         case .high: return "HIGH"
         }
     }
-
-    /// What the class *means*, spelled out — a badge nobody can decode is a
-    /// badge that gets ignored.
-    public var rationale: String {
-        switch self {
-        case .low: return "Reads, or a shell command with no obvious side effect."
-        case .medium: return "Writes files, installs, or reaches the network."
-        case .high: return "Destructive, credentialed, or publishes something."
-        }
-    }
 }

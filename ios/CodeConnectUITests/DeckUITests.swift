@@ -35,10 +35,6 @@ final class DeckUITests: XCTestCase {
     /// block. Not accessibility hints: a disabled control renders its reason as
     /// visible text.
     private static let readGateReason = "Scroll the command into view before deciding."
-    /// What HIGH says once the command has been seen but the class it was given
-    /// has not. MEDIUM never shows this one.
-    private static let readGateHighReason =
-        "Scroll to the end of the command block before deciding."
 
     override func setUp() {
         continueAfterFailure = false
@@ -217,11 +213,6 @@ final class DeckUITests: XCTestCase {
     }
 
     /// The transition the screenshots never reached: scroll, and the gate opens.
-    ///
-    /// HIGH asks for two things and says so in order — first the command, then
-    /// the class the command was given — because one tap is about to allow
-    /// both. The intermediate sentence is the proof that the two halves are
-    /// measured separately rather than one implying the other.
     func testHighCardArmsAfterScrollingToTheCommandAtAX5() {
         let app = launch(size: .ax5)
         openDeck(app)
@@ -231,14 +222,10 @@ final class DeckUITests: XCTestCase {
         XCTAssertFalse(allow.isEnabled)
         XCTAssertTrue(app.staticTexts[Self.readGateReason].exists)
 
-        scrollUntil(app, "the command clears the fold") {
-            app.staticTexts[Self.readGateHighReason].exists || allow.isEnabled
-        }
         scrollUntil(app, "the read gate arms") { allow.isEnabled }
 
         attach(app, "gate-high-ax5-armed")
         XCTAssertFalse(app.staticTexts[Self.readGateReason].exists)
-        XCTAssertFalse(app.staticTexts[Self.readGateHighReason].exists)
     }
 
     /// At a reading size the whole command block fits above the action bar, so
@@ -274,15 +261,12 @@ final class DeckUITests: XCTestCase {
             app.staticTexts[Self.readGateReason].firstMatch.exists,
             "a disabled control states its reason as visible text")
 
-        // …and it opens on the same scroll the HIGH card needs. MEDIUM asks for
-        // the command and nothing more, so one arming is the whole gate.
+        // …and it opens on the same scroll the HIGH card needs: the command and
+        // nothing more, so one arming is the whole gate.
         scrollUntil(app, "the read gate arms") {
             allowButton(app, tool: "Write").isEnabled
         }
         attach(app, "gate-medium-ax5-armed")
-        XCTAssertFalse(
-            app.staticTexts[Self.readGateHighReason].exists,
-            "the second sentence belongs to HIGH; MEDIUM never shows it")
     }
 
     /// **A LOW card is gated too, and this is the case that says why.**
@@ -313,9 +297,6 @@ final class DeckUITests: XCTestCase {
 
         scrollUntil(app, "the read gate arms") { allowButton(app, tool: "Read").isEnabled }
         attach(app, "gate-low-ax5-armed")
-        XCTAssertFalse(
-            app.staticTexts[Self.readGateHighReason].exists,
-            "the second sentence belongs to HIGH; LOW asks for the command and stops")
     }
 
     /// **And it costs nothing at a reading size.** The whole point of the LOW
@@ -447,7 +428,7 @@ final class DeckUITests: XCTestCase {
         attach(app, "deck-fleet-clear")
     }
 
-    /// A HIGH card is allowed with one tap, like any other: no hold and no identity check, and the stack moves on.
+    /// A HIGH card is allowed with one tap, like any other, and the stack moves on.
     func testAHighRiskApprovalIsOneTap() {
         let app = launch()
         openDeck(app)
@@ -458,9 +439,6 @@ final class DeckUITests: XCTestCase {
         allowBash.tap()
 
         XCTAssertTrue(allowButton(app, tool: "Write").waitForExistence(timeout: 20), "one tap answered it")
-        XCTAssertFalse(
-            app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Not approved'")).firstMatch.exists,
-            "nothing stood between the tap and the answer")
     }
 
     /// **`THIS PASS` is past tense, so it stops when the pass does.**
@@ -512,17 +490,6 @@ final class DeckUITests: XCTestCase {
         XCTAssertEqual(
             second, first,
             "a completed measurement must not tick: read \(first), then \(second)")
-    }
-
-    /// The daemon's own rule is shown, because a risk badge whose reason is
-    /// invisible is a badge that gets ignored.
-    func testMatchedPatternIsShownOnTheCard() {
-        let app = launch()
-        openDeck(app)
-        let matched = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'git push --force'")
-        ).firstMatch
-        XCTAssertTrue(matched.waitForExistence(timeout: 20))
     }
 
     // MARK: Postponing

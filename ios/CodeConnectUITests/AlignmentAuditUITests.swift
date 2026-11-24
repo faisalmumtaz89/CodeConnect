@@ -101,9 +101,9 @@ final class AlignmentAuditUITests: XCTestCase {
             fixture: "deck", size: .medium, deeplink: "codeconnect://deck/toolu_fixture_medium")
         sleep(3)
         assertLabelSharesBodyEdge(
-            app, label: "Command", body: "Classified at the computer", size: .medium)
+            app, label: "Command", body: "This call does not run", size: .medium)
         assertLabelSharesBodyEdge(
-            app, label: "If you deny", body: "Classified at the computer", size: .medium)
+            app, label: "If you deny", body: "This call does not run", size: .medium)
     }
 
     func testDecisionCardLabelsShareTheBodyEdgeAtAX5() {
@@ -111,7 +111,7 @@ final class AlignmentAuditUITests: XCTestCase {
             fixture: "deck", size: .ax5, deeplink: "codeconnect://deck/toolu_fixture_medium")
         sleep(3)
         assertLabelSharesBodyEdge(
-            app, label: "Command", body: "Classified at the computer", size: .ax5)
+            app, label: "Command", body: "This call does not run", size: .ax5)
     }
 
     // MARK: Fleet — the Ended footer against the screen's own text
@@ -183,7 +183,7 @@ final class AlignmentAuditUITests: XCTestCase {
             sleep(3)
             for label in ["Command", "If you deny"] {
                 assertLabelSharesBodyEdge(
-                    app, label: label, body: "Classified at the computer", size: size)
+                    app, label: label, body: "This call does not run", size: size)
             }
             app.terminate()
         }

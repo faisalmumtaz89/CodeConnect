@@ -16,7 +16,7 @@ import SwiftUI
     //
     //  Pressed states are LIVE, not mocked. Press and hold any control in the
     //  canvas or the simulator: press is a 1.5% contraction plus a one-step
-    //  luminance change, and the hold button traces its ring in real time.
+    //  luminance change.
     // =========================================================================
 
     struct CCGallery: View {
@@ -538,12 +538,12 @@ import SwiftUI
                             density: .comfortable,
                             // The shipped label, in the shipped order
                             // (`FleetView.accessibilityLabel`): place, agent,
-                            // status, class, the class's *rationale*, the
-                            // activity, the wait, and the capability — which is
+                            // status, class, the activity, the wait, and the
+                            // capability — which is
                             // announced on every row whether or not the badge is
                             // drawn.
                             accessibilityLabelText:
-                                "codeconnect, Claude Code session, Waiting for you, risk HIGH, Destructive, credentialed, or publishes something., Bash, git push --force origin main, waiting 4 minutes, control",
+                                "codeconnect, Claude Code session, Waiting for you, risk HIGH, Bash, git push --force origin main, waiting 4 minutes, control",
                             action: { lastAction = "fleet row" }
                         ) {
                             // **No dot, and no column.** A blocked row draws

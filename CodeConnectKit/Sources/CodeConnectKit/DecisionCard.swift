@@ -214,8 +214,6 @@ public enum DecisionCard {
         /// The bottom edge of the block carrying the command has been inside
         /// the visible region at least once.
         public var hasSeenCommand = false
-        /// …and so has the bottom edge of the risk class and its provenance.
-        public var hasSeenProvenance = false
 
         public init() {}
 
@@ -233,44 +231,28 @@ public enum DecisionCard {
             return bottom <= visibleBottom
         }
 
-        /// Whether this class may be answered yet.
+        /// Whether the card may be answered yet: its command has been on screen.
         ///
-        /// **The gate applies at every tier**, and the reason is that risk governs
-        /// *what else* must be on screen (HIGH waits for its class too), and never
-        /// whether the command has to be visible. LOW used to return `true` unconditionally on the argument that
-        /// "a `Read` that costs a scroll is a gate people learn to defeat". The
-        /// argument is sound and the implementation did not follow from it: at
-        /// reading sizes a LOW command fits above the bar on the first frame, so the
-        /// gate is already open by the time the card is drawn and costs the reader
-        /// nothing at all. It is only when the command does *not* fit that the two
-        /// behaviours differ, and that is precisely the case an AX5 render of a LOW
-        /// card measured: `Allow` enabled, in the thumb zone, over **13 of the 24
+        /// **The gate applies at every class.** LOW used to open unconditionally on
+        /// the argument that "a `Read` that costs a scroll is a gate people learn to
+        /// defeat". The argument is sound and the implementation did not follow from
+        /// it: at reading sizes a command fits above the bar on the first frame, so
+        /// the gate is already open by the time the card is drawn and costs the
+        /// reader nothing at all. It is only when the command does *not* fit that it
+        /// matters, and that is precisely the case an AX5 render of a LOW card
+        /// measured: `Allow` enabled, in the thumb zone, over **13 of the 24
         /// characters** of `/Users/dev/app/README.md` — the 11 that were missing
         /// being the ones that tell a README from `~/.aws/credentials`.
         ///
-        /// A tier-shaped exception here is not "less friction for a small risk", it
+        /// A class-shaped exception here is not "less friction for a small risk", it
         /// is "the product will let you approve something it never showed you", and
-        /// that is not a property any tier gets.
-        public func isOpen(at risk: RiskClass) -> Bool {
-            switch risk {
-            case .low:
-                return hasSeenCommand
-            case .medium:
-                return hasSeenCommand
-            // Stated separately rather than left to fall out of the layout: at HIGH
-            // one tap is about to allow the riskiest kind of call, and the two facts that
-            // say what it allows are the command and the class it was given. That the one
-            // is drawn above the other is not evidence that both were seen.
-            case .high:
-                return hasSeenCommand && hasSeenProvenance
-            }
-        }
+        /// that is not a property any class gets. The class's tag sits above the
+        /// command, so a command seen is a tag passed.
+        public var isOpen: Bool { hasSeenCommand }
 
         /// What a closed gate says. Drawn as the control's disabled reason, never only hinted.
-        public func blockedReason(at risk: RiskClass) -> String? {
-            guard !isOpen(at: risk) else { return nil }
-            guard hasSeenCommand else { return "Scroll the command into view before deciding." }
-            return "Scroll to the end of the command block before deciding."
+        public var blockedReason: String? {
+            isOpen ? nil : "Scroll the command into view before deciding."
         }
     }
 }

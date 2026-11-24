@@ -7,6 +7,8 @@ User-facing changes, newest first. Mac releases are cut per
 
 - On the iPhone, a high-risk approval is allowed with one tap, like any other: the hold and the Face ID or passcode
   step are gone.
+- On the iPhone, an approval shows its command and its risk tag, without the line of reasons under it; on the Mac,
+  an approval no longer shows its risk line.
 
 ## CodeConnect 0.19.18, with the iPhone app 1.1.35
 

@@ -7,23 +7,15 @@ import SwiftUI
 /// Deck. They must not diverge — a risk gate that applies in one place and not
 /// the other is worse than no gate, because it is the one you stop checking for.
 ///
-/// **The read gate is not one of the tiers.** Every class waits until the
-/// command has been on screen; what the class decides is what else must be seen
-/// first — at HIGH, the class itself. At reading sizes a LOW command fits
-/// above the action bar on the first frame, so its gate is already open by the
-/// time the card is drawn and the reader never meets it. At AX5 it is the only
-/// thing standing between one tap and approving a path the product never
-/// rendered.
-///
-/// The gates, by class:
-///
-///   * **LOW** — a single tap, once the command has been shown. Allow is the
-///     filled white primary.
-///   * **MEDIUM** — the same gate, and a fill morph and haptic at the moment it
-///     opens, because at MEDIUM the reader usually had to scroll for it.
-///   * **HIGH** — the same tap, once the command *and* its class have been
-///     shown. The controls look exactly as they do at LOW: Allow is the filled
-///     white affirmative, Deny the bordered alternative.
+/// **One read gate for every class.** A card waits until its command has been on
+/// screen, then Allow is a single tap, with a fill morph and a haptic at the
+/// moment it opens when the reader had to scroll for it. At reading sizes a
+/// command usually fits above the action bar on the first frame, so the gate is
+/// already open by the time the card is drawn and the reader never meets it. At
+/// AX5 it is the only thing standing between one tap and approving a path the
+/// product never rendered. The class shows as the tag in the header; the
+/// controls look the same at every class: Allow is the filled white
+/// affirmative, Deny the bordered alternative.
 ///
 /// **Risk never changes chrome.** An earlier version inverted the
 /// hierarchy at HIGH — Deny took the white fill, Allow was drawn in `danger` —
@@ -272,10 +264,6 @@ struct DecisionCardView: View {
             probe.commandBottom = value
             updateGate()
         }
-        .onPreferenceChange(ProvenanceBottomKey.self) { value in
-            probe.provenanceBottom = value
-            updateGate()
-        }
         .onPreferenceChange(ViewportBottomKey.self) { value in
             probe.viewportBottom = value
             updateGate()
@@ -403,31 +391,15 @@ struct DecisionCardView: View {
         VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             CCSectionHeader(commandHeader)
             CCMonoBlock(command).onContainerEdge()
-                // The gate's first half, measured on the block that carries the
-                // command itself rather than on a marker somewhere beneath it.
+                // The gate, measured on the block that carries the command
+                // itself rather than on a marker somewhere beneath it.
                 .background { bottomProbe(CommandBottomKey.self) }
 
-            VStack(alignment: .leading, spacing: CC.rhythm.text) {
-                if let intent = describedIntent {
-                    Text(intent)
-                        .ccType(CC.type.callout)
-                        .foregroundStyle(CC.text.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                // Two lines, not three sizes at three colours: the
-                // rationale in `callout` `textSecondary`, the provenance in
-                // `monoSmall` `textTertiary`. Risk spends no hue; the tag says it.
-                Text(rationale)
+            if let intent = describedIntent {
+                Text(intent)
                     .ccType(CC.type.callout)
                     .foregroundStyle(CC.text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(assessment.provenance)
-                    .ccType(CC.type.monoSmall)
-                    .foregroundStyle(CC.text.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    // The gate's second half, and the one HIGH names explicitly.
-                    .background { bottomProbe(ProvenanceBottomKey.self) }
             }
         }
     }
@@ -501,11 +473,6 @@ struct DecisionCardView: View {
         }
     }
 
-    private var rationale: String {
-        guard let pattern = assessment.matchedPattern else { return risk.rationale }
-        return "\(risk.rationale) Matched \(pattern)."
-    }
-
     /// The arming moment. The phone is telling you *"you may now
     /// decide"*, so it says so with a fill morph and a light impact rather than
     /// by silently enabling a control.
@@ -521,17 +488,14 @@ struct DecisionCardView: View {
         if DecisionCard.ReadGate.isVisible(bottom: probe.commandBottom, visibleBottom: visibleBottom) {
             next.hasSeenCommand = true
         }
-        if DecisionCard.ReadGate.isVisible(bottom: probe.provenanceBottom, visibleBottom: visibleBottom) {
-            next.hasSeenProvenance = true
-        }
         guard next != gate else { return }
-        let wasOpen = gate.isOpen(at: risk)
+        let wasOpen = gate.isOpen
         withAnimation(CC.motion.medium) { gate = next }
         // Never on entrance: a card whose command already fits on the first
         // frame arms silently. If a notification brought the reader here it has
         // already buzzed, and a second buzz inside the entrance window below
         // reads as a second event rather than as this one.
-        guard !wasOpen, next.isOpen(at: risk), approval.isPending else { return }
+        guard !wasOpen, next.isOpen, approval.isPending else { return }
         if Date().timeIntervalSince(appearedAt) > Self.entranceWindow { CCHaptic.light.fire() }
     }
 
@@ -1077,8 +1041,9 @@ struct DecisionCardView: View {
     ///
     /// The banner used to live in the scroll content, as the seventh child of a
     /// document the reader has already scrolled to the end of — so it appeared
-    /// *underneath* the bar. Measured on a render of a refused answer's banner: the
-    /// banner box at y=613.33 h=53.00 against a bar top edge of y=631.00, which
+    /// *underneath* the bar. Measured on a render of a banner in that slot (a
+    /// refused identity check, since removed): the banner box at y=613.33
+    /// h=53.00 against a bar top edge of y=631.00, which
     /// hides 66.6% of it, and its message — the only part that says *what went
     /// wrong* — at y=640.33 h=14.00, **100% occluded**. A banner that cannot state
     /// its reason is, measured, indistinguishable from a tap that did nothing.
@@ -1470,7 +1435,7 @@ struct DecisionCardView: View {
     /// primary at HIGH while Allow was drawn in `danger` — an inverted hierarchy
     /// plus a red approve button, on the one screen where approving is the
     /// ordinary thing to do. Both were wrong for the same reason: risk is
-    /// already stated by the class badge, the rationale and the hold, and
+    /// already stated by the class badge, and
     /// restating it in the *chrome* spends the two strongest signals the kit has
     /// — a white fill and the colour red — on something that is neither the
     /// primary action nor destructive.
@@ -1561,7 +1526,7 @@ struct DecisionCardView: View {
     /// Every reason an action cannot be taken, in the order that matters.
     private var blockedReason: String? {
         if let shared = sharedBlockedReason { return shared }
-        return gate.blockedReason(at: risk)
+        return gate.blockedReason
     }
 
     /// Denying skips the read-it-first gate. Refusing is the safe direction, and
@@ -1672,8 +1637,6 @@ final class ReadGateProbe {
     /// and it makes "unmeasured" indistinguishable from "very far down the
     /// document" at every call site.
     var commandBottom: CGFloat?
-    /// The bottom edge of the risk class and its provenance, likewise.
-    var provenanceBottom: CGFloat?
     /// The bottom of the scroll view's own frame.
     var viewportBottom: CGFloat?
     /// The whole card's height, the pinned bar included.
@@ -1767,9 +1730,6 @@ private struct DiffWidthKey: PreferenceKey {
 
 /// The bottom edge of the block carrying the command.
 private struct CommandBottomKey: ReadGateEdgeKey {}
-
-/// The bottom edge of the risk class and its provenance.
-private struct ProvenanceBottomKey: ReadGateEdgeKey {}
 
 /// The bottom of the scroll view's own frame.
 private struct ViewportBottomKey: ReadGateEdgeKey {}

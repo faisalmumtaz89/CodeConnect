@@ -284,7 +284,7 @@ struct CCRiskTag: View {
     private func tag(weight: Font.Weight, label: Color, fill: Color, border: Color?) -> some View {
         CCTagChrome(text: risk.label, weight: weight, label: label, fill: fill, border: border)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Risk \(risk.label). \(risk.rationale)")
+            .accessibilityLabel("Risk \(risk.label)")
     }
 }
 

@@ -492,14 +492,14 @@ is enforced.
 * **Risk is reconciled by taking the stricter reading** (`RiskAssessment`). The
   daemon sees the repo and can tighten a gate; it can never loosen one below
   what this build's own reading of the command justifies. `git push --force`
-  cannot become a single tap because a rule file said `low`.
+  is never shown as routine because a rule file said `low`.
 * **Nothing in the Deck is a swipe.** Advancing is a button and answering is a
   button.
 * **A fleet row opens its session, whatever its status.** A Done row's turn
   may have been watched at the Mac or changed nothing, so its diff is one tap
   away on the session screen, never where the tap lands.
-* **A HIGH-risk approval is one tap, like any other,** once both its command
-  and its class have been on screen.
+* **A HIGH-risk approval is one tap, like any other,** once its command has
+  been on screen. The card shows the class as its tag and no line of reasons.
 
 ## Transport
 
@@ -826,7 +826,7 @@ CC.text    primary secondary tertiary disabled onAccent
 
 CC.space   xxs 4 · xs 8 · sm 12 · md 16 · lg 20 · xl 24 · xxl 32 · xxxl 48
 CC.radius  sm 6 · md 8 · lg 12 · xl 16 · pill
-CC.stroke  hairline 1 · emphasis 1.5 · focus 2 · ring 3
+CC.stroke  hairline 1 · emphasis 1.5 · focus 2
 CC.size    hitTarget 44 · controlSm 36 · controlMd 44 · controlLg 52
            rowMin 64 · rowRoomy 76 · factRow 48 · badge 20 · icon 16
            chip 32 · chipMaxScale 1.75
@@ -835,7 +835,7 @@ CC.size    hitTarget 44 · controlSm 36 · controlMd 44 · controlLg 52
 CC.opacity muted .12 · press .08 · disabled .45 · pulse .45
 
 CC.duration micro .12 · small .18 · medium .22 · exit .24 · draw .30
-            hold 1.2 · toast 1.4 · reduced .12
+            toast 1.4 · reduced .12
 CC.motion   micro small medium exit physical draw reduced standard linear(_:)
 
 CC.type    display title headline rowTitle body callout footnote
@@ -915,8 +915,8 @@ and `.ccScaleEffect` / `.ccPressScale` become no-ops. Haptics are unaffected: a
 haptic is not motion, and removing it removes information.
 
 **Haptics** are the closed set in `CCHaptic`: `rowPress` (silent),
-`openHeavy`, `light`, `decision`, `holdTick`, `commit`, `success`, `warning`,
-`failure`. There are no others.
+`openHeavy`, `light`, `decision`, `success`, `warning`, `failure`. There are
+no others.
 
 ## Components
 
@@ -928,7 +928,7 @@ haptic is not motion, and removing it removes information.
 | `CCFactRow` | `CCFactRow(label, value:, labelStyle: .prose/.identifier/.key, tone:, isUnmeasured:, age:, separator:)` · `CCFactRow(label) { value }` · `CCFactRow(label, detail: { })` — 48pt. Lands its own text on the 52pt column; no call site adds anything |
 | `CCBadge` | `CCBadge(text, icon:, tone:, count:, isSelected:, action:)` · `CCBadge(status:count:)` · `CCBadge(capability:)` — **one construction**, and no `style:` to pick another: tint@12 fill, tint@40 border, full-strength label, radius 6. A badge is **20pt**; the same construction **with an `action`** is a control and is `CC.size.chip` 32 with a wider inset, because a chip is a thing you press. `danger` takes a 1.5pt edge; nothing takes a saturated fill |
 | `CCTag` | `CCTag(text, accessibilityText:)` · `CCTag(agent:)` — which agent a session is (`Claude Code`, `Codex`, or an unsupported agent's own word), on an ended fleet row; a run in a project card is titled with the same word instead. No fill, 1pt `borderStrong`, 9pt semibold uppercase `textTertiary`, **15pt** tall, radius 4; wraps at accessibility sizes like `CCBadge` |
-| `CCRiskTag` | `CCRiskTag(risk)` — `CCTag`'s construction for risk, **without colour**: HIGH is a solid `text` chip with a bold `onAccent` label, MEDIUM an outline with a `textSecondary` label, LOW draws nothing. VoiceOver: `Risk HIGH. <rationale>` |
+| `CCRiskTag` | `CCRiskTag(risk)` — `CCTag`'s construction for risk, **without colour**: HIGH is a solid `text` chip with a bold `onAccent` label, MEDIUM an outline with a `textSecondary` label, LOW draws nothing. VoiceOver: `Risk HIGH` |
 | `CCCountChip` | `CCCountChip(3)` — the same construction with a number in it. Used by `CCSectionHeader`; never hand-rolled |
 | `CCStatusDot` | `CCStatusDot(color:size:isHollow:pulses:)` · `CCStatusDot(tone:…)` · `CCStatusDot(status:size:isCached:)` — scales with Dynamic Type to `CC.size.dotMaxScale` (8 → 14 at AX5) |
 | `CCMachineLabel` | `CCMachineLabel(name:level:word:lineLimit:)` — a computer and whether it answers: a dot, the name, and a word only while the link is not live: `Stale`, `Connecting`, `Offline` or `Blocked`, and for a refused link its cause's own word, `Different version` or `Pair again`. The home screen's project cards wrap it. The dot and the level's word are `LinkHealth.Level.machineMark`; `word` takes the link's own, `LinkHealth.machineWord`, where the caller has the link |

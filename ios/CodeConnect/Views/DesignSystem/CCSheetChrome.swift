@@ -285,7 +285,7 @@ extension View {
 ///
 /// `Deny` is narrower than `Allow` because the two are not equals. has HIGH
 /// invert the hierarchy — Deny becomes the filled white primary, Allow the
-/// bordered hold-target — and *area* is one of the three variables specified to
+/// bordered target — and *area* is one of the three variables specified to
 /// carry that inversion. Shipped equal, the one place the design deliberately
 /// says "this side is safer" said it in a third of the language it specified.
 ///
