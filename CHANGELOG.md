@@ -3,9 +3,10 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
-## CodeConnect 0.19.20, with the iPhone app 1.1.37
+## CodeConnect 0.19.20
 
-- On the iPhone and the Mac, a Codex session no longer jumps to the top of the list when CodeConnect restarts.
+- On the Mac, a Codex session no longer jumps to the top of the list when CodeConnect restarts; the iPhone's next
+  build follows.
 - On the Mac, VoiceOver no longer reads two icons as bare symbol names.
 - On the Mac, the new-agent box asks "What do you want to work on?" where it said "First message".
 - On the Mac, the new-agent box has no line under it: a folder not yet chosen is the bar's highlighted "Choose folder", and why
