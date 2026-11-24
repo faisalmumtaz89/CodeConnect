@@ -6,9 +6,13 @@ User-facing changes, newest first. Mac releases are cut per
 ## CodeConnect 0.19.20, with the iPhone app 1.1.37
 
 - On the iPhone and the Mac, a Codex session no longer jumps to the top of the list when CodeConnect restarts.
-## CodeConnect 0.19.20
-
 - On the Mac, VoiceOver no longer reads two icons as bare symbol names.
+- On the Mac and Linux, sessions message each other through CodeConnect Messages: the tools a session is given are now
+  msg_sessions, msg_send and msg_read.
+- On the Mac and Linux, a session acts on a CodeConnect message from your other sessions by default, within its own
+  permissions; `codeconnect msg-act off` makes a computer's sessions show them to you instead. A computer you set to
+  off before stays off.
+- `codeconnect msg-act on|off` replaces `codeconnect mail-trust`, which still works.
 
 ## CodeConnect 0.19.19, with the iPhone app 1.1.36
 
