@@ -15,7 +15,7 @@ struct ModelButton: View {
     @State private var minX: CGFloat = 0
     @State private var minY: CGFloat = 0
     private var placed: (x: CGFloat, width: CGFloat) {
-        StartPanel.place(widest: 440, leading: minX, box: startBox)
+        PanelPlace.place(widest: 440, leading: minX, box: startBox)
     }
 
     private var checking: Bool { StartAgent.allCases.contains { context.models($0) == .checking } }
@@ -38,7 +38,7 @@ struct ModelButton: View {
         .accessibilityIdentifier("start.model")
         .accessibilityValue(open ? "open" : "closed")
         // Above the button, clear of it by the panels' one gap, inside the box by the start form's one rule
-        // (`StartPanel`).
+        // (`PanelPlace`).
         .onGeometryChange(for: CGPoint.self) { $0.frame(in: .named(StartForm.space)).origin } action: {
             minX = $0.x
             minY = $0.y
@@ -85,7 +85,7 @@ struct ModelButton: View {
         }
         .frame(width: placed.width)
         // Its top 8 pt inside the pane (before the button is measured, its tallest).
-        .frame(maxHeight: minY > 0 ? min(360, minY - Theme.panelGap - StartPanel.margin) : 360)
+        .frame(maxHeight: minY > 0 ? min(360, minY - Theme.panelGap - PanelPlace.margin) : 360)
         .fixedSize(horizontal: false, vertical: true)
         .menuCard()
     }

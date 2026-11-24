@@ -362,7 +362,7 @@ struct StartForm: View {
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { folderChip = $0 }
         .overlay(alignment: .topLeading) {
             if folderOpen {
-                let placed = StartPanel.place(widest: 520, leading: folderChip.minX, box: box)
+                let placed = PanelPlace.place(widest: 520, leading: folderChip.minX, box: box)
                 folderPanel(context, width: placed.width).openPanel()
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { folderPanelHeight = $0 }
                     .offset(x: placed.x - folderChip.minX, y: InputBoxChip.height + Theme.panelGap)
@@ -377,11 +377,11 @@ struct StartForm: View {
     private var listMost: CGFloat {
         guard folderPanelHeight > 0 else { return 260 }
         let others = folderPanelHeight - listShown
-        let room = startHeight - StartPanel.margin - folderChip.maxY - Theme.panelGap - others
+        let room = startHeight - PanelPlace.margin - folderChip.maxY - Theme.panelGap - others
         return min(260, max(room, 44))
     }
 
-    /// Up to 520 pt wide, inside the box (`StartPanel.place`).
+    /// Up to 520 pt wide, inside the box (`PanelPlace.place`).
     private func folderPanel(_ context: StartContext, width: CGFloat) -> some View {
         folderRows(context)
             .frame(width: width - 12)
@@ -851,7 +851,7 @@ private struct ComputerButton: View {
     @Environment(\.startBox) private var startBox
     /// The chip's leading edge in `StartForm.space`, where its panel starts when it fits.
     @State private var minX: CGFloat = 0
-    private var placed: (x: CGFloat, width: CGFloat) { StartPanel.place(widest: 260, leading: minX, box: startBox) }
+    private var placed: (x: CGFloat, width: CGFloat) { PanelPlace.place(widest: 260, leading: minX, box: startBox) }
 
     var body: some View {
         Button {
