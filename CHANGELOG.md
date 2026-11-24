@@ -10,8 +10,8 @@ User-facing changes, newest first. Mac releases are cut per
 - On the Mac, the new-agent box asks "What do you want to work on?" where it said "First message".
 - On the Mac, the new-agent box has no line under it: a folder not yet chosen is the bar's highlighted "Choose folder", and why
   Start can't be pressed is its tooltip.
-- On the iPhone and the Mac, text is a little less bright: 85% white, macOS's own level for text on a dark window,
-  where it was 89%.
+- On the Mac, text is a little less bright: 85% white, macOS's own level for text on a dark window, where it was
+  89%; the iPhone's next build follows.
 - On the Mac, the reply box's model, mode and ⋯ panels, and a session row's menu, open lined up with the left edge
   of the button that opened them, instead of the right edge of the box or button.
 - On the Mac, the usage figures in the reply box stand clear of Send, as far from it as the bar's chips stand from
