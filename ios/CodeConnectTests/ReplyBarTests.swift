@@ -189,6 +189,28 @@ final class ReplyBarTests: XCTestCase {
         XCTAssertEqual(bar.limits.map(\.resets), [nil])
     }
 
+    // MARK: The sentence both apps speak
+
+    /// The bar's whole reading as one sentence, for VoiceOver on the Mac's figures and the iPhone's settings button:
+    /// each part in the order the card draws it, a passed reset and an absent part left out.
+    func testTheBarIsSpokenAsOneSentence() throws {
+        let book = try book()
+        let (d, run) = try on("D", in: book)
+        let email = try XCTUnwrap(d.facts?.email)
+        XCTAssertEqual(
+            ReplyBar.of(events: try claudeEvents(), summary: run, book: book, now: now).spoken,
+            "Context 32k of 1M; 5-hour 12%, resets in 2h 10m; Week 42%, resets in 5 days; Account \(email)")
+        let (c, noLimits) = try on("C", in: book)
+        XCTAssertEqual(
+            ReplyBar.of(events: [], summary: noLimits, book: book, now: now).spoken,
+            "No plan limits; Account \(try XCTUnwrap(c.facts?.email))")
+        let passed = ReplyBar.of(
+            events: [], summary: try summary(.codex, account: onCodexDefault), book: book,
+            now: Date(timeIntervalSince1970: 1_800_000_000))
+        XCTAssertEqual(passed.spoken, "5-hour 42%; Account default@example.test")
+        XCTAssertEqual(ReplyBar.of(events: [], summary: try summary(.claude, account: nil), book: nil, now: now).spoken, "")
+    }
+
     // MARK: R4-5 Context text
 
     func testTokensAreWrittenInThousandsAndMillions() {

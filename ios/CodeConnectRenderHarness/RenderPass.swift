@@ -112,6 +112,12 @@ final class RenderPass: XCTestCase {
 
     func testRendersTheSwitchedRunAtLarge() throws { try render(at: .large, Self.switchedRun) }
 
+    private static let usage = RenderCatalog.all.filter { $0.name.hasPrefix("session-usage-") }
+
+    func testRendersTheUsageAtLarge() throws { try render(at: .large, Self.usage) }
+
+    func testRendersTheUsageAtAX5() throws { try render(at: .ax5, Self.usage) }
+
     // MARK: - The pass
 
     private func render(at size: Size, _ scenarios: [RenderScenario] = RenderCatalog.all) throws {

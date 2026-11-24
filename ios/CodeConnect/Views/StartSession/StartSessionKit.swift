@@ -118,23 +118,14 @@ struct StartMessagePill: View {
         .padding(.leading, CC.space.sm)
         .padding(.trailing, CC.size.hitTarget + CC.space.xxs)
         .padding(.vertical, CC.space.xs)
-        .frame(minHeight: CC.size.controlSm + 2 * CC.space.xs)
+        .frame(minHeight: CCPillSurface.height)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .bottomTrailing) {
             CCVoiceButton(phase: phase) { act() }
                 .accessibilityIdentifier("start-message-button")
                 .padding(CC.space.xxs)
         }
-        .background {
-            RoundedRectangle(cornerRadius: (CC.size.controlSm + 2 * CC.space.xs) / 2, style: .continuous)
-                .fill(CC.color.surfaceOverlay)
-                .overlay {
-                    RoundedRectangle(
-                        cornerRadius: (CC.size.controlSm + 2 * CC.space.xs) / 2, style: .continuous
-                    )
-                    .strokeBorder(CC.color.borderStrong, lineWidth: CC.stroke.hairline)
-                }
-        }
+        .background { CCPillSurface() }
         .onDisappear { dictation.cancel() }
     }
 

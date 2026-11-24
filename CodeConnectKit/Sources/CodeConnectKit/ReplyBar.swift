@@ -30,6 +30,15 @@ public struct ReplyBar: Equatable, Sendable {
     /// names no account.
     public let account: String?
 
+    /// The bar's whole reading as one sentence, as both apps give it to VoiceOver: the context, each window with its
+    /// reset, the no-limits words, then the account; an absent part left out.
+    public var spoken: String {
+        var parts = context.map { ["Context \($0.used) of \($0.window)"] } ?? []
+        parts += limits.map { "\($0.caption) \($0.usedPercent)%" + ($0.resets.map { ", \($0)" } ?? "") }
+        parts += [limitsNote, account.map { "Account \($0)" }].compactMap { $0 }
+        return parts.joined(separator: "; ")
+    }
+
     public static func of(events: [Event], summary: SessionSummary, book: AccountBook?, now: Date) -> ReplyBar {
         let context = events.reversed().lazy.compactMap { event -> Context? in
             guard event.kind == .usage, let used = event.payload["last"]?["totalTokens"]?.intValue,

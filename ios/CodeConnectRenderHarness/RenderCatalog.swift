@@ -1096,6 +1096,141 @@ enum RenderCatalog {
                 try driver.require(
                     app.buttons["session.composer.settings"], "the composer settings control")
             }),
+        // **The run's usage on its settings line**: Claude in Bypass permissions with its context and two windows of
+        // its account, the fullest full.
+        RenderScenario(
+            name: "session-usage-bypass-100",
+            purpose: "the settings line with the run's usage: context, two windows, the fullest at 100%",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-2",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 100),
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        RenderScenario(
+            name: "session-usage-codex-figures",
+            purpose: "the settings line with the run's usage on a Codex run at its default: all the figures",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        // **The fullest window's ring alone**: Claude in Plan, whose line leaves no room for all the figures at L,
+        // at three shares, so the percent's slot is seen holding its width.
+        RenderScenario(
+            name: "session-usage-ring-9",
+            purpose: "the settings line with the fullest window's ring alone, at 9%",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 9),
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        RenderScenario(
+            name: "session-usage-ring-23",
+            purpose: "the settings line with the fullest window's ring alone, at 23%",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        RenderScenario(
+            name: "session-usage-ring-100",
+            purpose: "the settings line with the fullest window's ring alone, at 100%",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 100),
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        RenderScenario(
+            name: "session-usage-context-only",
+            purpose: "the settings line with the run's context and no account limits read",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+                "-CC_FIXTURE_USAGE", "YES",
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        RenderScenario(
+            name: "session-usage-limits-only",
+            purpose: "the settings line with its account's limits and no context reported",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+                "-CC_FIXTURE_USAGE", "limits", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        RenderScenario(
+            name: "session-usage-codex-card-waiting",
+            purpose: "a live Codex run with a card waiting: the settings line disabled, its usage beside it",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-blocked",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control")
+            }),
+        RenderScenario(
+            name: "session-usage-sheet-claude",
+            purpose: "the settings sheet's Usage section for a Claude run: first as a tap opens it, last at AX5",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control").tap()
+                // As it opens where Usage stands first (scrolled not at all); at accessibility sizes, where it stands
+                // last, scrolled down to it.
+                try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
+                try driver.require(driver.text(containing: "Usage", in: app), "the sheet's Usage section")
+            }),
+        RenderScenario(
+            name: "session-usage-sheet-no-plan-limits",
+            purpose: "the settings sheet's Usage section for an account its agent says has no plan limits",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", noPlanLimitsAccounts,
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control").tap()
+                try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
+                try driver.require(driver.text(containing: "No plan limits", in: app), "the no-limits row")
+            }),
+        RenderScenario(
+            name: "session-usage-sheet-codex",
+            purpose: "the settings sheet's Usage section for a Codex run: first as a tap opens it, last at AX5",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    app.buttons["session.composer.settings"], "the composer settings control").tap()
+                // As it opens where Usage stands first (scrolled not at all); at accessibility sizes, where it stands
+                // last, scrolled down to it.
+                try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
+                try driver.require(driver.text(containing: "Usage", in: app), "the sheet's Usage section")
+            }),
         RenderScenario(
             name: "session-settings-over-a-long-reply",
             purpose:
@@ -1379,6 +1514,31 @@ enum RenderCatalog {
     /// website's pictures.
     static let nineFortyOneToday = ISO8601DateFormatter().string(
         from: Calendar.current.date(bySettingHour: 9, minute: 41, second: 0, of: Date())!)
+
+    /// An `accounts` reply for `-CC_ACCOUNTS_WIRE`: each agent's Default signed in as you@example.com, its 5-hour window
+    /// at `fullest` percent, its week at 4%: below every `fullest` a scene names, so the 5-hour window is the fullest.
+    /// They reset two hours and three days from when the catalog is read, which a picture taken moments later draws as
+    /// "1h 59m" and "2 days".
+    /// An `accounts` reply whose Claude Default is signed in as you@example.com with no plan limits.
+    static let noPlanLimitsAccounts = """
+        {"type":"accounts","request_id":"fx-usage","accounts":[],"active":[],"defaults":[\
+        {"agent":"claude","facts":{"email":"you@example.com","limits_available":false,\
+        "read_at":"2026-11-24T09:00:00Z","windows":[]}}]}
+        """
+
+    static func usageAccounts(fullest: Int) -> String {
+        let now = Int(Date().timeIntervalSince1970)
+        let read = ISO8601DateFormatter().string(from: Date())
+        let facts = """
+            {"email":"you@example.com","plan":"max","read_at":"\(read)","windows":[\
+            {"used_percent":\(fullest),"window_minutes":300,"resets_at":\(now + 7_200)},\
+            {"used_percent":4,"window_minutes":10080,"resets_at":\(now + 259_200)}]}
+            """
+        return """
+            {"type":"accounts","request_id":"fx-usage","accounts":[],"active":[],"defaults":[\
+            {"agent":"claude","facts":\(facts)},{"agent":"codex","facts":\(facts)}]}
+            """
+    }
 
     /// Its row in Settings, by the name its label starts with.
     static func secondMachineRow(_ app: XCUIApplication) -> XCUIElement {

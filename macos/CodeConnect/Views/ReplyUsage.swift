@@ -27,7 +27,7 @@ struct ReplyUsage: View {
                         }
                     }
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(Self.spoken(bar))
+                    .accessibilityLabel(bar.spoken)
                     .accessibilityIdentifier("session.composer.usage")
             }
         }
@@ -85,13 +85,6 @@ struct ReplyUsage: View {
             if let rest { Text(rest).font(Theme.ui(12)).foregroundStyle(Card.muted) }
         }
         .padding(.vertical, 4)
-    }
-
-    private static func spoken(_ bar: ReplyBar) -> String {
-        var parts = bar.context.map { ["Context \($0.used) of \($0.window)"] } ?? []
-        parts += bar.limits.map { "\($0.caption) \($0.usedPercent)%" + ($0.resets.map { ", \($0)" } ?? "") }
-        parts += [bar.limitsNote, bar.account.map { "Account \($0)" }].compactMap { $0 }
-        return parts.joined(separator: "; ")
     }
 }
 
