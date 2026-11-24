@@ -68,7 +68,8 @@ struct FolderBrowser: View {
             .onKeyPress(.upArrow) { step(down: false) }
             .onKeyPress(.return) { open(selected) }
             .onKeyPress(.leftArrow) { up() }
-            .onKeyPress(.delete) { up() }
+            // ⌫ sends DEL (U+007F) on a Mac, not SwiftUI's `.delete` (U+0008).
+            .onKeyPress(KeyEquivalent("\u{7F}")) { up() }
             bar
         }
         .task(id: request) { context.listFolder(request) }
