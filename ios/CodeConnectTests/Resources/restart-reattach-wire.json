@@ -1,0 +1,1655 @@
+{
+  "activity": {
+    "events": [
+      {
+        "kind": "user_message",
+        "payload": {
+          "request_id": "f712a902-1bab-41dd-84fb-e42638cad0dd",
+          "text": "hello"
+        },
+        "seq": 10,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "daemon",
+        "source_event_id": "say:a3135b4d-fd6b-8471-801a-9a0470ae8f5d",
+        "ts": "2026-11-24T17:51:29.648Z",
+        "turn_id": "01a20eaf-276e-7752-b039-f973b0d8c82e"
+      },
+      {
+        "item_id": "msg_3",
+        "kind": "agent_message",
+        "payload": {
+          "interrupted": false,
+          "text": "stub answer 3"
+        },
+        "seq": 11,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "codex",
+        "source_event_id": "01a20eae-a895-76d3-b869-8bce6823afba:item:msg_3",
+        "ts": "2026-11-24T17:51:29.661Z",
+        "turn_id": "01a20eaf-276e-7752-b039-f973b0d8c82e"
+      },
+      {
+        "kind": "usage",
+        "payload": {
+          "last": {
+            "cacheWriteInputTokens": 0,
+            "cachedInputTokens": 0,
+            "inputTokens": 10,
+            "outputTokens": 5,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 15
+          },
+          "modelContextWindow": 258400,
+          "total": {
+            "cacheWriteInputTokens": 0,
+            "cachedInputTokens": 0,
+            "inputTokens": 20,
+            "outputTokens": 10,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 30
+          }
+        },
+        "seq": 12,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "codex",
+        "source_event_id": "01a20eae-a895-76d3-b869-8bce6823afba:usage:01a20eaf-276e-7752-b039-f973b0d8c82e",
+        "ts": "2026-11-24T17:51:29.666Z",
+        "turn_id": "01a20eaf-276e-7752-b039-f973b0d8c82e"
+      },
+      {
+        "kind": "turn_complete",
+        "payload": {
+          "completed_at": 1795542689,
+          "duration_ms": 16,
+          "error": null,
+          "started_at": 1795542689,
+          "status": "completed"
+        },
+        "seq": 13,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "codex",
+        "source_event_id": "01a20eae-a895-76d3-b869-8bce6823afba:turn:01a20eaf-276e-7752-b039-f973b0d8c82e",
+        "ts": "2026-11-24T17:51:29.666Z",
+        "turn_id": "01a20eaf-276e-7752-b039-f973b0d8c82e"
+      }
+    ],
+    "sessions": [
+      {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "subscribed",
+        "codex_thread_id": "01a20eae-a895-76d3-b869-8bce6823afba",
+        "created_at": "2026-11-24T17:50:57.110Z",
+        "cwd": "/private/tmp/ccmk.6rhmjO/h/proj-alpha",
+        "diff_stat": {
+          "added": 0,
+          "removed": 0
+        },
+        "git_branch": "main",
+        "last_seq": 13,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "efforts": [],
+              "label": "stub-model",
+              "value": "stub-model"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Fast, go-to model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Sol",
+              "value": "gpt-6.2-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Our most capable model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Astra",
+              "value": "gpt-6.2-astra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Efficient model that excels at visual understanding and computer use.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1 Terra",
+              "value": "gpt-6.1-terra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1-Sol",
+              "value": "gpt-6.1-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Astra",
+              "value": "gpt-6-astra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Sol",
+              "value": "gpt-6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Fast and affordable model for easier tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-6-Luna",
+              "value": "gpt-6-luna"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Sol",
+              "value": "gpt-5.6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy balanced model for agentic coding.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Terra",
+              "value": "gpt-5.6-terra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy fast model for simpler tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-5.6-Luna",
+              "value": "gpt-5.6-luna"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy coding model.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "label": "GPT-5.5",
+              "value": "gpt-5.5"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Default",
+              "value": "auto"
+            },
+            {
+              "label": "Read Only",
+              "value": "read-only"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Full Access",
+              "value": "full-access"
+            }
+          ],
+          "selected_model": "stub-model"
+        },
+        "model": {
+          "seq": 8,
+          "value": "stub-model"
+        },
+        "permission_mode": {
+          "seq": 8,
+          "value": "auto"
+        },
+        "project_label": "proj-alpha",
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "updated_at": "2026-11-24T17:50:57.204Z"
+      },
+      {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "subscribed",
+        "codex_thread_id": "01a20eae-ab9e-7520-a7fd-b4c802320011",
+        "created_at": "2026-11-24T17:50:57.833Z",
+        "cwd": "/private/tmp/ccmk.6rhmjO/h/proj-notes",
+        "diff_stat": {
+          "added": 0,
+          "removed": 0
+        },
+        "git_branch": "main",
+        "last_seq": 9,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "efforts": [],
+              "label": "stub-model",
+              "value": "stub-model"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Fast, go-to model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Sol",
+              "value": "gpt-6.2-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Our most capable model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Astra",
+              "value": "gpt-6.2-astra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Efficient model that excels at visual understanding and computer use.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1 Terra",
+              "value": "gpt-6.1-terra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1-Sol",
+              "value": "gpt-6.1-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Astra",
+              "value": "gpt-6-astra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Sol",
+              "value": "gpt-6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Fast and affordable model for easier tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-6-Luna",
+              "value": "gpt-6-luna"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Sol",
+              "value": "gpt-5.6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy balanced model for agentic coding.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Terra",
+              "value": "gpt-5.6-terra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy fast model for simpler tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-5.6-Luna",
+              "value": "gpt-5.6-luna"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy coding model.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "label": "GPT-5.5",
+              "value": "gpt-5.5"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Default",
+              "value": "auto"
+            },
+            {
+              "label": "Read Only",
+              "value": "read-only"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Full Access",
+              "value": "full-access"
+            }
+          ],
+          "selected_model": "stub-model"
+        },
+        "model": {
+          "seq": 8,
+          "value": "stub-model"
+        },
+        "permission_mode": {
+          "seq": 8,
+          "value": "auto"
+        },
+        "project_label": "proj-notes",
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "updated_at": "2026-11-24T17:50:57.983Z"
+      }
+    ]
+  },
+  "before_restart": {
+    "events": [
+      {
+        "kind": "codex_settings",
+        "payload": {
+          "approval_policy": "on-request",
+          "collaboration_mode": "default",
+          "effort": null,
+          "model": "stub-model",
+          "sandbox": "workspaceWrite"
+        },
+        "seq": 1,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "codex",
+        "source_event_id": "01a20eae-a895-76d3-b869-8bce6823afba:settings:64a0c06f-7f2f-40ba-a869-03a68bd934a8",
+        "ts": "2026-11-24T17:50:57.206Z"
+      },
+      {
+        "kind": "link_state",
+        "payload": {
+          "link": "attached",
+          "reason": "agent host linked"
+        },
+        "seq": 2,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "daemon",
+        "ts": "2026-11-24T17:50:57.206Z"
+      },
+      {
+        "kind": "session_start",
+        "payload": {
+          "cli_version": "0.170.0",
+          "cwd": "/private/tmp/ccmk.6rhmjO/h/proj-alpha",
+          "rollout_path": "/private/tmp/ccmk.6rhmjO/cx/in/sessions/2026/11/24/rollout-2026-11-24T20-50-57-01a20eae-a895-76d3-b869-8bce6823afba.jsonl",
+          "thread_id": "01a20eae-a895-76d3-b869-8bce6823afba"
+        },
+        "seq": 3,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "codex",
+        "source_event_id": "01a20eae-a895-76d3-b869-8bce6823afba:thread_started",
+        "ts": "2026-11-24T17:50:57.207Z"
+      },
+      {
+        "item_id": "01a20eae-a8d1-7ca0-a993-8de3b8669f0b",
+        "kind": "user_message",
+        "payload": {
+          "interrupted": false,
+          "text": "hello"
+        },
+        "seq": 4,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "codex",
+        "source_event_id": "01a20eae-a895-76d3-b869-8bce6823afba:item:01a20eae-a8d1-7ca0-a993-8de3b8669f0b",
+        "ts": "2026-11-24T17:50:57.234Z",
+        "turn_id": "01a20eae-a8b1-7c71-9c65-2da13c50a4dd"
+      },
+      {
+        "item_id": "msg_1",
+        "kind": "agent_message",
+        "payload": {
+          "interrupted": false,
+          "text": "stub answer 1"
+        },
+        "seq": 5,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "codex",
+        "source_event_id": "01a20eae-a895-76d3-b869-8bce6823afba:item:msg_1",
+        "ts": "2026-11-24T17:50:57.240Z",
+        "turn_id": "01a20eae-a8b1-7c71-9c65-2da13c50a4dd"
+      },
+      {
+        "kind": "usage",
+        "payload": {
+          "last": {
+            "cacheWriteInputTokens": 0,
+            "cachedInputTokens": 0,
+            "inputTokens": 10,
+            "outputTokens": 5,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 15
+          },
+          "modelContextWindow": 258400,
+          "total": {
+            "cacheWriteInputTokens": 0,
+            "cachedInputTokens": 0,
+            "inputTokens": 10,
+            "outputTokens": 5,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 15
+          }
+        },
+        "seq": 6,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "codex",
+        "source_event_id": "01a20eae-a895-76d3-b869-8bce6823afba:usage:01a20eae-a8b1-7c71-9c65-2da13c50a4dd",
+        "ts": "2026-11-24T17:50:57.244Z",
+        "turn_id": "01a20eae-a8b1-7c71-9c65-2da13c50a4dd"
+      },
+      {
+        "kind": "turn_complete",
+        "payload": {
+          "completed_at": 1795542657,
+          "duration_ms": 39,
+          "error": null,
+          "started_at": 1795542657,
+          "status": "completed"
+        },
+        "seq": 7,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "codex",
+        "source_event_id": "01a20eae-a895-76d3-b869-8bce6823afba:turn:01a20eae-a8b1-7c71-9c65-2da13c50a4dd",
+        "ts": "2026-11-24T17:50:57.244Z",
+        "turn_id": "01a20eae-a8b1-7c71-9c65-2da13c50a4dd"
+      },
+      {
+        "kind": "codex_settings",
+        "payload": {
+          "approval_policy": "on-request",
+          "collaboration_mode": "default",
+          "effort": null,
+          "model": "stub-model",
+          "sandbox": "workspaceWrite"
+        },
+        "seq": 1,
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "source": "codex",
+        "source_event_id": "01a20eae-ab9e-7520-a7fd-b4c802320011:settings:7ebf8851-b922-45b9-9217-2811e0b9e9a2",
+        "ts": "2026-11-24T17:50:57.985Z"
+      },
+      {
+        "kind": "link_state",
+        "payload": {
+          "link": "attached",
+          "reason": "agent host linked"
+        },
+        "seq": 2,
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "source": "daemon",
+        "ts": "2026-11-24T17:50:57.985Z"
+      },
+      {
+        "kind": "session_start",
+        "payload": {
+          "cli_version": "0.170.0",
+          "cwd": "/private/tmp/ccmk.6rhmjO/h/proj-notes",
+          "rollout_path": "/private/tmp/ccmk.6rhmjO/cx/in/sessions/2026/11/24/rollout-2026-11-24T20-50-57-01a20eae-ab9e-7520-a7fd-b4c802320011.jsonl",
+          "thread_id": "01a20eae-ab9e-7520-a7fd-b4c802320011"
+        },
+        "seq": 3,
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "source": "codex",
+        "source_event_id": "01a20eae-ab9e-7520-a7fd-b4c802320011:thread_started",
+        "ts": "2026-11-24T17:50:57.987Z"
+      },
+      {
+        "item_id": "01a20eae-abde-7760-a478-0408a69e5a8c",
+        "kind": "user_message",
+        "payload": {
+          "interrupted": false,
+          "text": "hello"
+        },
+        "seq": 4,
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "source": "codex",
+        "source_event_id": "01a20eae-ab9e-7520-a7fd-b4c802320011:item:01a20eae-abde-7760-a478-0408a69e5a8c",
+        "ts": "2026-11-24T17:50:58.015Z",
+        "turn_id": "01a20eae-abbd-76f2-9479-c129d67bbc21"
+      },
+      {
+        "item_id": "msg_2",
+        "kind": "agent_message",
+        "payload": {
+          "interrupted": false,
+          "text": "stub answer 2"
+        },
+        "seq": 5,
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "source": "codex",
+        "source_event_id": "01a20eae-ab9e-7520-a7fd-b4c802320011:item:msg_2",
+        "ts": "2026-11-24T17:50:58.020Z",
+        "turn_id": "01a20eae-abbd-76f2-9479-c129d67bbc21"
+      },
+      {
+        "kind": "usage",
+        "payload": {
+          "last": {
+            "cacheWriteInputTokens": 0,
+            "cachedInputTokens": 0,
+            "inputTokens": 10,
+            "outputTokens": 5,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 15
+          },
+          "modelContextWindow": 258400,
+          "total": {
+            "cacheWriteInputTokens": 0,
+            "cachedInputTokens": 0,
+            "inputTokens": 10,
+            "outputTokens": 5,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 15
+          }
+        },
+        "seq": 6,
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "source": "codex",
+        "source_event_id": "01a20eae-ab9e-7520-a7fd-b4c802320011:usage:01a20eae-abbd-76f2-9479-c129d67bbc21",
+        "ts": "2026-11-24T17:50:58.024Z",
+        "turn_id": "01a20eae-abbd-76f2-9479-c129d67bbc21"
+      },
+      {
+        "kind": "turn_complete",
+        "payload": {
+          "completed_at": 1795542658,
+          "duration_ms": 39,
+          "error": null,
+          "started_at": 1795542657,
+          "status": "completed"
+        },
+        "seq": 7,
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "source": "codex",
+        "source_event_id": "01a20eae-ab9e-7520-a7fd-b4c802320011:turn:01a20eae-abbd-76f2-9479-c129d67bbc21",
+        "ts": "2026-11-24T17:50:58.024Z",
+        "turn_id": "01a20eae-abbd-76f2-9479-c129d67bbc21"
+      }
+    ],
+    "sessions": [
+      {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "subscribed",
+        "codex_thread_id": "01a20eae-a895-76d3-b869-8bce6823afba",
+        "created_at": "2026-11-24T17:50:57.110Z",
+        "cwd": "/private/tmp/ccmk.6rhmjO/h/proj-alpha",
+        "diff_stat": {
+          "added": 0,
+          "removed": 0
+        },
+        "git_branch": "main",
+        "last_seq": 7,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "efforts": [],
+              "label": "stub-model",
+              "value": "stub-model"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Fast, go-to model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Sol",
+              "value": "gpt-6.2-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Our most capable model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Astra",
+              "value": "gpt-6.2-astra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Efficient model that excels at visual understanding and computer use.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1 Terra",
+              "value": "gpt-6.1-terra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1-Sol",
+              "value": "gpt-6.1-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Astra",
+              "value": "gpt-6-astra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Sol",
+              "value": "gpt-6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Fast and affordable model for easier tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-6-Luna",
+              "value": "gpt-6-luna"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Sol",
+              "value": "gpt-5.6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy balanced model for agentic coding.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Terra",
+              "value": "gpt-5.6-terra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy fast model for simpler tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-5.6-Luna",
+              "value": "gpt-5.6-luna"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy coding model.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "label": "GPT-5.5",
+              "value": "gpt-5.5"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Default",
+              "value": "auto"
+            },
+            {
+              "label": "Read Only",
+              "value": "read-only"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Full Access",
+              "value": "full-access"
+            }
+          ],
+          "selected_model": "stub-model"
+        },
+        "model": {
+          "seq": 1,
+          "value": "stub-model"
+        },
+        "permission_mode": {
+          "seq": 1,
+          "value": "auto"
+        },
+        "project_label": "proj-alpha",
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "updated_at": "2026-11-24T17:50:57.204Z"
+      },
+      {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "subscribed",
+        "codex_thread_id": "01a20eae-ab9e-7520-a7fd-b4c802320011",
+        "created_at": "2026-11-24T17:50:57.833Z",
+        "cwd": "/private/tmp/ccmk.6rhmjO/h/proj-notes",
+        "diff_stat": {
+          "added": 0,
+          "removed": 0
+        },
+        "git_branch": "main",
+        "last_seq": 7,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "efforts": [],
+              "label": "stub-model",
+              "value": "stub-model"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Fast, go-to model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Sol",
+              "value": "gpt-6.2-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Our most capable model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Astra",
+              "value": "gpt-6.2-astra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Efficient model that excels at visual understanding and computer use.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1 Terra",
+              "value": "gpt-6.1-terra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1-Sol",
+              "value": "gpt-6.1-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Astra",
+              "value": "gpt-6-astra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Sol",
+              "value": "gpt-6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Fast and affordable model for easier tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-6-Luna",
+              "value": "gpt-6-luna"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Sol",
+              "value": "gpt-5.6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy balanced model for agentic coding.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Terra",
+              "value": "gpt-5.6-terra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy fast model for simpler tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-5.6-Luna",
+              "value": "gpt-5.6-luna"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy coding model.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "label": "GPT-5.5",
+              "value": "gpt-5.5"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Default",
+              "value": "auto"
+            },
+            {
+              "label": "Read Only",
+              "value": "read-only"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Full Access",
+              "value": "full-access"
+            }
+          ],
+          "selected_model": "stub-model"
+        },
+        "model": {
+          "seq": 1,
+          "value": "stub-model"
+        },
+        "permission_mode": {
+          "seq": 1,
+          "value": "auto"
+        },
+        "project_label": "proj-notes",
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "updated_at": "2026-11-24T17:50:57.983Z"
+      }
+    ]
+  },
+  "restart": {
+    "events": [
+      {
+        "kind": "codex_settings",
+        "payload": {
+          "approval_policy": "on-request",
+          "collaboration_mode": "default",
+          "effort": null,
+          "model": "stub-model",
+          "sandbox": "workspaceWrite"
+        },
+        "seq": 8,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "codex",
+        "source_event_id": "01a20eae-a895-76d3-b869-8bce6823afba:settings:05915dc0-af90-45c9-967d-5a8d9f4f8984",
+        "ts": "2026-11-24T17:51:08.442Z"
+      },
+      {
+        "kind": "link_state",
+        "payload": {
+          "link": "attached",
+          "reason": "agent host linked"
+        },
+        "seq": 9,
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "source": "daemon",
+        "ts": "2026-11-24T17:51:08.443Z"
+      },
+      {
+        "kind": "codex_settings",
+        "payload": {
+          "approval_policy": "on-request",
+          "collaboration_mode": "default",
+          "effort": null,
+          "model": "stub-model",
+          "sandbox": "workspaceWrite"
+        },
+        "seq": 8,
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "source": "codex",
+        "source_event_id": "01a20eae-ab9e-7520-a7fd-b4c802320011:settings:eac62288-aa0f-4b19-b329-9111b878ff85",
+        "ts": "2026-11-24T17:51:08.442Z"
+      },
+      {
+        "kind": "link_state",
+        "payload": {
+          "link": "attached",
+          "reason": "agent host linked"
+        },
+        "seq": 9,
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "source": "daemon",
+        "ts": "2026-11-24T17:51:08.442Z"
+      }
+    ],
+    "sessions": [
+      {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "subscribed",
+        "codex_thread_id": "01a20eae-a895-76d3-b869-8bce6823afba",
+        "created_at": "2026-11-24T17:50:57.110Z",
+        "cwd": "/private/tmp/ccmk.6rhmjO/h/proj-alpha",
+        "diff_stat": {
+          "added": 0,
+          "removed": 0
+        },
+        "git_branch": "main",
+        "last_seq": 9,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "efforts": [],
+              "label": "stub-model",
+              "value": "stub-model"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Fast, go-to model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Sol",
+              "value": "gpt-6.2-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Our most capable model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Astra",
+              "value": "gpt-6.2-astra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Efficient model that excels at visual understanding and computer use.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1 Terra",
+              "value": "gpt-6.1-terra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1-Sol",
+              "value": "gpt-6.1-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Astra",
+              "value": "gpt-6-astra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Sol",
+              "value": "gpt-6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Fast and affordable model for easier tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-6-Luna",
+              "value": "gpt-6-luna"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Sol",
+              "value": "gpt-5.6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy balanced model for agentic coding.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Terra",
+              "value": "gpt-5.6-terra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy fast model for simpler tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-5.6-Luna",
+              "value": "gpt-5.6-luna"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy coding model.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "label": "GPT-5.5",
+              "value": "gpt-5.5"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Default",
+              "value": "auto"
+            },
+            {
+              "label": "Read Only",
+              "value": "read-only"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Full Access",
+              "value": "full-access"
+            }
+          ],
+          "selected_model": "stub-model"
+        },
+        "model": {
+          "seq": 8,
+          "value": "stub-model"
+        },
+        "permission_mode": {
+          "seq": 8,
+          "value": "auto"
+        },
+        "project_label": "proj-alpha",
+        "session_id": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "session_uid": "01M87AXA2PJ0TKMX3KZT5YKJZY",
+        "updated_at": "2026-11-24T17:50:57.204Z"
+      },
+      {
+        "account": {
+          "id": null,
+          "label": "Default"
+        },
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "subscribed",
+        "codex_thread_id": "01a20eae-ab9e-7520-a7fd-b4c802320011",
+        "created_at": "2026-11-24T17:50:57.833Z",
+        "cwd": "/private/tmp/ccmk.6rhmjO/h/proj-notes",
+        "diff_stat": {
+          "added": 0,
+          "removed": 0
+        },
+        "git_branch": "main",
+        "last_seq": 9,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "efforts": [],
+              "label": "stub-model",
+              "value": "stub-model"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Fast, go-to model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Sol",
+              "value": "gpt-6.2-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Our most capable model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.2-Astra",
+              "value": "gpt-6.2-astra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Efficient model that excels at visual understanding and computer use.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1 Terra",
+              "value": "gpt-6.1-terra"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6.1-Sol",
+              "value": "gpt-6.1-sol"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Previous generation model for complex coding and professional work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Astra",
+              "value": "gpt-6-astra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-6-Sol",
+              "value": "gpt-6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Fast and affordable model for easier tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-6-Luna",
+              "value": "gpt-6-luna"
+            },
+            {
+              "default_effort": "low",
+              "detail": "Legacy model for coding and everyday work.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Sol",
+              "value": "gpt-5.6-sol"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy balanced model for agentic coding.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ],
+              "label": "GPT-5.6-Terra",
+              "value": "gpt-5.6-terra"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy fast model for simpler tasks.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "label": "GPT-5.6-Luna",
+              "value": "gpt-5.6-luna"
+            },
+            {
+              "default_effort": "medium",
+              "detail": "Legacy coding model.",
+              "efforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "label": "GPT-5.5",
+              "value": "gpt-5.5"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Default",
+              "value": "auto"
+            },
+            {
+              "label": "Read Only",
+              "value": "read-only"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Full Access",
+              "value": "full-access"
+            }
+          ],
+          "selected_model": "stub-model"
+        },
+        "model": {
+          "seq": 8,
+          "value": "stub-model"
+        },
+        "permission_mode": {
+          "seq": 8,
+          "value": "auto"
+        },
+        "project_label": "proj-notes",
+        "session_id": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "session_uid": "01M87AXAS9BEYEWMZEH2FFTTP2",
+        "updated_at": "2026-11-24T17:50:57.983Z"
+      }
+    ]
+  }
+}
