@@ -6,6 +6,8 @@ User-facing changes, newest first. Mac releases are cut per
 ## CodeConnect 0.19.18, with the iPhone app 1.1.35
 
 - On the Mac, /diff in a Claude Code session's reply box opens the session's Changes tab, as it does on the iPhone.
+- On the iPhone, a session you start opens even when its computer answers before the starting screen has appeared;
+  before, the phone could stay on "Starting…" while its list already showed the session.
 - On the Mac and Linux, a Codex session is woken for its CodeConnect mail only between its turns, so a turn that
   already read its mail is not followed by a second wake.
 - A session now finds CodeConnect's mail from a plain request, such as "tell the session on my other computer…",
