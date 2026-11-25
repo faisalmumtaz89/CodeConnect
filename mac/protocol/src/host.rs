@@ -135,9 +135,9 @@ pub struct StartOptions {
     /// A new worktree for claude to make and start in, as `claude --worktree <name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
-    /// Folders claude may read beside its own (`additionalDirectories`, `--add-dir`): the run's
-    /// uploads folder (minor 50), so a file sent with a message is read without a card. A host
-    /// that predates it ignores it, and such a file asks first.
+    /// Folders the agent may read beside its own (claude's `additionalDirectories`, `--add-dir`; agy's
+    /// session `additionalDirectories`): the run's uploads folder (minor 50), so a file sent with a
+    /// message is read without a card. A host that predates it ignores it, and such a file asks first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_directories: Vec<String>,
     /// CodeConnect's mail server, run by Claude as a stdio MCP server.

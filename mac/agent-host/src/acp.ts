@@ -218,9 +218,13 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
       throw new Error(`agy speaks ACP version ${initialized.result?.protocolVersion}, not ${PROTOCOL_VERSION}`);
     }
     const mail = start.options.mail;
+    // The run's uploads folder among the folders agy may read, so a file sent with a message is read without a card,
+    // as on a Claude run (start.ts).
+    const folders = start.options.additional_directories ?? [];
     const opening = {
       cwd: start.options.cwd,
       mcpServers: [{ name: 'codeconnect', command: mail.command, args: mail.args, env: [] }],
+      ...(folders.length === 0 ? {} : { additionalDirectories: folders }),
     };
     const resume = start.options.resume;
     if (resume !== undefined) {

@@ -16,6 +16,7 @@ async function run(
   script: { version?: number; resume?: boolean; quiet_on_cancel?: boolean; leave_child?: boolean; tool?: string } = {},
   prompt = 'read the note',
   resume?: string,
+  more: object = {},
 ) {
   const dir = runDir();
   const work = join(dir, 'work');
@@ -24,7 +25,7 @@ async function run(
   startHost(dir);
   const ccd = await open(dir);
   await ccd.attach(0, 1);
-  const options = { ...antigravityStart.options, cwd: work, claude_path: agy, ...(resume ? { resume } : {}) };
+  const options = { ...antigravityStart.options, cwd: work, claude_path: agy, ...(resume ? { resume } : {}), ...more };
   ccd.send({ ...antigravityStart, prompt, options });
   const outcome = await ccd.line('the start outcome', (line) => line.type === 'outcome');
   return { dir, work, ccd, outcome };
@@ -161,6 +162,18 @@ test('stop answers an open request cancelled, cancels the session and ends agy; 
   expect(lines.find((message) => message.method === 'session/cancel').params).toStrictEqual({ sessionId: 'sess-1' });
   expect(ccd.lines.find((line) => line.type === 'exited')).toMatchObject({ code: 0 });
 }, 15_000);
+
+test('the run\'s uploads folder reaches agy as a folder it may read, at a start and at a relaunch', async () => {
+  const uploads = { additional_directories: ['/tmp/uploads/the-run'] };
+  const started = await run({}, 'read the note', undefined, uploads);
+  await started.ccd.line('the permission request', (line) => line.type === 'permission');
+  expect(stdin(started.dir).find((message) => message.method === 'session/new').params.additionalDirectories)
+    .toStrictEqual(['/tmp/uploads/the-run']);
+  const resumed = await run({}, 'again', 'sess-9', uploads);
+  await resumed.ccd.line('the permission request', (line) => line.type === 'permission');
+  expect(stdin(resumed.dir).find((message) => message.method === 'session/resume').params.additionalDirectories)
+    .toStrictEqual(['/tmp/uploads/the-run']);
+}, 30_000);
 
 test('a relaunch resumes the run\'s session with the mail server again, then prompts it', async () => {
   const { dir, work, ccd, outcome } = await run({}, 'carry on', 'sess-9');
