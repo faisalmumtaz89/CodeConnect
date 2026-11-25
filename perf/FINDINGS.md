@@ -147,7 +147,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
 - **Proposed fix:** After code optimizations are complete, benchmark `mimalloc` or `jemalloc` (or `musl` default `mallocng` vs `mimalloc` with `MI_PURGE_DELAY=0`) on its own dedicated commit, verifying clean builds on `x86_64-unknown-linux-musl` AND `aarch64-unknown-linux-musl` (if cross-linker is available). Keep only if it improves RSS and/or CPU without regressing binary size or idle RSS beyond threshold; otherwise revert and document.
 - **Expected gain:** Potentially +15–25% throughput on `musl` or -50% RSS on `gnu`, at the cost of ~100–200 KiB binary size and ~0.5–1 MiB baseline RSS (must measure carefully!).
 - **Risk:** Medium (C build / musl / aarch64 cross-compile compatibility; evaluate strictly per decision rules).
-- **Status:** `todo`
+- **Status:** `rejected` (moved to `perf/PROPOSALS.md` P6 — no `aarch64-linux-musl` C cross-linker available in this VM to satisfy the all-supported-targets decision rule, and `musl` `mallocng` already achieves 5.50 MiB idle RSS [0.91 MiB anon] and 1,300+ ev/s burst after F1–F10. Separate build-profile experiment `opt-level = "s"` vs `"z"` also rejected: grew `ccd` by +540.7 KiB [+8.6%] and regressed `cold_idle` RSS `5.50 -> 5.89 MiB` and `burst` RSS `6.99 -> 7.54 MiB`, confirming existing `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true` is already optimal.)
 
 ### F12. `mac/agent-host/src/link.ts` quadratic line slicing on multi-line chunks
 - **Location:** `mac/agent-host/src/link.ts:115-122`
