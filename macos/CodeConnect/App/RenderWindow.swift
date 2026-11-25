@@ -248,6 +248,12 @@
 
         /// `-CC_OPEN <key>`: the run with this key opens beside the list.
         static var opened: String? { UserDefaults.standard.string(forKey: "CC_OPEN") }
+        /// `-CC_ATTACH_FILES <path>,<path>`: the open run's reply box takes these files once its computer takes files, as
+        /// if chosen with the paperclip (the file panel is a window a test launch never opens).
+        static var attachedFiles: [URL] {
+            (UserDefaults.standard.string(forKey: "CC_ATTACH_FILES") ?? "").split(separator: ",")
+                .map { URL(fileURLWithPath: String($0)) }
+        }
         /// `-CC_SESSION_TAB changes`: the opened run shows its Changes.
         static var sessionTab: SessionTab? {
             UserDefaults.standard.string(forKey: "CC_SESSION_TAB") == "changes" ? .changes : nil

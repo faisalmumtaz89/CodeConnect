@@ -83,27 +83,38 @@ enum FileIntake {
     }
 }
 
-/// The files going with the next message, above its words: 64 pt tiles in a row, a picture as itself and any other
-/// file by its name and size, each with its ×. One on its way shows how far it has got; one that failed offers to go
-/// again; one over a limit says why on its face.
+/// The files going with the next message, above its words, in a row: a picture as a 64 pt square of itself, any other
+/// file as a tile of its icon, whole name and size, each with its ×. One on its way shows how far it has got in its
+/// icon's place; one that failed offers Retry there. Under them, in one line, why they hold the message back.
 struct FileTray: View {
     let model: AppModel
     let key: String
 
     var body: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 10) {
-                ForEach(model.files(for: key)) { file in
-                    FileTile(file: file) { model.removeFile(file.id, from: key) } retry: {
-                        model.retryFile(file.id, in: key)
+        VStack(alignment: .leading, spacing: 8) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 10) {
+                    ForEach(model.files(for: key)) { file in
+                        FileTile(file: file) { model.removeFile(file.id, from: key) } retry: {
+                            model.retryFile(file.id, in: key)
+                        }
                     }
                 }
+                // Room for each tile's ×, which stands half outside it.
+                .padding(.top, 6)
+                .padding(.trailing, 6)
             }
-            // Room for each tile's ×, which stands half outside it.
-            .padding(.top, 6)
-            .padding(.trailing, 6)
+            .scrollIndicators(.never)
+            if let reason = model.filesBlockedReason(for: key) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.amber).accessibilityHidden(true)
+                    Text(reason).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.middle)
+                }
+                .font(Theme.ui(12))
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("session.composer.files.reason")
+            }
         }
-        .scrollIndicators(.never)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session.composer.files")
     }
@@ -118,71 +129,65 @@ private struct FileTile: View {
 
     var body: some View {
         face
-            .frame(width: Self.side, height: Self.side)
+            .frame(height: Self.side)
             .background(Theme.raised)
             .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(trouble != nil ? Theme.red.opacity(0.5) : Card.border))
-            .overlay { if case .uploading(let sent) = file.state { Progress(fraction: Double(sent) / Double(max(file.size, 1))) } }
-            .overlay(alignment: .topTrailing) { corner(remove, symbol: "xmark", id: "remove", label: "Remove \(file.name)") }
-            .help(trouble ?? "\(file.name), \(Attachment.sizeText(file.size))")
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(trouble ? Theme.red.opacity(0.5) : Card.border))
+            .overlay(alignment: .topTrailing) {
+                CornerButton(symbol: "xmark", id: "session.composer.file.\(file.id).remove", label: "Remove \(file.name)",
+                    action: remove)
+            }
+            .help("\(file.name), \(Attachment.sizeText(file.size))")
             .accessibilityElement(children: .contain)
             .accessibilityLabel(spoken)
             .accessibilityIdentifier("session.composer.file.\(file.id)")
     }
 
     @ViewBuilder private var face: some View {
-        if case .failed = file.state {
-            Button(action: retry) {
-                VStack(spacing: 4) {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 14, weight: .medium))
-                    Text("Retry").font(Theme.ui(10.5, .medium))
-                }
-                .foregroundStyle(Theme.text)
-                .frame(width: Self.side, height: Self.side)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.hover(radius: 10, id: "session.composer.file.\(file.id).retry"))
-            .accessibilityLabel("Retry \(file.name)")
-            .accessibilityIdentifier("session.composer.file.\(file.id).retry")
-        } else if file.isImage, let data = file.data, let image = NSImage(data: data) {
+        if file.isImage, let data = file.data, let image = NSImage(data: data), file.state == .arrived {
             Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
                 .frame(width: Self.side, height: Self.side)
-                .opacity(file.state == .arrived ? 1 : 0.55)
         } else {
-            VStack(alignment: .leading, spacing: 2) {
-                Image(systemName: trouble == nil ? "doc" : "exclamationmark.circle")
-                    .font(.system(size: 14))
-                    .foregroundStyle(trouble == nil ? Theme.text2 : Theme.red)
-                Spacer(minLength: 0)
-                Text(file.name).font(Theme.ui(10.5, .medium)).foregroundStyle(Theme.text)
-                    .lineLimit(1).truncationMode(.middle)
-                Text(Attachment.sizeText(file.size)).font(Theme.ui(10)).foregroundStyle(Theme.text3).lineLimit(1)
+            HStack(spacing: 10) {
+                mark.frame(width: 28, height: 28)
+                VStack(alignment: .leading, spacing: 3) {
+                    FileName(name: file.name)
+                    Text(Attachment.sizeText(file.size)).font(Theme.ui(11)).foregroundStyle(Theme.text3).lineLimit(1)
+                }
             }
-            .padding(8)
-            .frame(width: Self.side, height: Self.side, alignment: .topLeading)
+            .padding(.leading, 12)
+            .padding(.trailing, 16)
         }
     }
 
-    private func corner(_ action: @escaping () -> Void, symbol: String, id: String, label: String) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 7.5, weight: .bold)).foregroundStyle(Theme.text)
-                .frame(width: 16, height: 16)
-                .background(Theme.sheet, in: Circle())
-                .overlay(Circle().strokeBorder(Color.white.opacity(0.12)))
-                .contentShape(Circle())
-        }
-        .buttonStyle(.hover(radius: 8, over: true, id: "session.composer.file.\(file.id).\(id)"))
-        .offset(x: 5, y: -5)
-        .help(label)
-        .accessibilityLabel(label)
-        .accessibilityIdentifier("session.composer.file.\(file.id).\(id)")
-    }
-
-    /// Why it cannot go as it is, or nil.
-    private var trouble: String? {
+    /// The icon's place: the file's icon, how far it has got while on its way, Retry once it failed, or the mark of a
+    /// file over a limit.
+    @ViewBuilder private var mark: some View {
         switch file.state {
-        case .refused(let reason), .failed(let reason): reason
-        default: nil
+        case .uploading(let sent):
+            Ring(fraction: Double(sent) / Double(max(file.size, 1)))
+        case .failed:
+            Button(action: retry) {
+                Image(systemName: "arrow.clockwise").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
+                    .frame(width: 28, height: 28)
+                    .background(Theme.selected, in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.hover(radius: 14, over: true, id: "session.composer.file.\(file.id).retry"))
+            .help("Send it again")
+            .accessibilityLabel("Retry \(file.name)")
+            .accessibilityIdentifier("session.composer.file.\(file.id).retry")
+        case .refused:
+            Image(systemName: "exclamationmark.circle").font(.system(size: 17)).foregroundStyle(Theme.red)
+        case .arrived:
+            Image(systemName: file.isImage ? "photo" : "doc").font(.system(size: 17)).foregroundStyle(Theme.text2)
+        }
+    }
+
+    private var trouble: Bool {
+        switch file.state {
+        case .refused, .failed: true
+        default: false
         }
     }
 
@@ -195,26 +200,59 @@ private struct FileTile: View {
     }
 }
 
-/// How far a file on its way has got: a ring on a dimmed tile.
-private struct Progress: View {
+/// A file's name as wide as it needs, up to `widest`; a longer one is cut in its middle, so its extension stays.
+private struct FileName: View {
+    let name: String
+    static let widest: CGFloat = 160
+
+    var body: some View {
+        let needs = (name as NSString).size(withAttributes: [.font: Theme.uiFont(12, .medium)]).width.rounded(.up) + 1
+        Text(name).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text)
+            .lineLimit(1).truncationMode(.middle)
+            .frame(width: min(needs, Self.widest), alignment: .leading)
+    }
+}
+
+/// A tile's ×, half outside its corner.
+private struct CornerButton: View {
+    let symbol: String
+    let id: String
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 7.5, weight: .bold)).foregroundStyle(Theme.text)
+                .frame(width: 16, height: 16)
+                .background(Theme.sheet, in: Circle())
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.12)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.hover(radius: 8, over: true, id: id))
+        .offset(x: 5, y: -5)
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(id)
+    }
+}
+
+/// How far a file on its way has got, in its icon's place.
+private struct Ring: View {
     let fraction: Double
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.35)
-            Circle().stroke(Color.white.opacity(0.18), lineWidth: 2.5).frame(width: 22, height: 22)
+            Circle().stroke(Color.white.opacity(0.15), lineWidth: 2.5)
             Circle().trim(from: 0, to: max(0.04, fraction))
                 .stroke(Theme.text, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-                .frame(width: 22, height: 22)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .allowsHitTesting(false)
+        .padding(3)
     }
 }
 
-/// A sent message's files, read back from its text (Kit's `AttachedFiles`): tiles of the same size, each by its name;
-/// the bytes stay on the computer.
+/// A sent message's files, read back from its text (Kit's `AttachedFiles`): each a tile of its icon and whole name, as
+/// in the box; the bytes stay on the computer.
 struct SentFiles: View {
     let paths: [String]
 
@@ -222,13 +260,12 @@ struct SentFiles: View {
         HStack(spacing: 8) {
             ForEach(paths, id: \.self) { path in
                 let name = (path as NSString).lastPathComponent
-                VStack(alignment: .leading, spacing: 2) {
-                    Image(systemName: "doc").font(.system(size: 14)).foregroundStyle(Theme.text2)
-                    Spacer(minLength: 0)
-                    Text(name).font(Theme.ui(10.5, .medium)).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
+                HStack(spacing: 10) {
+                    Image(systemName: "doc").font(.system(size: 15)).foregroundStyle(Theme.text2).frame(width: 22)
+                    FileName(name: name)
                 }
-                .padding(8)
-                .frame(width: 64, height: 64, alignment: .topLeading)
+                .padding(.horizontal, 12)
+                .frame(height: 40)
                 .background(Theme.raised, in: RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Card.border))
                 .help(path)

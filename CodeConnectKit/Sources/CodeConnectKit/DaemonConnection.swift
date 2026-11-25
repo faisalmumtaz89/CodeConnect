@@ -1690,6 +1690,11 @@ public final class DaemonConnection {
             lastContactAt = Date()
         }
 
+        /// Test seam: the link drops as a closed socket drops it: waiters fail, and `onDisconnected` runs.
+        public func simulateDisconnectForTesting() {
+            close(socket: nil, session: nil)
+        }
+
         /// Test seam: put the link in a phase without the socket that would
         /// get it there — a drop (`.connecting`), a refusal (`.failed`).
         public func setPhaseForTesting(_ phase: Phase) {
