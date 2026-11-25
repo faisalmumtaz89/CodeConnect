@@ -205,6 +205,10 @@ private struct Composer: View {
             .task {
                 if let typed = RenderWindow.reply, kept.reply.isEmpty { kept.reply = typed }
                 model.seedFixtureFiles(key)
+                if !RenderWindow.attachedFiles.isEmpty {
+                    for _ in 0..<100 where !model.canUpload(key) { try? await Task.sleep(for: .milliseconds(100)) }
+                    FileIntake.add(RenderWindow.attachedFiles, model: model, key: key)
+                }
                 // A render of the slash palette: the box holds the keyboard, as a person typing "/" there has it, once
                 // the render has sized its window (a resize closes an open panel), and `-CC_SLASH_LIT <row>` lights a
                 // row, as ↓ would.
