@@ -2419,26 +2419,27 @@ impl Store {
         Ok(newest.as_deref() == Some(EventKind::SessionStart.as_str()))
     }
 
-    /// Whether a message ccd gave the Claude run `session_uid` waits for its turn: its newest `user_message` filed
-    /// by ccd (the person's words, a relaunch's prompt) is newer than its newest `session_start`, so claude has it
-    /// and has not begun the turn that answers it.
+    /// Whether a message ccd gave the Claude run `session_uid` waits for its answer: nothing has followed its
+    /// newest `user_message` filed by ccd (the person's words, a relaunch's prompt) that answers it, no turn begun
+    /// or ended and no line of claude's own, so claude has it and has not begun the turn that answers it.
     pub fn message_awaits_turn(&self, session_uid: &str) -> Result<bool> {
         let conn = self.read();
         let newest = conn
             .query_row(
-                "SELECT kind FROM events WHERE session_uid = ?1
-                    AND (kind = ?2 OR (kind = ?3 AND source = ?4))
+                "SELECT kind = ?4 AND source = ?5 FROM events
+                  WHERE session_uid = ?1 AND kind IN (?2, ?3, ?4)
                   ORDER BY seq DESC LIMIT 1",
                 params![
                     session_uid,
                     EventKind::SessionStart.as_str(),
+                    EventKind::TurnComplete.as_str(),
                     EventKind::UserMessage.as_str(),
                     Source::Daemon.as_str()
                 ],
-                |row| row.get::<_, String>(0),
+                |row| row.get::<_, bool>(0),
             )
             .optional()?;
-        Ok(newest.as_deref() == Some(EventKind::UserMessage.as_str()))
+        Ok(newest == Some(true))
     }
 
     /// Whether the Codex run `session_uid` is in a turn: its newest user message, the
@@ -5104,7 +5105,7 @@ impl Store {
 
     /// **Settle what time and ended sessions decide:** unread messages past their
     /// expiry are expired, those for a run that has ended are ended (a run its switch of
-    /// account ended keeps its waiting mail for its next process), a sent
+    /// account ended keeps its waiting mail for its next process until it is ended for good), a sent
     /// message no computer took within the unread time is expired, one taken whose
     /// answer never came is expired once the receiver's unread time for it has
     /// surely run out, and settled rows older than [`MailLimits::settled_ms`] are
@@ -5123,8 +5124,8 @@ impl Store {
             "state IN ('waiting', 'offered')
              AND session_uid IN (SELECT session_uid FROM all_sessions WHERE lifecycle = ?1)
              AND NOT (state = 'waiting'
-                      AND session_uid IN (SELECT session_uid FROM run_hosts WHERE switching = ?2))",
-            params![lifecycle_str(Lifecycle::Exited), Store::SWITCH_MOVED],
+                      AND session_uid IN (SELECT session_uid FROM run_hosts WHERE switching IS NOT NULL))",
+            params![lifecycle_str(Lifecycle::Exited)],
             "ended",
         )?;
         // A receiver takes a message up to one unread time after it was written, and
@@ -5150,7 +5151,7 @@ impl Store {
     }
 
     /// A run ended: its unread messages are ended now. A run its switch of account ended goes on under its uid, so
-    /// what waits for it is kept for its next process.
+    /// what waits for it is kept for its next process while its switch stands, moved or failed.
     pub fn end_mail(&self, session_uid: &str) -> Result<usize> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -5158,8 +5159,8 @@ impl Store {
             &tx,
             "session_uid = ?1 AND state IN ('waiting', 'offered')
              AND NOT (state = 'waiting'
-                      AND session_uid IN (SELECT session_uid FROM run_hosts WHERE switching = ?2))",
-            params![session_uid, Store::SWITCH_MOVED],
+                      AND session_uid IN (SELECT session_uid FROM run_hosts WHERE switching IS NOT NULL))",
+            params![session_uid],
             "ended",
         )?;
         tx.commit()?;

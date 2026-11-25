@@ -1,8 +1,8 @@
 //! Moving a computer's live runs to an agent's active account (decision 306, Slice E; decision 311).
 //!
 //! Choosing an account (`ActivateAccount`) marks every live run of that agent switching. A marked run moves at its
-//! next idle point, its turn over, no card waiting and no message of the person's unread by the agent or read with no
-//! turn begun for it: ccd ends its process and files that end typed as a switch (`switched_to`). The run reads live
+//! next idle point, its turn over, no card waiting and no message of the person's unread by the agent or taken and not
+//! yet answered: ccd ends its process and files that end typed as a switch (`switched_to`). The run reads live
 //! and `moved` from then on, its waiting mail kept, and its next message relaunches it, as a message relaunches any
 //! ended run, on the agent's ACTIVE account as of that message, resuming its session with its model, its mode (Bypass
 //! and Full Access included, decision 308) and its effort, with no effort notice. That relaunch going live ends the
@@ -171,8 +171,8 @@ pub(crate) async fn relaunched(daemon: &Arc<Daemon>, uid: &str, outcome: Result<
     }
 }
 
-/// No turn running, no card waiting, and no message of the person's the agent has not read yet, or has read with no
-/// turn begun for it. A Codex run's turn is its link's to know: it asks only once none runs
+/// No turn running, no card waiting, and no message of the person's the agent has not read yet, or has taken and not
+/// yet answered. A Codex run's turn is its link's to know: it asks only once none runs
 /// (`LinkCommand::SwitchIfIdle`, a turn's end).
 async fn idle(daemon: &Arc<Daemon>, uid: &str, agent: &AgentKind) -> bool {
     (*agent == AgentKind::Codex
