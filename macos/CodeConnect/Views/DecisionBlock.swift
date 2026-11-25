@@ -214,7 +214,8 @@ struct DecisionBlock: View {
             return BannerLine(title: ending.title, message: ending.message, tone: ending.tone)
         }
         switch DecisionCard.resolvedBanner(attempt: attempt, persisted: outcome, isBacked: live != nil) {
-        case .attempt(let attempt): return BannerLine(DecisionCard.resultBanner(for: attempt))
+        case .attempt(let attempt):
+            return BannerLine(DecisionCard.resultBanner(for: attempt, agent: summary?.agent ?? .claude))
         case .persisted(let outcome): return BannerLine(DecisionCard.alreadyResolvedBanner(for: outcome, now: model.now))
         case .unavailable: return BannerLine(DecisionCard.unavailableBanner())
         case .none: break

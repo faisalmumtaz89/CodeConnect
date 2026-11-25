@@ -186,6 +186,20 @@ final class AntigravityKitTests: XCTestCase {
         XCTAssertEqual(AccountRowAct.signOut.title, "Sign Out…")
     }
 
+    /// An answer to an Antigravity card, confirmed through its host, says it was handed to Antigravity, not to Claude;
+    /// a Claude card's still says Claude.
+    func testAnAnsweredAntigravityCardSaysItWentToAntigravity() {
+        let applied = AnswerOutcome(
+            requestID: "r", sessionID: "cc-1", decision: .allow, resolvedBy: .phone, appliedVia: .hookReturn,
+            resolvedAt: "2026-11-25T12:00:00.000Z", detail: nil, indeterminate: false)
+        XCTAssertEqual(
+            DecisionCard.resultBanner(for: .applied(applied), agent: .antigravity, on: .iPhone).provenance,
+            "handed straight to Antigravity")
+        XCTAssertEqual(
+            DecisionCard.resultBanner(for: .applied(applied), agent: .claude, on: .iPhone).provenance,
+            "handed straight to Claude")
+    }
+
     /// Stop follows the hosted rule, and its sentences name Antigravity.
     func testAnAntigravityTurnIsStoppedAsAHostedOne() {
         XCTAssertNil(

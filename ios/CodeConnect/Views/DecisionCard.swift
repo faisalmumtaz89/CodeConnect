@@ -1015,7 +1015,7 @@ struct DecisionCardView: View {
                 message: DecisionCard.hashMismatchSentence,
                 tone: .danger, icon: "shield-warning-fill")
         case .resolution(let attempt):
-            ResolutionBanner(attempt: attempt)
+            ResolutionBanner(attempt: attempt, agent: sessionAgent ?? .claude)
         case .alreadyResolved(let outcome):
             let banner = DecisionCard.alreadyResolvedBanner(for: outcome, now: model.now)
             CCBanner(banner.title, message: banner.message, tone: banner.tone.ccTone, icon: banner.icon)

@@ -298,14 +298,16 @@ extension DecisionCard {
         public let icon: String
     }
 
-    /// What became of this session's own answer, in the words of the device reading it.
-    public static func resultBanner(for attempt: AnswerAttempt, on host: HostDevice = .current) -> Banner {
+    /// What became of this session's own answer, in the words of the device reading it, naming the session's agent.
+    public static func resultBanner(
+        for attempt: AnswerAttempt, agent: AgentKind = .claude, on host: HostDevice = .current
+    ) -> Banner {
         switch attempt {
         case .applied(let outcome):
             return Banner(
                 title: "Confirmed",
                 message: "\(outcome.decisionLabel), confirmed by \(host.computer("your computer"))",
-                provenance: [actuationPhrase(for: outcome.appliedVia, on: host), outcome.detail]
+                provenance: [actuationPhrase(for: outcome.appliedVia, agent: agent, on: host), outcome.detail]
                     .compactMap { $0 }.joined(separator: " · "),
                 tone: .success, icon: "check-circle-fill")
         // The one honesty this case exists to protect: the daemon accepted the
@@ -364,9 +366,9 @@ extension DecisionCard {
     /// How an answer was *applied*, in plain words — never a claim this build cannot support. An `AnswerPath.unknown`
     /// is a path this build has never heard of, so it is described as unrecognised rather than asserted to be
     /// keystrokes or a hook return nobody can vouch for.
-    static func actuationPhrase(for path: AnswerPath, on host: HostDevice = .current) -> String {
+    static func actuationPhrase(for path: AnswerPath, agent: AgentKind = .claude, on host: HostDevice = .current) -> String {
         switch path {
-        case .hookReturn: return "handed straight to Claude"
+        case .hookReturn: return "handed straight to \(agent.displayName)"
         // A real actuation, and it reads like one. Codex asked, over its own
         // control link, and this is the answer written back to that request —
         // no keyboard, no pane, nothing inferred from a prompt disappearing.
