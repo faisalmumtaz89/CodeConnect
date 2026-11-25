@@ -118,6 +118,17 @@ final class RenderPass: XCTestCase {
 
     func testRendersTheUsageAtAX5() throws { try render(at: .ax5, Self.usage) }
 
+    /// A cold launch's splash mid-exit (the fleet caught up at 0.3 s, so the exit runs 0.75–1.15 s; held at 0.95 s),
+    /// over the fleet it gives way to: what shows between the leaving bands.
+    func testRendersTheSplashExitAtLarge() throws {
+        try render(at: .large, [
+            RenderScenario(
+                name: "splash-mid-exit", purpose: "the splash's bands leaving, at 0.95 s of a launch caught up at 0.3 s",
+                arguments: ["-CC_FIXTURE", "deck", "-CC_LAUNCH_T", "0.95", "-CC_LAUNCH_SETTLED", "0.3"],
+                reach: { app, driver in try driver.requireExists(app.navigationBars["Projects"], "the fleet under it") }),
+        ])
+    }
+
     /// Files with a reply.
     func testRendersTheUploadsAtLarge() throws {
         try render(at: .large, RenderCatalog.uploads + RenderCatalog.startFiles)

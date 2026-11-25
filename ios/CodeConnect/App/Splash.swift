@@ -5,9 +5,9 @@ import SwiftUI
 /// the first frame: the system's launch screen is that ground alone
 /// (`UILaunchScreen` › `LaunchGround`), and the intro starts from it. The mark
 /// holds, breathing, until every computer has caught up or the wait for it ran
-/// out (`Machines.waitOutLaunch`); then it leaves at once (`LaunchMark.exitStart`)
-/// with the first screen already laid out under it, the ground gone so the screen
-/// shows between the parts. Nothing changes opacity. Past a second the line under
+/// out (`Machines.waitOutLaunch`); then it leaves at once (`LaunchMark.exitStart`),
+/// its parts going on the plain ground, and the first screen, already laid out
+/// under it, appears by a cut once they are gone. Nothing changes opacity. Past a second the line under
 /// the mark says where the launch is connecting; once the wait has run out the
 /// screen itself says which computers are not answering. With no computer set up
 /// the intro plays and the onboarding is cut to. Reduce Motion: the still mark,
@@ -74,8 +74,8 @@ struct Splash: View {
     #endif
 }
 
-/// The splash at one moment: the ground until the exit, the mark, and past a
-/// second the line, the same drawing live and in a still.
+/// The splash at one moment: the ground throughout, the exit included, the mark,
+/// and past a second the line, the same drawing live and in a still.
 struct SplashFrame: View {
     let t: Double
     let exitAt: Double?
@@ -87,7 +87,7 @@ struct SplashFrame: View {
     var body: some View {
         let exiting = exitAt.map { t >= $0 } ?? false
         ZStack {
-            if !exiting { CC.color.bg }
+            CC.color.bg
             if !(exiting && cut) { LaunchMark(t: t, exitAt: exitAt, reduceMotion: reduceMotion) }
             if !exiting, let line, t >= LaunchMark.lineAfter {
                 Text(line)
