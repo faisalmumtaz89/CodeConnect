@@ -141,9 +141,7 @@ pub async fn magic_dns_name(tailscale: Option<PathBuf>) -> Option<String> {
     let bin = tailscale?;
     let output = tokio::time::timeout(
         STATUS_TIMEOUT,
-        tokio::process::Command::new(bin)
-            .args(["status", "--json"])
-            .output(),
+        crate::spawn::output(tokio::process::Command::new(bin).args(["status", "--json"])),
     )
     .await
     .ok()?
@@ -242,14 +240,15 @@ async fn issue(
     let bin = tailscale.context("tailscale is not installed where this daemon looks for it")?;
     let output = tokio::time::timeout(
         CERT_TIMEOUT,
-        tokio::process::Command::new(&bin)
-            .arg("cert")
-            .arg("--cert-file")
-            .arg(cert_path)
-            .arg("--key-file")
-            .arg(key_path)
-            .arg(hostname)
-            .output(),
+        crate::spawn::output(
+            tokio::process::Command::new(&bin)
+                .arg("cert")
+                .arg("--cert-file")
+                .arg(cert_path)
+                .arg("--key-file")
+                .arg(key_path)
+                .arg(hostname),
+        ),
     )
     .await
     .context("tailscale cert timed out")?

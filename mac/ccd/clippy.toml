@@ -1,0 +1,10 @@
+# Every child ccd starts goes through `crate::spawn`, one start at a time: see that module for
+# the macOS pipe race this closes. A start anywhere else fails clippy.
+disallowed-methods = [
+    { path = "std::process::Command::spawn", reason = "start children through crate::spawn" },
+    { path = "std::process::Command::output", reason = "start children through crate::spawn" },
+    { path = "std::process::Command::status", reason = "start children through crate::spawn" },
+    { path = "tokio::process::Command::spawn", reason = "start children through crate::spawn" },
+    { path = "tokio::process::Command::output", reason = "start children through crate::spawn" },
+    { path = "tokio::process::Command::status", reason = "start children through crate::spawn" },
+]

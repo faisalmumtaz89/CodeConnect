@@ -3,6 +3,9 @@
 //! sweep the daemon starts. A real process, because both are the start-up's own
 //! doing ([`common::Home`]).
 
+// A test starts the daemon it tests; only ccd's own starts go through its `spawn`.
+#![allow(clippy::disallowed_methods)]
+
 // Each test file builds the helpers for itself and uses only some of them.
 #[allow(dead_code)]
 mod common;

@@ -656,7 +656,7 @@ pub(crate) async fn read_facts(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    let mut child = command.spawn().ok()?;
+    let mut child = crate::spawn::spawn(&mut command).ok()?;
     let asked = async {
         let mut stdin = child.stdin.take()?;
         stdin.write_all(asking.as_bytes()).await.ok()?;
@@ -859,7 +859,7 @@ pub(crate) async fn sign_in(
     // The answer is read before the login starts, so it says this account is signing in, and the push at the
     // login's end is the newer.
     let reply = sign_ins.marked(listing(store, Some(request_id.clone())));
-    let mut child = match login.spawn() {
+    let mut child = match crate::spawn::spawn(&mut login) {
         Ok(child) => child,
         Err(err) => {
             sign_ins.forget(mine);

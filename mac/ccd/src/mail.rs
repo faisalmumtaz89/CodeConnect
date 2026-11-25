@@ -1127,10 +1127,9 @@ impl Daemon {
         #[cfg(not(test))]
         {
             let bin = self.config.tailscale_bin()?;
-            let run = tokio::process::Command::new(bin)
-                .args(["status", "--json"])
-                .kill_on_drop(true)
-                .output();
+            let mut command = tokio::process::Command::new(bin);
+            command.args(["status", "--json"]).kill_on_drop(true);
+            let run = crate::spawn::output(&mut command);
             let output = tokio::time::timeout(TAILSCALE_TIMEOUT, run)
                 .await
                 .ok()?
