@@ -111,7 +111,7 @@ final class AntigravityKitTests: XCTestCase {
         return try JSONDecoder().decode(SessionSummary.self, from: Data(JSONValue.object(frame).canonicalJSONString.utf8))
     }
 
-    private func fact(_ value: String) -> JSONValue { .object(["value": .string(value), "seq": .number(4)]) }
+    private func fact(_ value: String) -> JSONValue { .object(["value": .string(value), "seq": .int(4)]) }
 
     /// A live Antigravity run with menus draws them as a hosted run's: agy's families, the chosen one's efforts, and
     /// agy's modes, each selected from its facts. Ended, its model reads by its family's name.
