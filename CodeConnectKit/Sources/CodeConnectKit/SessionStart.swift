@@ -422,6 +422,10 @@ public final class SessionStarter {
     public func resolve(_ requestID: String, _ outcome: StartOutcome) {
         guard starts[requestID]?.outcome == nil else { return }
         starts[requestID]?.outcome = outcome
+        // Answered, its files' bytes are let go: a start is kept for the app's life. One asking about the folder keeps
+        // them, as the answer sends them again.
+        if case .needsTrust = outcome { return }
+        starts[requestID]?.files = starts[requestID]?.files.map { $0.withoutBytes() } ?? []
     }
 
     /// The reader stops this phone retrying an unanswered start. Kept so a late

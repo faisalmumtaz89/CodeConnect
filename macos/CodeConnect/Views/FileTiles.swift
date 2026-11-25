@@ -73,17 +73,17 @@ enum FileIntake {
         return taken
     }
 
-    /// ⌘V with a picture, or files, on the pasteboard and no words: they go to the tray, and the paste is taken.
-    /// Words paste into the field as ever.
+    /// ⌘V with files on the pasteboard (Finder's copy, which carries their names as words too), or a picture and no
+    /// words: they go to the tray, and the paste is taken. Words alone paste into the field as ever.
     static func paste(_ take: Take) -> Bool {
         let board = NSPasteboard.general
-        if board.string(forType: .string) != nil { return false }
         if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
             !urls.isEmpty
         {
             add(urls, take)
             return true
         }
+        if board.string(forType: .string) != nil { return false }
         guard let image = NSImage(pasteboard: board), let tiff = image.tiffRepresentation,
             let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
         else { return false }
@@ -93,13 +93,42 @@ enum FileIntake {
 }
 
 extension View {
-    /// The box takes files dropped on it, and a picture or files pasted into it, while `on`.
-    func takesFiles(_ on: Bool, _ take: @escaping FileIntake.Take) -> some View {
+    /// The box takes files dropped on it while `on`, and files or a picture pasted into it while `on` and its field has
+    /// the keyboard (`pasting`).
+    func takesFiles(_ on: Bool, pasting: Bool, _ take: @escaping FileIntake.Take) -> some View {
         onDrop(of: [.fileURL, .image], isTargeted: nil) { providers in on && FileIntake.drop(providers, take) }
-            .onKeyPress(keys: ["v"], phases: .down) { press in
-                guard press.modifiers == .command, on, FileIntake.paste(take) else { return .ignored }
-                return .handled
+            .modifier(PastesFiles(active: on && pasting, take: take))
+    }
+}
+
+/// ⌘V is Edit › Paste's key, which the menu takes before the field sees a key press, and the field's own paste would
+/// write a copied file's name: while `active`, a monitor sees ⌘V first and gives the pasteboard's files to `take`,
+/// leaving any other paste to the field.
+private struct PastesFiles: ViewModifier {
+    let active: Bool
+    let take: FileIntake.Take
+    @State private var monitor: Any?
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: active, initial: true) { _, on in
+                stop()
+                guard on else { return }
+                // AppKit calls a local monitor on the main thread.
+                nonisolated(unsafe) let take = take
+                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    let paste = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
+                        && event.charactersIgnoringModifiers == "v"
+                    guard paste, MainActor.assumeIsolated({ FileIntake.paste(take) }) else { return event }
+                    return nil
+                }
             }
+            .onDisappear(perform: stop)
+    }
+
+    private func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
     }
 }
 

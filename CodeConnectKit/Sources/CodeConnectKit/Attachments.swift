@@ -46,15 +46,21 @@ public struct Attachment: Identifiable, Hashable, Sendable {
         return name.isEmpty ? "file" : name
     }
 
-    /// PNG, JPEG, GIF or WebP, by their first bytes.
-    static func isImage(_ data: Data) -> Bool {
+    /// PNG, JPEG, GIF or WebP, by their first bytes: the extension each is written with ("png", "jpg", "gif", "webp"), or
+    /// nil for anything else.
+    public static func imageExtension(_ data: Data) -> String? {
         let head = [UInt8](data.prefix(12))
         func starts(_ bytes: [UInt8], at offset: Int = 0) -> Bool {
             head.count >= offset + bytes.count && Array(head[offset..<offset + bytes.count]) == bytes
         }
-        return starts([0x89, 0x50, 0x4E, 0x47]) || starts([0xFF, 0xD8, 0xFF]) || starts(Array("GIF8".utf8))
-            || (starts(Array("RIFF".utf8)) && starts(Array("WEBP".utf8), at: 8))
+        if starts([0x89, 0x50, 0x4E, 0x47]) { return "png" }
+        if starts([0xFF, 0xD8, 0xFF]) { return "jpg" }
+        if starts(Array("GIF8".utf8)) { return "gif" }
+        if starts(Array("RIFF".utf8)) && starts(Array("WEBP".utf8), at: 8) { return "webp" }
+        return nil
     }
+
+    static func isImage(_ data: Data) -> Bool { imageExtension(data) != nil }
 
     /// A file added to a tray that holds `count` already: refused on its name and size alone when over a limit (`read` is
     /// then never called), or when it cannot be read; else ready to go, under a new id.
@@ -70,6 +76,11 @@ public struct Attachment: Identifiable, Hashable, Sendable {
         if let reason = sizeRefusal(name, data.count) { return refused(reason) }
         return Attachment(
             id: newID(), name: name, size: data.count, isImage: isImage(data), data: data, state: .uploading(sent: 0))
+    }
+
+    /// The same file with its bytes let go: what a start keeps once it is answered.
+    func withoutBytes() -> Attachment {
+        Attachment(id: id, name: name, size: size, isImage: isImage, data: nil, state: state)
     }
 
     /// The same bytes as a new upload, from the start.
@@ -150,9 +161,10 @@ extension AppModel {
         filesBlockedReason(for: key) == nil ? files(for: key).map(\.id) : []
     }
 
-    /// The message carried them: the tray starts again empty.
-    func filesSent(_ key: String) {
-        if drafts(for: key)?.files.isEmpty == false { drafts(for: key)?.files = [] }
+    /// The message carried these: they leave the tray, and a file added while it waited for its answer stays.
+    func filesSent(_ ids: [String], from key: String) {
+        guard !ids.isEmpty, let drafts = drafts(for: key) else { return }
+        drafts.files.removeAll { ids.contains($0.id) }
     }
 
     /// The link dropped, and the computer removed every upload no message had carried: each must go again.

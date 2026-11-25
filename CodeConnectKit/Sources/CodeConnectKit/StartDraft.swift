@@ -162,7 +162,8 @@ public final class StartDraft {
         sent = nil
     }
 
-    /// The started run is open: the message and the place it started in are spent; the folder and model stay chosen.
+    /// The started run is open: the message, its files and the place it started in are spent; the folder and model stay
+    /// chosen.
     public func didOpen() {
         if let sent {
             edit(on: sent.ask.computerID) {
@@ -171,6 +172,7 @@ public final class StartDraft {
             }
         }
         message = ""
+        files = []
         sent = nil
     }
 
