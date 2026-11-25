@@ -1060,6 +1060,9 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// This daemon ends a run it started (`stop_run`, minor 35). An older one
     /// answers `stop_run` with `bad_request`, so the frame is sent only when this is set.
     public var endsRuns: Bool { advertises(["stop_run"]) }
+    /// This daemon takes files for a session's agent (`put_file`, and `attachments` on `send_text` and `compose`, minor
+    /// 50). An older one answers `put_file` with `bad_request`, so nothing is sent unless this is set.
+    public var takesUploads: Bool { advertises(["uploads"]) }
     /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
     /// 21): its question cards carry `question_hold` and it takes the
     /// `answers` and `decline` decisions. Absent is false — an older daemon
@@ -1523,6 +1526,28 @@ public enum CodexResolution: Decodable, Sendable, Hashable {
 }
 
 /// What became of one `stop_run` (minor 35).
+/// What became of one `put_file` chunk (minor 50).
+public enum PutFileResult: Decodable, Sendable, Hashable {
+    /// Written: the bytes held so far, the next chunk's offset, or the file's size once it is complete.
+    case received(Int)
+    /// Refused, with the daemon's reason; nothing of the upload is kept, and the file goes again under a new id.
+    case refused(String)
+
+    private enum CodingKeys: String, CodingKey {
+        case status, received, reason
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let status = try c.decode(String.self, forKey: .status)
+        switch status {
+        case "received": self = .received(try c.decode(Int.self, forKey: .received))
+        case "refused": self = .refused(try c.decode(String.self, forKey: .reason))
+        default: self = .refused("The computer answered “\(status)”.")
+        }
+    }
+}
+
 public enum StopRunResult: Decodable, Sendable, Hashable {
     /// The stop is accepted: the run is `stopping`, and reads ended once it has exited.
     case stopping
@@ -2020,8 +2045,10 @@ public enum ClientMessage: Sendable {
     /// same `request_id`.
     case answer(
         requestID: String, payloadHash: String, decision: AnswerDecision, session: String?)
+    /// `attachments`: uploads (`putFile`) the message carries, in order (minor 50); none is the minor-49 frame.
     case sendText(
-        session: String, text: String, submit: Bool, requestID: String?, payloadHash: String?)
+        session: String, text: String, submit: Bool, requestID: String?, payloadHash: String?,
+        attachments: [String] = [])
     case getDiff(session: String)
     case getCommandCatalog(session: String)
     /// "Push me here." Sent whenever Apple issues a token, not only at
@@ -2048,7 +2075,12 @@ public enum ClientMessage: Sendable {
     case stopRun(session: String, requestID: String)
     /// **Say something to a Codex session.** Minor 18, and the one message an
     /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
-    case compose(session: String, requestID: String, text: String, payloadHash: String)
+    case compose(
+        session: String, requestID: String, text: String, payloadHash: String, attachments: [String] = [])
+    /// **One chunk of a file for a session's agent** (minor 50, `Capabilities.takesUploads`), answered
+    /// `put_file_result`. The first chunk names the file and its size; each next one starts at the bytes the last answer
+    /// says were received. `data` is base64 of at most `Attachment.chunkBytes`.
+    case putFile(session: String?, uploadID: String, name: String, size: Int, offset: Int, data: String)
     /// **Set a hosted Claude run's model and/or effort** (minor 39). `effort` rides this message, so
     /// a change to effort alone sends `model: nil, effort: X`. At least one of the two is present —
     /// the daemon refuses a change naming neither.
@@ -2143,6 +2175,11 @@ extension ClientMessage: Encodable {
         case trust
         case label
         case accountID = "account_id"
+        case attachments
+        case uploadID = "upload_id"
+        case size
+        case offset
+        case data
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -2206,7 +2243,7 @@ extension ClientMessage: Encodable {
             // to: `ws.rs` reads `Option<String>`, and a null would decode as
             // "no scope" anyway while making the frame wrong to read.
             try c.encodeIfPresent(session, forKey: .sessionID)
-        case .sendText(let session, let text, let submit, let requestID, let payloadHash):
+        case .sendText(let session, let text, let submit, let requestID, let payloadHash, let attachments):
             try c.encode("send_text", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encode(text, forKey: .text)
@@ -2215,6 +2252,8 @@ extension ClientMessage: Encodable {
             // null would say "present but empty".
             try c.encodeIfPresent(requestID, forKey: .requestID)
             try c.encodeIfPresent(payloadHash, forKey: .payloadHash)
+            // Omitted when empty, so a message with no files is exactly the minor-49 frame.
+            if !attachments.isEmpty { try c.encode(attachments, forKey: .attachments) }
         case .registerPush(let token, let environment, let relayCredential):
             try c.encode("register_push", forKey: .type)
             try c.encode(token, forKey: .token)
@@ -2236,12 +2275,21 @@ extension ClientMessage: Encodable {
             try c.encode("stop_run", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encode(requestID, forKey: .requestID)
-        case .compose(let session, let requestID, let text, let payloadHash):
+        case .compose(let session, let requestID, let text, let payloadHash, let attachments):
             try c.encode("compose", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encode(requestID, forKey: .requestID)
             try c.encode(text, forKey: .text)
             try c.encode(payloadHash, forKey: .payloadHash)
+            if !attachments.isEmpty { try c.encode(attachments, forKey: .attachments) }
+        case .putFile(let session, let uploadID, let name, let size, let offset, let data):
+            try c.encode("put_file", forKey: .type)
+            try c.encodeIfPresent(session, forKey: .sessionID)
+            try c.encode(uploadID, forKey: .uploadID)
+            try c.encode(name, forKey: .name)
+            try c.encode(size, forKey: .size)
+            try c.encode(offset, forKey: .offset)
+            try c.encode(data, forKey: .data)
         case .setModel(let session, let requestID, let model, let effort):
             try c.encode("set_model", forKey: .type)
             try c.encode(session, forKey: .sessionID)
@@ -2574,6 +2622,8 @@ public enum ServerMessage: Sendable {
     case stopRunResult(sessionID: String, requestID: String, result: StopRunResult)
     /// The answer to one `compose`, same correlation.
     case composeResult(sessionID: String, requestID: String, result: ComposeResult)
+    /// The answer to one `put_file` chunk, by its upload.
+    case putFileResult(uploadID: String, result: PutFileResult)
     case settingResult(sessionID: String, requestID: String, result: SettingResult)
     /// The answer to `list_projects`: most recent first, and which agents the
     /// computer has.
@@ -2642,6 +2692,7 @@ extension ServerMessage: Decodable {
         case accounts
         case active
         case defaults
+        case uploadID = "upload_id"
     }
 
     public init(from decoder: Decoder) throws {
@@ -2704,6 +2755,10 @@ extension ServerMessage: Decodable {
                 sessionID: try c.decode(String.self, forKey: .sessionID),
                 requestID: try c.decode(String.self, forKey: .requestID),
                 result: try c.decode(InterruptResult.self, forKey: .result))
+        case "put_file_result":
+            self = .putFileResult(
+                uploadID: try c.decode(String.self, forKey: .uploadID),
+                result: try c.decode(PutFileResult.self, forKey: .result))
         case "stop_run_result":
             self = .stopRunResult(
                 sessionID: try c.decode(String.self, forKey: .sessionID),

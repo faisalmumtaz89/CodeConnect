@@ -329,6 +329,7 @@ public final class DaemonConnection {
     private var interruptWaiters: [String: [Waiter<InterruptResult>]] = [:]
     private var stopRunWaiters: [String: [Waiter<StopRunResult>]] = [:]
     private var composeWaiters: [String: [Waiter<ComposeResult>]] = [:]
+    private var putFileWaiters: [String: [Waiter<PutFileResult>]] = [:]
     private var settingWaiters: [String: [Waiter<SettingResult>]] = [:]
     /// Which session each in-flight mutation was sent for, so the echoed
     /// `session_id` on its result can be checked rather than trusted.
@@ -1037,10 +1038,11 @@ public final class DaemonConnection {
     /// a name.
     public func sendText(
         session: String, text: String, submit: Bool,
-        requestID: String? = nil, payloadHash: String? = nil
+        requestID: String? = nil, payloadHash: String? = nil, attachments: [String] = []
     ) async throws -> SendTextResult {
         #if DEBUG
             sendTextIdentities.append((requestID: requestID, payloadHash: payloadHash))
+            sentAttachments.append(attachments)
             if let sendTextStub { return try await sendTextStub(session, text) }
         #endif
         return try await request(
@@ -1048,7 +1050,26 @@ public final class DaemonConnection {
             store: \.sendTextWaiters,
             send: .sendText(
                 session: session, text: text, submit: submit,
-                requestID: requestID, payloadHash: payloadHash))
+                requestID: requestID, payloadHash: payloadHash, attachments: attachments))
+    }
+
+    /// **One chunk of a file for a session's agent** (minor 50), answered by its upload's id. No frame leaves unless the
+    /// daemon advertised `uploads`: an older one answers `put_file` with `bad_request`.
+    public func putFile(
+        session: String?, uploadID: String, name: String, size: Int, offset: Int, chunk: Data
+    ) async throws -> PutFileResult {
+        guard capabilities?.takesUploads == true else {
+            throw ConnectionError.incompatible(
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) has an older CodeConnect that cannot take files. Update CodeConnect on it, then try again."
+            )
+        }
+        let message = ClientMessage.putFile(
+            session: session, uploadID: uploadID, name: name, size: size, offset: offset,
+            data: chunk.base64EncodedString())
+        #if DEBUG
+            if let putFileStub { return try await putFileStub(message) }
+        #endif
+        return try await request(key: uploadID, store: \.putFileWaiters, send: message)
     }
 
     /// Which slash commands the session's Claude Code actually has, from the
@@ -1267,20 +1288,24 @@ public final class DaemonConnection {
     /// typed reply that is never coming and sit there until the 20-second
     /// timeout — once per tap, on a control that looks like it works.
     public func compose(
-        session: String, requestID: String, text: String, payloadHash: String
+        session: String, requestID: String, text: String, payloadHash: String, attachments: [String] = []
     ) async throws -> ComposeResult {
         guard capabilities?.codexCompose == true else {
             throw CodexRefusal.notAdvertised("codex_compose")
         }
-        let draft = ComposeDraft(text: text)
+        let draft = ComposeDraft(text: text, files: attachments.count)
         if let reason = draft.blockedReason { throw CodexRefusal.nothingToSend(reason) }
+        #if DEBUG
+            sentAttachments.append(attachments)
+        #endif
         mutationSessions[requestID] = session
         defer { mutationSessions.removeValue(forKey: requestID) }
         return try await request(
             key: requestID,
             store: \.composeWaiters,
             send: .compose(
-                session: session, requestID: requestID, text: text, payloadHash: payloadHash))
+                session: session, requestID: requestID, text: text, payloadHash: payloadHash,
+                attachments: attachments))
     }
 
     private typealias WaiterTable<T> = ReferenceWritableKeyPath<
@@ -1415,6 +1440,10 @@ public final class DaemonConnection {
         composeWaiters = [:]
         for queue in composes.values { for w in queue { w.continuation?.resume(throwing: error) } }
 
+        let puts = putFileWaiters
+        putFileWaiters = [:]
+        for queue in puts.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
         let settings = settingWaiters
         settingWaiters = [:]
         for queue in settings.values { for w in queue { w.continuation?.resume(throwing: error) } }
@@ -1544,6 +1573,8 @@ public final class DaemonConnection {
             guard acceptMutationResult(sessionID: sessionID, requestID: requestID, kind: "compose")
             else { break }
             deliver(store: \.composeWaiters, key: requestID, value: result)
+        case .putFileResult(let uploadID, let result):
+            deliver(store: \.putFileWaiters, key: uploadID, value: result)
         case .settingResult(let sessionID, let requestID, let result):
             guard acceptMutationResult(sessionID: sessionID, requestID: requestID, kind: "setting")
             else { break }
@@ -1693,6 +1724,10 @@ public final class DaemonConnection {
         /// Test seam: answer `commandCatalog` locally.
         var catalogStub: ((String) async throws -> CommandCatalogResult)?
         private(set) var sendTextIdentities: [(requestID: String?, payloadHash: String?)] = []
+        /// The upload ids each `sendText` and `compose` carried, in order, whether stubbed or not.
+        public private(set) var sentAttachments: [[String]] = []
+        /// Test seam: answer each `put_file` chunk locally, given the frame that would have been sent.
+        public var putFileStub: ((ClientMessage) async throws -> PutFileResult)?
 
         /// Test seam: take a frame here instead of writing it to the socket. An
         /// `AppModel` built in a test has no socket, so without it every send

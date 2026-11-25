@@ -265,7 +265,7 @@ enum Fixtures {
         let cards = variant.cards
         let held = variant.heldCard.map { [$0] } ?? []
         var messages: [ServerMessage] = []
-        let ackJSON: String
+        var ackJSON: String
         switch variant {
         case .timelineLongName:
             ackJSON = helloAckJSON.replacingOccurrences(
@@ -283,6 +283,11 @@ enum Fixtures {
                     with: #""can_approve_reliably":\#(observed != "unpromised")"#)
         default:
             ackJSON = helloAckJSON
+        }
+        // `-CC_FIXTURE_UPLOADS YES` (or `-CC_FIXTURE_FILES YES`, which also fills a run's tray): the computer takes
+        // files, so the box draws its file control.
+        if UserDefaults.standard.bool(forKey: "CC_FIXTURE_UPLOADS") || UserDefaults.standard.bool(forKey: "CC_FIXTURE_FILES") {
+            ackJSON = ackJSON.replacingOccurrences(of: #""send_text":true,"#, with: #""send_text":true,"uploads":true,"#)
         }
         if let ack = decode(ackJSON) { messages.append(ack) }
         if let sessions = decode(sessionsJSON(now: now, variant: variant, cards: cards + held)) {
