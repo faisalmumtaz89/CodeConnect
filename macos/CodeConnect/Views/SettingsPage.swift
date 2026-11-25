@@ -272,7 +272,7 @@ private struct GeneralSettings: View {
                 }
             }
             SettingsGroup(title: "Updates") {
-                SettingsRow(title: version, line: "CodeConnect looks for a new version on its own and asks before installing it.") {
+                SettingsRow(title: version, line: "CodeConnect looks for a new version on its own, and Update lights up when there is one.") {
                     if let updates {
                         ActionButton(title: "Check for Updates…", key: nil, prominent: false, id: "settings.updates") {
                             updates.checkForUpdates()

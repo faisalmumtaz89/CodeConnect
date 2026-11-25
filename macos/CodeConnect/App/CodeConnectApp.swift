@@ -8,7 +8,7 @@ struct CodeConnectApp: App {
     /// No push registrar: notifications on the Mac need a wire and relay change no step has built.
     @State private var machines: Machines
     @State private var setup: Setup
-    /// Sparkle's updater, with the app's own update sheet: started with the app.
+    /// Sparkle's updater, shown as the update button alone: started with the app.
     @State private var updates: Updates?
     /// Settings, in the main window in the sidebar's place, and its section: kept while the window is closed.
     @State private var settings: SettingsSection?
@@ -140,9 +140,7 @@ struct RootView: View {
                         ready: RenderWindow.launchRecord == nil
                             && settings != .devices && settings != .folders
                             && (!RenderWindow.waitsForComputer || machines.pairingError != nil || connected)
-                            && (!Setup.runsThisLaunch || setup.settled)
-                            // A render of an update step photographs the update's own window.
-                            && RenderWindow.updateStep == nil,
+                            && (!Setup.runsThisLaunch || setup.settled),
                         showsSheet: (RenderWindow.pairing == nil ? RenderWindow.opensAddComputer : !connected)
                             || setup.shown))
             #endif

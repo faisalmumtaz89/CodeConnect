@@ -91,7 +91,7 @@ Each block starts from the repository root.
    open version's heading (the first such merge after a release writes it,
    `## CodeConnect X.Y.Z, with the iPhone app A.B.C`, from `mac/Cargo.toml`
    and the iPhone project's `MARKETING_VERSION`), and rewrites
-   `macos/release-notes.txt`, the Mac app's update window, as one plain
+   `macos/release-notes.txt`, the notes in the Mac app's update feed, as one plain
    paragraph on everything since the last release (the GitHub release's own
    notes are separate). The release's pin job refuses notes that are still the
    last release's.

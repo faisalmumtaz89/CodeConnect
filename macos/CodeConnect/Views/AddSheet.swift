@@ -115,7 +115,7 @@ struct SheetBar<Leading: View>: View {
             HStack(spacing: 8) {
                 leading
                 Spacer()
-                // The secondary answer in the app's one footer style, Set Up's and the update window's: a bordered
+                // The secondary answer in the app's one footer style, Set Up's: a bordered
                 // button beside the filled one, the same height and corners.
                 if let cancel {
                     ActionButton(title: cancelTitle, key: nil, prominent: false, id: cancelID, action: cancel)
