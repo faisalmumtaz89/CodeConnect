@@ -204,15 +204,17 @@ private struct AttachmentTile: View {
                 } else {
                 Group {
                     if file.isImage {
-                        Image(systemName: "photo").font(.system(size: 18))
+                        Image(systemName: "photo").font(.system(size: 18)).dynamicTypeSize(...DynamicTypeSize.large)
                     } else {
-                        CCIcon("file-text", size: 20, weight: .regular)
+                        CCIcon("file-text", size: 20, weight: .regular, maxSize: 22)
                     }
                 }
                 .foregroundStyle(CC.text.secondary)
                 }
+                // A 56-pt tile has room for one fixed line.
                 Text(verbatim: file.name)
                     .font(.system(size: 10))
+                    .dynamicTypeSize(...DynamicTypeSize.large)
                     .foregroundStyle(CC.text.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
