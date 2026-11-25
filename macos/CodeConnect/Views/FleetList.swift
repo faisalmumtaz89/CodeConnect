@@ -807,7 +807,8 @@ struct AgentMark: View {
             switch agent {
             case .claude: Image(systemName: "asterisk").font(.system(size: 9, weight: .bold))
             case .codex: Image(systemName: "chevron.left.forwardslash.chevron.right").font(.system(size: 7.5, weight: .bold))
-            case .antigravity, .unsupported: Image(systemName: "questionmark").font(.system(size: 8, weight: .bold))
+            case .antigravity: Image(systemName: Self.antigravity).font(.system(size: 8, weight: .bold))
+            case .unsupported: Image(systemName: "questionmark").font(.system(size: 8, weight: .bold))
             }
         }
         .foregroundStyle(Theme.text2)
@@ -816,5 +817,14 @@ struct AgentMark: View {
         .help(agent.productName)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(agent.productName)
+    }
+
+    /// Antigravity's mark: none of its own yet. A render's `-CC_AGENT_MARK <SF Symbol>` draws a candidate in its place,
+    /// for the owner's pick of five.
+    private static var antigravity: String {
+        #if DEBUG
+            if let candidate = UserDefaults.standard.string(forKey: "CC_AGENT_MARK") { return candidate }
+        #endif
+        return "questionmark"
     }
 }
