@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.23
+
 ## CodeConnect 0.19.22
 
 - On the Mac, a message can carry files: the paperclip in the reply box and in the new-agent box opens a file panel,
