@@ -413,11 +413,6 @@ impl Db {
             .await
     }
 
-    pub async fn newest_model_receipt(&self, session_uid: String) -> Result<Option<String>> {
-        self.run(move |store| store.newest_model_receipt(&session_uid))
-            .await
-    }
-
     pub async fn turn_running(&self, session_uid: String) -> Result<bool> {
         self.run(move |store| store.turn_running(&session_uid))
             .await

@@ -3428,13 +3428,13 @@ impl Daemon {
             }
         }
         // A live run CodeConnect started offers its settings: a Claude run's from its start's
-        // answer, with the one its model fact names marked (its newest receipt read for that
-        // here); a Codex run's from its start's check and the model it started on, its model
-        // fact marked as it is.
+        // answer, with the one its model fact names marked (its newest receipt, kept in its
+        // facts, read for that); a Codex run's from its start's check and the model it started
+        // on, its model fact marked as it is.
         let mut menus: HashMap<String, protocol::event::RunMenus> = HashMap::new();
         // Every Claude run CodeConnect started keeps its start's models, ended or not: its model
         // fact is named by the chosen entry's id, never by claude's receipt of a change.
-        let mut choosing: Vec<(String, Vec<serde_json::Value>, Option<String>)> = Vec::new();
+        let mut choosing: Vec<(String, Vec<serde_json::Value>)> = Vec::new();
         let mut codex_menus: Vec<String> = Vec::new();
         // A Codex run that is not live keeps its menu only to name its model by.
         let mut codex_ended: Vec<(String, protocol::event::RunMenus)> = Vec::new();
@@ -3448,11 +3448,7 @@ impl Daemon {
                     if live {
                         menus.insert(row.session_uid.clone(), crate::claude_host::menus(&models));
                     }
-                    let receipt = self
-                        .db
-                        .newest_model_receipt(row.session_uid.clone())
-                        .await?;
-                    choosing.push((row.session_uid.clone(), models, receipt));
+                    choosing.push((row.session_uid.clone(), models));
                 }
                 protocol::agent::AgentKind::Codex if live => {
                     menus.insert(row.session_uid.clone(), crate::codex_host::menus(&models));
@@ -3476,14 +3472,15 @@ impl Daemon {
         let inner = self.inner.lock().await;
         let mut model_ids: HashMap<String, String> = HashMap::new();
         let mut model_labels: HashMap<String, String> = HashMap::new();
-        for (uid, models, receipt) in &choosing {
-            let fact = inner
-                .session_facts
-                .get(uid)
-                .and_then(|facts| facts.model.as_ref());
-            let Some(fact) = fact else { continue };
-            let chosen =
-                crate::claude_host::selected_model(models, &fact.value, receipt.as_deref());
+        for (uid, models) in &choosing {
+            let Some(facts) = inner.session_facts.get(uid) else {
+                continue;
+            };
+            let Some(fact) = facts.model.as_ref() else {
+                continue;
+            };
+            let receipt = facts.model_receipt.as_ref().map(|fact| fact.value.as_str());
+            let chosen = crate::claude_host::selected_model(models, &fact.value, receipt);
             if let Some(id) = chosen
                 .as_deref()
                 .and_then(|value| crate::claude_host::entry_model_id(models, value))
@@ -4174,15 +4171,15 @@ impl Daemon {
         let Some(models) = self.db.hosted_models(uid.to_string()).await? else {
             return Ok(None);
         };
-        let receipt = self.db.newest_model_receipt(uid.to_string()).await?;
         let inner = self.inner.lock().await;
-        Ok(inner
-            .session_facts
-            .get(uid)
-            .and_then(|facts| facts.model.as_ref())
-            .and_then(|fact| {
-                crate::claude_host::selected_model(&models, &fact.value, receipt.as_deref())
-            }))
+        let Some(facts) = inner.session_facts.get(uid) else {
+            return Ok(None);
+        };
+        let receipt = facts.model_receipt.as_ref().map(|fact| fact.value.as_str());
+        Ok(facts
+            .model
+            .as_ref()
+            .and_then(|fact| crate::claude_host::selected_model(&models, &fact.value, receipt)))
     }
 
     /// Commit one of a hosted run's card lines with its cursor ([`Db::commit_host_card`])
