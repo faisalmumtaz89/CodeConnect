@@ -12,9 +12,10 @@ import SwiftUI
 /// With no computer set up there is nothing to wait for: the intro, then a cut (to Set Up). Reduce Motion: the still
 /// mark, then a cut. Nothing changes opacity. Only a cold launch plays it: a window reopened later opens on the app.
 struct LaunchSurface: View {
-    /// Whether the splash is over for this process, for what waits on it (Set Up's sheet).
+    /// Whether the splash is over for this process, for what waits on it (Set Up's sheet). A launch that shows none has
+    /// none to wait out.
     @Observable @MainActor final class State {
-        var over = false
+        var over = !LaunchSurface.shows
     }
     @MainActor static let state = State()
 
@@ -27,7 +28,7 @@ struct LaunchSurface: View {
     @FocusState private var holdsFocus: Bool
 
     var body: some View {
-        if !Self.state.over, shows {
+        if !Self.state.over, Self.shows {
             TimelineView(.animation(paused: frozen)) { context in
                 frame(at: time(context.date))
             }
@@ -109,7 +110,7 @@ struct LaunchSurface: View {
     // MARK: Renders
 
     /// Whether this launch shows the splash: every launch but a render that didn't ask for it.
-    private var shows: Bool {
+    private static var shows: Bool {
         #if DEBUG
             if RenderWindow.isRendering || RenderWindow.launchRecord != nil { return RenderWindow.showsLaunch }
         #endif
