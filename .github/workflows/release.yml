@@ -204,9 +204,9 @@ jobs:
             exit 1
           fi
           echo "$VERSION is newer than ${previous#v}"
-          # The update window's notes are written by the merges since the last
-          # release (RELEASING.md, step 2), so notes still the last release's
-          # would tell every Mac the wrong news.
+          # The feed's notes are written by the merges since the last release
+          # (RELEASING.md, step 2), so notes still the last release's would
+          # describe the wrong release in the feed every Mac reads.
           if ! gh api "repos/$GITHUB_REPOSITORY/contents/macos/release-notes.txt?ref=$previous" \
               -H "Accept: application/vnd.github.raw" > "$RUNNER_TEMP/previous-notes.txt"; then
             echo "::error::could not read $previous's macos/release-notes.txt"

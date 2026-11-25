@@ -10,6 +10,8 @@ struct CodeConnectApp: App {
     @State private var setup: Setup
     /// Sparkle's updater, shown as the update button alone: started with the app.
     @State private var updates: Updates?
+    /// Check for Updates… opens the window first, where the update button stands.
+    @Environment(\.openWindow) private var openWindow
     /// Settings, in the main window in the sidebar's place, and its section: kept while the window is closed.
     @State private var settings: SettingsSection?
     /// Help › CodeConnect Support.
@@ -77,7 +79,10 @@ struct CodeConnectApp: App {
             }
             CommandGroup(after: .appInfo) {
                 if let updates {
-                    Button("Check for Updates\u{2026}") { updates.checkForUpdates() }
+                    Button("Check for Updates\u{2026}") {
+                        openWindow(id: "main")
+                        updates.checkForUpdates()
+                    }
                 }
                 Button("Set Up CodeConnect\u{2026}") { setup.reopen(machines: machines) }
             }

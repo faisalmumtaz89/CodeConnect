@@ -137,7 +137,8 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
         if state?.working == true { state = .available }
     }
 
-    func showUpdateInFocus() {}
+    /// Asked again while an update is under way: the app comes forward, where its button is.
+    func showUpdateInFocus() { NSApp.activate() }
 }
 
 /// The update's one control, at the title bar's trailing end, shown only while there is an update: a quiet capsule, the

@@ -155,13 +155,14 @@ struct MainWindow: View {
                 .padding(.top, 13)
             }
         }
+        // The update button is the window's, over Settings too; the run's toggle only over the panes.
         .overlay(alignment: .topTrailing) {
-            if settings == nil {
-                HStack(spacing: Self.updateGap) {
-                    if let updates, let state = updates.state {
-                        UpdateButton(state: state) { updates.press() }
-                            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { updateWidth = $0 }
-                    }
+            HStack(spacing: Self.updateGap) {
+                if let updates, let state = updates.state {
+                    UpdateButton(state: state) { updates.press() }
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { updateWidth = $0 }
+                }
+                if settings == nil {
                     PaneToggle(symbol: "sidebar.right", shown: runIsOpen && !runHidden,
                         title: runHidden ? "Show Run" : "Hide Run", id: "pane.toggle.run") {
                         runHidden.toggle()
@@ -169,11 +170,11 @@ struct MainWindow: View {
                     }
                     .disabled(!runIsOpen)
                 }
-                // The toggle's height: the button stands centred on it.
-                .frame(height: 24)
-                .padding(.trailing, 12)
-                .padding(.top, 13)
             }
+            // The toggle's height: the button stands centred on it.
+            .frame(height: 24)
+            .padding(.trailing, 12)
+            .padding(.top, 13)
         }
         .focusedSceneValue(\.runIsOpen, runIsOpen)
         .focusedSceneValue(\.settingsShown, settings != nil)

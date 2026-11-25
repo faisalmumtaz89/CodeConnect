@@ -2,7 +2,8 @@
 # The Mac app's update feed (Sparkle's appcast) for one release: one item, this release's, and no URL but the
 # versioned .dmg it names and the feed's own address — Sparkle fetches any other link it is given as soon as it shows
 # an update, before the person accepts anything. Written from the release's own values, so nothing in it is typed by
-# hand but the notes, which are macos/release-notes.txt, the text Sparkle's update window shows.
+# hand but the notes, which are macos/release-notes.txt, the feed item's description (the app itself shows none: its
+# update is one button).
 #
 #   appcast.sh VERSION REPOSITORY NOTES_FILE PUB_DATE SIGNATURE LENGTH
 #
