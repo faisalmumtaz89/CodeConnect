@@ -11,9 +11,11 @@ struct AttachButton: View {
 
     var body: some View {
         Button { FileIntake.choose(take) } label: {
+            // As the bar's other icon controls draw (the run's "…"): 12 pt of glyph in the chip's insets.
             Image(systemName: "paperclip")
-                .font(.system(size: 13, weight: .medium))
+                .font(InputBoxChip.font)
                 .foregroundStyle(Theme.text2)
+                .frame(width: 12)
                 .inputBoxChip(open: false)
         }
         .buttonStyle(.hover(radius: 8, id: id))
