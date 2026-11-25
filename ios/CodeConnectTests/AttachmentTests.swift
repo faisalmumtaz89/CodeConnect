@@ -330,6 +330,20 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(draft.files.count, 1, "the start box keeps its tiles")
     }
 
+    /// A start sent again while its first send is still sending its files (a handshake resends every unanswered start)
+    /// leaves it to that send: its files go once, and one start leaves.
+    func testAStartSentAgainWhileSendingSendsItsFilesOnce() async throws {
+        let (model, wire, project) = startModel()
+        let draft = StartDraft()
+        draft.attach(name: "notes.md", size: 5) { Data("hello".utf8) }
+        let id = model.startSession(project, agent: .claude, prompt: "read this", files: draft.files)
+        model.resumeStart(id)
+        _ = await outcome(model, id)
+        let chunks = wire.frames.filter { if case .putFile = $0 { true } else { false } }
+        XCTAssertEqual(chunks.count, 1, "one upload of the one file: \(wire.frames)")
+        XCTAssertEqual(startedIDs(wire).count, 1)
+    }
+
     /// A file that does not arrive fails the start with why, and no start leaves.
     func testAStartWhoseFileDidNotArriveIsNotSent() async throws {
         let (model, wire, project) = startModel()

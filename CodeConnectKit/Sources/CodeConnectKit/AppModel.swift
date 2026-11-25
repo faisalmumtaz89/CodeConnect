@@ -1492,14 +1492,19 @@ public final class AppModel {
     }
 
     /// One send of one start. A send that fails, or a link that drops before
-    /// the answer, is sent again by the next handshake under the same id.
+    /// the answer, is sent again by the next handshake under the same id. One
+    /// send of a start at a time: a start with files spends a while sending them,
+    /// and a handshake in that while leaves it to the send under way.
     private func sendStart(_ requestID: String) {
         Task {
             // The one send-eligibility check, where the send happens. A start
             // answered or retry-stopped between this being scheduled and here is
             // not sent — the first send and every reconnect resend alike.
-            guard let start = starter.starts[requestID], start.outcome == nil, !start.retryStopped
+            guard let start = starter.starts[requestID], start.outcome == nil, !start.retryStopped,
+                !startsSending.contains(requestID)
             else { return }
+            startsSending.insert(requestID)
+            defer { startsSending.remove(requestID) }
             guard let ids = await sendStartFiles(requestID) else { return }
             try? await connection.send(
                 .startSession(
@@ -1508,6 +1513,9 @@ public final class AppModel {
                     attachments: ids))
         }
     }
+
+    /// Starts being sent now (`sendStart`).
+    private var startsSending: Set<String> = []
 
     /// True while the sample fleet is on screen.
     ///
