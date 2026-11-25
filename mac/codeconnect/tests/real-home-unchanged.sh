@@ -2,12 +2,12 @@
 # A test run observes the machine; it does not change it — proven over the WHOLE
 # SUITE, not one writer at a time.
 #
-# `crate::home_guard` brackets individual tests: the ones that drive a known writer
-# snapshot the real `~/.codeconnect` before and assert it unchanged after. That is a
-# fence around the writers somebody thought of. It cannot answer the sentence the
-# claim is actually made in — "`cargo test` does not write into the operator's home"
-# — because the writer that breaks it will be one nobody bracketed, reached from a
-# test nobody suspected.
+# Cargo runs the suite with `CODECONNECT_HOME` set to `target/test-home`
+# (`mac/.cargo/config.toml`), so no test should resolve the real `~/.codeconnect`;
+# `ccd`'s `the_suite_never_resolves_the_real_codeconnect_folder` asserts the root it
+# resolves. Neither answers the sentence the claim is actually made in — "`cargo
+# test` does not write into the operator's home" — because the writer that breaks it
+# will be one that reaches the home some other way, from a test nobody suspected.
 #
 # This is that sentence, measured: a recursive inventory of the real home, the whole
 # workspace suite, the same inventory again, and a diff. It is the shape that found
@@ -24,9 +24,7 @@
 #
 # What is deliberately not compared: a live `ccd` writes its own database, WAL,
 # socket and two logs into this same directory on its own schedule. Those are the
-# daemon's, not the suite's, and they are excluded BY EXACT NAME — the same list
-# `home_guard::is_the_daemons_own` uses, kept in one shape in each place because a
-# shell and a Rust matcher cannot share a literal.
+# daemon's, not the suite's, and they are excluded BY EXACT NAME.
 
 set -u
 

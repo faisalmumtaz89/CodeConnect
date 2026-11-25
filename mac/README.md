@@ -1498,6 +1498,11 @@ for](#what-the-phone-can-ask-for).
 cargo test                        # the workspace suite
 ```
 
+Run from `mac/`, the tests keep CodeConnect's folder in `target/test-home`, never
+`~/.codeconnect`: `.cargo/config.toml` sets `CODECONNECT_HOME` for every process cargo
+runs there, `cargo run` included, unless it is already set. Cargo started from another
+folder, with `--manifest-path`, does not read that file.
+
 On Linux, run the suite with `TMPDIR` set to a folder you own: the tests make
 their temporary folder owner-only, as macOS's per-user one already is, and the
 shared `/tmp` is not yours to change.

@@ -2216,6 +2216,17 @@ pub(crate) fn phone_environment() -> HashMap<OsString, OsString> {
         std::fs::create_dir_all(&home).unwrap();
         environment.insert("HOME".into(), home.into_os_string());
     }
+    // Nor the person's own Codex or Claude folder, when their shell names one: an agent
+    // started here finds its folder in that home instead.
+    #[cfg(test)]
+    for name in ["CODEX_HOME", "CLAUDE_CONFIG_DIR"] {
+        if !environment
+            .get(OsStr::new(name))
+            .is_some_and(|dir| under_temporary(Path::new(dir)))
+        {
+            environment.remove(OsStr::new(name));
+        }
+    }
     environment
 }
 
@@ -4415,10 +4426,11 @@ mod tests {
     }
 
     /// The root has a listing of its own, and with no path the home folder is
-    /// listed (`answer` fills it in): the phone starts there.
+    /// listed (`answer` fills it in): the phone starts there. The home is a fake
+    /// one: a test lists none of the person's folders.
     #[test]
     fn the_root_and_the_home_folder_list() {
-        let _env = crate::ProcessEnvRead::take();
+        let _home = crate::legacy_credentials::test_support::FakeHome::new("browse");
         let (path, contents) = list_folder("/", false);
         assert_eq!(path, "/");
         assert!(!listed(contents).0.is_empty());
