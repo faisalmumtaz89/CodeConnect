@@ -5,6 +5,16 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.22
 
+- On the Mac, a message can carry files: the paperclip in the reply box and in the new-agent box opens a file panel,
+  and you can also drop files on the box or paste a picture into it. Each file shows as a tile with ×, starts
+  uploading as soon as it is added, and the message waits until every file has arrived. The iPhone app's next
+  version adds the same.
+- A message carries up to 10 files of up to 10 MB each. A file over a limit says why on its tile and is never sent;
+  one that didn't arrive can be retried or removed. A sent message shows its files as tiles under its words.
+- On the Mac and Linux, the agent gets each file as its path on the session's computer, on a line after
+  "Attached:". A Claude session may read its own uploads folder and nothing more.
+- Files need CodeConnect 0.19.22 on the computer; with an older one, the paperclip doesn't appear.
+
 ## CodeConnect 0.19.21
 
 - On the Mac, an update is one quiet button at the right end of the title bar: "Update" when a new version is out,
