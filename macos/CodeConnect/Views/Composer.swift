@@ -198,7 +198,8 @@ private struct Composer: View {
         .focusedSceneValue(\.composerHoldsEscape, panel != nil || fieldFocused)
         // A request that arrives is answered above the box: no settings panel may cover its answers.
         .onChange(of: model.shown(for: key)?.pendingApprovals.first?.id) { _, now in if now != nil { panel = nil } }
-        .onChange(of: model.receipts(for: key)?.compactSeq) { _, _ in settle() }
+        // Claude Code's receipt settles a compact; on Antigravity, the turn agy runs `/compact` in ending does.
+        .onChange(of: model.receipts(for: key).map { [$0.compactSeq, $0.turnEndSeq] }) { _, _ in settle() }
         #if DEBUG
             .task {
                 if let typed = RenderWindow.reply, kept.reply.isEmpty { kept.reply = typed }
