@@ -48,3 +48,20 @@ Each entry corresponds to one logical commit on `perf/baseline-and-optimizations
   - `concurrent_10` Wakeups/s: `138.4/s` -> **`104.6/s`** (**-24.4%**); CPU: `1.35%` -> **`1.12%`** (**-17.0%**)
   - `burst` CPU: `72.73%` (F2: `73.27%`) -> **`65.38%`** (**-10.1%**); `relay_p50_ms`: `810.5 ms` -> **`614.4 ms`** (**-24.2%**); throughput: `924.7` -> **`1,072.1 ev/s`** (**+15.9%**)
   - `reconnect_churn` `cycle_p50_ms` / `p95`: `8.91 / 11.85 ms` -> **`7.04 / 9.22 ms`** (**-21.0% / -22.2%**); CPU: `61.34%` -> **`54.37%`** (**-11.4%**); Wakeups/s: `11,248` -> **`8,110/s`** (**-27.9%**)
+
+---
+
+## F4 — Zero-DOM raw JSON replay & history paging with 4 MiB chunk byte budget (`RawEventFrame`)
+
+- **Files:** `mac/Cargo.toml`, `mac/ccd/src/store.rs`, `mac/ccd/src/db.rs`, `mac/ccd/src/ws_server.rs`
+- **Change:**
+  - Enabled built-in `serde_json` `raw_value` feature (zero new crates) and added `RawEventFrame` + `Store::raw_event_frames_after` (4 MiB soft byte budget per chunk) + `Store::raw_event_frames_before`, serializing `{"type":"event","event":{...}}` directly from SQLite's JSON TEXT column without building intermediate `serde_json::Value` DOM trees.
+  - Updated `ws_server::Backlog` and `ws_server::History` to stream `RawEventFrame` via `send_raw_event_frame` (preserving exact `MAX_CLIENT_MESSAGE_BYTES` placeholder fallback).
+  - Added unit test `raw_event_frames_match_typed_wire_and_respect_byte_budget` asserting byte-for-byte wire equivalence with `ServerMessage::Event`.
+- **Before vs After (`x86_64-unknown-linux-musl`, 3 runs median, vs baseline / previous step F3):**
+  - `large_payloads` `history_p50_ms` / `p95`: `79.38 / 84.88 ms` -> **`43.46 / 48.16 ms`** (**-45.3% / -43.3%**)
+  - `large_payloads` settled RSS: `8.84 MiB` (max `10.71`) -> **`7.00 MiB`** (max `7.04`) (**-20.8%**)
+  - `reconnect_churn` `cycle_p50_ms` / `p95`: `8.91 / 11.85 ms` (F3: `7.04 / 9.22`) -> **`6.14 / 7.87 ms`** (**-31.1% / -33.6%** vs baseline)
+  - `reconnect_churn` CPU / Wakeups/s: `61.34% / 11,248` (F3: `54.37% / 8,110`) -> **`49.37% / 7,390/s`** (**-19.5% / -34.3%** vs baseline)
+  - `burst` throughput: `924.7 ev/s` (F3: `1,072.1`) -> **`1,236.7 ev/s`** (**+33.7%** vs baseline)
+  - `burst` `relay_p50_ms` / `p95`: `810.5 / 958.0 ms` (F3: `614.4 / 742.4`) -> **`499.5 / 611.3 ms`** (**-38.4% / -36.2%** vs baseline)

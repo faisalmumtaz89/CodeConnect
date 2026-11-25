@@ -1737,6 +1737,67 @@ impl Store {
         Ok(events)
     }
 
+    /// Zero-DOM variant of [`Store::events_after`] for WebSocket `subscribe` replay:
+    /// builds each `{"type":"event","event":{...}}` wire frame directly from SQLite's
+    /// stored `payload` JSON text without parsing it into a `serde_json::Value` DOM tree.
+    /// Stops once `max_bytes` of wire JSON have been buffered (always returning at least
+    /// one event when any exist) so huge transcripts cannot spike per-connection RAM.
+    pub fn raw_event_frames_after(
+        &self,
+        session_uid: &str,
+        after_seq: u64,
+        limit: u32,
+        max_bytes: usize,
+    ) -> Result<Vec<RawEventFrame>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare_cached(
+            "SELECT seq, session_id, ts, kind, payload, source, source_event_id, turn_id, item_id
+               FROM events
+              WHERE session_uid = ?1 AND seq > ?2
+              ORDER BY seq ASC
+              LIMIT ?3",
+        )?;
+        let mut rows = stmt.query(params![session_uid, after_seq as i64, limit as i64])?;
+        let mut frames = Vec::new();
+        let mut total_bytes = 0usize;
+        while let Some(row) = rows.next()? {
+            let frame = raw_event_frame_from_row(session_uid, row)?;
+            total_bytes += frame.wire_json.len();
+            frames.push(frame);
+            if max_bytes > 0 && total_bytes >= max_bytes {
+                break;
+            }
+        }
+        Ok(frames)
+    }
+
+    /// Zero-DOM variant of [`Store::events_before`] for WebSocket `history` paging:
+    /// reads up to `limit` events below `before_seq` (returned oldest first) without
+    /// constructing intermediate `serde_json::Value` DOM trees.
+    pub fn raw_event_frames_before(
+        &self,
+        session_uid: &str,
+        before_seq: u64,
+        limit: u32,
+    ) -> Result<Vec<RawEventFrame>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare_cached(
+            "SELECT seq, session_id, ts, kind, payload, source, source_event_id, turn_id, item_id
+               FROM events
+              WHERE session_uid = ?1 AND seq < ?2
+              ORDER BY seq DESC
+              LIMIT ?3",
+        )?;
+        let before = i64::try_from(before_seq).unwrap_or(i64::MAX);
+        let mut rows = stmt.query(params![session_uid, before, limit as i64])?;
+        let mut frames = Vec::new();
+        while let Some(row) = rows.next()? {
+            frames.push(raw_event_frame_from_row(session_uid, row)?);
+        }
+        frames.reverse();
+        Ok(frames)
+    }
+
     /// A run's facts as of the newest event that decided each: one read per
     /// fact, newest first, stopped at the first event that decides it.
     ///
@@ -7447,6 +7508,74 @@ fn event_from_row(session_uid: &str, row: &rusqlite::Row<'_>) -> rusqlite::Resul
         turn_id: row.get(7)?,
         item_id: row.get(8)?,
     })
+}
+
+/// One pre-serialized `{"type":"event","event":{...}}` WebSocket frame built
+/// directly from SQLite columns using `serde_json::value::RawValue`, avoiding
+/// `serde_json::Value` DOM allocation during `subscribe` replay and `history`.
+pub struct RawEventFrame {
+    pub seq: u64,
+    pub wire_json: String,
+}
+
+#[derive(serde::Serialize)]
+struct RawEventEnvelope<'a> {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    event: RawEventWire<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct RawEventWire<'a> {
+    seq: u64,
+    session_uid: &'a str,
+    session_id: &'a str,
+    ts: &'a str,
+    kind: EventKind,
+    payload: &'a serde_json::value::RawValue,
+    source: Source,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_event_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_id: Option<&'a str>,
+}
+
+fn raw_event_frame_from_row(
+    session_uid: &str,
+    row: &rusqlite::Row<'_>,
+) -> Result<RawEventFrame> {
+    let seq = row.get::<_, i64>(0)? as u64;
+    let session_id: String = row.get(1)?;
+    let ts: String = row.get(2)?;
+    let kind_str: String = row.get(3)?;
+    let payload_str: String = row.get(4)?;
+    let source_str: String = row.get(5)?;
+    let source_event_id: Option<String> = row.get(6)?;
+    let turn_id: Option<String> = row.get(7)?;
+    let item_id: Option<String> = row.get(8)?;
+
+    let raw_payload = serde_json::value::RawValue::from_string(payload_str)
+        .unwrap_or_else(|_| serde_json::value::RawValue::from_string("null".to_string()).unwrap());
+
+    let envelope = RawEventEnvelope {
+        msg_type: "event",
+        event: RawEventWire {
+            seq,
+            session_uid,
+            session_id: &session_id,
+            ts: &ts,
+            kind: EventKind::from_str_lossy(&kind_str),
+            payload: raw_payload.as_ref(),
+            source: parse_source(&source_str),
+            source_event_id: source_event_id.as_deref(),
+            turn_id: turn_id.as_deref(),
+            item_id: item_id.as_deref(),
+        },
+    };
+    let wire_json = serde_json::to_string(&envelope)?;
+    Ok(RawEventFrame { seq, wire_json })
 }
 
 #[cfg(test)]
@@ -13832,5 +13961,63 @@ mod tests {
             ),
             "nothing an operator can read named the column: {told}"
         );
+    }
+
+    #[test]
+    fn raw_event_frames_match_typed_wire_and_respect_byte_budget() {
+        let (store, _p) = temp_store();
+        let session = key("RF", "cc-raw");
+        begin(&store, &session);
+        let uid = session.uid.as_str();
+
+        let big = "x".repeat(4096);
+        for i in 0..4u32 {
+            store
+                .append_event(&PendingEvent {
+                    session_uid: uid.into(),
+                    session_id: "cc-raw".into(),
+                    ts: "2026-01-01T00:00:01Z".into(),
+                    kind: EventKind::UserMessage,
+                    payload: serde_json::json!({"i": i, "text": big}),
+                    source: Source::Daemon,
+                    source_event_id: (i % 2 == 0).then(|| format!("src-{i}")),
+                    turn_id: (i % 2 == 1).then(|| format!("turn-{i}")),
+                    item_id: (i == 3).then(|| "item-3".into()),
+                })
+                .unwrap();
+        }
+
+        let typed_after = store.events_after(uid, 0, 10).unwrap();
+        let raw_after = store.raw_event_frames_after(uid, 0, 10, 0).unwrap();
+        assert_eq!(typed_after.len(), raw_after.len());
+        for (ev, raw) in typed_after.iter().zip(raw_after.iter()) {
+            assert_eq!(ev.seq, raw.seq);
+            let expected =
+                serde_json::to_string(&protocol::ws::ServerMessage::Event { event: ev.clone() })
+                    .unwrap();
+            assert_eq!(raw.wire_json, expected);
+        }
+
+        let typed_before = store.events_before(uid, 5, 3).unwrap();
+        let raw_before = store.raw_event_frames_before(uid, 5, 3).unwrap();
+        assert_eq!(typed_before.len(), raw_before.len());
+        for (ev, raw) in typed_before.iter().zip(raw_before.iter()) {
+            assert_eq!(ev.seq, raw.seq);
+            let expected =
+                serde_json::to_string(&protocol::ws::ServerMessage::Event { event: ev.clone() })
+                    .unwrap();
+            assert_eq!(raw.wire_json, expected);
+        }
+
+        // Byte budget smaller than 1 event still yields 1 event so paging always progresses.
+        let one = store.raw_event_frames_after(uid, 0, 10, 100).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].seq, 1);
+
+        // Byte budget ~6 KiB stops after 2 × ~4.2 KiB events instead of loading all 4.
+        let two = store.raw_event_frames_after(uid, 0, 10, 6000).unwrap();
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[0].seq, 1);
+        assert_eq!(two[1].seq, 2);
     }
 }

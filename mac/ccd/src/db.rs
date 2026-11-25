@@ -163,6 +163,7 @@ db_ops! {
 // value. Written out rather than bent into the macro, because a macro contorted
 // to fit every case is harder to read than the six functions it saves.
 impl Db {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn events_after(
         &self,
         session_uid: String,
@@ -173,6 +174,20 @@ impl Db {
             .await
     }
 
+    pub async fn raw_event_frames_after(
+        &self,
+        session_uid: String,
+        after_seq: u64,
+        limit: u32,
+        max_bytes: usize,
+    ) -> Result<Vec<crate::store::RawEventFrame>> {
+        self.run(move |store| {
+            store.raw_event_frames_after(&session_uid, after_seq, limit, max_bytes)
+        })
+        .await
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn events_before(
         &self,
         session_uid: String,
@@ -180,6 +195,16 @@ impl Db {
         limit: u32,
     ) -> Result<Vec<Event>> {
         self.run(move |store| store.events_before(&session_uid, before_seq, limit))
+            .await
+    }
+
+    pub async fn raw_event_frames_before(
+        &self,
+        session_uid: String,
+        before_seq: u64,
+        limit: u32,
+    ) -> Result<Vec<crate::store::RawEventFrame>> {
+        self.run(move |store| store.raw_event_frames_before(&session_uid, before_seq, limit))
             .await
     }
 

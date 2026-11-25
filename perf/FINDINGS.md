@@ -57,7 +57,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
   2. For `History` (`events_before`), stream raw JSON frames without ever constructing `serde_json::Value` DOM trees.
 - **Expected gain:** **-50% to -70% `large_payloads` `history_p50` latency** (`79 ms -> ~25 ms`), **-40% to -60% `large_payloads` Peak RSS** (`18.5 MiB -> ~9–11 MiB` on `musl`, `34.6 MiB -> ~14 MiB` on `gnu`), lower `reconnect_churn` CPU.
 - **Risk:** Low (wire bytes are byte-for-byte valid identical JSON objects; validate with round-trip serialization tests against `ServerMessage::Event`).
-- **Status:** `todo`
+- **Status:** `done` (`large_payloads` `history_p50` `-45.3%`, settled RSS `-20.8%`; `burst` `+33.7%` ev/s; `reconnect_churn` `-31.1%` cycle latency; see `perf/CHANGELOG.md`)
 
 ### F5. `broadcast::Sender<Event>` (1024 slots) pins large payloads, allocates 246 KiB permanently, and clones `Event` / `PendingEvent` unnecessarily
 - **Location:** `mac/ccd/src/state.rs:56, 110, 946, 951, 991`; `mac/ccd/src/ws_server.rs`

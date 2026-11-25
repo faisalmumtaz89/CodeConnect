@@ -1659,6 +1659,10 @@ fn describe(outcome: &AuthOutcome) -> String {
 /// message while a replay is pending, where it used to finish the backlog first.
 /// Event frames keep their order against each other; a reply to a message sent
 /// behind a `subscribe` can now arrive between two replayed events.
+/// Soft byte budget per fetched replay chunk so large transcripts cannot spike
+/// per-connection RAM while still amortizing SQLite reads cleanly.
+const REPLAY_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Default)]
 struct Backlog {
     /// Sessions still to be paged out, the one being paged now at the front.
@@ -1666,8 +1670,8 @@ struct Backlog {
     /// watermark, so the one already asked for carries everything a second
     /// would have.
     sessions: std::collections::VecDeque<String>,
-    /// Events read from the store for the front session and not yet sent.
-    page: std::collections::VecDeque<Event>,
+    /// Pre-serialized event frames read from the store for the front session and not yet sent.
+    page: std::collections::VecDeque<crate::store::RawEventFrame>,
 }
 
 impl Backlog {
@@ -1751,7 +1755,7 @@ impl Backlog {
             self.sessions.pop_front();
             return Ok(());
         };
-        if let Some(event) = self.page.pop_front() {
+        if let Some(frame) = self.page.pop_front() {
             // `seq > watermark`, exactly as the inline replay behaved, and
             // deliberately not the `seq == watermark + 1` the live path uses. A
             // hole in the *store* would leave such a page's head permanently
@@ -1759,9 +1763,9 @@ impl Backlog {
             // re-read for ever, and the connection would livelock. A store gap is
             // passed through instead, visible to the client in the seq it
             // carries, exactly as before.
-            if event.seq > watermark {
-                let seq = event.seq;
-                send(sink, &ServerMessage::Event { event }).await?;
+            if frame.seq > watermark {
+                let seq = frame.seq;
+                send_raw_event_frame(sink, frame.wire_json).await?;
                 watermarks.insert(session_uid.clone(), seq);
                 // After the successful send, never before: "written to the
                 // socket" is the only delivery this side can attest.
@@ -1778,7 +1782,12 @@ impl Backlog {
         // so events the live arm delivered meanwhile are not re-read.
         let page = daemon
             .db
-            .events_after(session_uid.clone(), watermark, REPLAY_PAGE)
+            .raw_event_frames_after(
+                session_uid.clone(),
+                watermark,
+                REPLAY_PAGE,
+                REPLAY_PAGE_MAX_BYTES,
+            )
             .await?;
         if page.is_empty() {
             self.sessions.pop_front();
@@ -1822,7 +1831,7 @@ struct HistoryRequest {
     limit: u32,
     request_id: String,
     /// The page read from the store, oldest first; `None` until it is read.
-    page: Option<VecDeque<Event>>,
+    page: Option<VecDeque<crate::store::RawEventFrame>>,
     /// The lowest seq sent so far.
     first_seq: u64,
     /// Why the page ends early. Set when the run is unknown, when the store read
@@ -1886,9 +1895,9 @@ impl History {
             return Ok(());
         };
         if request.error.is_none() {
-            if let Some(event) = request.page.as_mut().and_then(VecDeque::pop_front) {
-                request.first_seq = request.first_seq.min(event.seq);
-                return send(sink, &ServerMessage::Event { event }).await;
+            if let Some(frame) = request.page.as_mut().and_then(VecDeque::pop_front) {
+                request.first_seq = request.first_seq.min(frame.seq);
+                return send_raw_event_frame(sink, frame.wire_json).await;
             }
             // Asked before the page is read and again before its end is sent: a
             // run removed elsewhere — by another connection, or at the Mac — ends
@@ -1902,7 +1911,7 @@ impl History {
             if request.error.is_none() && request.page.is_none() {
                 match daemon
                     .db
-                    .events_before(
+                    .raw_event_frames_before(
                         request.session_uid.clone(),
                         request.before_seq,
                         request.limit,
@@ -2151,6 +2160,28 @@ where
             text.len()
         );
         oversized_placeholder(message, text.len())?
+    } else {
+        text
+    };
+    write_bounded(sink, Message::Text(text)).await
+}
+
+/// Send a pre-serialized `{"type":"event","event":{...}}` frame from the store,
+/// preserving the exact [`MAX_CLIENT_MESSAGE_BYTES`] placeholder guard on the
+/// rare oversized frame without parsing or re-serializing normal frames.
+async fn send_raw_event_frame<S>(sink: &mut S, text: String) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+    <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
+{
+    let text = if text.len() > MAX_CLIENT_MESSAGE_BYTES {
+        crate::log_warn!(
+            "ws: an outbound message of {} bytes exceeds the {MAX_CLIENT_MESSAGE_BYTES}-byte \
+             frame limit; sending a placeholder instead of failing the connection",
+            text.len()
+        );
+        let parsed: ServerMessage = serde_json::from_str(&text)?;
+        oversized_placeholder(&parsed, text.len())?
     } else {
         text
     };
