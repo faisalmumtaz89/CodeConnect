@@ -51,15 +51,22 @@ enum FileIntake {
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 taken = true
-                _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                    guard let url else { return }
-                    Task { @MainActor in add([url], take) }
+                Task {
+                    // The provider answers on a queue of its own; only what it read crosses back.
+                    let url: URL? = await withCheckedContinuation { answer in
+                        _ = provider.loadObject(ofClass: URL.self) { url, _ in answer.resume(returning: url) }
+                    }
+                    if let url { add([url], take) }
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                 taken = true
-                provider.loadDataRepresentation(forTypeIdentifier: UTType.png.identifier) { data, _ in
-                    guard let data else { return }
-                    Task { @MainActor in take("image.png", data.count) { data } }
+                Task {
+                    let data: Data? = await withCheckedContinuation { answer in
+                        _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.png.identifier) { data, _ in
+                            answer.resume(returning: data)
+                        }
+                    }
+                    if let data { take("image.png", data.count) { data } }
                 }
             }
         }
