@@ -166,7 +166,7 @@ pub struct Daemon {
     /// construction: [`SERVICE_LABEL_VAR`] is set by launchd, or by CodeConnect's
     /// systemd unit, at exec, and reading it later would be reading whatever the
     /// environment has become.
-    started_at: String,
+    pub(crate) started_at: String,
     launchd_label: Option<String>,
     inner: Arc<Mutex<Inner>>,
     /// One gate per run, held across *both* halves of an ingest.
@@ -2696,7 +2696,9 @@ impl Daemon {
                     .send(crate::codex_host::LinkCommand::TurnRunning(reply))
                     .is_err()
                     || told.await.unwrap_or(true);
-                if crate::switch::moves(self, &session.uid, request_id, running).await {
+                // A message the ledger holds is answered from it, and moves nothing.
+                if !recorded && crate::switch::moves(self, &session.uid, request_id, running).await
+                {
                     let deadline = tokio::time::Instant::now() + crate::claude_host::RELAUNCH_WAIT;
                     if !crate::switch::ended_for_move(self, &session.uid, deadline).await {
                         return refuse(crate::claude_host::STILL_ENDING.into());
@@ -3983,8 +3985,8 @@ impl Daemon {
         launcher: Result<std::path::PathBuf, String>,
     ) {
         match self.db.fail_codex_starts().await {
-            Ok((0, _, _)) => {}
-            Ok((failed, hosts, unrecorded)) => {
+            Ok((0, _)) => {}
+            Ok((failed, hosts)) => {
                 crate::log_info!(
                     "{failed} Codex run(s) were starting when ccd stopped, so they did not start"
                 );
@@ -3992,27 +3994,6 @@ impl Daemon {
                     tokio::spawn(async move {
                         crate::codex_host::stop(&watch.session_uid, watch.host, watch.boot).await;
                     });
-                }
-                // A switch's relaunch that had launched an app-server not yet recorded: its claim names it.
-                for uid in unrecorded {
-                    let claimed = crate::claude_host::run_dir(root, &uid).join("as.pid");
-                    let leader = std::fs::read_to_string(claimed)
-                        .ok()
-                        .and_then(|pid| pid.trim().parse::<i32>().ok())
-                        .and_then(|pid| {
-                            protocol::proc_identity::read_birth_identity(pid).map(|birth| {
-                                protocol::proc_identity::ProcessIdentity { pid, birth }
-                            })
-                        });
-                    // Awaited: no message may relaunch the run while it may still be running.
-                    if let Some(leader) = leader {
-                        crate::codex_host::stop(
-                            &uid,
-                            leader,
-                            protocol::proc_identity::boot_identity(),
-                        )
-                        .await;
-                    }
                 }
             }
             Err(err) => crate::log_error!("could not fail the Codex runs still starting: {err:#}"),

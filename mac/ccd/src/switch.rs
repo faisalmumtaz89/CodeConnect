@@ -88,6 +88,28 @@ pub(crate) async fn moves(
     true
 }
 
+/// The run `uid`, live on the account it records: due to move when that is not its agent's active account (a choice
+/// made while it was starting or moving, which marked nothing), or when `doubt`; otherwise its switch is over.
+pub(crate) async fn settle(daemon: &Daemon, uid: &str, doubt: bool) {
+    let Ok(Some(row)) = daemon.db.get_session(uid.to_string()).await else {
+        return;
+    };
+    let active = daemon
+        .store
+        .active_account(row.agent.as_str())
+        .ok()
+        .flatten()
+        .map(|account| account.id);
+    let current = daemon
+        .store
+        .run_account(uid)
+        .ok()
+        .flatten()
+        .map(|account| account.id);
+    let due = (doubt || active != current).then_some(Store::SWITCH_WAITING);
+    set(daemon, uid, due).await;
+}
+
 /// How often [`ended_for_move`] looks again.
 const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -150,16 +172,9 @@ pub(crate) async fn ended(daemon: &Arc<Daemon>, uid: &str) {
     }
 }
 
-/// The relaunch by the message of the run `uid`, marked switching, went live on the new account (`Ok`), or
-/// did not go through (`Err`, why): its mark goes, or becomes `failed` with a line of its own saying why.
-pub(crate) async fn relaunched(daemon: &Arc<Daemon>, uid: &str, outcome: Result<(), String>) {
-    let why = match outcome {
-        Ok(()) => {
-            set(daemon, uid, None).await;
-            return;
-        }
-        Err(why) => why,
-    };
+/// The relaunch by the message of the run `uid`, marked switching, did not go through (`why`): its mark becomes
+/// `failed`, with a line of its own saying why. One that goes live is [`settle`]d.
+pub(crate) async fn relaunch_failed(daemon: &Arc<Daemon>, uid: &str, why: String) {
     set(daemon, uid, Some(Store::SWITCH_FAILED)).await;
     crate::log_warn!("{uid}: its switch's start failed: {why}");
     let agent = match daemon.db.get_session(uid.to_string()).await {

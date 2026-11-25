@@ -281,11 +281,13 @@ impl Db {
         self.run(|store| store.fail_unhosted_starts()).await
     }
 
-    #[allow(clippy::type_complexity)]
-    pub async fn fail_codex_starts(
-        &self,
-    ) -> Result<(usize, Vec<crate::store::WatchedHost>, Vec<String>)> {
+    pub async fn fail_codex_starts(&self) -> Result<(usize, Vec<crate::store::WatchedHost>)> {
         self.run(|store| store.fail_codex_starts()).await
+    }
+
+    pub async fn release_unsent(&self, session_uid: String, before: String) -> Result<()> {
+        self.run(move |store| store.release_unsent(&session_uid, &before))
+            .await
     }
 
     pub async fn recover_moves(&self) -> Result<()> {
@@ -327,8 +329,13 @@ impl Db {
             .await
     }
 
-    pub async fn begin_claude_relaunch(&self, session_uid: String, start: String) -> Result<bool> {
-        self.run(move |store| store.begin_claude_relaunch(&session_uid, &start))
+    pub async fn begin_claude_relaunch(
+        &self,
+        session_uid: String,
+        start: String,
+        account: Option<String>,
+    ) -> Result<bool> {
+        self.run(move |store| store.begin_claude_relaunch(&session_uid, &start, account.as_deref()))
             .await
     }
 
