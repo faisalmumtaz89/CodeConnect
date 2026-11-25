@@ -13,12 +13,44 @@
 // picks the request's own allow_once or reject_once option, and `done` follows once it is written to agy. `stop`
 // answers every request still open `cancelled`, withdrawing its card, cancels the session's prompt and ends agy's
 // input; a prompt agy then leaves unanswered ends `cancelled`, one cut off by any other end of agy's in the error "agy
-// ended". agy's end is `exited`. Settings changes are refused: a later slice.
-import { spawn } from 'node:child_process';
+// ended". When agy ends, what it left running in the host's process group (a command in the background) is ended
+// before `exited` is reported. Settings changes are refused: a later slice.
+import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Unsequenced } from './link.ts';
 import type { Json, PermissionRequest, ToHost } from './protocol.ts';
 import type { Say, Start, Wake } from './start.ts';
+
+/** What is left running in the host's process group besides the host (a command agy ran in the background), by pid. */
+function leftovers(): number[] {
+  try {
+    return execFileSync('/bin/ps', ['-A', '-o', 'pid=,pgid=,comm='], { encoding: 'utf8' })
+      .split('\n')
+      .map((line) => line.trim().split(/\s+/))
+      .filter(([pid, pgid, comm]) => Number(pgid) === process.pid && Number(pid) !== process.pid)
+      .filter(([, , comm]) => comm?.split('/').pop() !== 'ps')
+      .map(([pid]) => Number(pid));
+  } catch {
+    return [];
+  }
+}
+
+/** Ends what agy left in the host's process group once agy has ended: TERM, then KILL to any still there 2 s later. A
+ * run's end is reported only once its group holds the host alone, which a relaunch waits for. */
+async function endLeftovers(): Promise<void> {
+  const signal = (name: NodeJS.Signals) => {
+    for (const pid of leftovers()) {
+      try {
+        process.kill(pid, name);
+      } catch {
+        // Already gone.
+      }
+    }
+  };
+  signal('SIGTERM');
+  for (let i = 0; i < 20 && leftovers().length > 0; i += 1) await new Promise((done) => setTimeout(done, 100));
+  signal('SIGKILL');
+}
 
 /** The ACP version this host speaks. */
 const PROTOCOL_VERSION = 1;
@@ -181,7 +213,8 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
     calls.clear();
     held.clear();
     opened.catch(() => {}).finally(() =>
-      current.finally(() => {
+      current.finally(async () => {
+        await endLeftovers();
         send({ type: 'exited', ...(code === null ? {} : { code }), ...(signal === null ? {} : { signal }) });
         finish();
       }),

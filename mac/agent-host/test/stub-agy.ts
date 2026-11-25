@@ -6,7 +6,8 @@
 // `no-such-model`, which it refuses. At each `session/prompt` it writes its reply in
 // two chunks, a tool call, then asks permission for it with allow_once and reject_once options; once answered it ends
 // the tool as the answer says, writes one more chunk and answers the prompt `end_turn`. A request answered
-// `cancelled` ends the prompt `cancelled`, unless its script says `quiet_on_cancel`. It records its argv, its folder and every line it read; its input's end
+// `cancelled` ends the prompt `cancelled`, unless its script says `quiet_on_cancel`. With `leave_child` it starts a child
+// that outlives it. It records its argv, its folder and every line it read; its input's end
 // ends it.
 //
 //   stub-agy.ts <script.json> acp
@@ -21,6 +22,13 @@ const chunk = (sessionId: string, text: string) =>
   update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
 
 record({ argv: process.argv.slice(3), cwd: process.cwd() });
+// `leave_child`: as a command agy ran in the background would, a child that outlives agy, in its process group.
+if (script.leave_child) {
+  const { spawn } = await import('node:child_process');
+  const child = spawn('/bin/sleep', ['60'], { stdio: 'ignore' });
+  child.unref();
+  record({ child: child.pid });
+}
 // The prompt waiting on a permission request, by the request's id.
 const waiting = new Map<number, { sessionId: string; promptId: number }>();
 let asked = 100;

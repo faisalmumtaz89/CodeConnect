@@ -13,7 +13,7 @@ const antigravityStart = goldenLines('to_host', 'start').find((m) => m.options.a
 
 /** A host with an Antigravity start sent, its agy the stand-in. Resolves once the start's outcome has come. */
 async function run(
-  script: { version?: number; resume?: boolean; quiet_on_cancel?: boolean } = {},
+  script: { version?: number; resume?: boolean; quiet_on_cancel?: boolean; leave_child?: boolean } = {},
   prompt = 'read the note',
   resume?: string,
 ) {
@@ -222,6 +222,25 @@ test('agy ending on its own, nobody having stopped it, ends the running prompt i
   // A prompt's reply, as agy wrote it or as the host closes it when agy has gone: no method.
   const replies = acpLines(ccd).filter((message) => message.method === undefined);
   expect(replies.at(-1)).toMatchObject({ error: { message: 'agy ended' } });
+}, 15_000);
+
+test('what agy leaves running in the run\'s process group is ended before its end is reported', async () => {
+  const { dir, ccd } = await run({ leave_child: true });
+  await ccd.line('the permission request', (line) => line.type === 'permission');
+  const child = stubLog(dir).find((event) => event.child)?.child;
+  expect(typeof child).toBe('number');
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  expect(alive(child)).toBe(true);
+  ccd.send({ type: 'stop', uuid: 'c-stop' });
+  await ccd.line('the run\'s end', (line) => line.type === 'exited');
+  expect(alive(child)).toBe(false);
 }, 15_000);
 
 test('an agy at another ACP version is refused at the start, with the version it speaks', async () => {
