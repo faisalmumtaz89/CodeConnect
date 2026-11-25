@@ -407,8 +407,8 @@ private struct AccountSettings: View {
                 Text("Each agent uses the account marked here. Click another to move its sessions to it.")
                     .font(Theme.ui(13)).foregroundStyle(Theme.text2)
                 ForEach(StartAgent.withAccounts) { agent in AgentAccounts(model: model, agent: agent) }
-                // An agent with one sign-in of its own and no accounts here, where this Mac lists it.
-                if model.starter.agents.contains(where: { $0.agent == .antigravity }) {
+                // An agent with one sign-in of its own and no accounts here, where it is installed on this Mac.
+                if model.starter.availableAgents.contains(.antigravity) {
                     AgentSignInGroup(model: model, agent: .antigravity)
                 }
                 if let problem = model.accountsProblem {

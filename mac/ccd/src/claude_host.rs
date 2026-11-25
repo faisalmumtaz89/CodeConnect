@@ -1023,6 +1023,18 @@ async fn link(
                         Err(detail.unwrap_or_else(|| "the agent host refused the start".into())),
                     ),
                 };
+                // agy refusing a start as signed out (signed out outside CodeConnect, or Google ended it): what is kept
+                // of its sign-in is old, and is read again.
+                if said
+                    .as_ref()
+                    .is_err_and(|why| why == "Authentication required")
+                    && agent_named(&daemon, &uid).await == "Antigravity"
+                {
+                    daemon.agents.forget(&AgentKind::Antigravity);
+                    daemon
+                        .account_facts
+                        .forget(&crate::accounts::default_key(&AgentKind::Antigravity));
+                }
                 let initialize = match initialize.as_ref().map(serde_json::to_string).transpose() {
                     Ok(initialize) => initialize,
                     Err(err) => {
@@ -3948,6 +3960,51 @@ mod tests {
         assert_eq!(kinds, ["agent_message", "tool_call", "turn_complete"]);
         let reply: serde_json::Value = serde_json::from_str(&filed[0].2).unwrap();
         assert_eq!(reply, serde_json::json!({"text": "Hello."}));
+        stop(&played.dir);
+    }
+
+    /// **An Antigravity start agy refuses as signed out forgets what is kept of its sign-in** (round 1): agy signed out
+    /// outside CodeConnect (in agy itself, or Google ended it) still read "Signed in" from what ccd kept. agy's own
+    /// "Authentication required" for a start drops that, so the accounts listing reads agy again.
+    #[tokio::test]
+    async fn an_antigravity_start_refused_as_signed_out_forgets_its_kept_sign_in() {
+        let rig = rig();
+        let key = crate::accounts::default_key(&AgentKind::Antigravity);
+        rig.daemon.account_facts.keep_agent_signed(&key, Some(true));
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (result, played) = tokio::join!(
+            start(
+                &rig.daemon,
+                Run {
+                    agent: AgentKind::Antigravity,
+                    claude_path: "/nonexistent/agy",
+                    ..run(&rig, "req-agy-out", &cwd, &host)
+                }
+            ),
+            async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "refused", "detail": "Authentication required"}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        assert_eq!(result, failed("Authentication required".into()));
+        let listing = rig
+            .daemon
+            .account_facts
+            .told(crate::accounts::listing(&rig.daemon.store, None));
+        assert_eq!(
+            serde_json::to_value(listing).unwrap().get("agent_sign_ins"),
+            None,
+            "what was kept of agy's sign-in is gone, to be read again"
+        );
         stop(&played.dir);
     }
 

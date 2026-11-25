@@ -464,7 +464,6 @@ impl Facts {
         true
     }
 
-    /// What is held for `key`, its facts and its sign-in, goes (its sign-in changed, or it was removed).
     /// Whether the agent whose Default is `key` (Antigravity's: it keeps one sign-in and no accounts of ours) is
     /// signed in, as it just said: the listing's [`protocol::ws::AgentSignIn`] for it.
     pub(crate) fn keep_agent_signed(&self, key: &str, signed_in: Option<bool>) {
@@ -474,6 +473,7 @@ impl Facts {
             .insert(key.to_string(), (signed_in, false));
     }
 
+    /// What is held for `key`, its facts and its sign-in, goes (its sign-in changed, or it was removed).
     pub(crate) fn forget(&self, key: &str) {
         self.known.lock().unwrap().remove(key);
         self.signed.lock().unwrap().remove(key);
