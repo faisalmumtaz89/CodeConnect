@@ -33,10 +33,10 @@ http = { workspace = true }
 ring = { workspace = true }
 rustls-native-certs = { workspace = true }
 libc = { workspace = true }
+# An upload's chunks arrive base64 (`put_file`); the tests also write PEM certificates.
+base64 = { workspace = true }
 
 [dev-dependencies]
-# TEST-ONLY. The tests write PEM certificates, whose bodies are base64.
-base64 = { workspace = true }
 # `test-util` for the paused clock a test runs on when its timing must not depend on how
 # busy the machine is.
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

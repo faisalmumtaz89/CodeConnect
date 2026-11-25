@@ -118,6 +118,13 @@ final class RenderPass: XCTestCase {
 
     func testRendersTheUsageAtAX5() throws { try render(at: .ax5, Self.usage) }
 
+    /// Files with a reply.
+    func testRendersTheUploadsAtLarge() throws {
+        try render(at: .large, RenderCatalog.uploads + RenderCatalog.startFiles)
+    }
+
+    func testRendersTheUploadsAtAX5() throws { try render(at: .ax5, RenderCatalog.uploads + RenderCatalog.startFiles) }
+
     // MARK: - The pass
 
     private func render(at size: Size, _ scenarios: [RenderScenario] = RenderCatalog.all) throws {

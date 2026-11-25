@@ -34,6 +34,8 @@ export interface StartOptions {
   effort?: string;
   /** A new worktree for claude to make and start in, as `claude --worktree <name>`. */
   worktree?: string;
+  /** Folders claude may read beside its own (`--add-dir`): the run's uploads folder. */
+  additional_directories?: string[];
   mail: McpCommand;
 }
 

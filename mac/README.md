@@ -667,7 +667,7 @@ gate then refuses.
 `send_text`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
 `codex_compose`, `question_card`, `hook_only_approvals`, `history_pages`, `supported_agents`,
 `can_approve_reliably`, `command_catalog`, `private_transport`, `start_session`,
-`start_worktree`, `browse_folders`, `machine_stats` and `stop_run` so the app disables
+`start_worktree`, `browse_folders`, `machine_stats`, `stop_run` and `uploads` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
@@ -1328,6 +1328,27 @@ to probe credentials.
   prompt on screen had been fingerprinted for typing, announced by an
   `approval_prompt_bound` event this daemon no longer sends.
 
+**Files for a session's agent** (minor 50, `uploads`, paired devices only). `put_file {session_id,
+upload_id, name, size, offset, data}` sends a file in chunks of at most 512 KiB decoded (`data` is
+base64), each answered `put_file_result {upload_id, result}`: `received` with the bytes held, or
+`refused` with a reason, after which the app sends the file again under a new id. The daemon holds
+every bound: a file is at most 10 MiB, chunks arrive in order from offset 0, the first chunk fixes
+the name and size, and the upload is this connection's and this run's. `upload_id` and `name` are
+each one file name (no separator, not starting with a dot, no control character). The file is
+complete at exactly its size, at `~/.codeconnect/uploads/<session_uid>/<upload_id>/<name>`.
+`send_text` and `compose` take `attachments`, at most ten upload ids in order, hashed after the text
+only when there are any. The message claims them before it is sent, and the agent gets each as its
+absolute path on a line after `Attached:`, after the typed words (whose 8 KiB bound is unchanged);
+files alone are the whole message. A Claude run is started and resumed with its own uploads folder
+as an additional directory, so claude reads them without a card; a Codex run reads them as any path.
+A file sent from the start box names no `session_id`: it is held under
+`uploads/.pending/<upload_id>/`, its connection's alone, and `start_session`'s `attachments` (at
+most ten) move it by rename into the new run's folder once the run is named, before its first
+message is written; that message carries the same path lines, and a start that cannot take one of
+them takes none and starts nothing. The start has no payload hash: its `request_id` alone makes it
+idempotent. An upload nothing attached is removed when its connection closes or ccd starts again,
+and a run's folder goes with the run (`delete_session`, `prune`).
+
 ## How it fits together
 
 ```
@@ -1415,6 +1436,10 @@ readable.
 
 `chmod` is never applied through a symlink: every repair stats with
 `symlink_metadata` first and refuses rather than changing some other file's mode.
+
+Uploads (`~/.codeconnect/uploads/<session_uid>/<upload_id>/`) follow the same rules: each
+upload's folder is made exclusively `0700`, and its file is created `0600`, exclusively and never
+through a link, then renamed into place when its last byte arrives.
 
 ## The database and the runtime
 

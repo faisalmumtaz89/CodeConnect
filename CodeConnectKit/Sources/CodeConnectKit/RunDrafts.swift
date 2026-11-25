@@ -18,6 +18,8 @@ public final class RunDrafts {
     public var reasons: [String: String] = [:]
     /// A question's picks and words, by request.
     public var answers: [String: QuestionDraft] = [:]
+    /// The files going with the next message, in order (`AppModel.attach`).
+    public internal(set) var files: [Attachment] = []
 
     /// Drops what was typed for requests no longer waiting. Each dictionary is assigned only when something goes:
     /// `@Observable` fires on the assignment.

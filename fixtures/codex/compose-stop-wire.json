@@ -355,7 +355,8 @@
     "stop_run": true,
     "test_push": false,
     "tls": false,
-    "tls_active": false
+    "tls_active": false,
+    "uploads": true
   },
   "person_row": {
     "request_id": "send-1",

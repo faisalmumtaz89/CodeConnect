@@ -157,16 +157,23 @@ struct UserMessageRow: View {
             // a surface on the reading lane (`CCColumn.hang`): border on the 16pt
             // page margin, words on 28 under `YOU` — the same edges a code block
             // or table in Claude's reply keeps.
-            Text(text)
-                .ccType(isCommand ? CC.type.readingMono : CC.type.reading)
-                .foregroundStyle(CC.text.primary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(CC.space.sm)
-                .background(
-                    CC.color.surfaceRaised,
-                    in: RoundedRectangle(cornerRadius: CC.radius.md, style: .continuous))
+            // Files the message carried: the daemon appends their paths to the words; they show as tiles.
+            let parts = AttachedFiles.split(text)
+            if !parts.words.isEmpty {
+                Text(parts.words)
+                    .ccType(isCommand ? CC.type.readingMono : CC.type.reading)
+                    .foregroundStyle(CC.text.primary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(CC.space.sm)
+                    .background(
+                        CC.color.surfaceRaised,
+                        in: RoundedRectangle(cornerRadius: CC.radius.md, style: .continuous))
+            }
+            if !parts.paths.isEmpty {
+                SentAttachments(paths: parts.paths)
+            }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(notSent ? "You said: \(text). Not sent: stopped." : "You said: \(text)")

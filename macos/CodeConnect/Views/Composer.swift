@@ -128,6 +128,8 @@ private struct Composer: View {
     private var summary: SessionSummary? { model.shownSummary(for: key) }
     private var isCodex: Bool { summary?.isCodex == true }
     private var blocked: String? { model.sendBlockedReason(for: key, draft: kept.reply) }
+    /// Why the run cannot be talked to now: what blocks a send, except the files, which hold back only the message.
+    private var runBlocked: String? { blocked == model.filesBlockedReason(for: key) ? nil : blocked }
     private var computer: String { HostDevice.current.computer("the computer", named: model.machineName) }
     private var busy: Bool { sending || running?.phase.busy == true }
 
@@ -144,8 +146,10 @@ private struct Composer: View {
         route(row.action, draft: kept.reply)
     }
 
+    /// Words, or files alone: either is a message.
     private var canSend: Bool {
-        blocked == nil && !sending && !kept.reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        blocked == nil && !sending
+            && (!kept.reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.files(for: key).isEmpty)
     }
 
     var body: some View {
@@ -202,6 +206,11 @@ private struct Composer: View {
         #if DEBUG
             .task {
                 if let typed = RenderWindow.reply, kept.reply.isEmpty { kept.reply = typed }
+                model.seedFixtureFiles(key)
+                if !RenderWindow.attachedFiles.isEmpty {
+                    for _ in 0..<100 where !model.canUpload(key) { try? await Task.sleep(for: .milliseconds(100)) }
+                    FileIntake.add(RenderWindow.attachedFiles, takeFile)
+                }
                 // A render of the slash palette: the box holds the keyboard, as a person typing "/" there has it, once
                 // the render has sized its window (a resize closes an open panel), and `-CC_SLASH_LIT <row>` lights a
                 // row, as ↓ would.
@@ -253,6 +262,11 @@ private struct Composer: View {
         }
     }
 
+    /// A file for the next message, to the run's tray (Kit's `attach`).
+    private func takeFile(_ name: String, _ size: Int, _ read: () throws -> Data) {
+        model.attach(name: name, size: size, to: key, read: read)
+    }
+
     private var modeWords: ModeConfirmation.Words { ModeConfirmation.words(for: summary?.agent ?? .claude) }
 
     // MARK: The box
@@ -260,41 +274,50 @@ private struct Composer: View {
     private var box: some View {
         let agent = summary?.agent.displayName ?? "the agent"
         return InputBox(barHeight: 46, trailingOpen: usageHovered) {
-            TextField(
-                "", text: $kept.reply, selection: $selection,
-                prompt: Text(SessionWords.replyPrompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
-            )
-                .textFieldStyle(.plain)
-                .font(Theme.ui(15))
-                .lineSpacing(InputBoxLayout.lineSpacing)
-                .foregroundStyle(Theme.text)
-                .lineLimit(1...5)
-                .accessibilityLabel(SessionWords.replyPrompt(agent))
-                .accessibilityIdentifier("session.composer.field")
-                // Inside `sendsOnReturn`: over the palette, ↑ ↓ move its light and Return runs the lit row; anything
-                // the palette leaves (⇧/⌥Return, no palette) goes on to the box. ⌘ and ⌃ Return are never the palette's.
-                .onKeyPress(keys: [.upArrow, .downArrow, .return], phases: .down) { press in
-                    guard let slash, !press.modifiers.contains(.command), !press.modifiers.contains(.control) else {
-                        return .ignored
-                    }
-                    let key: SlashPalette.Key =
-                        switch press.key {
-                        case .upArrow: .up
-                        case .downArrow: .down
-                        default: .return(addsLine: press.modifiers.contains(.shift) || press.modifiers.contains(.option))
-                        }
-                    switch SlashPalette.outcome(of: key, rows: slash.rows.count, highlighted: slashLit) {
-                    case .highlight(let row): slashLit = row
-                    case .run(let row): runSlash(slash.rows[row])
-                    case .close: slashLatch.close()
-                    case .addLine, .toBox: return .ignored
-                    }
-                    return .handled
+            // The files going with the message stand above its words.
+            VStack(alignment: .leading, spacing: 12) {
+                if !model.files(for: key).isEmpty {
+                    FileTray(
+                        files: model.files(for: key), reason: model.filesBlockedReason(for: key),
+                        remove: { model.removeFile($0, from: key) }, retry: { model.retryFile($0, in: key) })
                 }
-                .sendsOnReturn(submit)
-                .focused($fieldFocused)
-                .onExitCommand { if panel != nil { panel = nil } else { fieldFocused = false } }
+                TextField(
+                    "", text: $kept.reply, selection: $selection,
+                    prompt: Text(SessionWords.replyPrompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
+                )
+                    .textFieldStyle(.plain)
+                    .font(Theme.ui(15))
+                    .lineSpacing(InputBoxLayout.lineSpacing)
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1...5)
+                    .accessibilityLabel(SessionWords.replyPrompt(agent))
+                    .accessibilityIdentifier("session.composer.field")
+                    // Inside `sendsOnReturn`: over the palette, ↑ ↓ move its light and Return runs the lit row; anything
+                    // the palette leaves (⇧/⌥Return, no palette) goes on to the box. ⌘ and ⌃ Return are never the palette's.
+                    .onKeyPress(keys: [.upArrow, .downArrow, .return], phases: .down) { press in
+                        guard let slash, !press.modifiers.contains(.command), !press.modifiers.contains(.control) else {
+                            return .ignored
+                        }
+                        let key: SlashPalette.Key =
+                            switch press.key {
+                            case .upArrow: .up
+                            case .downArrow: .down
+                            default: .return(addsLine: press.modifiers.contains(.shift) || press.modifiers.contains(.option))
+                            }
+                        switch SlashPalette.outcome(of: key, rows: slash.rows.count, highlighted: slashLit) {
+                        case .highlight(let row): slashLit = row
+                        case .run(let row): runSlash(slash.rows[row])
+                        case .close: slashLatch.close()
+                        case .addLine, .toBox: return .ignored
+                        }
+                        return .handled
+                    }
+                    .sendsOnReturn(submit)
+                    .focused($fieldFocused)
+                    .onExitCommand { if panel != nil { panel = nil } else { fieldFocused = false } }
+            }
         } leading: {
+            if model.canUpload(key) { AttachButton(id: "session.composer.attach", take: takeFile) }
             // Which model control this run has is Kit's to say: a run started from the app gets its own menus, or
             // its model as a fact when it has none; a run these controls do not own draws none.
             switch model.runSettings(for: key) {
@@ -306,14 +329,14 @@ private struct Composer: View {
             case .hostedLive(let settings):
                 HostedSettingsButton(
                     model: model, key: key, agent: summary?.agent ?? .claude, settings: settings,
-                    blocked: blocked, open: $panel, chose: takeOpener, compact: { compact(prefill: "") },
+                    blocked: runBlocked, open: $panel, chose: takeOpener, compact: { compact(prefill: "") },
                     clear: {
                         opener = nil
                         clearing = true
                     },
                     confirmMode: { confirmingMode = $0 },
                     box: CGRect(x: InputBoxLayout.barInset - controls.minX, y: 0, width: rowWidth, height: 0))
-                .disabled(blocked != nil || busy)
+                .disabled(runBlocked != nil || busy)
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { controls = $0 }
                 #if DEBUG
                     .task {
@@ -336,6 +359,8 @@ private struct Composer: View {
             sendButton
         }
         .coordinateSpace(.named(Self.space))
+        // Files dropped on the box, or a picture pasted into it, go with the message, where the computer takes them.
+        .takesFiles(model.canUpload(key), takeFile)
         .onGeometryChange(for: CGFloat.self) { $0.size.width - 2 * InputBoxLayout.barInset } action: { rowWidth = $0 }
         // The slash palette above the box, clear of it by the panels' one gap, as wide as the box.
         .overlay(alignment: .topLeading) {
@@ -392,7 +417,9 @@ private struct Composer: View {
         if case .hostedLive(let settings) = model.runSettings(for: key), let outcome = settings.lastOutcome {
             return Line(text: outcome.text, tone: outcome.tone.composeTone)
         }
-        if let kit = model.outcomeNote(for: key, lastSend: result) ?? model.standingNote(for: key, draft: kept.reply) {
+        // Why the files hold the message back stands under them, not here as well.
+        let standing = blocked != nil && runBlocked == nil ? nil : model.standingNote(for: key, draft: kept.reply)
+        if let kit = model.outcomeNote(for: key, lastSend: result) ?? standing {
             return Line(text: kit.text, tone: kit.tone)
         }
         return nil
@@ -427,7 +454,7 @@ private struct Composer: View {
         let generation = model.connection.generation
         let sentAt = Date()
         Task {
-            let attempt = await model.send(text: draft, to: key)
+            let attempt = await model.send(text: draft, to: key, files: true)
             sending = false
             if case .indeterminate = attempt, !again {
                 kept.unanswered = UnansweredSend(text: draft, sentAt: sentAt)

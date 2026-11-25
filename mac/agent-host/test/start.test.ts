@@ -36,6 +36,9 @@ async function run(base: any, script: StubScript = {}, opts: { env?: Record<stri
 
 const argvOf = (log: any[]) => log.find((event) => event.argv)!.argv as string[];
 const stdinOf = (log: any[]) => log.filter((event) => event.stdin).map((event) => event.stdin);
+/** The folders claude was given beside its own, in either spelling of the flag. */
+const addDirs = (argv: string[]) =>
+  argv.flatMap((arg, i) => (arg === '--add-dir' ? [argv[i + 1]] : arg.startsWith('--add-dir=') ? [arg.slice('--add-dir='.length)] : []));
 const noUnexpected = (log: any[]) => expect(log.filter((event) => event.unexpected)).toStrictEqual([]);
 
 test("a trusted folder's options reach claude: no mode when none is named, the SDK's guard for Bypass permissions, the worktree, the mail server, its two reading tools allowed, the echo, and the SDK's own setting sources", async () => {
@@ -45,6 +48,8 @@ test("a trusted folder's options reach claude: no mode when none is named, the S
   expect(argv.filter((arg) => arg.startsWith('--permission-mode'))).toStrictEqual([]);
   expect(argv).toContain('--allow-dangerously-skip-permissions');
   expect(argv[argv.indexOf('--worktree') + 1]).toBe(start.options.worktree);
+  // The run's uploads folder, and only it, is claude's to read beside its own.
+  expect(addDirs(argv)).toStrictEqual(start.options.additional_directories);
   expect(argv).toContain('--replay-user-messages');
   const mcp = argv[argv.indexOf('--mcp-config') + 1]!;
   expect(JSON.parse(mcp)).toStrictEqual({ mcpServers: { codeconnect: { type: 'stdio', ...start.options.mail } } });
@@ -70,6 +75,7 @@ test("a folder not trusted reads only the person's settings and only CodeConnect
   expect(argv.filter((arg) => arg.startsWith('--permission-mode'))).toHaveLength(1);
   expect(argv).toContain('--allow-dangerously-skip-permissions');
   expect(argv).not.toContain('--worktree');
+  expect(addDirs(argv)).toStrictEqual([]);
   // A folder not trusted keeps every card, CodeConnect's own tools' included.
   expect(argv.filter((arg) => arg.startsWith('--allowedTools'))).toStrictEqual([]);
 }, 10_000);

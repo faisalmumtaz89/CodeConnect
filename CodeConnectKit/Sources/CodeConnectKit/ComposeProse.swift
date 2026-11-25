@@ -190,6 +190,7 @@ extension AppModel {
             return "These agents are not real. Pair with \(computer) to talk to your own."
         }
         if let reason = linkHealth.disabledReason { return reason }
+        if let reason = filesBlockedReason(for: key) { return reason }
         let summary = shownSummary(for: key)
         if let summary, summary.isCodex {
             // The draft's own ceiling comes first: it is the one the reader can

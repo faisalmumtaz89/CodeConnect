@@ -298,7 +298,11 @@ const AGENTS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
 /// The answer to a `get_project_git`, `list_folder`, `create_folder`,
 /// `start_session` or one of the folder-trust frames. A `list_projects` is answered
 /// by [`list_projects`].
-pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessage {
+pub async fn answer(
+    daemon: &Arc<Daemon>,
+    connection: u64,
+    message: ClientMessage,
+) -> ServerMessage {
     match message {
         ClientMessage::ListFolderTrust { request_id } => folder_trust(daemon, request_id).await,
         ClientMessage::SetFolderTrust {
@@ -366,8 +370,14 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             worktree,
             model,
             trust,
+            attachments,
         } => {
             let state_dir = protocol::root_dir();
+            // This connection's uploads for the run, moved into its folder once it is named.
+            let attachments = crate::uploads::Pending {
+                connection,
+                ids: &attachments,
+            };
             // One environment per start: the check and the run it starts read the
             // same login shell, since `auth status` turns on variables alone.
             let environment = phone_environment();
@@ -405,6 +415,7 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                         &environment,
                         account.as_ref(),
                         trust,
+                        attachments,
                     );
                     daemon.starts.once(&request_id, start).await
                 }
@@ -421,6 +432,7 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                         &environment,
                         account.as_ref(),
                         trust,
+                        attachments,
                     );
                     daemon.starts.once(&request_id, start).await
                 }
@@ -656,6 +668,7 @@ async fn codex_start(
     environment: &HashMap<OsString, OsString>,
     account: Option<&crate::accounts::AccountEnv>,
     trust: Option<Trust>,
+    attachments: crate::uploads::Pending<'_>,
 ) -> StartSessionResult {
     if let Some(answer) = existing_run(&daemon.db, request_id).await {
         return answer;
@@ -721,6 +734,7 @@ async fn codex_start(
             environment,
             account,
             trust,
+            attachments,
         },
     )
     .await
@@ -846,6 +860,7 @@ async fn claude_start(
     environment: &HashMap<OsString, OsString>,
     account: Option<&crate::accounts::AccountEnv>,
     trust: Option<Trust>,
+    attachments: crate::uploads::Pending<'_>,
 ) -> StartSessionResult {
     if let Some(answer) = existing_run(&daemon.db, request_id).await {
         return answer;
@@ -928,6 +943,7 @@ async fn claude_start(
             codeconnect: &codeconnect,
             environment,
             account,
+            attachments,
         },
     )
     .await
@@ -2523,6 +2539,7 @@ mod tests {
                         &self.env,
                         None,
                         trust,
+                        crate::uploads::Pending::default(),
                     )
                     .await
                 }
@@ -2539,6 +2556,7 @@ mod tests {
                         &self.env,
                         None,
                         trust,
+                        crate::uploads::Pending::default(),
                     )
                     .await
                 }
@@ -2776,6 +2794,7 @@ mod tests {
             &environment,
             None,
             Some(Trust::Trusted),
+            crate::uploads::Pending::default(),
         )
         .await;
         let run = daemon
@@ -2837,6 +2856,7 @@ mod tests {
                     environment,
                     None,
                     trust,
+                    crate::uploads::Pending::default(),
                 )
                 .await;
                 let run = daemon
@@ -3103,6 +3123,7 @@ mod tests {
             &environment,
             None,
             Some(trust),
+            crate::uploads::Pending::default(),
         )
         .await;
         let StartSessionResult::Started { session_uid, .. } = &started else {
@@ -3237,7 +3258,7 @@ mod tests {
             let hash = protocol::hash::send_text_hash(&g3.uid, &text, true);
             let sent = g3
                 .daemon
-                .send_text(&g3.uid, text, Some("g3t-2"), Some(&hash), true)
+                .send_text(&g3.uid, text, Some("g3t-2"), Some(&hash), true, 0, &[])
                 .await;
             let mut ran = false;
             for _ in 0..300 {
@@ -3346,6 +3367,7 @@ mod tests {
             &environment,
             None,
             Some(Trust::Trusted),
+            crate::uploads::Pending::default(),
         )
         .await;
         let row = daemon
@@ -3397,6 +3419,7 @@ mod tests {
                 &environment,
                 None,
                 trust,
+                crate::uploads::Pending::default(),
             )
         };
         let asked = start("req-ask", None).await;
@@ -3456,6 +3479,7 @@ mod tests {
             &environment,
             None,
             Some(Trust::Trusted),
+            crate::uploads::Pending::default(),
         )
         .await;
         let worktrees = git(&project, &["worktree", "list", "--porcelain"]);
@@ -3507,6 +3531,7 @@ mod tests {
             &environment,
             None,
             Some(Trust::Trusted),
+            crate::uploads::Pending::default(),
         )
         .await;
         let run = daemon
@@ -3971,6 +3996,7 @@ mod tests {
             &rig.env,
             None,
             Some(Trust::Trusted),
+            crate::uploads::Pending::default(),
         )
         .await;
         assert_eq!(
@@ -5886,6 +5912,7 @@ esac"#;
                 worktree: None,
                 model: None,
                 trust,
+                attachments: Vec::new(),
             })
             .unwrap()
         };
@@ -5996,6 +6023,7 @@ esac"#;
                 worktree: None,
                 model: Some("haiku".into()),
                 trust: None,
+                attachments: Vec::new(),
             })
             .unwrap(),
         })

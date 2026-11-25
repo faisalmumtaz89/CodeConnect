@@ -49,6 +49,9 @@ struct StartStepsSheet: View {
     /// The first message, held by the fleet above this sheet, so closing the sheet keeps it, as the Mac's
     /// `StartDraft.message` does.
     @Binding var message: String
+    /// The files going with the first message, held beside it by the fleet (Kit's `StartDraft`, of which this flow
+    /// uses the files).
+    let files: StartDraft
     @State private var worktreeName = ""
     @State private var showsHidden = false
     @State private var namingFolder = false
@@ -69,11 +72,12 @@ struct StartStepsSheet: View {
     @State private var trustPath: String?
 
     init(
-        contexts: [StartContext], message: Binding<String>, seed: StartSeed? = nil,
+        contexts: [StartContext], message: Binding<String>, files: StartDraft, seed: StartSeed? = nil,
         onStarted: @escaping (String) -> Void, onClose: @escaping () -> Void
     ) {
         self.contexts = contexts
         _message = message
+        self.files = files
         self.onStarted = onStarted
         self.onClose = onClose
         guard let seed else { return }
@@ -663,11 +667,20 @@ struct StartStepsSheet: View {
                             StartWords.branch, startPlaceSummary(place, agent: agent, project: project, git: git), .branch,
                             mono: true)
                     }
-                    if typeSize.isAccessibilitySize { messagePill(project, agent).padding(CC.space.md) }
+                    if typeSize.isAccessibilitySize {
+                        VStack(alignment: .leading, spacing: CC.space.xs) {
+                            fileTray
+                            messagePill(project, agent)
+                        }
+                        .padding(CC.space.md)
+                    }
                 }
             }
             .scrollDismissesKeyboard(.interactively)
             .accessibilityIdentifier("start-list")
+            #if DEBUG
+                .task { AppModel.seedFixtureFiles(files) }
+            #endif
             // The message rides over the keyboard with Start. At the
             // accessibility sizes the two left no line to type on: the message
             // stays in the list, and while it has the keyboard its own send
@@ -675,8 +688,14 @@ struct StartStepsSheet: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if !(composing && typeSize.isAccessibilitySize) {
                     CCActionBar {
-                        if !typeSize.isAccessibilitySize { messagePill(project, agent) }
+                        // The files sit with the message: over it in the bar, or in the list at the accessibility sizes.
+                        if !typeSize.isAccessibilitySize {
+                            fileTray
+                            messagePill(project, agent)
+                        }
+                        // A file over a limit holds the start: the tray says why.
                         CCButton("Start", size: .lg, fullWidth: true) { start(project, agent) }
+                            .disabled(files.filesBlockedReason != nil)
                             .accessibilityIdentifier("start-go")
                     }
                 }
@@ -684,14 +703,30 @@ struct StartStepsSheet: View {
         }
     }
 
+    @ViewBuilder
+    private var fileTray: some View {
+        if !files.files.isEmpty {
+            AttachmentTray(
+                files: files.files, reason: files.filesBlockedReason,
+                onRemove: { files.removeFile($0) }, onRetry: { _ in })
+        }
+    }
+
     private func messagePill(_ project: StartProject, _ agent: StartAgent) -> some View {
         StartMessagePill(
             text: $message, placeholder: "First message", focused: $composing,
-            onSend: typeSize.isAccessibilitySize ? { start(project, agent) } : nil)
+            onSend: typeSize.isAccessibilitySize ? { start(project, agent) } : nil,
+            attach: context.takesUploads
+                ? (room: Attachment.maxCount - files.files.count,
+                   take: { name, size, read in files.attach(name: name, size: size, read: read) })
+                : nil)
     }
 
     private func start(_ project: StartProject, _ agent: StartAgent) {
-        onStarted(context.start(project, place: place, agent: agent, model: pick(agent)?.model, prompt: message))
+        guard files.filesBlockedReason == nil else { return }
+        onStarted(
+            context.start(
+                project, place: place, agent: agent, model: pick(agent)?.model, prompt: message, files: files.files))
     }
 
     // MARK: Model
@@ -775,7 +810,7 @@ struct StartStepsSheet: View {
                     onStarted(
                         context.start(
                             project, place: place, agent: agent, model: pick(agent)?.model, prompt: message,
-                            trust: trust))
+                            trust: trust, files: files.files))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(CC.space.md)

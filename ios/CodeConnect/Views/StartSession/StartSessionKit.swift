@@ -100,6 +100,8 @@ struct StartMessagePill: View {
     var focused: FocusState<Bool>.Binding
     /// Drawn in the circle once text exists; nil keeps the mic.
     var onSend: (() -> Void)?
+    /// Where the computer takes files: `+` at the pill's start, and how many more fit.
+    var attach: (room: Int, take: TakeFile)? = nil
 
     @State private var dictation = DictationController()
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -115,7 +117,7 @@ struct StartMessagePill: View {
                 field
             }
         }
-        .padding(.leading, CC.space.sm)
+        .padding(.leading, attach == nil ? CC.space.sm : CC.size.hitTarget + CC.space.xxs)
         .padding(.trailing, CC.size.hitTarget + CC.space.xxs)
         .padding(.vertical, CC.space.xs)
         .frame(minHeight: CCPillSurface.height)
@@ -124,6 +126,9 @@ struct StartMessagePill: View {
             CCVoiceButton(phase: phase) { act() }
                 .accessibilityIdentifier("start-message-button")
                 .padding(CC.space.xxs)
+        }
+        .overlay(alignment: .bottomLeading) {
+            if let attach { AttachMenu(room: attach.room, take: attach.take).padding(CC.space.xxs) }
         }
         .background { CCPillSurface() }
         .onDisappear { dictation.cancel() }

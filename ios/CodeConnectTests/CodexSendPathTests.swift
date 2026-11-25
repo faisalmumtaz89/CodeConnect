@@ -88,7 +88,7 @@ final class CodexSendPathTests: XCTestCase {
                 guard let result = wire.interruptResult else { return }
                 connection?.injectForTesting(
                     .interruptResult(sessionID: session, requestID: requestID, result: result))
-            case .compose(let session, let requestID, _, _):
+            case .compose(let session, let requestID, _, _, _):
                 guard let result = wire.composeResult else { return }
                 connection?.injectForTesting(
                     .composeResult(sessionID: session, requestID: requestID, result: result))
@@ -363,7 +363,7 @@ final class CodexSendPathTests: XCTestCase {
         let (model, wire) = model(link: "subscribed")
         wire.composeResult = .started(turnID: "turn-9")
         _ = await model.composeToCodex(sessionKey: key(), text: "hello")
-        guard case .compose(let session, _, _, let hash) = wire.frames.first(where: {
+        guard case .compose(let session, _, _, let hash, _) = wire.frames.first(where: {
             if case .compose = $0 { return true }
             return false
         }) else { return XCTFail("no compose frame") }
@@ -514,7 +514,7 @@ final class CodexSendPathTests: XCTestCase {
         _ = await composeModel.composeToCodex(sessionKey: key(), text: "hello")
         _ = await composeModel.composeToCodex(sessionKey: key(), text: "hello")
         let composeIDs = composeWire.frames.compactMap { message -> String? in
-            if case .compose(_, let requestID, _, _) = message { return requestID }
+            if case .compose(_, let requestID, _, _, _) = message { return requestID }
             return nil
         }
         XCTAssertEqual(composeIDs.count, 2)
@@ -524,7 +524,7 @@ final class CodexSendPathTests: XCTestCase {
         // identity of what is being said, not of the tap.
         _ = await composeModel.composeToCodex(sessionKey: key(), text: "different words")
         let afterChange = composeWire.frames.compactMap { message -> String? in
-            if case .compose(_, let requestID, _, _) = message { return requestID }
+            if case .compose(_, let requestID, _, _, _) = message { return requestID }
             return nil
         }
         XCTAssertEqual(afterChange.count, 3)

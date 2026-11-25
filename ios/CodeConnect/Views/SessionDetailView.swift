@@ -1147,6 +1147,9 @@ struct SessionDetailView: View {
             // A session this phone just started with nothing to say yet opens
             // ready to type into.
             if route.focusComposer { composerFocused = true }
+            #if DEBUG
+                model.seedFixtureFiles(key)
+            #endif
         }
         .onDisappear {
             model.markReviewed(key)
@@ -1549,7 +1552,7 @@ struct SessionDetailView: View {
         let generation = model.connection.generation
         let sentAt = Date()
         Task {
-            let result = await model.send(text: text, to: key)
+            let result = await model.send(text: text, to: key, files: true)
             sending = false
             composeResult = result
             if case .indeterminate = result, !again {
@@ -2042,6 +2045,9 @@ private struct SessionComposeBar: View {
     /// so the finger that just ended a recording cannot also fire the send.
     @State private var stoppedAt: Date?
 
+    /// What goes with the next reply, in order (Kit's tray).
+    private var files: [Attachment] { model.files(for: key) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: CC.space.xs) {
             // The reason goes *above* the composer and is visible text, not
@@ -2049,6 +2055,12 @@ private struct SessionComposeBar: View {
             // highest-traffic control.
             standingNote
             byteCounter
+            if !files.isEmpty {
+                AttachmentTray(
+                    files: files, reason: model.filesBlockedReason(for: key),
+                    onRemove: { model.removeFile($0, from: key) },
+                    onRetry: { model.retryFile($0, in: key) })
+            }
             composer
         }
         .padding(.horizontal, CC.space.md)
@@ -2091,7 +2103,7 @@ private struct SessionComposeBar: View {
         }
         // 12pt, not 16: the disc's 8pt inset took 4pt from the trailing side,
         // and the text keeps the width it wraps at.
-        .padding(.leading, CC.space.sm)
+        .padding(.leading, model.canUpload(key) ? CC.size.hitTarget + CC.space.xxs : CC.space.sm)
         .padding(
             .trailing,
             dictation.isRecording
@@ -2117,6 +2129,15 @@ private struct SessionComposeBar: View {
             // 4pt round the 44pt frame puts the 36pt disc 8pt inside the
             // pill's bottom and trailing edges.
             .padding(CC.space.xxs)
+        }
+        // `+` at the leading edge, where the computer takes files: the circle's 4pt inset, mirrored.
+        .overlay(alignment: .bottomLeading) {
+            if model.canUpload(key) {
+                AttachMenu(room: Attachment.maxCount - files.count) { name, size, read in
+                    model.attach(name: name, size: size, to: key, read: read)
+                }
+                .padding(CC.space.xxs)
+            }
         }
         .background { CCPillSurface() }
         // The sort priority above ranks within the pill alone.
@@ -2176,7 +2197,9 @@ private struct SessionComposeBar: View {
         // While a turn runs the circle stops it, by Kit's one rule (`stopUnavailable`), unless a typed message can be
         // sent now, since the field's Return is a new line; a message that must wait (the note says why) keeps Stop.
         let canStop = model.stopUnavailable(for: key) == nil
-        if !text.isEmpty, !canStop || model.sendBlockedReason(for: key, draft: text) == nil { return .send }
+        // Files alone are a whole message.
+        let hasMessage = !text.isEmpty || !files.isEmpty
+        if hasMessage, !canStop || model.sendBlockedReason(for: key, draft: text) == nil { return .send }
         return canStop ? .stopTurn : .dictate
     }
 
@@ -2207,7 +2230,7 @@ private struct SessionComposeBar: View {
             stoppedAt = .now
         case .send:
             if let stoppedAt, Date.now.timeIntervalSince(stoppedAt) < 0.3 { return }
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty else {
                 return
             }
             // Deliberately silent: Send fires dozens of times a day, and the
@@ -2259,11 +2282,13 @@ private struct SessionComposeBar: View {
         // "answer the card first" — is what they need, not a stale send's verdict (R2T3-F1). But a
         // just-taken outcome (a Stop they tapped) wins over the block. Computed in `composeOutcomeOrBlock`
         // so the precedence has a test; the neutral "observe only" note stays below, as before.
-        if let note = model.composeOutcomeOrBlock(for: key, draft: text, lastSend: result) {
+        // The files' own reason is said once, under the tray.
+        let filesReason = model.filesBlockedReason(for: key)
+        if let note = model.composeOutcomeOrBlock(for: key, draft: text, lastSend: result), note.text != filesReason {
             composeNote(note)
         } else if case .failed(let reason, let needsSettings) = dictation.phase {
             micFailureNote(reason: reason, needsSettings: needsSettings)
-        } else if let note = model.standingNote(for: key, draft: text) {
+        } else if let note = model.standingNote(for: key, draft: text), note.text != filesReason {
             composeNote(note)
         }
     }
