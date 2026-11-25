@@ -667,7 +667,13 @@ struct StartStepsSheet: View {
                             StartWords.branch, startPlaceSummary(place, agent: agent, project: project, git: git), .branch,
                             mono: true)
                     }
-                    if typeSize.isAccessibilitySize { messagePill(project, agent).padding(CC.space.md) }
+                    if typeSize.isAccessibilitySize {
+                        VStack(alignment: .leading, spacing: CC.space.xs) {
+                            fileTray
+                            messagePill(project, agent)
+                        }
+                        .padding(CC.space.md)
+                    }
                 }
             }
             .scrollDismissesKeyboard(.interactively)
@@ -682,12 +688,11 @@ struct StartStepsSheet: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if !(composing && typeSize.isAccessibilitySize) {
                     CCActionBar {
-                        if !files.files.isEmpty {
-                            AttachmentTray(
-                                files: files.files, reason: files.filesBlockedReason,
-                                onRemove: { files.removeFile($0) }, onRetry: { _ in })
+                        // The files sit with the message: over it in the bar, or in the list at the accessibility sizes.
+                        if !typeSize.isAccessibilitySize {
+                            fileTray
+                            messagePill(project, agent)
                         }
-                        if !typeSize.isAccessibilitySize { messagePill(project, agent) }
                         // A file over a limit holds the start: the tray says why.
                         CCButton("Start", size: .lg, fullWidth: true) { start(project, agent) }
                             .disabled(files.filesBlockedReason != nil)
@@ -695,6 +700,15 @@ struct StartStepsSheet: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var fileTray: some View {
+        if !files.files.isEmpty {
+            AttachmentTray(
+                files: files.files, reason: files.filesBlockedReason,
+                onRemove: { files.removeFile($0) }, onRetry: { _ in })
         }
     }
 
