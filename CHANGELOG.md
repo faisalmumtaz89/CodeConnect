@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.24
+
 ## CodeConnect 0.19.23
 
 - On the Mac, the update button is white and reads "Update Available", so a new version isn't missed.
