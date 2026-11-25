@@ -5,6 +5,8 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.23
 
+- On the Mac, the update button is white and reads "Update Available", so a new version isn't missed.
+
 ## CodeConnect 0.19.22
 
 - On the Mac, a message can carry files: the paperclip in the reply box and in the new-agent box opens a file panel,
