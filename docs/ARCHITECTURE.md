@@ -8,7 +8,7 @@ An agent's terminal output tells you what it *has done*. It does not reliably te
 
 That single fact determines the design. Anything that detects approvals by reading terminal text is inferring a signal from its absence, and it breaks the first time the rendering changes. So the system is split in two:
 
-- **The control plane** — where an agent asks a question and *blocks*. For Claude Code, the agent host it runs under, which holds each request as the Agent SDK's `canUseTool` request; for Codex, its own JSON-RPC app server. It is the only place an approval is created or answered.
+- **The control plane** — where an agent asks a question and *blocks*. For Claude Code, the agent host it runs under, which holds each request as the Agent SDK's `canUseTool` request; for Antigravity, the same host, which holds agy's `session/request_permission`; for Codex, its own JSON-RPC app server. It is the only place an approval is created or answered.
 - **The observation plane** — where an agent narrates what already happened. The messages its host or app server relays. Useful for showing a timeline and a diff. Never used to decide anything: the daemon acts on the control plane alone.
 
 ## The pieces
@@ -36,7 +36,7 @@ That single fact determines the design. Anything that detects approvals by readi
 
 **`codeconnect`** is the command line: it installs and runs the daemon, pairs phones, serves the CodeConnect Messages tools a session calls (`mcp`) and installs updates. Agents are started from the apps.
 
-**`cc-agent-host`** runs Claude Code for each run started from an app, through the Agent SDK: it relays what Claude says to the daemon, and the daemon's answers back.
+**`cc-agent-host`** runs Claude Code for each run started from an app, through the Agent SDK, and Antigravity's `agy`, through the Agent Client Protocol: it relays what the agent says to the daemon, and the daemon's answers back.
 
 **The phone** is a client of the event log, never a source of truth. It renders what the log says, and shows the age of every fact.
 
@@ -83,6 +83,6 @@ A Codex session is started from the app: the daemon runs Codex's own app server 
 
 ## Adding another agent
 
-Sessions are acquired through an adapter, and the phone talks to a normalised event model rather than anything Claude-specific. That is what Codex was added through, and what a third agent would use: its own control channel, as Claude Code's agent host and Codex's app server are; several CLIs speak the Agent Client Protocol.
+Sessions are acquired through an adapter, and the phone talks to a normalised event model rather than anything Claude-specific. That is what Codex was added through, with its own control channel, its app server; Antigravity came through the agent host, which speaks the Agent Client Protocol to `agy acp`, as several other CLIs do.
 
 The rule that does not bend: a new adapter may add an *observation* path freely, but never an *approval* path built on parsing terminal output.

@@ -1,4 +1,5 @@
-//! A Claude run's agent host, from ccd's side (P0 §2.1 H1-H3).
+//! A Claude run's agent host, from ccd's side (P0 §2.1 H1-H3). An Antigravity run is hosted
+//! the same way, its host speaking the Agent Client Protocol to `agy acp`.
 //!
 //! ccd writes the run's row first, with the app's start request id, so a repeated
 //! request finds the run instead of starting another. Then it makes the run's folder
@@ -31,7 +32,7 @@ use std::time::Duration;
 
 use protocol::agent::AgentKind;
 use protocol::config::Config;
-use protocol::event::{EventKind, Lifecycle, PendingEvent, SessionKey, Source};
+use protocol::event::{Event, EventKind, Lifecycle, PendingEvent, SessionKey, Source};
 use protocol::event::{MenuMode, MenuModel, RunMenus};
 use protocol::host::{
     FromHost, HostFile, McpCommand, OutcomeStatus, StartOptions, ToHost, Trust,
@@ -89,6 +90,8 @@ pub(crate) const PROCESS_ENDED: &str = "Stopped: its process ended";
 
 /// One Claude start, as the app asked for it and the checks before the row resolved it.
 pub(crate) struct Run<'a> {
+    /// The agent the host runs: Claude, or Antigravity through `agy acp`.
+    pub agent: AgentKind,
     /// This daemon's state folder, which holds `runs/`.
     pub root: &'a Path,
     pub request_id: &'a str,
@@ -106,7 +109,7 @@ pub(crate) struct Run<'a> {
     /// trusted, only the person's own settings and CodeConnect's MCP server (decision
     /// 157, the host's `queryOptions`).
     pub trust: Trust,
-    /// The claude the start's check found.
+    /// The agent's binary the start's check found: claude, or Antigravity's agy.
     pub claude_path: &'a str,
     /// The agent host to spawn.
     pub host_bin: &'a Path,
@@ -201,7 +204,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         lifecycle: Lifecycle::Starting,
         created_at: now.clone(),
         updated_at: now,
-        agent: AgentKind::Claude,
+        agent: run.agent.clone(),
         codex_thread_id: None,
     };
     match daemon
@@ -553,6 +556,7 @@ async fn connect(
 /// The run's `query()` options.
 fn start_options(uid: &str, run: &Run<'_>) -> StartOptions {
     StartOptions {
+        agent: run.agent.clone(),
         cwd: run.cwd.to_string(),
         claude_path: run.claude_path.to_string(),
         // The app chooses no mode at a start, so claude picks its own: the person's
@@ -631,6 +635,10 @@ struct Turns {
     /// The context the turn's latest top-level call left (its input, cache creation, cache read and output) and that
     /// call's model, for the turn's `usage` (minor 49); none until a call of the turn's own, and again at its result.
     context: Option<(u64, String)>,
+    /// An Antigravity run's turn of its latest `acp` line: a line of another turn starts one.
+    acp: Option<String>,
+    /// An Antigravity turn's newest context (tokens in use, window), filed once at its end.
+    acp_usage: Option<(u64, u64)>,
 }
 
 /// The mark of a turn's start or end at `now`, strictly after the link's latest one,
@@ -767,6 +775,23 @@ async fn apply_sdk(
         }
         Err(err) => return Err(format!("{err:#}")),
     };
+    mark_turn(daemon, uid, turns, &events, started, ended).await;
+    send(write, &ToHost::Ack { seq }).await
+}
+
+/// A turn of the run started, ended, or both, its events `events` filed: the run moving
+/// again ([`Daemon::note_turn_running`]); an end read after the replay rings the phone about
+/// the decisions still open ([`Daemon::push_turn_complete`]); and both are marked for the
+/// mail wake rule on ccd's clock, each mark after the last, an end read after the replay
+/// being the end the rule hears of ([`crate::mail::turn_ended`]).
+async fn mark_turn(
+    daemon: &Arc<Daemon>,
+    uid: &str,
+    turns: &mut Turns,
+    events: &[Event],
+    started: bool,
+    ended: bool,
+) {
     if started {
         daemon.note_turn_running(uid);
     }
@@ -798,7 +823,6 @@ async fn apply_sdk(
             crate::mail::turn_ended(daemon, uid);
         }
     }
-    send(write, &ToHost::Ack { seq }).await
 }
 
 /// What a link knows of its run when it begins: from the start that spawned the host, or,
@@ -862,7 +886,9 @@ async fn relaunched_send(
 /// order. It applies the run's `state` and the outcome of the run's start, which makes
 /// the run `live` or `failed` and is told to `begun` once committed; `begun` hears instead
 /// why the link ended if it ends first. A `live` run's SDK messages are its events
-/// ([`apply_sdk`]); the host sends none before the outcome. A `live` run's `exited` ends the
+/// ([`apply_sdk`]), and an Antigravity run's `acp` lines are ([`protocol::acp_map`]), a run of
+/// its chunks joined and acknowledged at the next other line ([`file_joined`]); the host sends
+/// none before the outcome. A `live` run's `exited` ends the
 /// run (H6, `Daemon::end_hosted_run`). After a refusal claude's `exited` changes nothing
 /// in the `failed` run and is applied so its host can end. After a re-attach, the host
 /// replays what it kept and then sends its `state`, so the first `state` ends the replay
@@ -906,12 +932,18 @@ async fn link(
         replayed,
         launched: Some(if resumed { "resume" } else { "startup" }),
         context: None,
+        acp: None,
+        acp_usage: None,
     };
     let (mut live, mut refused) = (
         matches!(lifecycle, Lifecycle::Live | Lifecycle::Stopping),
         lifecycle == Lifecycle::Failed,
     );
     let mut stopping = lifecycle == Lifecycle::Stopping;
+    // An Antigravity run's words or thoughts so far: its chunk lines, unacknowledged, so
+    // the host keeps them until the joined text is committed.
+    let mut joining: Option<Joining> = None;
+    let key = SessionKey::new(&uid, &uid);
     let ended = loop {
         let line = tokio::select! {
             line = lines.next_line() => match line {
@@ -927,7 +959,49 @@ async fn link(
                 continue;
             }
         };
-        match serde_json::from_str::<FromHost>(&line) {
+        let read = serde_json::from_str::<FromHost>(&line);
+        let acp = match &read {
+            Ok(FromHost::Acp { seq, turn, message }) if live => Some(protocol::acp_map::read(
+                &key,
+                &start_uuid,
+                *seq,
+                turn.as_deref(),
+                message,
+            )),
+            _ => None,
+        };
+        if let Some(protocol::acp_map::Read::Chunk { thought, text }) = &acp {
+            let Ok(FromHost::Acp { seq, turn, message }) = &read else {
+                unreachable!("a chunk is read from an acp line")
+            };
+            if let Some(open) = joining.take_if(|open| open.thought != *thought) {
+                if let Err(why) =
+                    file_joined(&daemon, &uid, &key, host, open, &mut turns, &mut write).await
+                {
+                    break why;
+                }
+            }
+            let open = joining.get_or_insert_with(|| Joining {
+                thought: *thought,
+                text: String::new(),
+                first: *seq,
+                last: *seq,
+                turn: turn.clone(),
+                session: acp_session(message),
+                run: start_uuid.clone(),
+            });
+            open.text.push_str(text);
+            open.last = *seq;
+            continue;
+        }
+        if let Some(open) = joining.take() {
+            if let Err(why) =
+                file_joined(&daemon, &uid, &key, host, open, &mut turns, &mut write).await
+            {
+                break why;
+            }
+        }
+        match read {
             Ok(FromHost::State { seq, pending, .. }) => {
                 match daemon.db.commit_cursor(uid.clone(), host, seq).await {
                     Ok(true) => {}
@@ -1004,6 +1078,20 @@ async fn link(
                     let answer = initialize.as_ref()?;
                     sent_command(&start_prompt, &answer.commands).map(str::to_string)
                 });
+                // agy refusing a start as signed out (signed out outside CodeConnect, or Google ended it): what is kept
+                // of its sign-in is old, and is read again, the accounts listing then pushed.
+                if said
+                    .as_ref()
+                    .is_err_and(|why| why == "Authentication required")
+                    && agent_named(&daemon, &uid).await == "Antigravity"
+                {
+                    daemon.agents.forget(&AgentKind::Antigravity);
+                    daemon
+                        .account_facts
+                        .forget(&crate::accounts::default_key(&AgentKind::Antigravity));
+                    let daemon = Arc::clone(&daemon);
+                    tokio::spawn(async move { crate::start_session::refresh_facts(&daemon).await });
+                }
                 let initialize = match initialize.as_ref().map(serde_json::to_string).transpose() {
                     Ok(initialize) => initialize,
                     Err(err) => {
@@ -1126,6 +1214,39 @@ async fn link(
                     break why;
                 }
             }
+            Ok(FromHost::Acp { seq, turn, message }) if live => {
+                let Some(protocol::acp_map::Read::Events(mut events)) = acp else {
+                    unreachable!("a live run's acp line is read above")
+                };
+                // agy's context, several times a turn: the newest is filed once, as the turn ends.
+                if let Some(context) = protocol::acp_map::usage_of(&message) {
+                    turns.acp_usage = Some(context);
+                }
+                if let Some(end) = events
+                    .iter()
+                    .position(|event| event.kind == EventKind::TurnComplete)
+                {
+                    if let Some((used, size)) = turns.acp_usage.take() {
+                        let usage = protocol::acp_map::usage(
+                            &key,
+                            &start_uuid,
+                            seq,
+                            turn.as_deref(),
+                            used,
+                            size,
+                        );
+                        events.insert(end, usage);
+                    }
+                }
+                let session = acp_session(&message);
+                if let Err(why) = apply_acp(
+                    &daemon, &uid, host, seq, turn, session, events, &mut turns, &mut write,
+                )
+                .await
+                {
+                    break why;
+                }
+            }
             Ok(FromHost::Exited { seq, code, signal }) if live => {
                 // Ended by its switch: the end names the account it goes on; its next message starts it there. Any
                 // other end of a run waiting to move is what it is, and the move is off.
@@ -1210,6 +1331,112 @@ async fn link(
     }
     daemon.host_link_detached(&uid).await;
     end_if_host_gone(&daemon, &uid).await;
+}
+
+/// A run of an Antigravity run's chunks: its words, or its thoughts, from the host's line
+/// `first` to `last`.
+struct Joining {
+    thought: bool,
+    text: String,
+    first: u64,
+    last: u64,
+    /// The turn of its first chunk.
+    turn: Option<String>,
+    /// The ACP session its first chunk names.
+    session: Option<String>,
+    /// The uuid of the start its host was started with, which its event's id begins with.
+    run: String,
+}
+
+/// The ACP session an `acp` line's `session/update` names; a prompt's reply names none.
+fn acp_session(message: &serde_json::Value) -> Option<String> {
+    message["params"]["sessionId"].as_str().map(str::to_string)
+}
+
+/// The joined chunks as one event, committed with the cursor at their last line, then
+/// acknowledged: the host drops them only then.
+async fn file_joined(
+    daemon: &Arc<Daemon>,
+    uid: &str,
+    key: &SessionKey,
+    host: ProcessIdentity,
+    open: Joining,
+    turns: &mut Turns,
+    write: &mut OwnedWriteHalf,
+) -> Result<(), String> {
+    let event = protocol::acp_map::joined(
+        key,
+        &open.run,
+        open.thought,
+        &open.text,
+        open.first,
+        open.turn.as_deref(),
+    );
+    apply_acp(
+        daemon,
+        uid,
+        host,
+        open.last,
+        open.turn,
+        open.session,
+        vec![event],
+        turns,
+        write,
+    )
+    .await
+}
+
+/// An Antigravity run's events from its line `seq` of the turn `turn`, committed with the
+/// cursor and the ACP session the line names (`session`), which a relaunch resumes, then
+/// acknowledged. Its turns are marked as a Claude run's are ([`mark_turn`]): a
+/// line of a turn not seen before starts one, and the prompt's reply ends it, unless it ended
+/// `cancelled`: a turn the person stopped stays open for the mail rule until their next turn
+/// ends, as a Claude turn whose `result` is aborted does.
+#[allow(clippy::too_many_arguments)]
+async fn apply_acp(
+    daemon: &Arc<Daemon>,
+    uid: &str,
+    host: ProcessIdentity,
+    seq: u64,
+    turn: Option<String>,
+    session: Option<String>,
+    events: Vec<PendingEvent>,
+    turns: &mut Turns,
+    write: &mut OwnedWriteHalf,
+) -> Result<(), String> {
+    let notes = RunNotes {
+        session_id: session,
+        ..RunNotes::default()
+    };
+    let ended = events.iter().any(|event| {
+        event.kind == EventKind::TurnComplete && event.payload["stop_reason"] != "cancelled"
+    });
+    let filed = match daemon
+        .ingest_host_message(uid, host, seq, events, notes)
+        .await
+    {
+        Ok(Some(filed)) => filed,
+        Ok(None) => {
+            return Err(format!(
+                "message {seq} is not past the run's cursor for this host"
+            ))
+        }
+        Err(err) => return Err(format!("{err:#}")),
+    };
+    let started = turn.is_some() && turn != turns.acp;
+    if started {
+        turns.acp = turn;
+    }
+    mark_turn(daemon, uid, turns, &filed, started, ended).await;
+    send(write, &ToHost::Ack { seq }).await
+}
+
+/// The name a sentence gives the hosted run `uid`'s agent: Antigravity, or Claude.
+async fn agent_named(daemon: &Daemon, uid: &str) -> &'static str {
+    match daemon.db.get_session(uid.to_string()).await {
+        Ok(Some(row)) if row.agent == AgentKind::Antigravity => "Antigravity",
+        _ => "Claude",
+    }
 }
 
 /// What became of a dead host's group.
@@ -1509,6 +1736,26 @@ pub(crate) fn menus(models: &[serde_json::Value]) -> RunMenus {
     }
 }
 
+/// An Antigravity run's menus, from its start's outcome: its model families (`models`, in Claude's shape, read as
+/// [`menus`] reads Claude's) and agy's own `modes` (`{value, label}`), none of which asks nothing, so none is marked
+/// `confirm` (decision 214).
+pub(crate) fn acp_menus(models: &[serde_json::Value], modes: &[serde_json::Value]) -> RunMenus {
+    RunMenus {
+        modes: modes
+            .iter()
+            .filter_map(|mode| {
+                let value = mode["value"].as_str()?.to_string();
+                Some(MenuMode {
+                    label: mode["label"].as_str().unwrap_or(&value).to_string(),
+                    value,
+                    confirm: false,
+                })
+            })
+            .collect(),
+        ..menus(models)
+    }
+}
+
 /// The model id the entry `value` of `models` (the start's answer) runs: its `resolvedModel`, or
 /// the value itself when claude gives none. None when no entry has that value.
 pub(crate) fn entry_model_id(models: &[serde_json::Value], value: &str) -> Option<String> {
@@ -1627,6 +1874,8 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
     let refused = |reason: &str| SettingResult::Refused {
         reason: reason.to_string(),
     };
+    let agent = agent_named(daemon, uid).await;
+    let antigravity = agent == "Antigravity";
     let parts: Vec<(Option<String>, Option<String>, Option<String>)> =
         match setting {
             Setting::Model {
@@ -1638,6 +1887,8 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
                 .into_iter()
                 .chain(effort.map(|effort| (None, Some(effort), None)))
                 .collect(),
+            // An Antigravity run's modes are agy's, checked with its menus below.
+            Setting::Mode { mode, .. } if antigravity => vec![(None, None, Some(mode))],
             Setting::Mode { mode, confirmed } => {
                 match MODES.iter().find(|(value, _, _)| *value == mode) {
                     None => return refused(
@@ -1664,6 +1915,13 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
         }
     }
     let menus = match daemon.db.hosted_models(uid.to_string()).await {
+        Ok(Some(models)) if antigravity => match daemon.db.hosted_modes(uid.to_string()).await {
+            Ok(modes) => acp_menus(&models, &modes),
+            Err(err) => {
+                crate::log_error!("{uid}: could not read its modes: {err:#}");
+                return refused("This computer could not read the session.");
+            }
+        },
         Ok(Some(models)) => menus(&models),
         Ok(None) => return refused("This session isn’t running, so nothing was changed."),
         Err(err) => {
@@ -1671,14 +1929,14 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
             return refused("This computer could not read the session.");
         }
     };
-    for (model, effort, _) in &parts {
+    for (model, effort, mode) in &parts {
         if model
             .as_ref()
             .is_some_and(|model| !menus.models.iter().any(|offered| &offered.value == model))
         {
-            return refused(
-                "Claude doesn’t offer that model in this session; nothing was changed.",
-            );
+            return refused(&format!(
+                "{agent} doesn’t offer that model in this session; nothing was changed."
+            ));
         }
         if effort.as_ref().is_some_and(|effort| {
             !menus
@@ -1686,8 +1944,16 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
                 .iter()
                 .any(|offered| offered.efforts.contains(effort))
         }) {
+            return refused(&format!(
+                "{agent} doesn’t offer that effort in this session; nothing was changed."
+            ));
+        }
+        if mode
+            .as_ref()
+            .is_some_and(|mode| !menus.modes.iter().any(|offered| &offered.value == mode))
+        {
             return refused(
-                "Claude doesn’t offer that effort in this session; nothing was changed.",
+                "That permission mode isn’t offered in this session; nothing was changed.",
             );
         }
     }
@@ -1967,7 +2233,8 @@ pub(crate) async fn send_text(
             return SendTextResult::Indeterminate {
                 reason: format!(
                     "this message (first sent {started_at}) was never confirmed; it may or may not \
-                     have reached Claude, and it will not be sent again"
+                     have reached {}, and it will not be sent again",
+                    agent_named(daemon, uid).await
                 ),
             }
         }
@@ -2015,17 +2282,21 @@ pub(crate) async fn send_text(
         Ok(Ok(true)) => SendTextResult::Sent { matched: text },
         Ok(Ok(false)) => refuse("This session stopped taking messages; nothing was sent."),
         Ok(Err(_)) => SendTextResult::Indeterminate {
-            reason: "The computer lost the session before the message was confirmed; it may or \
-                     may not have reached Claude."
-                .into(),
+            reason: format!(
+                "The computer lost the session before the message was confirmed; it may or \
+                 may not have reached {}.",
+                agent_named(daemon, uid).await
+            ),
         },
         // Settled nothing: the host's outcome, whenever it comes, still files the words.
         Err(_) => {
             daemon.host_send_taken(&uuid, false).await;
             SendTextResult::Indeterminate {
-                reason: "The session did not confirm the message in time; it may or may not \
-                         have reached Claude."
-                    .into(),
+                reason: format!(
+                    "The session did not confirm the message in time; it may or may not \
+                     have reached {}.",
+                    agent_named(daemon, uid).await
+                ),
             }
         }
     }
@@ -2109,23 +2380,31 @@ async fn relaunch(
         }
     };
     let checked = async {
-        let ready = crate::start_session::claude_preflight(
-            &environment,
-            account.as_ref(),
-            daemon.config.claude_bin.as_deref(),
-        )
-        .await
-        .map_err(|refusal| match refusal {
-            StartSessionResult::Failed { detail, .. } => detail,
-            _ => "Claude Code cannot start here".to_string(),
-        })?;
-        let host_bin = host_binary(&daemon.config)?;
-        let codeconnect = launcher.clone()?;
         let kept = match serde_json::from_str::<ToHost>(&ended.start) {
             Ok(ToHost::Start { options, .. }) => options,
             _ => return Err("its start could not be read".to_string()),
         };
-        Ok::<_, String>((ready.path, host_bin, codeconnect, kept))
+        // An Antigravity run goes on with the agy a start would find now.
+        let binary = if kept.agent == AgentKind::Antigravity {
+            crate::start_session::agy_path(&environment, daemon.config.agy_bin.as_deref())
+                .await
+                .ok_or_else(|| "Antigravity isn’t installed here".to_string())?
+        } else {
+            crate::start_session::claude_preflight(
+                &environment,
+                account.as_ref(),
+                daemon.config.claude_bin.as_deref(),
+            )
+            .await
+            .map_err(|refusal| match refusal {
+                StartSessionResult::Failed { detail, .. } => detail,
+                _ => "Claude Code cannot start here".to_string(),
+            })?
+            .path
+        };
+        let host_bin = host_binary(&daemon.config)?;
+        let codeconnect = launcher.clone()?;
+        Ok::<_, String>((binary, host_bin, codeconnect, kept))
     };
     // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
     let switching = crate::switch::switched(daemon, uid).await;
@@ -2140,7 +2419,7 @@ async fn relaunch(
         }
     };
     let Some(claude_path) = claude.to_str() else {
-        let reason = "This session could not start again (claude's path is not text); nothing \
+        let reason = "This session could not start again (its agent's path is not text); nothing \
                       was sent.";
         return refuse_relaunch(daemon, uid, request_id, reason).await;
     };
@@ -2163,7 +2442,12 @@ async fn relaunch(
     // effort.
     let (mode, effort) = match daemon.db.session_facts(uid.to_string()).await {
         Ok(facts) => (
-            relaunch_mode(facts.permission_mode.map(|fact| fact.value), switching),
+            // None of agy's modes asks nothing (decision 214): an Antigravity run keeps the one it was in.
+            if kept.agent == AgentKind::Antigravity {
+                facts.permission_mode.map(|fact| fact.value)
+            } else {
+                relaunch_mode(facts.permission_mode.map(|fact| fact.value), switching)
+            },
             facts.ended_with.map(|fact| fact.value),
         ),
         Err(err) => {
@@ -2174,6 +2458,7 @@ async fn relaunch(
         }
     };
     let run = Run {
+        agent: kept.agent.clone(),
         root,
         request_id,
         cwd: &ended.cwd,
@@ -2185,7 +2470,8 @@ async fn relaunch(
         host_bin: &host_bin,
         codeconnect: &codeconnect,
         environment: &environment,
-        account: account.as_ref(),
+        // The account is Claude Code's; Antigravity has none of CodeConnect's.
+        account: account.as_ref().filter(|_| kept.agent.is_claude()),
         attachments: crate::uploads::Pending::default(),
     };
     let uuid = send_uuid(uid, request_id);
@@ -2244,7 +2530,9 @@ async fn relaunch(
             return refuse_relaunch(daemon, uid, request_id, &reason).await;
         }
     };
-    let lost = "The session is starting again; the message may or may not have reached Claude.";
+    let agent = agent_named(daemon, uid).await;
+    let lost =
+        format!("The session is starting again; the message may or may not have reached {agent}.");
     match tokio::time::timeout_at(deadline, begun).await {
         Ok(Ok(Ok(()))) => SendTextResult::Sent {
             matched: text.to_string(),
@@ -2253,15 +2541,11 @@ async fn relaunch(
         // link that ended first leaves it starting, for the watch.
         Ok(Ok(Err(detail))) => match daemon.db.hosted_link(uid.to_string()).await {
             Ok(Some(linked)) if linked.lifecycle == Lifecycle::Exited => SendTextResult::Refused {
-                reason: format!("Claude did not start again ({detail}); nothing was sent."),
+                reason: format!("{agent} did not start again ({detail}); nothing was sent."),
             },
-            _ => SendTextResult::Indeterminate {
-                reason: lost.into(),
-            },
+            _ => SendTextResult::Indeterminate { reason: lost },
         },
-        Ok(Err(_)) | Err(_) => SendTextResult::Indeterminate {
-            reason: lost.into(),
-        },
+        Ok(Err(_)) | Err(_) => SendTextResult::Indeterminate { reason: lost },
     }
 }
 
@@ -2336,7 +2620,9 @@ pub(crate) async fn interrupt(
             return InterruptReport::NotApplied(says::INTERRUPT_ALREADY_WAITING.into())
         }
         Lifecycle::Starting => {
-            return InterruptReport::NotApplied(says::CLAUDE_TURN_NOT_RUNNING.into())
+            return InterruptReport::NotApplied(says::hosted_turn_not_running(
+                agent_named(daemon, uid).await,
+            ))
         }
         _ => return InterruptReport::NotApplied(says::INTERRUPT_RUN_IS_GONE.into()),
     }
@@ -2530,16 +2816,18 @@ pub(crate) async fn answer(
             _ => rejected("Claude has the answer, but this computer could not read its record"),
         },
         Ok(Ok(false)) => rejected("Claude was no longer asking, so the answer was not used."),
-        Ok(Err(_)) => rejected(
+        Ok(Err(_)) => rejected(&format!(
             "The computer lost the session before the answer was confirmed; it may or may not \
-             have reached Claude, and it will not be sent again.",
-        ),
+             have reached {}, and it will not be sent again.",
+            agent_named(daemon, uid).await
+        )),
         Err(_) => {
             daemon.host_send_taken(&uuid, false).await;
-            rejected(
+            rejected(&format!(
                 "The session did not confirm the answer in time; it may or may not have reached \
-                 Claude, and it will not be sent again.",
-            )
+                 {}, and it will not be sent again.",
+                agent_named(daemon, uid).await
+            ))
         }
     }
 }
@@ -2770,10 +3058,13 @@ async fn settle_stop(
         {
             crate::log_error!("{uid}: could not give back the refused stop: {err:#}");
         }
-        return InterruptReport::NotApplied(says::CLAUDE_TURN_NOT_RUNNING.into());
+        return InterruptReport::NotApplied(says::hosted_turn_not_running(
+            agent_named(daemon, uid).await,
+        ));
     }
     let reason = told.terminal_reason.unwrap_or("completed");
-    let (outcome, report) = if reason.starts_with("aborted") {
+    // Claude's stopped turn ends `aborted_*`; an Antigravity prompt's, `cancelled` (ACP's word).
+    let (outcome, report) = if reason.starts_with("aborted") || reason == "cancelled" {
         (
             crate::store::INTERRUPT_ABORTED,
             InterruptReport::Aborted {
@@ -3092,6 +3383,7 @@ mod tests {
 
     fn run<'a>(rig: &'a Rig, request_id: &'a str, cwd: &'a str, host_bin: &'a Path) -> Run<'a> {
         Run {
+            agent: AgentKind::Claude,
             root: &rig.root,
             request_id,
             cwd,
@@ -3415,6 +3707,7 @@ mod tests {
             start(
                 &daemon,
                 Run {
+                    agent: AgentKind::Claude,
                     worktree: Some("feature-x"),
                     trust: Trust::Trusted,
                     ..run(&rig, "req-1", &cwd, &host)
@@ -3512,6 +3805,364 @@ mod tests {
             .await
             .expect("the link reads detached once its connection ends");
         stop(&dir);
+    }
+
+    /// What an Antigravity host's start outcome carries (acp.ts `menus`): agy's model families, each with its efforts,
+    /// and its modes.
+    fn agy_menus() -> serde_json::Value {
+        serde_json::json!({"commands": [], "account": {},
+            "models": [
+                {"value": "gemini-4-neon", "displayName": "Gemini 4 Neon",
+                 "supportedEffortLevels": ["high", "xhigh", "medium", "low"]},
+                {"value": "gemini-3.8-flash", "displayName": "Gemini 3.8 Flash",
+                 "supportedEffortLevels": ["high", "medium", "low"]}
+            ],
+            "modes": [{"value": "default", "label": "Default"}, {"value": "accept-edits", "label": "Accept edits"},
+                      {"value": "auto", "label": "Auto"}, {"value": "plan", "label": "Plan"}]})
+    }
+
+    /// agy's settings line (`acp`, message `seq`): its session's opening reply, naming the current values.
+    fn agy_settings(seq: u64, model: &str, effort: &str, mode: &str) -> serde_json::Value {
+        let option = |id: &str, value: &str| serde_json::json!({"id": id, "category": id, "currentValue": value});
+        serde_json::json!({"type": "acp", "seq": seq, "message": {"jsonrpc": "2.0", "id": 2, "result": {
+            "sessionId": "sess-7", "configOptions": [option("model", model), option("thought_level", effort),
+                                                      option("mode", mode)]}}})
+    }
+
+    /// A live Antigravity run on a stand-in host: its uid, and the host's side, its start's
+    /// outcome `done` (message 2, with agy's menus) acknowledged.
+    async fn antigravity_run(rig: &Rig) -> (String, Played) {
+        let host = stub_host(rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let daemon = Arc::clone(&rig.daemon);
+        let (result, played) = tokio::join!(
+            start(
+                &daemon,
+                Run {
+                    agent: AgentKind::Antigravity,
+                    claude_path: "/nonexistent/agy",
+                    ..run(rig, "req-agy", &cwd, &host)
+                }
+            ),
+            async {
+                let mut played = play_to_start(rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid, "status": "done",
+                                       "initialize": agy_menus()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        (started_uid(&result), played)
+    }
+
+    /// **An Antigravity run's settings are agy's own** (S1): a live run's menus are its model families with their
+    /// efforts and its four modes, none asking for a confirmation; its model, effort and mode are what agy's settings
+    /// lines name, the model marked chosen. A change is checked against those menus: a mode of agy's reaches the
+    /// host and applies; Claude's Bypass permissions and a model agy does not offer are refused, naming Antigravity.
+    /// Once the run has ended its model is named by its family's name.
+    #[tokio::test]
+    async fn an_antigravity_runs_settings_are_agys_own() {
+        let rig = rig();
+        let (uid, mut played) = antigravity_run(&rig).await;
+        say(
+            &mut played.write,
+            agy_settings(3, "gemini-4-neon", "high", "default"),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let now = summary(&rig.daemon, &uid).await;
+        let model = |value: &str, label: &str, efforts: &[&str]| MenuModel {
+            value: value.into(),
+            label: label.into(),
+            detail: None,
+            resolved_model: None,
+            default_effort: None,
+            efforts: efforts.iter().map(|effort| effort.to_string()).collect(),
+        };
+        assert_eq!(
+            now.menus,
+            Some(RunMenus {
+                models: vec![
+                    model(
+                        "gemini-4-neon",
+                        "Gemini 4 Neon",
+                        &["high", "xhigh", "medium", "low"]
+                    ),
+                    model(
+                        "gemini-3.8-flash",
+                        "Gemini 3.8 Flash",
+                        &["high", "medium", "low"]
+                    ),
+                ],
+                modes: [
+                    ("default", "Default"),
+                    ("accept-edits", "Accept edits"),
+                    ("auto", "Auto"),
+                    ("plan", "Plan")
+                ]
+                .map(|(value, label)| MenuMode {
+                    value: value.into(),
+                    label: label.into(),
+                    confirm: false,
+                })
+                .to_vec(),
+                selected_model: Some("gemini-4-neon".into()),
+            })
+        );
+        let value = |fact: Option<protocol::event::Fact>| fact.map(|fact| fact.value);
+        assert_eq!(
+            (
+                value(now.model),
+                value(now.effort),
+                value(now.permission_mode)
+            ),
+            (
+                Some("gemini-4-neon".into()),
+                Some("high".into()),
+                Some("default".into())
+            )
+        );
+        let (applied, line) = tokio::join!(
+            rig.daemon.set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "accept-edits".into(),
+                    confirmed: false
+                }
+            ),
+            host_answers_setting(&mut played, 4, "done", None)
+        );
+        assert_eq!(
+            line,
+            ToHost::SetMode {
+                uuid: String::new(),
+                mode: "accept-edits".into()
+            }
+        );
+        assert!(
+            matches!(applied, SettingResult::Applied { .. }),
+            "{applied:?}"
+        );
+        for (setting, reason) in [
+            (
+                Setting::Mode {
+                    mode: "bypassPermissions".into(),
+                    confirmed: true,
+                },
+                "That permission mode isn’t offered in this session; nothing was changed.",
+            ),
+            (
+                set_model(Some("sonnet"), None),
+                "Antigravity doesn’t offer that model in this session; nothing was changed.",
+            ),
+            (
+                set_model(None, Some("max")),
+                "Antigravity doesn’t offer that effort in this session; nothing was changed.",
+            ),
+        ] {
+            assert_eq!(refusal(rig.daemon.set_setting(&uid, setting).await), reason);
+        }
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let ended = async {
+            loop {
+                let ended = summary(&rig.daemon, &uid).await;
+                if ended.menus.is_none() {
+                    break ended;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        };
+        let ended = tokio::time::timeout(Duration::from_secs(5), ended)
+            .await
+            .expect("the run ends");
+        assert_eq!(ended.model_label.as_deref(), Some("Gemini 4 Neon"));
+        stop(&played.dir);
+    }
+
+    /// An Antigravity run is a hosted run: its start names its agent and its agy, its row is
+    /// Antigravity's, and its `acp` lines are its events. A run of the agent's chunks is
+    /// joined into one reply and acknowledged only with it, at its last line, when the next
+    /// line comes; the host keeps the chunks until then.
+    #[tokio::test]
+    async fn an_antigravity_runs_acp_lines_are_its_events_and_its_words_are_joined() {
+        let rig = rig();
+        let (uid, mut played) = antigravity_run(&rig).await;
+        match &played.start {
+            ToHost::Start { options, .. } => {
+                assert_eq!(options.agent, AgentKind::Antigravity);
+                assert_eq!(options.claude_path, "/nonexistent/agy");
+            }
+            other => panic!("no start: {other:?}"),
+        }
+        let update = |seq: u64, update: serde_json::Value| {
+            serde_json::json!({"type": "acp", "seq": seq, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-1", "update": update}}})
+        };
+        let chunk = |seq: u64, text: &str| {
+            update(
+                seq,
+                serde_json::json!({"sessionUpdate": "agent_message_chunk",
+                                   "content": {"type": "text", "text": text}}),
+            )
+        };
+        say(&mut played.write, chunk(3, "Hel")).await;
+        say(&mut played.write, chunk(4, "lo.")).await;
+        say(
+            &mut played.write,
+            update(
+                5,
+                serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "call_1",
+                                   "title": "cat NOTE.txt", "kind": "read", "status": "pending",
+                                   "rawInput": {"command": "cat NOTE.txt"}}),
+            ),
+        )
+        .await;
+        // The chunks are acknowledged together, with the reply they make, only now.
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 6, "message": {"jsonrpc": "2.0", "id": 3,
+                               "result": {"stopReason": "end_turn"}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 6 }));
+        assert_eq!(cursor(&rig, &uid), 6);
+        let conn = rusqlite::Connection::open(rig.root.join("events.db")).unwrap();
+        let agent: String = conn
+            .query_row(
+                "SELECT agent FROM sessions WHERE session_uid = ?1",
+                [&uid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(agent, "antigravity");
+        let filed: Vec<(String, String, String)> = conn
+            .prepare(
+                "SELECT kind, source, payload FROM events WHERE session_uid = ?1 AND source = 'acp'
+                  ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([&uid], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let kinds: Vec<&str> = filed.iter().map(|(kind, _, _)| kind.as_str()).collect();
+        assert_eq!(kinds, ["agent_message", "tool_call", "turn_complete"]);
+        let reply: serde_json::Value = serde_json::from_str(&filed[0].2).unwrap();
+        assert_eq!(reply, serde_json::json!({"text": "Hello."}));
+        stop(&played.dir);
+    }
+
+    /// **An Antigravity turn's context is filed once, at its end** (row 11): agy reports its context in use and its
+    /// window several times a turn (`usage_update`); the turn's end files one `usage` event with the newest, in the keys
+    /// the apps read a Claude or Codex turn's by (`last.totalTokens`, `modelContextWindow`).
+    #[tokio::test]
+    async fn an_antigravity_turns_context_is_filed_once_at_its_end() {
+        let rig = rig();
+        let (uid, mut played) = antigravity_run(&rig).await;
+        let turn = played.start_uuid();
+        let usage = |seq: u64, used: u64| {
+            serde_json::json!({"type": "acp", "seq": seq, "turn": turn, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-7", "update": {
+                "sessionUpdate": "usage_update", "used": used, "size": 1048576}}}})
+        };
+        say(&mut played.write, usage(3, 9801)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        say(&mut played.write, usage(4, 9942)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 5, "turn": turn, "message": {
+                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let conn = rusqlite::Connection::open(rig.root.join("events.db")).unwrap();
+        let filed: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT kind, payload FROM events WHERE session_uid = ?1 AND source = 'acp' ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([&uid], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let kinds: Vec<&str> = filed.iter().map(|(kind, _)| kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["usage", "turn_complete"],
+            "one usage event, at the turn's end"
+        );
+        let payload: serde_json::Value = serde_json::from_str(&filed[0].1).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({"last": {"totalTokens": 9942}, "modelContextWindow": 1048576})
+        );
+        stop(&played.dir);
+    }
+
+    /// **An Antigravity start agy refuses as signed out forgets what is kept of its sign-in** (round 1): agy signed out
+    /// outside CodeConnect (in agy itself, or Google ended it) still read "Signed in" from what ccd kept. agy's own
+    /// "Authentication required" for a start drops that, reads agy again and pushes the accounts listing.
+    #[tokio::test]
+    async fn an_antigravity_start_refused_as_signed_out_forgets_its_kept_sign_in() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let key = crate::accounts::default_key(&AgentKind::Antigravity);
+        rig.daemon.account_facts.keep_agent_signed(&key, Some(true));
+        let mut pushed = rig.daemon.accounts_tx.subscribe();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (result, played) = tokio::join!(
+            start(
+                &rig.daemon,
+                Run {
+                    agent: AgentKind::Antigravity,
+                    claude_path: "/nonexistent/agy",
+                    ..run(&rig, "req-agy-out", &cwd, &host)
+                }
+            ),
+            async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "refused", "detail": "Authentication required"}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        assert_eq!(result, failed("Authentication required".into()));
+        let listing = rig
+            .daemon
+            .account_facts
+            .told(crate::accounts::listing(&rig.daemon.store, None));
+        assert_eq!(
+            serde_json::to_value(listing).unwrap().get("agent_sign_ins"),
+            None,
+            "what was kept of agy's sign-in is gone, to be read again"
+        );
+        // Read again at once and told: a Settings page already open does not keep "Signed in".
+        let told = tokio::time::timeout(Duration::from_secs(10), pushed.recv()).await;
+        assert!(
+            matches!(told, Ok(Ok(protocol::ws::ServerMessage::Accounts { .. }))),
+            "the accounts listing is pushed after the refusal: {told:?}"
+        );
+        stop(&played.dir);
     }
 
     /// A start the host refuses: its outcome makes the run `failed`, and the app is
@@ -4240,6 +4891,7 @@ mod tests {
             options: start_options(
                 &uid,
                 &Run {
+                    agent: AgentKind::Claude,
                     trust,
                     ..run(rig, "req-1", cwd, host)
                 },
@@ -5876,6 +6528,44 @@ mod tests {
         );
         turn_ends(&mut played, 4).await;
         assert_eq!(woken(&mut played.lines).await, crate::mail::nudge());
+        stop(&played.dir);
+    }
+
+    /// **Mail to an Antigravity run mid-turn wakes it once that turn has ended.** Its turn
+    /// starts with the first `acp` line of a turn not seen before and ends with the prompt's
+    /// reply, so the rule reads it as a Claude run's init and `result`.
+    #[tokio::test]
+    async fn mail_to_an_antigravity_run_mid_turn_wakes_it_once_the_turn_ends() {
+        let rig = rig();
+        let (uid, mut played) = antigravity_run(&rig).await;
+        let turn = played.start_uuid();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 3, "turn": turn, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-1", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "call_1", "title": "cat NOTE.txt",
+                "kind": "read", "status": "in_progress"}}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(
+            mail_from_another_run(&rig.daemon, &uid).await,
+            protocol::ipc::MailState::Waiting
+        );
+        assert_eq!(
+            sent_soon(&mut played.lines).await,
+            None,
+            "a wake while the turn runs"
+        );
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 4, "turn": turn, "message": {
+                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert_eq!(woken(&mut played.lines).await, crate::mail::nudge());
+        assert_eq!(nudges(&rig, &uid, 1).await, 1);
         stop(&played.dir);
     }
 
@@ -8569,6 +9259,72 @@ mod tests {
         panic!("the link to {uid}'s host did not end");
     }
 
+    /// **An Antigravity run's Stop.** The app names the turn its events carry (the uuid of the
+    /// prompt's command); it reaches the host as `interrupt`, and the prompt's reply ending
+    /// `cancelled` (ACP's word for a stopped prompt) makes it `aborted`, as Claude's
+    /// `aborted_*` does.
+    #[tokio::test]
+    async fn an_antigravity_stop_is_aborted_by_its_prompts_cancelled_reply() {
+        let rig = rig();
+        let (uid, mut played) = antigravity_run(&rig).await;
+        let turn = played.start_uuid();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 3, "turn": turn, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-1", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "call_1", "title": "sleep 60",
+                "kind": "execute", "status": "in_progress"}}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        // A Stop of a turn the host is not running is refused in Antigravity's name.
+        let (refused, _) = tokio::join!(
+            stop_as_app(&rig.daemon, &uid, "stop-0", "not-the-turn"),
+            async {
+                let (uuid, _) = host_reads_stop(&mut played).await;
+                host_refuses_stop(&mut played, 4, &uuid).await;
+            }
+        );
+        assert_eq!(
+            refused,
+            protocol::ws::InterruptResult::Rejected {
+                reason: crate::codex_refusals::hosted_turn_not_running("Antigravity")
+            }
+        );
+        let (stopped, _) = tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", &turn), async {
+            let (uuid, named) = host_reads_stop(&mut played).await;
+            assert_eq!(named, turn);
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "acp", "seq": 5, "turn": turn, "message": {
+                    "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "cancelled"}}}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "outcome", "seq": 6, "uuid": uuid, "status": "done",
+                                   "terminal_reason": "cancelled", "cancelled": []}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 6 }));
+        });
+        assert_eq!(
+            stopped,
+            protocol::ws::InterruptResult::Aborted {
+                turn_id: turn.clone()
+            }
+        );
+        assert_eq!(
+            stop_record(&rig.daemon, &uid, "stop-1").await.as_deref(),
+            Some("aborted")
+        );
+        assert!(stored(&rig, &uid)
+            .iter()
+            .any(|event| event["kind"] == "turn_complete" && event["turn_id"] == turn.as_str()));
+        stop(&played.dir);
+    }
+
     /// **B7 part 2 S1, S4 and S7: a Stop aborts the running turn, a second one waits, and
     /// the message it cancelled is marked.** The app's Stop reaches the host as
     /// `interrupt` naming the turn. A second Stop of the turn while the first waits is
@@ -8679,7 +9435,7 @@ mod tests {
         assert_eq!(
             refused,
             protocol::ws::InterruptResult::Rejected {
-                reason: crate::codex_refusals::CLAUDE_TURN_NOT_RUNNING.into()
+                reason: crate::codex_refusals::hosted_turn_not_running("Claude")
             }
         );
         assert_eq!(stop_record(&rig.daemon, &uid, "stop-4").await, None);
@@ -8771,7 +9527,7 @@ mod tests {
         let (starting, _) = begun(&rig, &cwd, &host, Trust::Trusted).await;
         assert_eq!(
             stop_as_app(&rig.daemon, &starting, "stop-1", "turn-1").await,
-            says(crate::codex_refusals::CLAUDE_TURN_NOT_RUNNING)
+            says(&crate::codex_refusals::hosted_turn_not_running("Claude"))
         );
         assert_eq!(stop_record(&rig.daemon, &starting, "stop-1").await, None);
     }
@@ -11047,6 +11803,7 @@ mod tests {
         let started = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 claude_path: claude.to_str().unwrap(),
                 ..run(rig, name, &cwd, host)
             },
@@ -11238,6 +11995,7 @@ mod tests {
         let started = start(
             &daemon,
             Run {
+                agent: AgentKind::Claude,
                 root: &root,
                 request_id: "g2",
                 cwd: &cwd,
@@ -11335,6 +12093,7 @@ mod tests {
             let started = start(
                 &daemon,
                 Run {
+                    agent: AgentKind::Claude,
                     root: &root,
                     request_id: "restart",
                     cwd: &cwd,
@@ -11577,6 +12336,7 @@ mod tests {
         let started = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 root: &rig.root,
                 request_id: "g6",
                 cwd: &cwd,
@@ -11751,6 +12511,7 @@ mod tests {
         let started = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 root: &rig.root,
                 request_id: name,
                 cwd: &cwd,
@@ -12171,6 +12932,162 @@ mod tests {
             "the relaunched run's end is filed beside the first"
         );
         stop(&played.dir);
+    }
+
+    /// **An Antigravity run whose agy ended on its own is relaunched by the person's next
+    /// message**, as a Claude run is: the ACP session its lines named is kept as the run's
+    /// session, and the new host's `start` names the agent, the agy a start finds (config
+    /// `agy_bin`) and that session to resume, with the message as its prompt. The session is
+    /// never offered to the apps as Claude Code's (no `claude_session_id`, which they resume
+    /// with `claude --resume`). It goes on with the model, effort and mode it ended with, agy's own mode
+    /// included. The relaunched host numbers its lines from 1 again, and its
+    /// reply and its turn's end are filed beside the first host's, not taken for them.
+    #[tokio::test]
+    async fn a_message_relaunches_an_antigravity_run_resuming_its_session() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        let (claude, _) = crate::start_session::test_claude(&rig.root);
+        let agy = rig.root.join("bin/agy");
+        std::fs::write(&agy, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        rig.daemon = daemon_with(
+            &rig.root,
+            Config {
+                claude_bin: Some(claude.display().to_string()),
+                agy_bin: Some(agy.display().to_string()),
+                agent_host_bin: Some(host.display().to_string()),
+                ..Default::default()
+            },
+        );
+        rig.daemon
+            .relaunch_from
+            .set((rig.root.clone(), Ok(rig.root.join("codeconnect"))))
+            .unwrap();
+        let (uid, mut played) = antigravity_run(&rig).await;
+        let turn = played.start_uuid();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 3, "turn": turn, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-7", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "call_1", "title": "ls",
+                "kind": "execute", "status": "in_progress"}}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        // The settings the run ends with, agy's mode one Claude has none of.
+        let mut settings = agy_settings(4, "gemini-3.8-flash", "low", "accept-edits");
+        settings["turn"] = turn.clone().into();
+        say(&mut played.write, settings).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 5, "turn": turn, "message": {
+                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 6, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 6 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        // The dead host's socket closes, as the kernel closes it.
+        let dir = played.dir.clone();
+        drop(played);
+        until_detached(&rig.daemon, &uid).await;
+        let ended = summary(&rig.daemon, &uid).await;
+        assert!(ended.relaunchable);
+        assert_eq!(
+            ended.claude_session_id, None,
+            "an ACP session is not Claude Code's"
+        );
+        let (sent, mut relaunched) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-again", "carry on"),
+            async {
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let ToHost::Start {
+                    uuid,
+                    options,
+                    prompt,
+                } = relaunched.start.clone()
+                else {
+                    panic!("not a start: {:?}", relaunched.start);
+                };
+                assert_eq!(options.agent, AgentKind::Antigravity);
+                assert_eq!(options.claude_path, agy.display().to_string());
+                assert_eq!(options.resume.as_deref(), Some("sess-7"));
+                assert_eq!(
+                    (
+                        options.model.as_deref(),
+                        options.effort.as_deref(),
+                        options.permission_mode.as_deref()
+                    ),
+                    (Some("gemini-3.8-flash"), Some("low"), Some("accept-edits")),
+                    "the run goes on with the settings it ended with"
+                );
+                assert_eq!(prompt, "carry on");
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid, "status": "done"}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            }
+        );
+        assert_eq!(
+            sent,
+            SendTextResult::Sent {
+                matched: "carry on".into()
+            }
+        );
+        assert_eq!(kept(&rig, &uid).0, "live");
+        let again = send_uuid(&uid, "r-again");
+        say(
+            &mut relaunched.write,
+            serde_json::json!({"type": "acp", "seq": 3, "turn": again, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-7", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Back."}}}}}),
+        )
+        .await;
+        say(
+            &mut relaunched.write,
+            serde_json::json!({"type": "acp", "seq": 4, "turn": again, "message": {
+                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
+        )
+        .await;
+        assert_eq!(
+            next(&mut relaunched.lines).await,
+            Some(ToHost::Ack { seq: 3 })
+        );
+        assert_eq!(
+            next(&mut relaunched.lines).await,
+            Some(ToHost::Ack { seq: 4 })
+        );
+        let events = stored(&rig, &uid);
+        assert!(
+            events.iter().any(
+                |event| event["kind"] == "agent_message" && event["payload"]["text"] == "Back."
+            ),
+            "the relaunched run's reply is filed"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["kind"] == "turn_complete")
+                .count(),
+            2,
+            "both hosts' turn ends are filed"
+        );
+        stop(&relaunched.dir);
     }
 
     /// **A relaunch goes on at the effort the run ended with.** A run ends at High: ended, its summary says High; a
@@ -15814,6 +16731,7 @@ mod tests {
         let started = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 claude_path: claude.to_str().unwrap(),
                 ..run(&rig, "perm", &cwd, &host)
             },
@@ -15872,6 +16790,7 @@ mod tests {
             let started = start(
                 &daemon,
                 Run {
+                    agent: AgentKind::Claude,
                     claude_path: claude.to_str().unwrap(),
                     ..run(&rig, "restart", &cwd, &host)
                 },
@@ -16017,6 +16936,7 @@ mod tests {
             let refused = start(
                 &rig.daemon,
                 Run {
+                    agent: AgentKind::Claude,
                     claude_path: refusing.to_str().unwrap(),
                     ..run(&rig, request, &cwd, &host)
                 },
@@ -16072,6 +16992,7 @@ mod tests {
         let result = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 claude_path: claude.to_str().unwrap(),
                 ..run(&rig, "req-1", &cwd, &host)
             },
@@ -16154,6 +17075,7 @@ mod tests {
         let early_start = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 claude_path: early.to_str().unwrap(),
                 ..run(&rig, "req-3", &cwd, &host)
             },

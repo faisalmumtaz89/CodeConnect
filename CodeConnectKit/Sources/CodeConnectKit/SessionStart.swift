@@ -3,12 +3,21 @@ import Observation
 
 /// The agents a session can be started with from the phone.
 public enum StartAgent: String, CaseIterable, Identifiable, Sendable {
-    case claude, codex
+    case claude, codex, antigravity
 
     public var id: String { rawValue }
 
+    /// The agents whose accounts CodeConnect keeps, as Settings lists them: Antigravity's sign-in is agy's own.
+    public static let withAccounts: [StartAgent] = [.claude, .codex]
+
     /// The product's own name, as the empty fleet prints it.
-    public var displayName: String { self == .claude ? "Claude Code" : "Codex" }
+    public var displayName: String {
+        switch self {
+        case .claude: return "Claude Code"
+        case .codex: return "Codex"
+        case .antigravity: return "Antigravity"
+        }
+    }
 }
 
 /// One checkout of a repository, as `project_git` lists it (minor 29): the

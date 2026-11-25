@@ -440,7 +440,7 @@ struct StartStepsSheet: View {
         if let project {
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(StartAgent.allCases) { candidate in
+                    ForEach(context.startAgents) { candidate in
                         let missing = context.missingReason(candidate) ?? signedOut(candidate)
                         Button {
                             if agent != candidate { modelValue = nil }

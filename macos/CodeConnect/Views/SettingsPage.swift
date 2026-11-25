@@ -406,7 +406,11 @@ private struct AccountSettings: View {
             if let model, model.keepsAccounts, model.linkHealth.notice == nil {
                 Text("Each agent uses the account marked here. Click another to move its sessions to it.")
                     .font(Theme.ui(13)).foregroundStyle(Theme.text2)
-                ForEach(StartAgent.allCases) { agent in AgentAccounts(model: model, agent: agent) }
+                ForEach(StartAgent.withAccounts) { agent in AgentAccounts(model: model, agent: agent) }
+                // An agent with one sign-in of its own and no accounts here, where it is installed on this Mac.
+                if model.starter.availableAgents.contains(.antigravity) {
+                    AgentSignInGroup(model: model, agent: .antigravity)
+                }
                 if let problem = model.accountsProblem {
                     Text(problem).font(Theme.ui(12)).foregroundStyle(Theme.red)
                         .fixedSize(horizontal: false, vertical: true)
@@ -443,6 +447,55 @@ private struct AccountSettings: View {
             model?.listProjects()
             await model?.loadAccounts()
         }
+    }
+}
+
+/// An agent that keeps one sign-in of its own and no accounts here (Antigravity, minor 51), drawn as an accounts group
+/// with its Default alone: "Signed in · <plan>" (its plan as the agent names it), "Signed in", "Signed out", signing in,
+/// or "As set up on this Mac" before the Mac has said. Its "…" holds Sign In… signed out and Sign Out… signed in; the
+/// sign-out is confirmed. No account is added or chosen here.
+private struct AgentSignInGroup: View {
+    let model: AppModel
+    let agent: StartAgent
+    @State private var signingOut = false
+
+    var body: some View {
+        let book = model.accountBook
+        let signIn = book?.agentSignIn(for: agent)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(agent.displayName).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
+                .padding(.leading, 4)
+            VStack(spacing: 0) {
+                if book != nil {
+                    AccountRow(
+                        model: model, agent: agent, id: nil, facts: nil, label: "Default",
+                        signedOut: signIn?.signedOut ?? false, signingIn: signIn?.signingIn ?? false,
+                        note: signIn?.line(plan: book?.defaultFacts(for: agent)?.plan), columns: [], inUse: true,
+                        choose: {}, acts: model.signsAgentsIn ? signIn?.acts ?? [] : [], remove: {},
+                        signOut: { signingOut = true }, reportsUsage: false)
+                } else {
+                    Text("Asking this Mac…").font(Theme.ui(13)).foregroundStyle(Theme.text3)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 9)
+                }
+            }
+            .padding(6)
+            .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.hairline))
+        }
+        .confirmation(Binding(get: { signingOut ? agent : nil }, set: { signingOut = $0 != nil })) { agent in
+            Confirmation(
+                title: "Sign Out of \(agent.displayName)?",
+                message: "\(agent.displayName) sessions on this Mac stop working until it’s signed in again.",
+                answers: [
+                    .init(title: "Cancel", kind: .cancel, id: "settings.accounts.signOut.cancel"),
+                    .init(title: "Sign Out", kind: .destructive, id: "settings.accounts.signOut.confirm") {
+                        Task { await model.signOutAgent(agent) }
+                    },
+                ])
+        }
+        #if DEBUG
+            .task { if RenderWindow.confirm == "signOut" { signingOut = true } }
+        #endif
     }
 }
 
@@ -578,6 +631,11 @@ private struct AccountRow: View {
     let acts: [AccountRowAct]
     /// Remove…: asks first, by the page's card.
     let remove: () -> Void
+    /// Sign Out… of an agent's own sign-in: asks first, by its group's card.
+    var signOut: () -> Void = {}
+    /// Its agent reports usage of its plan: a row whose agent reports none (Antigravity) shows no figures, not a "Not
+    /// reported yet" that would never change.
+    var reportsUsage = true
     @Environment(RowMenu.self) private var menu
     @State private var hovered = false
     @State private var moreFrame: CGRect = .zero
@@ -675,7 +733,9 @@ private struct AccountRow: View {
     /// empty cell where it names no such window. Or, in their place, "No plan limits" where its agent says none apply
     /// (`limitsAvailable` false), else "Not reported yet".
     @ViewBuilder private var figures: some View {
-        if let facts, !ReplyBar.limits(facts, now: .now).isEmpty {
+        if !reportsUsage {
+            EmptyView()
+        } else if let facts, !ReplyBar.limits(facts, now: .now).isEmpty {
             // Redrawn each minute while shown; each countdown is from the time of that drawing, since the schedule's own
             // date is the minute's start, up to 59 s earlier. The figures are the reply bar's (`ReplyBar.limits`).
             TimelineView(.everyMinute) { _ in
@@ -731,7 +791,8 @@ private struct AccountRow: View {
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { moreFrame = $0 }
         #if DEBUG
             .task {
-                guard let id, RenderWindow.openAccountMenu == id else { return }
+                // A Default's, by `default:<agent>`.
+                guard RenderWindow.openAccountMenu == (id ?? "default:\(agent.rawValue)") else { return }
                 // After the render has sized and placed its window, as a click comes on a window at rest.
                 try? await Task.sleep(for: .seconds(1))
                 show(at: moreFrame)
@@ -744,7 +805,7 @@ private struct AccountRow: View {
         let items = acts.map { act in
             RowMenu.Item(
                 id: "\(rowID).\(Self.name(act))", title: act.title,
-                symbol: act == .remove ? PanelSymbol.remove : PanelSymbol.signIn, destructive: act == .remove
+                symbol: Self.symbol(act), destructive: act == .remove || act == .signOut
             ) { perform(act) }
         }
         menu.toggle(rect, owner: moreID, items: items)
@@ -757,10 +818,29 @@ private struct AccountRow: View {
             Task { await model.signInAccount(accountID: id) }
         case .remove:
             remove()
+        case .signIn:
+            Task { await model.signInAgent(agent) }
+        case .signOut:
+            signOut()
         }
     }
 
-    private static func name(_ act: AccountRowAct) -> String { act == .remove ? "remove" : "signInAgain" }
+    private static func name(_ act: AccountRowAct) -> String {
+        switch act {
+        case .signInAgain: "signInAgain"
+        case .remove: "remove"
+        case .signIn: "signIn"
+        case .signOut: "signOut"
+        }
+    }
+
+    private static func symbol(_ act: AccountRowAct) -> String {
+        switch act {
+        case .remove: PanelSymbol.remove
+        case .signOut: PanelSymbol.signOut
+        case .signInAgain, .signIn: PanelSymbol.signIn
+        }
+    }
 }
 
 #if DEBUG

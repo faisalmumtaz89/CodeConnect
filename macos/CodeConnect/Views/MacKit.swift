@@ -653,6 +653,7 @@ enum PanelSymbol {
     static let copy = "doc.on.doc"
     /// iPhone: `sign-in`.
     static let signIn = "person.badge.key"
+    static let signOut = "rectangle.portrait.and.arrow.right"
 }
 
 /// One act in a "…" panel, on the Model and Mode panels' row: a quiet icon and the 12.5 pt label in a `MenuRow` (10 pt

@@ -57,9 +57,11 @@ struct DecisionCardSheet: View {
 /// duplicate that does not show you what the first answer was is just a refusal.
 struct ResolutionBanner: View {
     let attempt: AnswerAttempt
+    /// The session's agent, whom the answer was handed to.
+    var agent: AgentKind = .claude
 
     var body: some View {
-        let banner = DecisionCard.resultBanner(for: attempt)
+        let banner = DecisionCard.resultBanner(for: attempt, agent: agent)
         VStack(alignment: .leading, spacing: CC.space.xs) {
             CCBanner(banner.title, message: banner.message, tone: banner.tone.ccTone, icon: banner.icon)
             if let provenance = banner.provenance {

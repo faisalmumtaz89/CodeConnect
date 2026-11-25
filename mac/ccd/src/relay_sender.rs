@@ -27,7 +27,6 @@ use anyhow::{bail, Context, Result};
 use protocol::secret::Redacted;
 use push_core::{terminal_refusal, ApnsEnvironment, COLLAPSE_ID, TEST_COLLAPSE_ID};
 use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::TlsConnector;
 
 use crate::apns::{
     CredentialRefused, NoRegistration, PushHint, PushMode, PushSender, SendRateLimited,
@@ -108,12 +107,12 @@ pub(crate) trait RelayTransport: Send + Sync {
 pub(crate) struct HttpsRelay {
     host: String,
     port: u16,
-    tls: TlsConnector,
+    tls: crate::tls::LazyOutboundH2,
 }
 
 impl HttpsRelay {
     /// The one production endpoint, from the baked constants and nothing else.
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new() -> Self {
         Self::against(RELAY_HOST.to_string(), 443)
     }
 
@@ -121,16 +120,16 @@ impl HttpsRelay {
     /// Compiled out of every shipped binary, so no configuration file,
     /// environment variable or wire message can reach it.
     #[cfg(test)]
-    pub(crate) fn at(host: String, port: u16) -> Result<Self> {
+    pub(crate) fn at(host: String, port: u16) -> Self {
         Self::against(host, port)
     }
 
-    fn against(host: String, port: u16) -> Result<Self> {
-        Ok(Self {
+    fn against(host: String, port: u16) -> Self {
+        Self {
             host,
             port,
-            tls: crate::tls::outbound_h2("relay")?,
-        })
+            tls: crate::tls::LazyOutboundH2::new("relay"),
+        }
     }
 }
 
@@ -173,10 +172,11 @@ fn relay_request(host: &str, credential: &Redacted) -> Result<http::Request<()>>
 async fn post(
     host: String,
     port: u16,
-    tls: TlsConnector,
+    tls: crate::tls::LazyOutboundH2,
     credential: Redacted,
     body: String,
 ) -> Result<RelayReply> {
+    let tls = tls.get().await?;
     let stream = tokio::time::timeout(
         CONNECT_TIMEOUT,
         tokio::net::TcpStream::connect((host.as_str(), port)),
@@ -664,27 +664,15 @@ impl PushSender for RelayPushSender {
     }
 }
 
-/// The relay sender, or the stub when this machine cannot even build a TLS
-/// client.
-///
-/// **A trust store that will not load is the one failure here**, and it means a
-/// broken system rather than a missing configuration — so it is reported as
-/// what it is and push goes off, rather than being reported as "not
-/// configured", which would send somebody looking at their config file.
+/// The relay sender. Its TLS client is built by the first push that needs it
+/// ([`crate::tls::LazyOutboundH2`]), so a trust store that will not load is
+/// reported by that push, as the broken system it is, and tried again by the next.
 pub fn build(store: Arc<crate::store::Store>) -> Arc<dyn PushSender> {
-    match HttpsRelay::new() {
-        Ok(transport) => {
-            crate::log_info!("push: relay mode, sending through {RELAY_HOST}");
-            Arc::new(RelayPushSender::new(
-                Arc::new(transport),
-                Arc::new(crate::apns_sender::StoreRegistry::new(store)),
-            ))
-        }
-        Err(err) => {
-            crate::log_error!("push: staying off — {err:#}");
-            Arc::new(crate::apns::LoggingPushSender::new())
-        }
-    }
+    crate::log_info!("push: relay mode, sending through {RELAY_HOST}");
+    Arc::new(RelayPushSender::new(
+        Arc::new(HttpsRelay::new()),
+        Arc::new(crate::apns_sender::StoreRegistry::new(store)),
+    ))
 }
 
 #[cfg(test)]
@@ -1665,7 +1653,7 @@ mod tests {
     /// parses cleanly and is simply not read.
     #[test]
     fn the_endpoint_is_baked_and_a_config_file_cannot_move_it() {
-        let production = HttpsRelay::new().expect("the production endpoint builds");
+        let production = HttpsRelay::new();
         assert_eq!(production.host, RELAY_HOST);
         assert_eq!(production.port, 443);
 
@@ -1681,7 +1669,7 @@ mod tests {
             "the file said nothing this daemon acts on"
         );
         assert_eq!(
-            HttpsRelay::new().expect("still builds").host,
+            HttpsRelay::new().host,
             RELAY_HOST,
             "and the endpoint is where it always was"
         );
@@ -1690,7 +1678,7 @@ mod tests {
         // controls. It is `#[cfg(test)]`, so it is not in a shipped binary at
         // all — there is no release-build path, public or private, that reaches
         // it.
-        let elsewhere = HttpsRelay::at("127.0.0.1".into(), 1).expect("the test seam builds");
+        let elsewhere = HttpsRelay::at("127.0.0.1".into(), 1);
         assert_eq!(elsewhere.host, "127.0.0.1");
         assert_eq!(elsewhere.port, 1);
     }
@@ -1756,7 +1744,7 @@ mod tests {
         // port could instead be re-bound by another test between the drop and
         // the connect, turning the refusal this test is about into a stalled
         // handshake against a live socket.
-        let relay = HttpsRelay::at("127.0.0.1".into(), 1).expect("the transport builds");
+        let relay = HttpsRelay::at("127.0.0.1".into(), 1);
         let err = tokio::time::timeout(
             DELIVERY_DEADLINE,
             relay.post("a-relay-bearer".into(), "{}".into()),

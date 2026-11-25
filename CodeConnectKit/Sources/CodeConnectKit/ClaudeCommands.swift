@@ -261,19 +261,25 @@ public enum SlashPalette {
         SlashRow(command: "diff", subtitle: "Review working-tree changes", action: .nativeDiff),
     ]
 
-    /// The palette for one text, or nil for none. Bare `/` is the discovery moment: every row and the caption. A
-    /// fragment filters case-insensitively. Whitespace after the fragment means arguments are coming, and arguments
-    /// are typing, not browsing.
-    public static func content(for typed: String) -> Content? {
+    /// The rows `agent` takes: all five for Claude Code; Antigravity has no `/clear`, so not that one.
+    public static func rows(for agent: AgentKind) -> [SlashRow] {
+        agent == .antigravity ? allRows.filter { $0.command != "clear" } : allRows
+    }
+
+    /// The palette for one text on `agent`'s run, or nil for none. Bare `/` is the discovery moment: every row and the
+    /// caption. A fragment filters case-insensitively. Whitespace after the fragment means arguments are coming, and
+    /// arguments are typing, not browsing.
+    public static func content(for typed: String, agent: AgentKind = .claude) -> Content? {
         let afterLeading = typed.drop(while: \.isWhitespace)
         guard afterLeading.hasPrefix("/") else { return nil }
         let fragment = afterLeading.dropFirst()
+        let offered = rows(for: agent)
         if fragment.isEmpty {
-            return Content(rows: allRows, showsCaption: true)
+            return Content(rows: offered, showsCaption: true)
         }
         guard !fragment.contains(where: \.isWhitespace) else { return nil }
         let needle = fragment.lowercased()
-        let matches = allRows.filter { $0.command.hasPrefix(needle) }
+        let matches = offered.filter { $0.command.hasPrefix(needle) }
         return matches.isEmpty ? nil : Content(rows: matches, showsCaption: false)
     }
 
@@ -290,10 +296,11 @@ public enum SlashPalette {
         /// The draft changed.
         public mutating func edited() { closed = false }
 
-        /// The palette for `draft` on a Claude run whose reply box has the keyboard, unless it is closed.
-        public func content(for draft: String, claudeRun: Bool, focused: Bool) -> Content? {
-            guard claudeRun, focused, !closed else { return nil }
-            return SlashPalette.content(for: draft)
+        /// The palette for `draft` on a Claude or Antigravity run (`agent`) whose reply box has the keyboard, unless it
+        /// is closed; a Codex run has no slash vocabulary.
+        public func content(for draft: String, agent: AgentKind?, focused: Bool) -> Content? {
+            guard let agent, agent == .claude || agent == .antigravity, focused, !closed else { return nil }
+            return SlashPalette.content(for: draft, agent: agent)
         }
     }
 

@@ -70,10 +70,20 @@ public enum NativeCommand: Sendable, Hashable {
         }
     }
 
-    /// Claude Code's own answer to this command above `baseline`, as a terminal phase, or nil while there is none.
-    /// The sequence fences out a backfill that publishes an older receipt.
-    func receiptPhase(from receipts: SessionState.Receipts?, after baseline: UInt64) -> CommandPhase? {
+    /// The agent's own answer to this command above `baseline`, as a terminal phase, or nil while there is none: Claude
+    /// Code's receipt; for Antigravity, which runs `/compact` as a prompt, that prompt's own turn ending, confirmed only
+    /// when agy ended it as done. The sequence fences out a backfill that publishes an older receipt.
+    func receiptPhase(
+        from receipts: SessionState.Receipts?, after baseline: UInt64, agent: AgentKind = .claude
+    ) -> CommandPhase? {
         switch self {
+        case .compact where agent == .antigravity:
+            guard let turn = receipts?.compactTurn, turn.sentSeq > baseline, let reason = turn.endReason else {
+                return nil
+            }
+            return reason == "end_turn"
+                ? .confirmed("Antigravity compacted its context.")
+                : .failed("Antigravity didn’t finish compacting.")
         case .compact:
             guard let signal = receipts?.compact, let seq = receipts?.compactSeq, seq > baseline else { return nil }
             switch signal {
@@ -85,18 +95,20 @@ public enum NativeCommand: Sendable, Hashable {
 }
 
 extension AppModel {
-    /// Claude Code's own answer to `command` in this run since `baseline` (`eventHighWater(for:)`, taken just
-    /// before the send), as a terminal phase, or nil while there is none.
-    public func receiptPhase(for command: NativeCommand, in key: String, after baseline: UInt64) -> CommandPhase? {
-        command.receiptPhase(from: receipts(for: key), after: baseline)
+    /// The agent's own answer to `command` in this run since `baseline` (`eventHighWater(for:)`, taken just before
+    /// the send), as a terminal phase, or nil while there is none.
+    public func receiptPhase(
+        for command: NativeCommand, in key: String, after baseline: UInt64, agent: AgentKind = .claude
+    ) -> CommandPhase? {
+        command.receiptPhase(from: receipts(for: key), after: baseline, agent: agent)
     }
 
     /// What a command's status says in `phase`, naming the computer in the words of the device reading it; nil at
     /// rest. Typing and waiting are neutral; a settled phase is its own words, a change confirmed, a kept value
     /// neutral, a failure a warning.
-    public func commandStatus(_ command: NativeCommand, _ phase: CommandPhase, on host: HostDevice = .current)
-        -> ComposeProse.Note?
-    {
+    public func commandStatus(
+        _ command: NativeCommand, _ phase: CommandPhase, agent: AgentKind = .claude, on host: HostDevice = .current
+    ) -> ComposeProse.Note? {
         let computer = host.computer("the computer", named: machineName)
         let typed: String
         switch command {
@@ -108,7 +120,7 @@ extension AppModel {
         case .sending:
             return ComposeProse.Note(text: "Typing \(typed) on \(computer)…", tone: .neutral, icon: nil)
         case .waiting(_, quietly: false):
-            return ComposeProse.Note(text: "Waiting for Claude Code to confirm…", tone: .neutral, icon: nil)
+            return ComposeProse.Note(text: "Waiting for \(agent.productName) to confirm…", tone: .neutral, icon: nil)
         case .waiting(_, quietly: true):
             return ComposeProse.Note(
                 text: "Compaction requested on \(computer). CodeConnect has not received a completion signal.",
@@ -132,11 +144,15 @@ public enum ClearConfirmation {
         "Claude Code will forget this conversation’s context. CodeConnect’s timeline will stay here."
 }
 
-/// The words of the control `/compact` opens.
+/// The words of the control `/compact` opens, naming the run's agent.
 public enum CompactPrompt {
     public static let title = "Compact context"
-    public static let explanation = "Ask Claude Code to compact its current context. Instructions are optional."
+    public static func explanation(for agent: AgentKind = .claude) -> String {
+        "Ask \(agent.productName) to compact its current context. Instructions are optional."
+    }
     public static let fieldLabel = "Instructions (optional)"
-    public static let placeholder = "What should Claude preserve?"
+    public static func placeholder(for agent: AgentKind = .claude) -> String {
+        "What should \(agent.displayName) preserve?"
+    }
     public static let action = "Compact now"
 }

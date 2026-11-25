@@ -563,6 +563,7 @@ impl Daemon {
         vec![
             protocol::agent::AgentKind::Claude,
             protocol::agent::AgentKind::Codex,
+            protocol::agent::AgentKind::Antigravity,
         ]
     }
 
@@ -620,8 +621,15 @@ impl Daemon {
     /// then does its durable write later — `send_text` in the same breath,
     /// `answer` five awaits later. A run's agent is filed once, when the run
     /// begins, and nothing writes it again.
+    ///
+    /// An Antigravity run is admitted: it is a hosted run as a Claude run is, its row in
+    /// `sessions` beside theirs (`store::session_tables_for`), so a v0.6.0 daemon that sweeps
+    /// its texts and answers already sweeps the row they belong to.
     fn shared_ledgers_admit(&self, agent: &protocol::agent::AgentKind) -> bool {
-        agent.is_claude()
+        matches!(
+            agent,
+            protocol::agent::AgentKind::Claude | protocol::agent::AgentKind::Antigravity
+        )
     }
 
     /// Re-derive from the database everything a restart would otherwise lose.
@@ -1198,8 +1206,10 @@ impl Daemon {
     ///
     /// The phone is for when the owner is away. After the grace, a ring on a Mac
     /// that has had keyboard or mouse input within [`crate::presence::RING_IDLE`]
-    /// waits, reading the idle time every [`crate::presence::POLL`], and rings the
-    /// first time the Mac has been left that long. While it waits it asks once a
+    /// waits, reading the idle time again when the Mac could first count as left
+    /// ([`crate::presence::until_away`]), at least [`crate::presence::POLL`] and at most a
+    /// second later, and rings the first time the Mac has been left that long. While it
+    /// waits it asks once a
     /// second whether it still matters — the ticket, the card, both in memory —
     /// and ends if not; before it goes it asks everything, the database
     /// included, so what rings is still true when it rings. The hold lives in this task alone, as the gate lives in
@@ -1209,7 +1219,9 @@ impl Daemon {
     /// at the Mac, three 5 s windows. Re-checking everything each poll cost 1.1–1.7
     /// % of a core for 10 held rings and 15.7–18.5 % for 100; reading only the
     /// idle time each poll costs 0.06 % and 0.15–0.30 %, plus the HID read itself,
-    /// 10.5 µs (20,000 reads): about 0.01 % of a core per held ring.
+    /// 10.5 µs (20,000 reads): about 0.01 % of a core per held ring. Reading it only when the Mac
+    /// could first count as left takes a held ring's daemon from about 21 context switches a second
+    /// to about 3 (release build, someone at the Mac, four 60 s windows each).
     ///
     /// # The grace is also a best-effort CANCELLATION window, and it is not
     /// coordinated with anything
@@ -1256,7 +1268,7 @@ impl Daemon {
                 // idle time that cannot be read rings, as it did before this
                 // check existed: a read that fails for good must not silence
                 // every notification for good.
-                if crate::presence::at_the_mac(crate::presence::RING_IDLE).unwrap_or(false) {
+                if let Some(left) = crate::presence::until_away(crate::presence::RING_IDLE) {
                     if looked.is_none_or(|at| at.elapsed() >= LOOK) {
                         if looked.is_none() {
                             crate::log_debug!(
@@ -1280,7 +1292,9 @@ impl Daemon {
                         }
                         looked = Some(tokio::time::Instant::now());
                     }
-                    tokio::time::sleep(crate::presence::POLL).await;
+                    // Nobody can count as gone before `left`; whether the ring still matters is
+                    // asked once a `LOOK`.
+                    tokio::time::sleep(left.clamp(crate::presence::POLL, LOOK)).await;
                     continue;
                 }
                 // **The run still has to exist.** The ticket catches a session
@@ -2343,10 +2357,10 @@ impl Daemon {
         let mut hosted = None;
         match row.agent {
             protocol::agent::AgentKind::Codex => {}
-            // A Claude run CodeConnect started is stopped through its agent host. Any
-            // other has no interrupt on this wire: its stop control is the keyboard at
-            // the Mac, and saying so is more useful than a bare refusal.
-            protocol::agent::AgentKind::Claude => {
+            // A Claude or Antigravity run CodeConnect started is stopped through its agent
+            // host. Any other has no interrupt on this wire: its stop control is the keyboard
+            // at the Mac, and saying so is more useful than a bare refusal.
+            protocol::agent::AgentKind::Claude | protocol::agent::AgentKind::Antigravity => {
                 match self.db.hosted_link(row.session_uid.clone()).await {
                     Ok(Some(linked)) => hosted = Some(linked.lifecycle),
                     _ => {
@@ -2606,6 +2620,12 @@ impl Daemon {
             // name. Neither silently does the other's job.
             protocol::agent::AgentKind::Claude => {
                 return refuse(crate::codex_refusals::compose_on_claude(&row.session_uid))
+            }
+            protocol::agent::AgentKind::Antigravity => {
+                return refuse(crate::codex_refusals::compose_on_unsupported(
+                    &row.session_uid,
+                    "Antigravity",
+                ))
             }
             protocol::agent::AgentKind::Unsupported(ref name) => {
                 return refuse(crate::codex_refusals::compose_on_unsupported(
@@ -3081,6 +3101,11 @@ impl Daemon {
                      does not offer for it",
                     row.session_uid
                 )),
+                protocol::agent::AgentKind::Antigravity => ClaudeOnly::WrongAgent(format!(
+                    "{} is an Antigravity session, and {what} is something this daemon \
+                     can only do for Claude",
+                    row.session_uid
+                )),
                 protocol::agent::AgentKind::Unsupported(ref name) => {
                     ClaudeOnly::WrongAgent(format!(
                         "{} is a {name} session, and {what} is something this daemon \
@@ -3144,7 +3169,10 @@ impl Daemon {
         // sentence.
         let codex = match self.db.get_session(session_uid.clone()).await {
             Ok(Some(row)) => match row.agent {
-                protocol::agent::AgentKind::Claude => None,
+                // A hosted run: its agent host holds the request.
+                protocol::agent::AgentKind::Claude | protocol::agent::AgentKind::Antigravity => {
+                    None
+                }
                 protocol::agent::AgentKind::Codex => Some(row),
                 protocol::agent::AgentKind::Unsupported(ref name) => {
                     return AnswerResult::Rejected {
@@ -3559,7 +3587,7 @@ impl Daemon {
         // A live run CodeConnect started offers its settings: a Claude run's from its start's
         // answer, with the one its model fact names marked (its newest receipt, kept in its
         // facts, read for that); a Codex run's from its start's check and the model it started
-        // on, its model fact marked as it is.
+        // on, and an Antigravity run's from its start's outcome, each with its model fact marked as it is.
         let mut menus: HashMap<String, protocol::event::RunMenus> = HashMap::new();
         // Every Claude run CodeConnect started keeps its start's models, ended or not: its model
         // fact is named by the chosen entry's id, never by claude's receipt of a change.
@@ -3589,6 +3617,17 @@ impl Daemon {
                 }
                 protocol::agent::AgentKind::Codex => {
                     codex_ended.push((row.session_uid.clone(), crate::codex_host::menus(&models)));
+                }
+                // agy's model families and modes, its model fact a family as its menu names it, as Codex's is.
+                protocol::agent::AgentKind::Antigravity => {
+                    let modes = self.db.hosted_modes(row.session_uid.clone()).await?;
+                    let menu = crate::claude_host::acp_menus(&models, &modes);
+                    if live {
+                        menus.insert(row.session_uid.clone(), menu);
+                        codex_menus.push(row.session_uid.clone());
+                    } else {
+                        codex_ended.push((row.session_uid.clone(), menu));
+                    }
                 }
                 protocol::agent::AgentKind::Unsupported(_) => {}
             }
@@ -3642,7 +3681,7 @@ impl Daemon {
                     .then(|| fact.value.clone());
             }
         }
-        // A Codex entry's label is its model's name, else the model itself: only a name is given.
+        // A Codex or Antigravity entry's label is its model's name, else the model itself: only a name is given.
         for (uid, menu) in &codex_ended {
             let fact = inner
                 .session_facts
@@ -4795,7 +4834,9 @@ impl Daemon {
                 cwd: row.cwd,
                 lifecycle: row.lifecycle,
                 link,
-                claude_session_id: row.claude_session_id,
+                // Claude Code's own session, which an app resumes with `claude --resume`: an
+                // Antigravity run's ACP session is kept in the same column for its relaunch alone.
+                claude_session_id: row.claude_session_id.filter(|_| row.agent.is_claude()),
                 transcript_path: row.transcript_path,
                 last_seq: last_seqs.get(&row.session_uid).copied().unwrap_or_default(),
                 created_at: row.created_at,
@@ -8373,6 +8414,31 @@ mod tests {
         );
     }
 
+    /// **A held ring reads the Mac's idle time about once a second, not ten times.** Idle time
+    /// only grows as time passes, so a ring held for someone who used the Mac a moment ago cannot
+    /// go for two minutes; reading it every 100 ms woke the daemon ten times a second for as long as
+    /// they worked. Held for three seconds, it reads at most a few times.
+    #[tokio::test]
+    async fn a_held_ring_reads_the_idle_time_about_once_a_second() {
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(Duration::ZERO));
+        raise_ring(&daemon, Ring::ClaudeApproval).await;
+        let before = crate::presence::idle_reads();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let reads = crate::presence::idle_reads() - before;
+        assert_eq!(rung(&capture), vec![], "held while someone is at the Mac");
+        assert!(
+            reads < 10,
+            "{reads} reads of the idle time in three held seconds"
+        );
+        crate::presence::set_idle(Some(AWAY));
+        assert_eq!(
+            rung_after(&capture, 1).await,
+            vec![crate::apns::PushKind::Approval],
+            "and it rings once they have left"
+        );
+    }
+
     /// **A doorbell counted earlier is never posted after one counted later.**
     ///
     /// Every doorbell shares one collapse slot and a device's queue keeps the one
@@ -8496,7 +8562,9 @@ mod tests {
     async fn a_held_ring_that_stopped_mattering_never_rings() {
         async fn leave_and_listen(capture: &CaptureSender, case: &str) {
             crate::presence::set_idle(Some(AWAY));
-            tokio::time::sleep(crate::presence::POLL * 5).await;
+            // Longer than the held ring's longest wait, a second, so a ring that still mattered
+            // would have gone.
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
             assert_eq!(rung(capture), vec![], "{case}");
         }
 

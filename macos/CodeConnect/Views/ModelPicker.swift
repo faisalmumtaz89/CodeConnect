@@ -18,14 +18,14 @@ struct ModelButton: View {
         PanelPlace.place(widest: 440, leading: minX, box: startBox)
     }
 
-    private var checking: Bool { StartAgent.allCases.contains { context.models($0) == .checking } }
+    private var checking: Bool { context.startAgents.contains { context.models($0) == .checking } }
 
     var body: some View {
         Button {
             open.toggle()
         } label: {
             HStack(spacing: 5) {
-                if let pick { AgentMark(agent: pick.agent == .claude ? .claude : .codex) }
+                if let pick { AgentMark(agent: AgentKind(pick.agent)) }
                 Text(label).font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
@@ -57,7 +57,7 @@ struct ModelButton: View {
 
     /// The rows a choice can be, in the menu's order: each agent's that has its models.
     private var rows: [StartModelChoice] {
-        StartAgent.allCases.flatMap { agent -> [StartModelChoice] in
+        context.startAgents.flatMap { agent -> [StartModelChoice] in
             guard case .choices = context.models(agent) else { return [] }
             return context.modelChoices.filter { $0.agent == agent }
         }
@@ -68,7 +68,7 @@ struct ModelButton: View {
         let order = rows
         return PanelScroll {
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(StartAgent.allCases.enumerated()), id: \.element) { index, agent in
+                ForEach(Array(context.startAgents.enumerated()), id: \.element) { index, agent in
                     if index > 0 { divider }
                     header(agent.displayName)
                     switch context.models(agent) {

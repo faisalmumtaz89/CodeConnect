@@ -29,8 +29,9 @@ public enum ModeConfirmation {
                     + "outside this project’s folder and with network access, until you change the mode back.",
                 confirm: "Give Full Access",
                 cancel: "Keep Asking")
-        case .claude, .unsupported:
-            // Claude's message promises nothing about a sandbox: the mode only turns off claude's prompts.
+        case .claude, .antigravity, .unsupported:
+            // Claude's message promises nothing about a sandbox: the mode only turns off claude's prompts. None of an
+            // Antigravity run's modes lets agy work without asking (decision 214), so it never asks this.
             return Words(
                 title: "Let Claude work without asking?",
                 message: "Claude will run commands and edit files in this run without asking you first, "

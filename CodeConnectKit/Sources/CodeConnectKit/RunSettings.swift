@@ -7,14 +7,13 @@ import Foundation
 /// no menus suppresses the picker rather than falling back to a static family list, which is what keeps
 /// a detached, ended or older-daemon run off a list it cannot act on.
 public enum RunSettings: Sendable, Hashable {
-    /// Not a run these controls own: an agent they do not know. This entry draws
-    /// nothing.
+    /// Not a run these controls own: an agent they do not know. This entry draws nothing.
     case deferToOtherPath
-    /// A hosted Claude run with no menus — detached, ended, still starting, or a daemon below minor 39.
+    /// A hosted run with no menus — detached, ended, still starting, or a daemon below minor 39.
     /// No picker: the model shows read-only, by the label the daemon names it by (minor 46) or else exactly as it
     /// arrived, and no effort or mode line at all.
     case hostedReadOnly(model: RunModelName?)
-    /// A live hosted Claude run offering its menus.
+    /// A live hosted run offering its menus.
     case hostedLive(HostedSettings)
 
     /// The effort a run is on, as the reply row names it beside the model: the effort in force on the chosen model
@@ -52,7 +51,9 @@ public enum RunSettings: Sendable, Hashable {
         summary: SessionSummary, confirmed: String? = nil, inFlight: Bool = false,
         lastOutcome: SettingOutcome? = nil
     ) -> RunSettings {
-        guard summary.agent == .claude || summary.agent == .codex else { return .deferToOtherPath }
+        guard summary.agent == .claude || summary.agent == .codex || summary.agent == .antigravity else {
+            return .deferToOtherPath
+        }
         guard let menus = summary.menus else {
             return .hostedReadOnly(
                 model: summary.model.map {

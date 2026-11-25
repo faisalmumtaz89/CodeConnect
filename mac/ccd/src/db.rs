@@ -418,6 +418,11 @@ impl Db {
             .await
     }
 
+    pub async fn hosted_modes(&self, session_uid: String) -> Result<Vec<serde_json::Value>> {
+        self.run(move |store| store.hosted_modes(&session_uid))
+            .await
+    }
+
     pub async fn keep_hosted_models(
         &self,
         session_uid: String,

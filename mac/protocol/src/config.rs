@@ -252,10 +252,14 @@ pub struct Config {
 
     /// Explicit path to the real `codex` binary, resolved the same way
     /// `claude_bin` is. Flat beside `claude_bin` rather than nested under an
-    /// agent map: there are two agents, and one field each reads more plainly
-    /// than a structure that would invite a third the code cannot yet host.
+    /// agent map: one field each reads more plainly than a structure.
     #[serde(default)]
     pub codex_bin: Option<String>,
+
+    /// Explicit path to Antigravity's `agy`, tried before the login shell's `PATH`
+    /// and its installer's `~/.local/bin/agy`.
+    #[serde(default)]
+    pub agy_bin: Option<String>,
 
     /// Explicit path to the agent host (`cc-agent-host`) ccd runs for each Claude
     /// run. Unset, it is the one beside ccd's own executable, where the Mac app
@@ -367,6 +371,7 @@ impl Default for Config {
             git_bin: None,
             claude_bin: None,
             codex_bin: None,
+            agy_bin: None,
             agent_host_bin: None,
             tailscale_bin: None,
             log_max_bytes: default_log_max_bytes(),

@@ -890,7 +890,8 @@ impl Daemon {
         let _moving = gate.lock().await;
         let claude = match self.db.get_session(run_uid.to_string()).await {
             Ok(Some(row)) => match row.agent {
-                AgentKind::Claude => true,
+                // A hosted run: its agent host takes the wake.
+                AgentKind::Claude | AgentKind::Antigravity => true,
                 AgentKind::Codex => false,
                 AgentKind::Unsupported(_) => return,
             },
@@ -924,7 +925,7 @@ impl Daemon {
                 return;
             }
         }
-        // A Claude run CodeConnect started is woken through its agent host's link.
+        // A Claude or Antigravity run CodeConnect started is woken through its agent host's link.
         let issued = if claude {
             crate::claude_host::wake(self, run_uid, nudge()).await
         } else {
@@ -1130,10 +1131,9 @@ impl Daemon {
         #[cfg(not(test))]
         {
             let bin = self.config.tailscale_bin()?;
-            let run = tokio::process::Command::new(bin)
-                .args(["status", "--json"])
-                .kill_on_drop(true)
-                .output();
+            let mut command = tokio::process::Command::new(bin);
+            command.args(["status", "--json"]).kill_on_drop(true);
+            let run = crate::spawn::output(&mut command);
             let output = tokio::time::timeout(TAILSCALE_TIMEOUT, run)
                 .await
                 .ok()?
@@ -1171,6 +1171,7 @@ fn agent_name(agent: &AgentKind) -> &str {
     match agent {
         AgentKind::Claude => "Claude",
         AgentKind::Codex => "Codex",
+        AgentKind::Antigravity => "Antigravity",
         AgentKind::Unsupported(name) => name,
     }
 }

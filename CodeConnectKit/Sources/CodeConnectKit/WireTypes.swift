@@ -53,6 +53,9 @@ public enum EventSource: Sendable, Hashable {
     /// A Claude run driven through the Agent SDK: the messages its agent host
     /// forwards (`Source::Sdk`, `event.rs`). Named for the same reason as `.codex`.
     case sdk
+    /// An Antigravity run's `agy acp` messages, which its agent host forwards (`Source::Acp`). Named for the same
+    /// reason as `.codex`.
+    case acp
     /// A source a newer daemon knows about and this build does not. Retained
     /// rather than coerced, so nothing reads it as the trusted `.daemon`.
     case unknown(String)
@@ -65,6 +68,7 @@ public enum EventSource: Sendable, Hashable {
         case .pty: return "pty"
         case .codex: return "codex"
         case .sdk: return "sdk"
+        case .acp: return "acp"
         case .unknown(let raw): return raw
         }
     }
@@ -119,6 +123,7 @@ extension EventSource: Codable {
         case "pty": self = .pty
         case "codex": self = .codex
         case "sdk": self = .sdk
+        case "acp": self = .acp
         case let other: self = .unknown(other)
         }
     }
@@ -192,6 +197,8 @@ public enum AnsweredOn: String, Codable, Sendable, Hashable {
 public enum AgentKind: Sendable, Hashable {
     case claude
     case codex
+    /// Google Antigravity's agent, `agy`, which the computer runs on its agent host as it runs Claude Code.
+    case antigravity
     /// An agent a newer daemon hosts and this build does not know how to drive.
     case unsupported(String)
 
@@ -199,6 +206,7 @@ public enum AgentKind: Sendable, Hashable {
         switch self {
         case .claude: return "claude"
         case .codex: return "codex"
+        case .antigravity: return "antigravity"
         case .unsupported(let raw): return raw
         }
     }
@@ -209,6 +217,7 @@ public enum AgentKind: Sendable, Hashable {
         switch self {
         case .claude: return "Claude"
         case .codex: return "Codex"
+        case .antigravity: return "Antigravity"
         case .unsupported(let raw): return raw
         }
     }
@@ -219,14 +228,26 @@ public enum AgentKind: Sendable, Hashable {
         switch self {
         case .claude: return StartAgent.claude.displayName
         case .codex: return StartAgent.codex.displayName
+        case .antigravity: return StartAgent.antigravity.displayName
         case .unsupported(let raw): return raw
         }
+    }
+
+    /// Whether a Deny on this agent's card can carry the person's reason to it: Claude's does. A Codex card is answered
+    /// with its own options, and Antigravity's agent takes a rejection with no words (ACP's `reject_once`), so a reason
+    /// typed for either would reach no one.
+    public var takesDenyReason: Bool { self == .claude }
+
+    /// The agent a start of `agent` runs.
+    public init(_ agent: StartAgent) {
+        self.init(wire: agent.rawValue)
     }
 
     init(wire raw: String) {
         switch raw {
         case "claude": self = .claude
         case "codex": self = .codex
+        case "antigravity": self = .antigravity
         case let other: self = .unsupported(other)
         }
     }
@@ -2128,6 +2149,11 @@ public enum ClientMessage: Sendable {
     /// Removes `accountID` after its agent's own sign-out. Answered `accounts`, or `accounts_refused`
     /// (`accounts_in_use` while a session runs on it, `accounts_unavailable` when it could not be signed out).
     case removeAccount(requestID: String, accountID: String)
+    /// Signs `agent` in with its own sign-in in a browser on the computer (minor 51, Antigravity only). Answered at once
+    /// with `accounts`, its sign-in `signing_in`; its end comes in a pushed `accounts`.
+    case signInAgent(requestID: String, agent: String)
+    /// Signs `agent` out of the computer (minor 51, Antigravity only). Answered `accounts`, or `accounts_refused`.
+    case signOutAgent(requestID: String, agent: String)
     /// One folder's repository: its checkouts and free branches. Minor 29,
     /// sent only when `Capabilities.startsInWorktrees`.
     case getProjectGit(path: String)
@@ -2362,6 +2388,14 @@ extension ClientMessage: Encodable {
             try c.encode("remove_account", forKey: .type)
             try c.encode(requestID, forKey: .requestID)
             try c.encode(accountID, forKey: .accountID)
+        case .signInAgent(let requestID, let agent):
+            try c.encode("sign_in_agent", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(agent, forKey: .agent)
+        case .signOutAgent(let requestID, let agent):
+            try c.encode("sign_out_agent", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(agent, forKey: .agent)
         case .getProjectGit(let path):
             try c.encode("get_project_git", forKey: .type)
             try c.encode(path, forKey: .path)
@@ -2697,6 +2731,7 @@ extension ServerMessage: Decodable {
         case active
         case defaults
         case uploadID = "upload_id"
+        case agentSignIns = "agent_sign_ins"
     }
 
     public init(from decoder: Decoder) throws {
@@ -2798,7 +2833,8 @@ extension ServerMessage: Decodable {
                 book: AccountBook(
                     accounts: try c.decode([AgentAccount].self, forKey: .accounts),
                     active: try c.decode([ActiveAccount].self, forKey: .active),
-                    defaults: try c.decodeIfPresent([DefaultAccount].self, forKey: .defaults) ?? []))
+                    defaults: try c.decodeIfPresent([DefaultAccount].self, forKey: .defaults) ?? [],
+                    agentSignIns: try c.decodeIfPresent([AgentSignIn].self, forKey: .agentSignIns) ?? []))
         case "accounts_refused":
             self = .accountsRefused(
                 requestID: try c.decode(String.self, forKey: .requestID),

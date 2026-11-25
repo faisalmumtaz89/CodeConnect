@@ -790,6 +790,18 @@ final class CodexSendPathTests: XCTestCase {
         }
     }
 
+    /// An Antigravity run takes its words as typed, but a typed `/compact` opens Compact's own controls with its
+    /// words, as on a Claude run: typed through, the sender would refuse it.
+    func testAnAntigravityRunOpensCompactForATypedCompact() {
+        let (agy, _) = model(link: "none", agent: "antigravity")
+        XCTAssertEqual(
+            agy.submission(of: "/compact keep the plan", to: key()),
+            .command(.nativeCompact(prefillInstructions: "keep the plan")))
+        XCTAssertEqual(agy.submission(of: "/compact", to: key()), .command(.nativeCompact(prefillInstructions: "")))
+        XCTAssertEqual(agy.submission(of: "/clear", to: key()), .claude, "agy has no clear")
+        XCTAssertEqual(agy.submission(of: "hello", to: key()), .claude)
+    }
+
     /// **A reply typed while the last send was out is the next message, not this
     /// one.** A landed send empties the composer only when the box still holds
     /// exactly the words that were sent; an edit made while the send was in flight

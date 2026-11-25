@@ -7,6 +7,9 @@
 //! piece of session state either lives in SQLite or is re-derived when ccd
 //! attaches again.
 
+// Tests start their stand-ins directly; every start ccd itself makes goes through `spawn`.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod accounts;
 mod apns;
 mod apns_sender;
@@ -33,6 +36,7 @@ mod push_queue;
 mod question;
 mod relay_sender;
 mod secret;
+mod spawn;
 mod start_session;
 mod state;
 mod store;
@@ -52,8 +56,22 @@ use crate::state::{Daemon, Endpoint};
 use crate::store::Store;
 use protocol::config::Config;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Most workers ccd runs async tasks on. Its sockets and timers need few; database, file and
+/// process work runs on the blocking pool. Tokio's default of one worker per core parked 28 idle
+/// threads on a 28-core Mac.
+const MAX_WORKERS: usize = 4;
+
+fn main() -> Result<()> {
+    let workers = std::thread::available_parallelism().map_or(1, |cores| cores.get());
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers.min(MAX_WORKERS))
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     log::init_from_env();
     if std::env::args().any(|arg| arg == "--version") {
         println!(
@@ -112,11 +130,10 @@ async fn main() -> Result<()> {
     // running process (that is the whole point of recording it), so the hash
     // must be of what was actually loaded, as close to exec as we get.
     if let Ok(exe) = std::env::current_exe() {
-        if let Ok(bytes) = std::fs::read(&exe) {
-            let _ = daemon.exe_identity.set((
-                exe.to_string_lossy().to_string(),
-                protocol::hash::sha256_hex(&bytes),
-            ));
+        if let Ok(sha) = protocol::hash::sha256_file_hex(&exe) {
+            let _ = daemon
+                .exe_identity
+                .set((exe.to_string_lossy().to_string(), sha));
         }
     }
 
@@ -1494,10 +1511,9 @@ async fn tailnet_addresses(config: &Config) -> Vec<IpAddr> {
         if !candidate.exists() {
             continue;
         }
-        let run = tokio::process::Command::new(&candidate)
-            .arg("ip")
-            .kill_on_drop(true)
-            .output();
+        let mut command = tokio::process::Command::new(&candidate);
+        command.arg("ip").kill_on_drop(true);
+        let run = crate::spawn::output(&mut command);
         let output = match tokio::time::timeout_at(deadline, run).await {
             Ok(Ok(output)) => output,
             Ok(Err(_)) => continue,
@@ -1536,10 +1552,9 @@ fn held_here(ip: IpAddr) -> bool {
 /// tailnet connection to this node's address on to `127.0.0.1` on the same port.
 async fn userspace_tailnet_address(config: &Config) -> Option<IpAddr> {
     let bin = config.tailscale_bin()?;
-    let run = tokio::process::Command::new(bin)
-        .args(["status", "--json"])
-        .kill_on_drop(true)
-        .output();
+    let mut command = tokio::process::Command::new(bin);
+    command.args(["status", "--json"]).kill_on_drop(true);
+    let run = crate::spawn::output(&mut command);
     let output = tokio::time::timeout(TAILSCALE_PROBE_TIMEOUT, run)
         .await
         .ok()?

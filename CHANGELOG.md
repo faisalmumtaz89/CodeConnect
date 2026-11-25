@@ -3,6 +3,41 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.26
+
+- On the Mac, Antigravity is an agent you can start beside Claude Code and Codex, on a Mac where Google's Antigravity
+  CLI (`agy`) is installed.
+- On the Mac, choose an Antigravity session's model, thinking level and mode when you start it and in the reply bar,
+  from Antigravity's own lists.
+- On the Mac, Settings › Accounts shows whether Antigravity is signed in and on which plan, with Sign In… (in your
+  browser) and Sign Out….
+- On the Mac, Set Up asks for your attention only when none of Claude Code, Codex and Antigravity can start: one agent
+  is enough.
+- On the Mac, an Antigravity session shows its context in the reply bar, and "/" offers its model, effort, Compact
+  and diff.
+- On the Mac, an Antigravity session sends and reads messages to and from your other sessions, and reads the files you
+  send with a message without asking, as the other agents do.
+
+## CodeConnect 0.19.25
+
+- On the Mac and Linux, CodeConnect's background service starts much faster with a long history: with a million
+  events stored, in about 0.9 s instead of 3.0 s on a Mac and 0.55 s instead of 2.0 s on Linux. At rest it runs
+  5 threads instead of 29 on a Mac and 9 on Linux.
+- On the Mac, a phone notification held back while you are at the Mac no longer wakes it ten times a second.
+
+## CodeConnect 0.19.24
+
+- On the Mac and Linux, switching accounts no longer loses a session's waiting messages from your other sessions,
+  a message it had taken but not yet started on, or its effort setting; and choosing an account and then the first one
+  again no longer leaves a session without its agent.
+- On the Mac, a new session could wait until another one ended before it started; it now starts at once.
+- On the Mac and Linux, CodeConnect's background service is faster and lighter. Measured on a Mac: the session list
+  answers in about 7 ms instead of 500 ms with a million events stored, it starts in about 50 ms instead of 150 ms, and
+  it uses about 5.5 MB of memory at rest instead of 13 MB.
+- On the Mac, the opening animation's slices leave on their own background; the app appears only once they have gone.
+- On the Mac, a fleet row shows its tool's name again when the name is short: a run waiting on Edit no longer reads as
+  its file path alone.
+
 ## CodeConnect 0.19.23
 
 - On the Mac, the update button is white and reads "Update Available", so a new version isn't missed.

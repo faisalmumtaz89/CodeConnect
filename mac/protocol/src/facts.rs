@@ -37,9 +37,20 @@ pub fn codex_mode(approval: &str, sandbox: &str, collaboration: &str) -> Option<
     }
 }
 
+/// The kind ccd files an Antigravity run's settings under: the current `model` (a family, as agy's `model` option
+/// names it), `effort` (its `thought_level`) and `mode`, as agy's `configOptions` give them at the session's opening
+/// and at each change, or the `mode` alone of a `current_mode_update`.
+pub const ACP_SETTINGS: &str = "acp_settings";
+
 /// Whether `event` is a Codex run's settings ([`CODEX_SETTINGS`]).
 fn codex_settings(event: &Event) -> bool {
     matches!(&event.kind, EventKind::Other(kind) if kind == CODEX_SETTINGS)
+}
+
+/// Whether `event` is an agent's report of its run's settings, a Codex run's ([`CODEX_SETTINGS`]) or an Antigravity
+/// run's ([`ACP_SETTINGS`]), whose `model` and `effort` are the run's as named.
+fn settings_report(event: &Event) -> bool {
+    codex_settings(event) || matches!(&event.kind, EventKind::Other(kind) if kind == ACP_SETTINGS)
 }
 
 /// A run's facts, each as of the newest event that decided it.
@@ -119,7 +130,8 @@ impl SessionFacts {
 /// notice, which ccd files when claude has taken an app's effort change (minor 39), or
 /// claude's own receipt for a typed `/effort` on a user line (`Set effort level to low (this
 /// session only): …`), read as [`model_fact`] reads `Set model to`, or a Codex run's settings
-/// report's `effort` ([`CODEX_SETTINGS`]). A receipt in another wording is not read.
+/// report's `effort` ([`CODEX_SETTINGS`]), or an Antigravity run's ([`ACP_SETTINGS`]). A receipt in another wording is
+/// not read.
 pub fn effort_fact(event: &Event) -> Option<Fact> {
     let value = match event.kind {
         EventKind::Notification => {
@@ -137,7 +149,7 @@ pub fn effort_fact(event: &Event) -> Option<Fact> {
                 .next()?
                 .to_string()
         }
-        _ if codex_settings(event) => event.payload.get("effort")?.as_str()?.to_string(),
+        _ if settings_report(event) => event.payload.get("effort")?.as_str()?.to_string(),
         _ => return None,
     };
     Some(Fact {
@@ -149,7 +161,7 @@ pub fn effort_fact(event: &Event) -> Option<Fact> {
 /// What one event says the run's model is, if anything: a `session_start`
 /// carrying a non-empty `model`, Claude Code's `/model` receipt on a
 /// transcript user line, or a Codex run's settings' `model`
-/// ([`CODEX_SETTINGS`]), an agent's own receipt as Claude's is. Both verbs of the
+/// ([`CODEX_SETTINGS`]) or an Antigravity run's ([`ACP_SETTINGS`]), an agent's own receipt as Claude's is. Both verbs of the
 /// receipt are facts about the model in force; which one it was is not this fact's
 /// business.
 pub fn model_fact(event: &Event) -> Option<Fact> {
@@ -165,7 +177,7 @@ pub fn model_fact(event: &Event) -> Option<Fact> {
             let content = event.payload.get("message")?.get("content")?.as_str()?;
             model_receipt(content)?.1
         }
-        _ if codex_settings(event) => {
+        _ if settings_report(event) => {
             let model = event.payload.get("model")?.as_str()?;
             if model.is_empty() {
                 return None;
@@ -183,7 +195,7 @@ pub fn model_fact(event: &Event) -> Option<Fact> {
 /// What one event says the main agent's permission mode is, if anything: the
 /// `permission_mode` of a hook's input that names no `agent_id`, Claude's own
 /// permission-mode transcript line, the `permissionMode` of an SDK run's init, or the menu
-/// mode a Codex run's settings are ([`codex_mode`]).
+/// mode a Codex run's settings are ([`codex_mode`]), or an Antigravity run's settings' `mode` ([`ACP_SETTINGS`]).
 ///
 /// A background agent's hook carries its `agent_id`, and its mode (measured:
 /// `bubble`) is that agent's, never the run's.
@@ -204,6 +216,7 @@ pub fn permission_mode_fact(event: &Event) -> Option<Fact> {
         EventKind::Other(kind) if kind == TRANSCRIPT_PERMISSION_MODE => {
             event.payload.get("permissionMode")?
         }
+        EventKind::Other(kind) if kind == ACP_SETTINGS => event.payload.get("mode")?,
         EventKind::SessionStart if event.source == Source::Sdk => {
             event.payload.get("permissionMode")?
         }
@@ -736,6 +749,32 @@ mod tests {
     /// asking nothing reading `full-access` in Plan
     /// too; and a combination no menu mode is, or a report with no effort, decides nothing of
     /// that.
+    /// **An Antigravity run's settings** (`acp_settings`, its opening's and each change's current values) decide
+    /// its model, effort and mode, each only when it names it: a mode change alone decides the mode alone.
+    #[test]
+    fn an_antigravity_settings_report_decides_what_it_names() {
+        let report = |seq, payload| {
+            event(
+                seq,
+                EventKind::Other(ACP_SETTINGS.into()),
+                Source::Acp,
+                payload,
+            )
+        };
+        let all = report(
+            4,
+            json!({"model": "gemini-4-neon", "effort": "high", "mode": "default"}),
+        );
+        let value = |fact: Option<Fact>| fact.map(|fact| fact.value);
+        assert_eq!(value(model_fact(&all)), Some("gemini-4-neon".into()));
+        assert_eq!(value(effort_fact(&all)), Some("high".into()));
+        assert_eq!(value(permission_mode_fact(&all)), Some("default".into()));
+        let mode = report(5, json!({"mode": "plan"}));
+        assert_eq!(value(model_fact(&mode)), None);
+        assert_eq!(value(effort_fact(&mode)), None);
+        assert_eq!(value(permission_mode_fact(&mode)), Some("plan".into()));
+    }
+
     #[test]
     fn a_codex_settings_report_decides_its_model_effort_and_mode() {
         let report = |seq, approval: &str, sandbox: &str, mode: &str, effort: serde_json::Value| {

@@ -88,6 +88,11 @@ public enum DecisionCard {
             // held for is answered at the Mac.
             guard hookOnlyApprovals, hold == .held else { return .noneAnswerable }
             return .allowDeny(allowForSession: card.allowForSession == true)
+        case .antigravity:
+            // Allow or Deny, answered through the agent host that holds agy's request, as a Claude card is; agy's
+            // request has no "for this session" answer the computer sends.
+            guard hookOnlyApprovals, hold == .held else { return .noneAnswerable }
+            return .allowDeny(allowForSession: false)
         case .unsupported:
             // An agent this build cannot drive gets no answer surface at all.
             // Guessing a vocabulary for it would be guessing on the wire.
@@ -138,7 +143,8 @@ public enum DecisionCard {
         switch agent {
         case .claude: expected = QuestionCard.toolName
         case .codex: expected = QuestionCard.codexToolName
-        case .unsupported: return nil
+        // agy asks no question as a card.
+        case .antigravity, .unsupported: return nil
         }
         guard card.toolName == expected else { return nil }
         return QuestionCard(card: card)
@@ -292,14 +298,16 @@ extension DecisionCard {
         public let icon: String
     }
 
-    /// What became of this session's own answer, in the words of the device reading it.
-    public static func resultBanner(for attempt: AnswerAttempt, on host: HostDevice = .current) -> Banner {
+    /// What became of this session's own answer, in the words of the device reading it, naming the session's agent.
+    public static func resultBanner(
+        for attempt: AnswerAttempt, agent: AgentKind = .claude, on host: HostDevice = .current
+    ) -> Banner {
         switch attempt {
         case .applied(let outcome):
             return Banner(
                 title: "Confirmed",
                 message: "\(outcome.decisionLabel), confirmed by \(host.computer("your computer"))",
-                provenance: [actuationPhrase(for: outcome.appliedVia, on: host), outcome.detail]
+                provenance: [actuationPhrase(for: outcome.appliedVia, agent: agent, on: host), outcome.detail]
                     .compactMap { $0 }.joined(separator: " · "),
                 tone: .success, icon: "check-circle-fill")
         // The one honesty this case exists to protect: the daemon accepted the
@@ -358,9 +366,9 @@ extension DecisionCard {
     /// How an answer was *applied*, in plain words — never a claim this build cannot support. An `AnswerPath.unknown`
     /// is a path this build has never heard of, so it is described as unrecognised rather than asserted to be
     /// keystrokes or a hook return nobody can vouch for.
-    static func actuationPhrase(for path: AnswerPath, on host: HostDevice = .current) -> String {
+    static func actuationPhrase(for path: AnswerPath, agent: AgentKind = .claude, on host: HostDevice = .current) -> String {
         switch path {
-        case .hookReturn: return "handed straight to Claude"
+        case .hookReturn: return "handed straight to \(agent.displayName)"
         // A real actuation, and it reads like one. Codex asked, over its own
         // control link, and this is the answer written back to that request —
         // no keyboard, no pane, nothing inferred from a prompt disappearing.

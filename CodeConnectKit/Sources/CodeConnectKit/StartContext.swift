@@ -153,9 +153,17 @@ public struct StartContext {
         return .choices([StartModelChoice(agent: agent, model: nil, label: "Default", detail: nil)] + offered)
     }
 
+    /// The agents a start here offers, in the menu's order: Claude Code and Codex always, each saying why when it
+    /// cannot start; Antigravity only where this computer lists it, which a computer that predates it never does.
+    public var startAgents: [StartAgent] {
+        StartAgent.allCases.filter { agent in
+            agent != .antigravity || starter.agents.contains { $0.agent == agent }
+        }
+    }
+
     /// Every entry that can be chosen here, agent by agent.
     public var modelChoices: [StartModelChoice] {
-        StartAgent.allCases.flatMap { agent -> [StartModelChoice] in
+        startAgents.flatMap { agent -> [StartModelChoice] in
             switch models(agent) {
             case .choices(let choices): return choices
             case .checking, .missing, .signedOut: return []
@@ -183,6 +191,14 @@ public struct StartContext {
 }
 
 /// What the model menu holds for one agent on a computer.
+/// When a computer's setup needs the person (the owner's rule, 2026-11-25): its background service is missing, or none
+/// of its agents is ready, every one missing; one agent ready is enough, and one still being checked is not missing.
+public enum SetupAttention {
+    public static func needed(serviceMissing: Bool, agentsMissing: [Bool]) -> Bool {
+        serviceMissing || (!agentsMissing.isEmpty && agentsMissing.allSatisfy { $0 })
+    }
+}
+
 public enum StartModels: Hashable, Sendable {
     /// The computer hasn't answered yet.
     case checking

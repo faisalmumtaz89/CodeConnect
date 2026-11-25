@@ -728,14 +728,21 @@ struct RunMore: View {
 
 }
 
-/// A row's words given less room than a short word shows nothing, never a sliver of a letter beside the name.
+/// A row's words given less room than a short word shows nothing, never a sliver of a letter beside the name. Only
+/// words cut to that room: a short word shown whole ("Edit") is shown.
 private struct DropsWhenNarrow: ViewModifier {
     @State private var width: CGFloat = .infinity
+    /// The words' own width, uncut.
+    @State private var whole: CGFloat = 0
 
     func body(content: Content) -> some View {
         content
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
-            .opacity(width < 28 ? 0 : 1)
+            .background {
+                content.fixedSize().hidden()
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { whole = $0 }
+            }
+            .opacity(width < 28 && width < whole - 0.5 ? 0 : 1)
     }
 }
 
@@ -797,8 +804,8 @@ struct StateIcon: View {
     }
 }
 
-/// Which agent a run is: Claude's asterisk, Codex's brackets, or the daemon's own word for one this
-/// build does not know.
+/// Which agent a run is: Claude's asterisk, Codex's brackets, Antigravity's sparkle (the owner's pick), or the mark of an
+/// agent this build does not know, each a grey system symbol in the same circle, named by its product on hover.
 struct AgentMark: View {
     let agent: AgentKind
 
@@ -807,6 +814,7 @@ struct AgentMark: View {
             switch agent {
             case .claude: Image(systemName: "asterisk").font(.system(size: 9, weight: .bold))
             case .codex: Image(systemName: "chevron.left.forwardslash.chevron.right").font(.system(size: 7.5, weight: .bold))
+            case .antigravity: Image(systemName: "sparkle").font(.system(size: 8.5, weight: .bold))
             case .unsupported: Image(systemName: "questionmark").font(.system(size: 8, weight: .bold))
             }
         }
@@ -817,4 +825,5 @@ struct AgentMark: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(agent.productName)
     }
+
 }
