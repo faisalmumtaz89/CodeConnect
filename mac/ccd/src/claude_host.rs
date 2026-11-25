@@ -1253,6 +1253,14 @@ async fn file_joined(
     }
 }
 
+/// The name a sentence gives the hosted run `uid`'s agent: Antigravity, or Claude.
+async fn agent_named(daemon: &Daemon, uid: &str) -> &'static str {
+    match daemon.db.get_session(uid.to_string()).await {
+        Ok(Some(row)) if row.agent == AgentKind::Antigravity => "Antigravity",
+        _ => "Claude",
+    }
+}
+
 /// What became of a dead host's group.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Ladder {
@@ -2008,7 +2016,8 @@ pub(crate) async fn send_text(
             return SendTextResult::Indeterminate {
                 reason: format!(
                     "this message (first sent {started_at}) was never confirmed; it may or may not \
-                     have reached Claude, and it will not be sent again"
+                     have reached {}, and it will not be sent again",
+                    agent_named(daemon, uid).await
                 ),
             }
         }
@@ -2048,17 +2057,21 @@ pub(crate) async fn send_text(
         Ok(Ok(true)) => SendTextResult::Sent { matched: text },
         Ok(Ok(false)) => refuse("This session stopped taking messages; nothing was sent."),
         Ok(Err(_)) => SendTextResult::Indeterminate {
-            reason: "The computer lost the session before the message was confirmed; it may or \
-                     may not have reached Claude."
-                .into(),
+            reason: format!(
+                "The computer lost the session before the message was confirmed; it may or \
+                 may not have reached {}.",
+                agent_named(daemon, uid).await
+            ),
         },
         // Settled nothing: the host's outcome, whenever it comes, still files the words.
         Err(_) => {
             daemon.host_send_taken(&uuid, false).await;
             SendTextResult::Indeterminate {
-                reason: "The session did not confirm the message in time; it may or may not \
-                         have reached Claude."
-                    .into(),
+                reason: format!(
+                    "The session did not confirm the message in time; it may or may not \
+                     have reached {}.",
+                    agent_named(daemon, uid).await
+                ),
             }
         }
     }
@@ -2549,16 +2562,18 @@ pub(crate) async fn answer(
             _ => rejected("Claude has the answer, but this computer could not read its record"),
         },
         Ok(Ok(false)) => rejected("Claude was no longer asking, so the answer was not used."),
-        Ok(Err(_)) => rejected(
+        Ok(Err(_)) => rejected(&format!(
             "The computer lost the session before the answer was confirmed; it may or may not \
-             have reached Claude, and it will not be sent again.",
-        ),
+             have reached {}, and it will not be sent again.",
+            agent_named(daemon, uid).await
+        )),
         Err(_) => {
             daemon.host_send_taken(&uuid, false).await;
-            rejected(
+            rejected(&format!(
                 "The session did not confirm the answer in time; it may or may not have reached \
-                 Claude, and it will not be sent again.",
-            )
+                 {}, and it will not be sent again.",
+                agent_named(daemon, uid).await
+            ))
         }
     }
 }

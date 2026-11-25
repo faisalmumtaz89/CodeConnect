@@ -2305,7 +2305,7 @@ impl Store {
                 filed.push(event);
             }
         }
-        // A hosted run is Claude's, so its row is in Claude's table.
+        // A hosted run, Claude's or Antigravity's, has its row in `sessions`.
         let (table, _) = session_tables_for(&AgentKind::Claude);
         if let Some(id) = &notes.session_id {
             tx.execute(

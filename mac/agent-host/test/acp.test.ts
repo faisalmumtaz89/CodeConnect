@@ -74,10 +74,12 @@ test('Allow answers with the request\'s own allow_once option; the turn goes on 
   expect(await ccd.line('the refusal', (line) => line.uuid === 'c-again')).toMatchObject({ status: 'refused' });
 }, 15_000);
 
-test('Deny answers with reject_once; a say waits for the turn before it and is the next prompt', async () => {
+test('Deny answers with reject_once; a say during a turn is done at once and is the next prompt', async () => {
   const { dir, ccd } = await run();
   const permission = await ccd.line('the permission request', (line) => line.type === 'permission');
   ccd.send({ type: 'say', uuid: 'c-say', text: 'and the docs' });
+  // Taken while the turn still waits on its card, so ccd's send wait is never spent on the turn before it.
+  expect(await ccd.line('the say\'s outcome', (line) => line.uuid === 'c-say')).toMatchObject({ status: 'done' });
   ccd.send({
     type: 'answer', uuid: 'c-deny', tool_use_id: permission.request.tool_use_id,
     decision: { behavior: 'deny', message: 'Not now' },
@@ -87,11 +89,10 @@ test('Deny answers with reject_once; a say waits for the turn before it and is t
   expect(lines.find((message) => message.id === 101 && message.method === undefined).result).toStrictEqual({
     outcome: { outcome: 'selected', optionId: 'reject-once' },
   });
-  // The say was sent only after the first prompt's reply.
+  // The say reached agy only after the first prompt was answered.
   const prompts = lines.filter((message) => message.method === 'session/prompt');
   expect(prompts.map((message) => message.params.prompt[0].text)).toStrictEqual(['read the note', 'and the docs']);
-  const order = ccd.lines.map((line) => (line.uuid === 'c-say' ? 'say done' : line.message?.result ? 'reply' : line.type));
-  expect(order.indexOf('reply')).toBeLessThan(order.indexOf('say done'));
+  expect(lines.indexOf(prompts[1])).toBeGreaterThan(lines.findIndex((message) => message.id === 101 && !message.method));
 }, 15_000);
 
 test('stop answers an open request cancelled, cancels the session and ends agy; its end is exited', async () => {

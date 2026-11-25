@@ -2,8 +2,8 @@
 // the host's process group as claude is. The start initializes it (protocol version 1; no file system or terminal
 // offered, so agy uses its own) and opens one session in the run's folder with CodeConnect's mail server; its outcome
 // is `done` once the session is open, `refused` with agy's reason otherwise. Every notification agy sends, and the
-// reply to each prompt, goes to ccd whole as `acp`. A `say` is one more prompt, sent once the one before has its
-// reply, so prompts never overlap; its outcome is `done` as it is sent. A permission request is held by its JSON-RPC
+// reply to each prompt, goes to ccd whole as `acp`. A `say` is one more prompt, `done` as it is queued and sent once
+// the one before has its reply, so prompts never overlap. A permission request is held by its JSON-RPC
 // id and sent as `permission`; ccd's answer picks the request's own allow_once or reject_once option, and `done`
 // follows once it is written to agy. `stop` answers every request still open `cancelled`, cancels the session's
 // prompt and ends agy's input; agy's end is `exited`. Wakes, interrupts and settings are refused: a later slice.
@@ -73,14 +73,17 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
   // The prompts, one at a time: each is sent once the one before has its reply, which goes to ccd as the turn's end.
   let prompts: Promise<void> = Promise.resolve();
   const prompt = (uuid: string | undefined, text: string) => {
-    prompts = prompts.then(async () => {
-      if (ended || sessionId === undefined) {
-        if (uuid !== undefined) refuse(uuid, 'the run is not taking messages');
+    if (uuid !== undefined) {
+      if (ended) {
+        refuse(uuid, 'the run is not taking messages');
         return;
       }
-      const reply = call('session/prompt', { sessionId, prompt: [{ type: 'text', text }] });
-      if (uuid !== undefined) send({ type: 'outcome', uuid, status: 'done' });
-      send({ type: 'acp', message: (await reply) as Json });
+      send({ type: 'outcome', uuid, status: 'done' });
+    }
+    prompts = prompts.then(async () => {
+      if (ended || sessionId === undefined) return;
+      const reply = await call('session/prompt', { sessionId, prompt: [{ type: 'text', text }] });
+      send({ type: 'acp', message: reply as Json });
     });
   };
 
