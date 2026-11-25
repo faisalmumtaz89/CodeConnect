@@ -13,7 +13,7 @@ use std::time::Duration;
 /// How long the Mac must be left before a ring reaches the phone.
 pub const RING_IDLE: Duration = Duration::from_secs(120);
 
-/// How often a held ring checks the Mac again.
+/// The shortest a held ring waits before checking the Mac again.
 pub const POLL: Duration = Duration::from_millis(100);
 
 /// Time since the last keyboard or mouse input on this Mac, as the HID system
@@ -83,6 +83,15 @@ fn used_within(idle: Option<Duration>, within: Duration) -> Option<bool> {
     idle.map(|idle| idle < within)
 }
 
+/// How long until the Mac counts as left for `within`, while someone is at it: the Mac's idle time
+/// only grows as time passes, so nobody can count as gone sooner. `None` when nobody has used it
+/// within that time, or its idle time cannot be read, which a ring reads as [`at_the_mac`] does: go.
+pub fn until_away(within: Duration) -> Option<Duration> {
+    idle()
+        .filter(|idle| *idle < within)
+        .map(|idle| within - idle)
+}
+
 #[cfg(not(test))]
 fn idle() -> Option<Duration> {
     machine_idle()
@@ -104,12 +113,20 @@ fn machine_idle() -> Option<Duration> {
 /// of how long this machine has been left alone.
 #[cfg(test)]
 fn idle() -> Option<Duration> {
+    READS.with(|reads| reads.set(reads.get() + 1));
     IDLE.with(|idle| idle.get())
 }
 
 #[cfg(test)]
 thread_local! {
     static IDLE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread has read the Mac's idle time.
+#[cfg(test)]
+pub fn idle_reads() -> usize {
+    READS.with(|reads| reads.get())
 }
 
 #[cfg(test)]

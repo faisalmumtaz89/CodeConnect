@@ -1168,8 +1168,10 @@ impl Daemon {
     ///
     /// The phone is for when the owner is away. After the grace, a ring on a Mac
     /// that has had keyboard or mouse input within [`crate::presence::RING_IDLE`]
-    /// waits, reading the idle time every [`crate::presence::POLL`], and rings the
-    /// first time the Mac has been left that long. While it waits it asks once a
+    /// waits, reading the idle time again when the Mac could first count as left
+    /// ([`crate::presence::until_away`]), at least [`crate::presence::POLL`] and at most a
+    /// second later, and rings the first time the Mac has been left that long. While it
+    /// waits it asks once a
     /// second whether it still matters — the ticket, the card, both in memory —
     /// and ends if not; before it goes it asks everything, the database
     /// included, so what rings is still true when it rings. The hold lives in this task alone, as the gate lives in
@@ -1179,7 +1181,9 @@ impl Daemon {
     /// at the Mac, three 5 s windows. Re-checking everything each poll cost 1.1–1.7
     /// % of a core for 10 held rings and 15.7–18.5 % for 100; reading only the
     /// idle time each poll costs 0.06 % and 0.15–0.30 %, plus the HID read itself,
-    /// 10.5 µs (20,000 reads): about 0.01 % of a core per held ring.
+    /// 10.5 µs (20,000 reads): about 0.01 % of a core per held ring. Reading it only when the Mac
+    /// could first count as left takes a held ring's daemon from about 21 context switches a second
+    /// to about 3 (release build, someone at the Mac, four 60 s windows each).
     ///
     /// # The grace is also a best-effort CANCELLATION window, and it is not
     /// coordinated with anything
@@ -1226,7 +1230,7 @@ impl Daemon {
                 // idle time that cannot be read rings, as it did before this
                 // check existed: a read that fails for good must not silence
                 // every notification for good.
-                if crate::presence::at_the_mac(crate::presence::RING_IDLE).unwrap_or(false) {
+                if let Some(left) = crate::presence::until_away(crate::presence::RING_IDLE) {
                     if looked.is_none_or(|at| at.elapsed() >= LOOK) {
                         if looked.is_none() {
                             crate::log_debug!(
@@ -1250,7 +1254,9 @@ impl Daemon {
                         }
                         looked = Some(tokio::time::Instant::now());
                     }
-                    tokio::time::sleep(crate::presence::POLL).await;
+                    // Nobody can count as gone before `left`; whether the ring still matters is
+                    // asked once a `LOOK`.
+                    tokio::time::sleep(left.clamp(crate::presence::POLL, LOOK)).await;
                     continue;
                 }
                 // **The run still has to exist.** The ticket catches a session
@@ -8317,6 +8323,31 @@ mod tests {
         );
     }
 
+    /// **A held ring reads the Mac's idle time about once a second, not ten times.** Idle time
+    /// only grows as time passes, so a ring held for someone who used the Mac a moment ago cannot
+    /// go for two minutes; reading it every 100 ms woke the daemon ten times a second for as long as
+    /// they worked. Held for three seconds, it reads at most a few times.
+    #[tokio::test]
+    async fn a_held_ring_reads_the_idle_time_about_once_a_second() {
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(Duration::ZERO));
+        raise_ring(&daemon, Ring::ClaudeApproval).await;
+        let before = crate::presence::idle_reads();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let reads = crate::presence::idle_reads() - before;
+        assert_eq!(rung(&capture), vec![], "held while someone is at the Mac");
+        assert!(
+            reads < 10,
+            "{reads} reads of the idle time in three held seconds"
+        );
+        crate::presence::set_idle(Some(AWAY));
+        assert_eq!(
+            rung_after(&capture, 1).await,
+            vec![crate::apns::PushKind::Approval],
+            "and it rings once they have left"
+        );
+    }
+
     /// **A doorbell counted earlier is never posted after one counted later.**
     ///
     /// Every doorbell shares one collapse slot and a device's queue keeps the one
@@ -8440,7 +8471,9 @@ mod tests {
     async fn a_held_ring_that_stopped_mattering_never_rings() {
         async fn leave_and_listen(capture: &CaptureSender, case: &str) {
             crate::presence::set_idle(Some(AWAY));
-            tokio::time::sleep(crate::presence::POLL * 5).await;
+            // Longer than the held ring's longest wait, a second, so a ring that still mattered
+            // would have gone.
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
             assert_eq!(rung(capture), vec![], "{case}");
         }
 
