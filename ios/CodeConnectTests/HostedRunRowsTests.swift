@@ -142,7 +142,7 @@ final class HostedRunRowsTests: XCTestCase {
             shape(drawn.timeline).filter { $0.lowercased().contains("cleared") }, ["notice:Conversation cleared."])
     }
 
-    /// A hosted compaction (`fixtures/claude/sdk-session-events.json`, the daemon's events for a real session, seq 84)
+    /// A hosted compaction (`fixtures/claude/sdk-session-events.json`, the daemon's events for a real session, seq 90)
     /// draws the row a terminal compaction's start draws, without the model the notice does not carry: by its type it
     /// read "Compacted" over "Conversation compacted".
     func testAHostedCompactionDrawsTheTerminalCompactionsRow() async throws {

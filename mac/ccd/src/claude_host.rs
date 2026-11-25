@@ -4009,12 +4009,12 @@ mod tests {
                 seqs.push(event.seq);
             }
         }
-        assert_eq!(seqs, (1..=113).collect::<Vec<u64>>(), "each once, in order");
+        assert_eq!(seqs, (1..=119).collect::<Vec<u64>>(), "each once, in order");
 
         let last = messages.len() as u64 + 2;
         sdk(&mut played.write, last, messages.last().unwrap().clone()).await;
         assert_eq!(next(&mut played.lines).await, None);
-        assert_eq!(after_words(&rig, &played.uid).len(), 111);
+        assert_eq!(after_words(&rig, &played.uid).len(), 117);
         assert_eq!(cursor(&rig, &played.uid), last as i64);
         stop(&played.dir);
     }
@@ -13915,51 +13915,186 @@ mod tests {
         assert!(ended, "the child ended with the move");
     }
 
-    /// **A background job claude tracks holds the move** (306, G1): a command claude ran in the background in an earlier
-    /// turn may still be running, so the next message goes on A as any message does, and the run stays due.
-    #[tokio::test]
-    async fn a_background_job_claude_tracks_holds_the_move() {
-        let _env = crate::ProcessEnvRead::take();
-        let mut rig = relaunch_rig();
-        let b = on_a_with_b(&mut rig);
-        let mut played = live_run(&rig).await;
-        let uid = played.uid.clone();
-        turn_begins(&mut played, 3, "turn-1").await;
+    /// A run on A whose first turn ran a command claude tracks as a background task (`npm run dev`, through Bash run in
+    /// the background when `flagged`, else moved there while it ran): its start filed, then its end when `ended`; then
+    /// a second turn. Its host's next message is message 10.
+    async fn with_a_background_task(played: &mut Played, flagged: bool, ended: bool) {
+        let session = "5f0c1e2a-0000-4000-8000-000000000001";
+        turn_begins(played, 3, "turn-1").await;
         sdk(
             &mut played.write,
             4,
             serde_json::json!({"type": "assistant", "message": {"model": "claude-opus-5-5", "content": [
                 {"type": "tool_use", "id": "toolu_bg", "name": "Bash",
-                 "input": {"command": "npm run dev", "run_in_background": true}}]},
-                "session_id": "5f0c1e2a-0000-4000-8000-000000000001", "parent_tool_use_id": null,
+                 "input": {"command": "npm run dev", "run_in_background": flagged}}]},
+                "session_id": session, "parent_tool_use_id": null,
                 "uuid": "9d1f0000-0000-4000-8000-000000000b01"}),
         )
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
-        turn_ends(&mut played, 5).await;
-        turn_begins(&mut played, 6, "turn-2").await;
-        turn_ends(&mut played, 7).await;
+        sdk(
+            &mut played.write,
+            5,
+            serde_json::json!({"type": "system", "subtype": "task_started", "task_id": "bdev1",
+                "tool_use_id": "toolu_bg", "description": "npm run dev", "task_type": "local_bash",
+                "uuid": "9d1f0000-0000-4000-8000-000000000b02", "session_id": session}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        turn_ends(played, 6).await;
+        if ended {
+            sdk(
+                &mut played.write,
+                7,
+                serde_json::json!({"type": "system", "subtype": "task_notification", "task_id": "bdev1",
+                    "tool_use_id": "toolu_bg", "status": "completed", "output_file": "", "summary": "npm run dev",
+                    "uuid": "9d1f0000-0000-4000-8000-000000000b03", "session_id": session}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 7 }));
+        }
+        turn_begins(played, 8, "turn-2").await;
+        turn_ends(played, 9).await;
+    }
+
+    /// The person's message `go on` to the due run `played` as message `seq` of its host: what reached the host first,
+    /// and the send's answer once a `say` is taken; a stop is left unanswered.
+    async fn first_line_of_a_message(
+        rig: &Rig,
+        played: &mut Played,
+        seq: u64,
+    ) -> (Option<ToHost>, Option<SendTextResult>) {
+        let uid = played.uid.clone();
+        let sending = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move { send_as_app(&daemon, &uid, "r-1", "go on").await })
+        };
+        let read = next(&mut played.lines).await;
+        let Some(ToHost::Say { uuid, .. }) = &read else {
+            sending.abort();
+            return (read, None);
+        };
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "outcome", "seq": seq, "uuid": uuid, "status": "done"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        (read, Some(sending.await.unwrap()))
+    }
+
+    /// **A finished background job lets the run move** (306, G1): a job claude ran in the background in an earlier
+    /// turn, its end filed, keeps nothing on A: the next message moves the run. Its start and end are filed as quiet
+    /// facts, which change no listing's time.
+    #[tokio::test]
+    async fn a_finished_background_job_lets_the_run_move() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let b = on_a_with_b(&mut rig);
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let before = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        with_a_background_task(&mut played, true, true).await;
+        let after = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        let kinds: Vec<_> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["payload"]["task_id"] == "bdev1")
+            .map(|event| event["kind"].clone())
+            .collect();
         choose(&rig.daemon, Some(&b)).await;
-        let (sent, read) = tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
-            let read = next(&mut played.lines).await;
-            if let Some(ToHost::Say { uuid, .. }) = &read {
-                say(
-                    &mut played.write,
-                    serde_json::json!({"type": "outcome", "seq": 8, "uuid": uuid, "status": "done"}),
-                )
-                .await;
-                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 8 }));
-            }
-            read
-        });
+        let (read, _) = first_line_of_a_message(&rig, &mut played, 10).await;
+        stop(&played.dir);
+        assert!(
+            matches!(read, Some(ToHost::Stop { .. })),
+            "the message moves the run: {read:?}"
+        );
+        assert_eq!(after["updated_at"], before["updated_at"], "{after}");
+        assert_eq!(
+            kinds,
+            [
+                serde_json::json!("background_task"),
+                serde_json::json!("background_task")
+            ]
+        );
+    }
+
+    /// **A background job still running holds the move** (306, G1): a job claude tracks as a background task, started
+    /// in an earlier turn and not ended, may still be running: the next message goes on A, and the run stays due.
+    #[tokio::test]
+    async fn a_running_background_job_holds_the_move() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let b = on_a_with_b(&mut rig);
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        with_a_background_task(&mut played, false, false).await;
+        choose(&rig.daemon, Some(&b)).await;
+        let (read, sent) = first_line_of_a_message(&rig, &mut played, 10).await;
         stop(&played.dir);
         assert!(
             matches!(read, Some(ToHost::Say { .. })),
             "the message goes on A: {read:?}"
         );
-        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert!(
+            matches!(sent, Some(SendTextResult::Sent { .. })),
+            "{sent:?}"
+        );
         let due = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
         assert_eq!(due["switching"], "waiting", "still due: {due}");
+    }
+
+    /// **A restart keeps a run's background jobs as they were** (306, G1): opened again (`recover`, then the hosted
+    /// runs'), a job still running holds the move, and a finished one lets it.
+    #[tokio::test]
+    async fn a_restart_keeps_a_runs_background_jobs_as_they_were() {
+        let _env = crate::ProcessEnvRead::take();
+        for ended in [false, true] {
+            let mut rig = relaunch_rig();
+            let b = on_a_with_b(&mut rig);
+            let mut played = live_run(&rig).await;
+            with_a_background_task(&mut played, ended, ended).await;
+            let claude = rig.root.join("bin").join("claude");
+            let host = rig.root.join("stub-host");
+            let Played {
+                uid,
+                dir,
+                record,
+                start,
+                ..
+            } = played;
+            let (restarted, mut lines, mut write) =
+                restarted_as(&rig, &dir, relauncher(&rig.root, &claude, &host)).await;
+            assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 9 }));
+            say(
+                &mut write,
+                serde_json::json!({"type": "state", "seq": 10, "pending": []}),
+            )
+            .await;
+            assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 10 }));
+            rig.daemon = restarted;
+            let mut again = Played {
+                uid,
+                dir,
+                lines,
+                write,
+                record,
+                start,
+            };
+            choose(&rig.daemon, Some(&b)).await;
+            let (read, _) = first_line_of_a_message(&rig, &mut again, 11).await;
+            stop(&again.dir);
+            if ended {
+                assert!(
+                    matches!(read, Some(ToHost::Stop { .. })),
+                    "finished: it moves: {read:?}"
+                );
+            } else {
+                assert!(
+                    matches!(read, Some(ToHost::Say { .. })),
+                    "running: it stays on A: {read:?}"
+                );
+            }
+        }
     }
 
     /// **A ccd restarted while a failed move's retry was starting leaves its message unclaimed** (306): a move whose

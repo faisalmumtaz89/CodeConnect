@@ -13,8 +13,9 @@
 //! when a message comes only loses its mark, so choosing again, or choosing back, is never a lock.
 //!
 //! The decision and the send are one step under the run's move gate ([`crate::state::Daemon::move_gate`]): a
-//! second message, a mail wake, a settings change or a Stop waits for it. Work claude runs in the background holds
-//! the move for as long as its process runs (ccd files when it starts, never when it ends). Accepted misses: a
+//! second message, a mail wake, a settings change or a Stop waits for it. A background task claude runs (a command
+//! run in the background, a subagent) holds the move from its start until its end, as the SDK reports both: a
+//! finished one lets the next message move the run, one that never ends keeps it on its account. Accepted misses: a
 //! message queued inside Codex itself (`codex queue`) does not survive the app-server's end; and a process a session
 //! started outside its agent's own tracking (a Claude `cmd &`, a Codex background command from an earlier turn) ends
 //! when the session moves.

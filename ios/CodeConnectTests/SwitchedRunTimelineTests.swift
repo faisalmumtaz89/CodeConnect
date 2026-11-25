@@ -91,6 +91,24 @@ final class SwitchedRunTimelineTests: XCTestCase {
         }
     }
 
+    /// **A background task's start and end are no activity and draw nothing**: the quiet `background_task` facts a
+    /// Claude run files (which decide whether a switch of account may move it) leave the conversation without a row and
+    /// its last activity at the person's message before them.
+    func testABackgroundTaskDrawsNothingAndIsNoActivity() async throws {
+        func event(_ json: String) throws -> Event { try JSONDecoder().decode(Event.self, from: Data(json.utf8)) }
+        let uid = "01M8BGTASK0000000000000001"
+        let said = try event(
+            #"{"kind": "user_message", "payload": {"text": "start the server"}, "seq": 1, "session_id": "\#(uid)", "session_uid": "\#(uid)", "source": "daemon", "ts": "2026-11-25T14:00:00.000Z"}"#)
+        let started = try event(
+            #"{"kind": "background_task", "payload": {"task_id": "b1", "ended": false}, "seq": 2, "session_id": "\#(uid)", "session_uid": "\#(uid)", "source": "sdk", "ts": "2026-11-25T14:00:05.000Z"}"#)
+        let ended = try event(
+            #"{"kind": "background_task", "payload": {"task_id": "b1", "ended": true}, "seq": 3, "session_id": "\#(uid)", "session_uid": "\#(uid)", "source": "sdk", "ts": "2026-11-25T14:00:09.000Z"}"#)
+        let alone = await state([said])
+        let drawn = await state([said, started, ended])
+        XCTAssertEqual(drawn.timeline.map(\.content), alone.timeline.map(\.content), "no row for a background task")
+        XCTAssertEqual(drawn.shown.lastActivityAt, said.date, "a background task is no activity")
+    }
+
     /// Every listing in the window reads live, with what the run had drawn by then: never the Ended band, and the reply
     /// box kept.
     func testEveryListingInTheSwitchReadsLive() async throws {

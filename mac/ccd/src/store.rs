@@ -2410,8 +2410,8 @@ impl Store {
     /// a turn of its process has completed and none has begun since; no message of the person's sent it waits to be
     /// taken or answered (a claim still `applying`, or one filed after its last turn began, which may run as a turn
     /// of its own); its last turn ran no command, subagent or task (Codex: no command or subagent), and its process
-    /// scheduled no prompt and started no work in the background; and no mail wake is outstanding. `sending`, the
-    /// message being sent
+    /// scheduled no prompt; no background task it started (a command, a subagent, [`protocol::sdk_map::BACKGROUND_TASK`])
+    /// is still open; and no mail wake is outstanding. `sending`, the message being sent
     /// now, is no message waiting. Anything not known reads not quiet.
     pub fn certainly_quiet(&self, session_uid: &str, sending: &str) -> Result<bool> {
         let conn = self.read();
@@ -2492,6 +2492,25 @@ impl Store {
                 .filter(|block| block["type"] == "tool_use")
                 .collect()
         };
+        // A background task claude runs, from its start until its end, whichever turn began it.
+        let mut open = std::collections::HashSet::new();
+        for (kind, _, payload) in &events {
+            if kind != protocol::sdk_map::BACKGROUND_TASK {
+                continue;
+            }
+            let task = serde_json::from_str::<serde_json::Value>(payload).unwrap_or_default();
+            let Some(id) = task["task_id"].as_str() else {
+                continue;
+            };
+            if task["ended"] == true {
+                open.remove(id);
+            } else {
+                open.insert(id.to_string());
+            }
+        }
+        if !open.is_empty() {
+            return Ok(false);
+        }
         for (i, (kind, source, payload)) in events.iter().enumerate() {
             let in_last_turn = i > began;
             let quiet = match kind.as_str() {
@@ -2515,12 +2534,10 @@ impl Store {
                 }
                 // A Codex subagent its last turn spawned, which may work on after the turn.
                 kind if codex && i >= before && kind == "codex_collabAgentToolCall" => false,
-                // A prompt it scheduled, or work claude runs in the background, may still come or run, whichever turn
-                // began it: ccd files when such work starts, never when it ends.
+                // A prompt it scheduled may still come, whichever turn scheduled it.
                 kind if kind == EventKind::AgentMessage.as_str() => {
                     blocks(payload).iter().all(|block| {
                         !(block["name"] == "CronCreate"
-                            || block["input"]["run_in_background"] == true
                             || in_last_turn
                                 && ["Bash", "Task", "Agent"]
                                     .iter()
