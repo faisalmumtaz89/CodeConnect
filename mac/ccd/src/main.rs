@@ -112,11 +112,10 @@ async fn main() -> Result<()> {
     // running process (that is the whole point of recording it), so the hash
     // must be of what was actually loaded, as close to exec as we get.
     if let Ok(exe) = std::env::current_exe() {
-        if let Ok(bytes) = std::fs::read(&exe) {
-            let _ = daemon.exe_identity.set((
-                exe.to_string_lossy().to_string(),
-                protocol::hash::sha256_hex(&bytes),
-            ));
+        if let Ok(sha) = protocol::hash::sha256_file_hex(&exe) {
+            let _ = daemon
+                .exe_identity
+                .set((exe.to_string_lossy().to_string(), sha));
         }
     }
 

@@ -1129,7 +1129,7 @@ fn locate(tool: &str) -> Option<PathBuf> {
 /// deploys this line exists because of.
 fn stale_binary_line(info: &DaemonInfo) -> Option<String> {
     let (path, running_sha) = (info.exe_path.as_deref()?, info.exe_sha.as_deref()?);
-    let on_disk = protocol::hash::sha256_hex(&std::fs::read(path).ok()?);
+    let on_disk = protocol::hash::sha256_file_hex(std::path::Path::new(path)).ok()?;
     (on_disk != running_sha).then(|| {
         format!(
             "         STALE: the binary at {path} has changed since this daemon \
