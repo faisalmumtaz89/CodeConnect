@@ -443,7 +443,8 @@ impl Daemon {
         }
     }
 
-    /// A run ended: its unread messages are ended. A sender on another computer is
+    /// A run ended: its unread messages are ended, but for what waits for a run its switch of
+    /// account ended ([`crate::store::Store::end_mail`]). A sender on another computer is
     /// told at the next sweep.
     pub(crate) async fn end_mail(&self, session_uid: &str) {
         if let Err(err) = self.db.end_mail(session_uid.to_string()).await {

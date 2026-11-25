@@ -50,7 +50,9 @@ pub struct SessionFacts {
     pub effort: Option<Fact>,
     /// The seq of the run's newest `session_end`, 0 before one. `effort` is the live
     /// process's own: an effort decided before the end is not the next process's until that
-    /// process is given it (a relaunch gives it, as [`Self::ended_with`]) and says so.
+    /// process is given it (a relaunch gives it, as [`Self::ended_with`]) and says so. A switch
+    /// of account's end ([`crate::event::SWITCHED_TO`]) is the exception: its relaunch gives the
+    /// next process the effort with no word of it, so the effort is kept through that end.
     pub ended: u64,
     /// The effort the run's process held when its newest end came: what the ended run shows. None when that process
     /// named none. Kept only by an in-order fold, as the live path folds; an effort folded after its end is left out.
@@ -86,7 +88,11 @@ impl SessionFacts {
                 .as_ref()
                 .is_some_and(|held| held.seq < self.ended)
             {
-                self.ended_with = self.effort.take();
+                self.ended_with = if event.payload.get(crate::event::SWITCHED_TO).is_some() {
+                    self.effort.clone()
+                } else {
+                    self.effort.take()
+                };
             }
         }
         if let Some(fact) = effort_fact(event) {
