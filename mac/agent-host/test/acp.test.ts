@@ -13,7 +13,7 @@ const antigravityStart = goldenLines('to_host', 'start').find((m) => m.options.a
 
 /** A host with an Antigravity start sent, its agy the stand-in. Resolves once the start's outcome has come. */
 async function run(
-  script: { version?: number; resume?: boolean; quiet_on_cancel?: boolean; leave_child?: boolean } = {},
+  script: { version?: number; resume?: boolean; quiet_on_cancel?: boolean; leave_child?: boolean; tool?: string } = {},
   prompt = 'read the note',
   resume?: string,
 ) {
@@ -81,6 +81,25 @@ test('Allow answers with the request\'s own allow_once option; the turn goes on 
   ccd.send({ type: 'answer', uuid: 'c-again', tool_use_id: `${antigravityStart.uuid}/101`, decision: { behavior: 'allow' } });
   expect(await ccd.line('the refusal', (line) => line.uuid === 'c-again')).toMatchObject({ status: 'refused' });
 }, 15_000);
+
+test('CodeConnect\'s own reading tools, msg_read and msg_sessions, run without a card, as on a Claude run', async () => {
+  for (const tool of ['mcp_codeconnect_msg_read', 'mcp_codeconnect_msg_sessions']) {
+    const { dir, ccd } = await run({ tool });
+    await ccd.line('the prompt reply', (line) => line.type === 'acp' && line.message.result?.stopReason === 'end_turn');
+    expect(ccd.lines.filter((line) => line.type === 'permission')).toStrictEqual([]);
+    expect(stdin(dir).find((message) => message.id === 101 && message.method === undefined)?.result).toStrictEqual({
+      outcome: { outcome: 'selected', optionId: 'allow-once' },
+    });
+  }
+}, 30_000);
+
+test('sending a message, and a tool of any other server, keep their cards', async () => {
+  for (const tool of ['mcp_codeconnect_msg_send', 'mcp_other_msg_read']) {
+    const { ccd } = await run({ tool });
+    const permission = await ccd.line('the permission request', (line) => line.type === 'permission');
+    expect(permission.request.tool_name).toBe(`Run ${tool}`);
+  }
+}, 30_000);
 
 test('Deny answers with reject_once; a say is done at once and is the next prompt, after the turn before it', async () => {
   const { dir, ccd } = await run();

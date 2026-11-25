@@ -57,6 +57,8 @@ async function endLeftovers(): Promise<void> {
 
 /** The ACP version this host speaks. */
 const PROTOCOL_VERSION = 1;
+/** CodeConnect's reading tools as agy names them, answered Allow without a card. */
+const READING_TOOLS = new Set(['mcp_codeconnect_msg_read', 'mcp_codeconnect_msg_sessions']);
 
 type Answer = Extract<ToHost, { type: 'answer' }>;
 type Interrupt = Extract<ToHost, { type: 'interrupt' }>;
@@ -133,6 +135,15 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
     }
     if (message.method === 'session/request_permission' && message.id !== undefined) {
       const update = message.params?.toolCall ?? {};
+      // CodeConnect's two reading tools run without a card, as on a Claude run (start.ts) and as Codex runs tools
+      // marked as only reading; sending a message keeps its card. agy names an MCP server's tool `mcp_<server>_<tool>`,
+      // and `codeconnect` is the server this host gives it (mcpServers, below). ACP names no server beyond that, so a
+      // server of the same name in agy's own settings would pass here too.
+      const allowOnce = (message.params?.options ?? []).find((option: { kind: string }) => option.kind === 'allow_once');
+      if (READING_TOOLS.has(String(update.name)) && allowOnce !== undefined) {
+        write({ id: message.id, result: { outcome: { outcome: 'selected', optionId: allowOnce.optionId } } });
+        return;
+      }
       // agy numbers its requests from 1 in each process, so a card is named by this host's start too: a relaunched
       // run's requests never take its earlier cards' names.
       const request: PermissionRequest = {

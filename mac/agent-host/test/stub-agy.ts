@@ -9,7 +9,8 @@
 // nothing. At each `session/prompt` it writes its reply in two chunks, a tool call, then asks permission for it with
 // allow_once and reject_once options; once answered it ends the tool as the answer says, writes one more chunk and
 // answers the prompt `end_turn`. A request answered `cancelled` ends the prompt `cancelled`, unless its script says
-// `quiet_on_cancel`. With `leave_child` it starts a child that outlives it. It records its argv, its folder and every
+// `quiet_on_cancel`. With `tool` its request names that tool as agy names an MCP server's (`name`, and `title` "Run
+// <tool>"). With `leave_child` it starts a child that outlives it. It records its argv, its folder and every
 // line it read; its input's end ends it.
 //
 //   stub-agy.ts <script.json> acp
@@ -125,7 +126,9 @@ for await (const text of createInterface({ input: process.stdin })) {
       method: 'session/request_permission',
       params: {
         sessionId,
-        toolCall: { toolCallId: 'call_1', title: 'cat NOTE.txt', kind: 'read', rawInput: { command: 'cat NOTE.txt' } },
+        toolCall: script.tool
+          ? { toolCallId: 'call_1', name: script.tool, title: `Run ${script.tool}`, kind: 'other', rawInput: { toolSummary: 'a summary' } }
+          : { toolCallId: 'call_1', title: 'cat NOTE.txt', kind: 'read', rawInput: { command: 'cat NOTE.txt' } },
         options: [
           { optionId: 'allow-once', name: 'Allow', kind: 'allow_once' },
           { optionId: 'allow-always', name: 'Always allow', kind: 'allow_always' },
