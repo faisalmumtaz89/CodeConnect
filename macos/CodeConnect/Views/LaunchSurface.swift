@@ -5,7 +5,8 @@ import SwiftUI
 /// A cold launch's splash, inside the main window over the app from the window's first frame: the Kit's mark (the
 /// slice) on the window's ground, the app laid out under it. The intro plays, the mark breathes until the fleet has
 /// caught up (the Kit's `waitOutLaunch`: 3 s for a silent computer, 15 s at most), and then at once
-/// (`LaunchMark.exitStart`) the bands slide away with the ground already gone, so the app shows between them. Past a
+/// (`LaunchMark.exitStart`) the bands slide away on the splash's own ground; once the last has left, the app is there, by
+/// a cut. The app never shows behind a band. Past a
 /// second, one quiet line under the mark says where it is connecting; once the wait has run out the app itself says
 /// which computers are not answering. While it is up it holds the keyboard, and nothing under it draws a focus ring.
 /// With no computer set up there is nothing to wait for: the intro, then a cut (to Set Up). Reduce Motion: the still
@@ -64,7 +65,8 @@ struct LaunchSurface: View {
     private func frame(at t: Double) -> some View {
         let exiting = exitAt.map { t >= $0 } ?? false
         ZStack {
-            if !exiting { Theme.window }
+            // The ground stays through the exit: the bands leave on it, and the app shows only once they have gone.
+            Theme.window
             if !(cuts && exiting) {
                 LaunchMark(t: t, exitAt: exitAt, reduceMotion: reduceMotion)
             }
@@ -126,7 +128,7 @@ struct LaunchSurface: View {
     #if DEBUG
         @SwiftUI.State private var recorded: Double?
 
-        /// Every frame, 30 a second, from `-CC_LAUNCH_RECORD_FROM` until the splash is gone, the window photographed
+        /// Every frame, 30 a second (`-CC_LAUNCH_RECORD_FPS`), from `-CC_LAUNCH_RECORD_FROM` until the splash is gone, the window photographed
         /// into launch-<000…>.png in `-CC_LAUNCH_RECORD`'s folder; then the app quits.
         private func record() async {
             guard let folder = RenderWindow.launchRecord else { return }
@@ -144,7 +146,7 @@ struct LaunchSurface: View {
                     .write(to: URL(fileURLWithPath: folder).appendingPathComponent(name))
                 if LaunchMark.finished(t: t, exitAt: exitAt) || (cuts && exitAt.map { t >= $0 } == true) { break }
                 index += 1
-                t = RenderWindow.launchRecordFrom + Double(index) / 30
+                t = RenderWindow.launchRecordFrom + Double(index) / RenderWindow.launchRecordFPS
             }
             NSApp.terminate(nil)
         }
