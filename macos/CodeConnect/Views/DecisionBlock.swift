@@ -374,7 +374,8 @@ struct DecisionBlock: View {
     @ViewBuilder private var controls: some View {
         switch surface {
         case .allowDeny(let allowForSession):
-            if boxed {
+            // The reason field only where the run's agent receives a Deny's reason (`AgentKind.takesDenyReason`).
+            if boxed, summary?.agent.takesDenyReason == true {
                 TextField(
                     "", text: Binding { reason } set: { reason = $0 },
                     prompt: Text(placeholder).foregroundStyle(Theme.text3), axis: .vertical

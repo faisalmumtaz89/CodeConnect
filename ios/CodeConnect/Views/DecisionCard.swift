@@ -1379,7 +1379,7 @@ struct DecisionCardView: View {
                 }
                 .accessibilityIdentifier("allow-for-session")
             }
-            if !denyFieldShown {
+            if !denyFieldShown, sessionAgent?.takesDenyReason == true {
                 CCButton(
                     "Deny with a reason", icon: "chat-text", variant: .ghost, size: .md,
                     fullWidth: true,

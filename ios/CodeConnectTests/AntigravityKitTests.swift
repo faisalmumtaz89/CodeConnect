@@ -93,6 +93,15 @@ final class AntigravityKitTests: XCTestCase {
         XCTAssertNotNil(AppModel.decisionMismatch(decision: .allow, agent: .antigravity, answersApprovalsByHook: false))
     }
 
+    /// Only Claude's card offers a Deny with a reason: agy takes a rejection with no words, and Codex is answered with
+    /// its own options, so a reason typed for either would reach no one.
+    func testOnlyAClaudeCardTakesADenysReason() {
+        XCTAssertTrue(AgentKind.claude.takesDenyReason)
+        XCTAssertFalse(AgentKind.antigravity.takesDenyReason)
+        XCTAssertFalse(AgentKind.codex.takesDenyReason)
+        XCTAssertFalse(AgentKind.unsupported("gemini").takesDenyReason)
+    }
+
     /// Stop follows the hosted rule, and its sentences name Antigravity.
     func testAnAntigravityTurnIsStoppedAsAHostedOne() {
         XCTAssertNil(

@@ -233,6 +233,11 @@ public enum AgentKind: Sendable, Hashable {
         }
     }
 
+    /// Whether a Deny on this agent's card can carry the person's reason to it: Claude's does. A Codex card is answered
+    /// with its own options, and Antigravity's agent takes a rejection with no words (ACP's `reject_once`), so a reason
+    /// typed for either would reach no one.
+    public var takesDenyReason: Bool { self == .claude }
+
     /// The agent a start of `agent` runs.
     public init(_ agent: StartAgent) {
         self.init(wire: agent.rawValue)
