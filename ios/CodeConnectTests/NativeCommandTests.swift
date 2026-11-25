@@ -111,7 +111,7 @@ final class NativeCommandTests: XCTestCase {
             ["Clear Claude’s context?", "Clear context", "Keep context",
              "Claude Code will forget this conversation’s context. CodeConnect’s timeline will stay here."])
         XCTAssertEqual(
-            [CompactPrompt.title, CompactPrompt.explanation, CompactPrompt.fieldLabel, CompactPrompt.placeholder,
+            [CompactPrompt.title, CompactPrompt.explanation(), CompactPrompt.fieldLabel, CompactPrompt.placeholder(),
              CompactPrompt.action],
             ["Compact context", "Ask Claude Code to compact its current context. Instructions are optional.",
              "Instructions (optional)", "What should Claude preserve?", "Compact now"])
