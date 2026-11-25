@@ -139,8 +139,14 @@ test('an agy at another ACP version is refused at the start, with the version it
   expect(ccd.lines.some((line) => line.type === 'acp')).toBe(false);
 }, 15_000);
 
-test('a wake is refused: an Antigravity run takes none yet', async () => {
-  const { ccd } = await run({}, '');
-  ccd.send({ type: 'wake', uuid: 'c-wake', text: 'You have CodeConnect messages' });
-  expect(await ccd.line('the refusal', (line) => line.uuid === 'c-wake')).toMatchObject({ status: 'refused' });
+test('a wake is one more prompt: done at once, and its lines carry its turn', async () => {
+  const { dir, ccd } = await run({}, '');
+  const nudge = 'You have CodeConnect messages: call the codeconnect msg_read tool, then handle each message as its sender asks.';
+  ccd.send({ type: 'wake', uuid: 'c-wake', text: nudge });
+  expect(await ccd.line('the wake\'s outcome', (line) => line.uuid === 'c-wake')).toMatchObject({ status: 'done' });
+  await ccd.line('the permission request', (line) => line.type === 'permission');
+  expect(stdin(dir).filter((message) => message.method === 'session/prompt').map((m) => m.params.prompt))
+    .toStrictEqual([[{ type: 'text', text: nudge }]]);
+  expect(ccd.lines.filter((line) => line.type === 'acp' && line.turn !== undefined).map((line) => line.turn))
+    .toContain('c-wake');
 }, 15_000);

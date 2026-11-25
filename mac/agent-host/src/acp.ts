@@ -3,18 +3,18 @@
 // offered, so agy uses its own) and opens one session in the run's folder with CodeConnect's mail server; its outcome
 // is `done` once the session is open, `refused` with agy's reason otherwise. Every notification agy sends, and the
 // reply to each prompt, goes to ccd whole as `acp`, with the turn it belongs to: the uuid of the command whose prompt
-// is running (the start's for its own). A `say` is one more prompt, queued and `done` at once, and sent once the one
-// before has its reply, so prompts never overlap. An `interrupt` of the running turn answers its open requests
+// is running (the start's for its own). A `say`, or ccd's `wake` for the run's mail, is one more prompt, queued and
+// `done` at once, and sent once the one before has its reply, so prompts never overlap. An `interrupt` of the running turn answers its open requests
 // `cancelled`, cancels the session's prompt and drops the prompts queued after it; once the prompt's reply comes, its
 // outcome is `done` with the reply's stopReason and the uuids dropped. A permission request is held by its JSON-RPC
 // id and sent as `permission`; ccd's answer picks the request's own allow_once or reject_once option, and `done`
 // follows once it is written to agy. `stop` answers every request still open `cancelled`, cancels the session's
-// prompt and ends agy's input; agy's end is `exited`. Wakes and settings are refused: a later slice.
+// prompt and ends agy's input; agy's end is `exited`. Settings are refused: a later slice.
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Unsequenced } from './link.ts';
 import type { Json, PermissionRequest, ToHost } from './protocol.ts';
-import type { Say, Start } from './start.ts';
+import type { Say, Start, Wake } from './start.ts';
 
 /** The ACP version this host speaks. */
 const PROTOCOL_VERSION = 1;
@@ -161,7 +161,7 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
   });
 
   return {
-    say(command: Say): void {
+    say(command: Say | Wake): void {
       if (ended) {
         refuse(command.uuid, 'the run is not taking messages');
         return;

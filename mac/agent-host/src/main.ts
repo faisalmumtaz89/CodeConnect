@@ -129,12 +129,12 @@ function begin(start: Start): void {
   begun = true;
   clearTimeout(noStart);
   facts = startFacts(start.options);
-  // An Antigravity run is agy's, over the Agent Client Protocol (acp.ts); it takes no wake yet.
+  // An Antigravity run is agy's, over the Agent Client Protocol (acp.ts).
   if (start.options.agent === 'antigravity') {
     const run = runAcp(start, (body) => link.send(body), () => link.finish());
     permissions = run;
     interrupt = run.interrupt;
-    say = (command) => (command.type === 'say' ? run.say(command) : refuse(command.uuid));
+    say = run.say;
     stop = () => {
       stop = undefined;
       run.stop();

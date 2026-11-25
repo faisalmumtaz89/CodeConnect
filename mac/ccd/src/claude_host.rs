@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use protocol::agent::AgentKind;
 use protocol::config::Config;
-use protocol::event::{EventKind, Lifecycle, PendingEvent, SessionKey, Source};
+use protocol::event::{Event, EventKind, Lifecycle, PendingEvent, SessionKey, Source};
 use protocol::event::{MenuMode, MenuModel, RunMenus};
 use protocol::host::{
     FromHost, HostFile, McpCommand, OutcomeStatus, StartOptions, ToHost, Trust,
@@ -602,6 +602,8 @@ struct Turns {
     /// The context the turn's latest top-level call left (its input, cache creation, cache read and output) and that
     /// call's model, for the turn's `usage` (minor 49); none until a call of the turn's own, and again at its result.
     context: Option<(u64, String)>,
+    /// An Antigravity run's turn of its latest `acp` line: a line of another turn starts one.
+    acp: Option<String>,
 }
 
 /// The mark of a turn's start or end at `now`, strictly after the link's latest one,
@@ -738,6 +740,23 @@ async fn apply_sdk(
         }
         Err(err) => return Err(format!("{err:#}")),
     };
+    mark_turn(daemon, uid, turns, &events, started, ended).await;
+    send(write, &ToHost::Ack { seq }).await
+}
+
+/// A turn of the run started, ended, or both, its events `events` filed: the run moving
+/// again ([`Daemon::note_turn_running`]); an end read after the replay rings the phone about
+/// the decisions still open ([`Daemon::push_turn_complete`]); and both are marked for the
+/// mail wake rule on ccd's clock, each mark after the last, an end read after the replay
+/// being the end the rule hears of ([`crate::mail::turn_ended`]).
+async fn mark_turn(
+    daemon: &Arc<Daemon>,
+    uid: &str,
+    turns: &mut Turns,
+    events: &[Event],
+    started: bool,
+    ended: bool,
+) {
     if started {
         daemon.note_turn_running(uid);
     }
@@ -769,7 +788,6 @@ async fn apply_sdk(
             crate::mail::turn_ended(daemon, uid);
         }
     }
-    send(write, &ToHost::Ack { seq }).await
 }
 
 /// What a link knows of its run when it begins: from the start that spawned the host, or,
@@ -879,6 +897,7 @@ async fn link(
         replayed,
         launched: if resumed { "resume" } else { "startup" },
         context: None,
+        acp: None,
     };
     let (mut live, mut refused) = (
         matches!(lifecycle, Lifecycle::Live | Lifecycle::Stopping),
@@ -919,7 +938,9 @@ async fn link(
                 unreachable!("a chunk is read from an acp line")
             };
             if let Some(open) = joining.take_if(|open| open.thought != *thought) {
-                if let Err(why) = file_joined(&daemon, &uid, &key, host, open, &mut write).await {
+                if let Err(why) =
+                    file_joined(&daemon, &uid, &key, host, open, &mut turns, &mut write).await
+                {
                     break why;
                 }
             }
@@ -935,7 +956,9 @@ async fn link(
             continue;
         }
         if let Some(open) = joining.take() {
-            if let Err(why) = file_joined(&daemon, &uid, &key, host, open, &mut write).await {
+            if let Err(why) =
+                file_joined(&daemon, &uid, &key, host, open, &mut turns, &mut write).await
+            {
                 break why;
             }
         }
@@ -1119,23 +1142,16 @@ async fn link(
                     });
                 }
             }
-            Ok(FromHost::Acp { seq, .. }) if live => {
+            Ok(FromHost::Acp { seq, turn, .. }) if live => {
                 let Some(protocol::acp_map::Read::Events(events)) = acp else {
                     unreachable!("a live run's acp line is read above")
                 };
-                match daemon
-                    .ingest_host_message(&uid, host, seq, events, RunNotes::default())
-                    .await
+                if let Err(why) = apply_acp(
+                    &daemon, &uid, host, seq, turn, events, &mut turns, &mut write,
+                )
+                .await
                 {
-                    Ok(Some(_)) => {
-                        if let Err(why) = send(&mut write, &ToHost::Ack { seq }).await {
-                            break why;
-                        }
-                    }
-                    Ok(None) => {
-                        break format!("message {seq} is not past the run's cursor for this host")
-                    }
-                    Err(err) => break format!("{err:#}"),
+                    break why;
                 }
             }
             Ok(FromHost::Exited { seq, code, signal }) if live => {
@@ -1243,6 +1259,7 @@ async fn file_joined(
     key: &SessionKey,
     host: ProcessIdentity,
     open: Joining,
+    turns: &mut Turns,
     write: &mut OwnedWriteHalf,
 ) -> Result<(), String> {
     let event = protocol::acp_map::joined(
@@ -1252,17 +1269,56 @@ async fn file_joined(
         open.first,
         open.turn.as_deref(),
     );
-    match daemon
-        .ingest_host_message(uid, host, open.last, vec![event], RunNotes::default())
+    apply_acp(
+        daemon,
+        uid,
+        host,
+        open.last,
+        open.turn,
+        vec![event],
+        turns,
+        write,
+    )
+    .await
+}
+
+/// An Antigravity run's events from its line `seq` of the turn `turn`, committed with the
+/// cursor, then acknowledged. Its turns are marked as a Claude run's are ([`mark_turn`]): a
+/// line of a turn not seen before starts one, and the prompt's reply ends it, unless it ended
+/// `cancelled`: a turn the person stopped stays open for the mail rule until their next turn
+/// ends, as a Claude turn whose `result` is aborted does.
+#[allow(clippy::too_many_arguments)]
+async fn apply_acp(
+    daemon: &Arc<Daemon>,
+    uid: &str,
+    host: ProcessIdentity,
+    seq: u64,
+    turn: Option<String>,
+    events: Vec<PendingEvent>,
+    turns: &mut Turns,
+    write: &mut OwnedWriteHalf,
+) -> Result<(), String> {
+    let ended = events.iter().any(|event| {
+        event.kind == EventKind::TurnComplete && event.payload["stop_reason"] != "cancelled"
+    });
+    let filed = match daemon
+        .ingest_host_message(uid, host, seq, events, RunNotes::default())
         .await
     {
-        Ok(Some(_)) => send(write, &ToHost::Ack { seq: open.last }).await,
-        Ok(None) => Err(format!(
-            "message {} is not past the run's cursor for this host",
-            open.last
-        )),
-        Err(err) => Err(format!("{err:#}")),
+        Ok(Some(filed)) => filed,
+        Ok(None) => {
+            return Err(format!(
+                "message {seq} is not past the run's cursor for this host"
+            ))
+        }
+        Err(err) => return Err(format!("{err:#}")),
+    };
+    let started = turn.is_some() && turn != turns.acp;
+    if started {
+        turns.acp = turn;
     }
+    mark_turn(daemon, uid, turns, &filed, started, ended).await;
+    send(write, &ToHost::Ack { seq }).await
 }
 
 /// The name a sentence gives the hosted run `uid`'s agent: Antigravity, or Claude.
@@ -5871,6 +5927,44 @@ mod tests {
         );
         turn_ends(&mut played, 4).await;
         assert_eq!(woken(&mut played.lines).await, crate::mail::nudge());
+        stop(&played.dir);
+    }
+
+    /// **Mail to an Antigravity run mid-turn wakes it once that turn has ended.** Its turn
+    /// starts with the first `acp` line of a turn not seen before and ends with the prompt's
+    /// reply, so the rule reads it as a Claude run's init and `result`.
+    #[tokio::test]
+    async fn mail_to_an_antigravity_run_mid_turn_wakes_it_once_the_turn_ends() {
+        let rig = rig();
+        let (uid, mut played) = antigravity_run(&rig).await;
+        let turn = played.start_uuid();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 3, "turn": turn, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-1", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "call_1", "title": "cat NOTE.txt",
+                "kind": "read", "status": "in_progress"}}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(
+            mail_from_another_run(&rig.daemon, &uid).await,
+            protocol::ipc::MailState::Waiting
+        );
+        assert_eq!(
+            sent_soon(&mut played.lines).await,
+            None,
+            "a wake while the turn runs"
+        );
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 4, "turn": turn, "message": {
+                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert_eq!(woken(&mut played.lines).await, crate::mail::nudge());
+        assert_eq!(nudges(&rig, &uid, 1).await, 1);
         stop(&played.dir);
     }
 
