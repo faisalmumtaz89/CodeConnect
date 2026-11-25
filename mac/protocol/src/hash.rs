@@ -16,6 +16,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex_of(sha256_bytes(bytes))
 }
 
+/// [`sha256_hex`] of a file's bytes, read through a small buffer rather than whole: an
+/// executable is megabytes, and reading it whole only to hash it raised a process's peak memory
+/// by its size.
+pub fn sha256_file_hex(path: &std::path::Path) -> std::io::Result<String> {
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut std::fs::File::open(path)?, &mut hasher)?;
+    Ok(hex_of(hasher.finalize().into()))
+}
+
 /// The one hex encoder. Lowercase, fixed width, no separators — the single
 /// spelling every digest in this codebase has, so two equal digests can never
 /// compare unequal as text.
@@ -153,6 +162,25 @@ pub fn compose_hash(session_ref: &str, text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// **A file hashes as its bytes do**, whatever its size: empty, inside one read, and across
+    /// many.
+    #[test]
+    fn a_file_hashes_as_its_bytes() {
+        let dir = std::env::temp_dir().join(format!("cc-file-hash-{}", crate::uid::new().unwrap()));
+        std::fs::create_dir(&dir).unwrap();
+        for size in [0, 100, 3 * 1024 * 1024 + 7] {
+            let bytes: Vec<u8> = (0..size).map(|n| (n * 31 % 251) as u8).collect();
+            let path = dir.join(format!("{size}.bin"));
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                sha256_file_hex(&path).unwrap(),
+                sha256_hex(&bytes),
+                "{size} bytes"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn known_vector() {
