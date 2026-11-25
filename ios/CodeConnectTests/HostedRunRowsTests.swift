@@ -229,12 +229,12 @@ final class HostedRunRowsTests: XCTestCase {
         XCTAssertEqual(shape(shown.timeline.suffix(1)), ["you:/compact"], "the preview")
     }
 
-    /// A command's own turn end (`local_command`: the recorded session's `/compact` s86, `/effort low` s98, `/clear`
-    /// s102) draws no row, as a terminal run files none. The item stays: the run reads done until seen, then idle, and
+    /// A command's own turn end (`local_command`: the recorded session's `/compact` s92, `/effort low` s104, `/clear`
+    /// s108) draws no row, as a terminal run files none. The item stays: the run reads done until seen, then idle, and
     /// the preview is the turn's end, as after any turn. Each drew "Turn complete".
     func testACommandsOwnTurnEndDrawsNoRowButEndsTheTurnForTheFleet() async throws {
         let all = try recorded("sdk-session-events")
-        for end in [UInt64(86), 98, 102] {
+        for end in [UInt64(92), 104, 108] {
             XCTAssertNotNil(try XCTUnwrap(all.first { $0.seq == end }).payload["local_command"], "s\(end)")
             let shown = await state(all.filter { $0.seq <= end }).shown
             XCTAssertEqual(shape(shown.timeline.filter { $0.seq == end }), ["notice:Turn complete"], "s\(end)'s item")
@@ -246,14 +246,14 @@ final class HostedRunRowsTests: XCTestCase {
         }
     }
 
-    /// A turn's end directly after "Interrupted" draws no row: the recorded session's Stop (s64-65) and its denied call
-    /// (s70-71: "rejected before it ran", s75) and `denied-call-wire`'s denied call (s36-37) end on "Interrupted · What
+    /// A turn's end directly after "Interrupted" draws no row: the recorded session's Stop (s70-71) and its denied call
+    /// (s76-77: "rejected before it ran", s81) and `denied-call-wire`'s denied call (s36-37) end on "Interrupted · What
     /// should Claude do instead?", as an Esc does at a terminal. The item stays: Running while the call runs, done once
     /// it ends. Each drew "Turn complete" under it.
     func testATurnsEndAfterInterruptedDrawsNoRow() async throws {
         let session = try recorded("sdk-session-events")
         let denied = try recorded("denied-call-wire")
-        for (events, interrupt, end) in [(session, UInt64(64), UInt64(65)), (session, 70, 71), (denied, 36, 37)] {
+        for (events, interrupt, end) in [(session, UInt64(70), UInt64(71)), (session, 76, 77), (denied, 36, 37)] {
             let running = await state(events.filter { $0.seq < interrupt }).shown
             XCTAssertEqual(
                 FleetStatusRule.status(summary: try liveRun, shown: running, reviewedSeq: 0), .running, "s\(end)")
