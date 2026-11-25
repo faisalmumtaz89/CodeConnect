@@ -1,0 +1,4 @@
+out/
+mocks/target/
+*.heaptrack*
+*.massif*

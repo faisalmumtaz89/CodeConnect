@@ -1,0 +1,23 @@
+#!/bin/sh
+# Offline mock `claude` CLI for CodeConnect benchmarks.
+# Handles `--version`, `auth status`, and `-p` model-probe control_request.
+case "$1" in
+  --version)
+    echo "2.1.300 (Claude Code)"
+    exit 0
+    ;;
+  auth)
+    if [ "$2" = "status" ]; then
+      echo '{"loggedIn": true}'
+      exit 0
+    fi
+    ;;
+  -p)
+    # Read one control_request line and return model catalog.
+    IFS= read -r _line || true
+    echo '{"type":"control_response","request_id":"models","response":{"subtype":"success","response":{"models":[{"value":"default","displayName":"Default","description":"Recommended"},{"value":"claude-sonnet-4-6","displayName":"Claude Sonnet 4.6","description":"Fast coding model"}]}}}'
+    exit 0
+    ;;
+esac
+echo "mock-claude: unexpected args: $*" >&2
+exit 1
