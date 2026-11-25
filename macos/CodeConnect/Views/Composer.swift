@@ -207,7 +207,7 @@ private struct Composer: View {
             .task {
                 if let typed = RenderWindow.reply, kept.reply.isEmpty { kept.reply = typed }
                 model.seedFixtureFiles(key)
-                if !RenderWindow.attachedFiles.isEmpty {
+                if !RenderWindow.attachedFiles.isEmpty, RenderWindow.opened == key {
                     for _ in 0..<100 where !model.canUpload(key) { try? await Task.sleep(for: .milliseconds(100)) }
                     FileIntake.add(RenderWindow.attachedFiles, takeFile)
                 }
