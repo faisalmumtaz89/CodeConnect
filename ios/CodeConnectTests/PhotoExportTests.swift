@@ -52,18 +52,36 @@ final class PhotoExportTests: XCTestCase {
     }
 }
 
-/// **What holds what, on the iPhone, while files travel**: files hold the message, not the run's settings; files for
-/// a computer that takes none hold Start, as the Mac says it.
+/// **What holds what, on the iPhone, while files travel**: a file on its way holds the message, not the run's
+/// settings; files for a computer that takes none hold Start, as the Mac says it.
+@MainActor
 final class UploadHoldsTests: XCTestCase {
 
-    func testFilesOnTheirWayLeaveTheSettingsOpen() {
-        let files = "Waiting for the file to arrive."
-        XCTAssertFalse(HostedSettingsBar.holdsSettings(sendReason: files, filesReason: files))
-        XCTAssertTrue(HostedSettingsBar.holdsSettings(sendReason: "Answer the card first.", filesReason: files))
-        XCTAssertFalse(HostedSettingsBar.holdsSettings(sendReason: nil, filesReason: nil))
+    func testAFileOnItsWayLeavesTheSettingsOpen() async throws {
+        let model = AppModel(cache: EventCache())
+        model.connection.simulateConnectedForTesting()
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(canApproveReliably: true, sendText: true, extra: ["uploads": .bool(true)]), minor: 50)
+        // The computer never answers a chunk: the file stays on its way.
+        model.connection.sendStub = { _ in }
+        model.connection.injectForTesting(
+            .sessions([
+                try JSONDecoder().decode(
+                    SessionSummary.self,
+                    from: Data(
+                        """
+                        {"session_uid":"u-1","session_id":"cc-1",
+                         "cwd":"/work","project_label":"work","lifecycle":"live","link":"attached",
+                         "last_seq":0,"created_at":"2026-08-18T09:00:00.000Z",
+                         "updated_at":"2026-08-18T09:00:00.000Z","blocked_on":[],"agent":"claude"}
+                        """.utf8))
+            ]))
+        try await XCTUnwrap(model.statesForTesting["u-1"]).settleForTesting()
+        model.attach(data: Data("abc".utf8), name: "a.txt", to: "u-1")
+        XCTAssertNotNil(model.filesBlockedReason(for: "u-1"), "the file holds the message")
+        XCTAssertFalse(HostedSettingsBar.isHeld(model, "u-1"), "but not the run's model and effort")
     }
 
-    @MainActor
     func testFilesForAComputerThatTakesNoneHoldStart() {
         let draft = StartDraft()
         draft.attach(name: "a.txt", size: 3) { Data("abc".utf8) }

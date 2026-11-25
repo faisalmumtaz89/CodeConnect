@@ -1483,7 +1483,7 @@ struct SessionDetailView: View {
         composeResult = nil
         composeResultClearTask?.cancel()
         Task {
-            let result = await model.composeToCodex(sessionKey: key, text: text)
+            let result = await model.composeToCodex(sessionKey: key, text: text, files: true)
             sending = false
             // Otherwise the draft is kept. On a refusal it can be retried as-is;
             // on an outcome nobody can account for the send path now refuses an
