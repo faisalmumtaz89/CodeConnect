@@ -14037,6 +14037,73 @@ mod tests {
         assert_eq!(alive, Liveness::Alive, "the child runs on");
     }
 
+    /// **A run whose earlier move left something running does not move again while it runs** (306, G1): moved to B
+    /// beside a child its old group held, its turn on B over, A chosen: the next message goes on B, its record of the
+    /// child unchanged; once the child is gone, the next message moves it.
+    #[tokio::test]
+    async fn a_second_move_waits_for_what_the_first_left_running() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (sent, uid, child, mut relaunched) = moved_beside_a_child(&mut rig).await;
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        // Its turn on B, numbered past the turn on A, whose result's uuid its number names.
+        turn_begins(&mut relaunched, 3, "turn-b1").await;
+        turn_ends(&mut relaunched, 14).await;
+        let a = rig
+            .daemon
+            .store
+            .accounts()
+            .unwrap()
+            .into_iter()
+            .find(|account| account.label == "A")
+            .unwrap();
+        choose(&rig.daemon, Some(&a)).await;
+        let left = rig.daemon.store.left_group(&uid).unwrap();
+        let (sent, read) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-2", "still here"),
+            async {
+                let read = next(&mut relaunched.lines).await;
+                if let Some(ToHost::Say { uuid, .. }) = &read {
+                    say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 15, "uuid": uuid, "status": "done"}),
+                )
+                .await;
+                    assert_eq!(
+                        next(&mut relaunched.lines).await,
+                        Some(ToHost::Ack { seq: 15 })
+                    );
+                }
+                read
+            }
+        );
+        let kept = rig.daemon.store.left_group(&uid).unwrap();
+        if liveness(&child) == Liveness::Alive {
+            // SAFETY: kill(2) of the stand-in's own child, by the pid it recorded, while it is still that child.
+            unsafe { libc::kill(child.pid, libc::SIGKILL) };
+        }
+        assert!(gone_by_birth(&child, Duration::from_secs(5)).await);
+        assert!(
+            matches!(read, Some(ToHost::Say { .. })),
+            "the message goes on B while the child runs: {read:?}"
+        );
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(kept, left, "its record unchanged");
+        turn_begins(&mut relaunched, 16, "turn-b2").await;
+        turn_ends(&mut relaunched, 17).await;
+        let moving = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move { send_as_app(&daemon, &uid, "r-3", "now move").await })
+        };
+        let read = next(&mut relaunched.lines).await;
+        moving.abort();
+        stop(&relaunched.dir);
+        assert!(
+            matches!(read, Some(ToHost::Stop { .. })),
+            "once it is gone, the message moves the run: {read:?}"
+        );
+    }
+
     /// **What a move left running is stopped with the run** (306, G1): the child a moved run's old group still held is
     /// recorded with the run, and End run stops it; so does deleting the run once it has ended; and End run stops it
     /// after ccd restarts.
