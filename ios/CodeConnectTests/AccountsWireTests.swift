@@ -430,6 +430,25 @@ final class AccountsWireTests: XCTestCase {
             "cch2.3J9739PW4Y couldn't switch accounts. Its conversation says what to do.")
     }
 
+    /// A failed move's line goes once a retry starts its session: listings of it starting and then live, the failed
+    /// mark not yet cleared (the daemon's recording carries both), say nothing failed.
+    func testAFailedMoveIsNotShownOnceItsRetryStarts() async throws {
+        let (model, _) = try model()
+        let url = try XCTUnwrap(
+            Bundle(for: type(of: self)).url(forResource: "switch-failed-then-recovered-claude-wire", withExtension: "json"))
+        let frames = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).arrayValue)
+        func listing(_ index: Int) throws -> ServerMessage {
+            try JSONDecoder().decode(ServerMessage.self, from: Data(frames[index].canonicalJSONString.utf8))
+        }
+        model.connection.injectForTesting(try listing(5))
+        await waitUntil({ model.accountSwitch(for: .claude)?.failure != nil }, "the failed listing to be read")
+        for index in [7, 9] {
+            model.connection.injectForTesting(try listing(index))
+            await waitUntil({ model.accountSwitch(for: .claude)?.failure == nil }, "listing \(index) to be read")
+            XCTAssertNil(model.accountSwitch(for: .claude)?.failure, "listing \(index)")
+        }
+    }
+
     /// An account signing in is not signed out: the service says `signed_in: false` with `signing_in: true` while the
     /// person is in the browser (terminal's probe, push 3 of one Add), and the row says the sign-in, not "Signed out".
     /// Signed out is false only, never unread, never not separate.

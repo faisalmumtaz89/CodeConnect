@@ -8884,6 +8884,92 @@ mod tests {
         }
     }
 
+    /// **A ccd restarted in a Codex move's stop files the switch's end** (306): the person's message had marked a quiet
+    /// run moving and its app-server was told to stop, or not yet, when ccd stopped; opened again, an app-server
+    /// still alive is stopped, and the end filed is the switch's, never an ordinary one.
+    #[tokio::test]
+    async fn a_restart_in_a_codex_moves_stop_files_the_switchs_end() {
+        let _env = crate::ProcessEnvRead::take();
+        for stopped in [true, false] {
+            let mut rig = rig();
+            rig.daemon = relauncher(&rig);
+            let (uid, mut ws) = engine_run(&rig, "req-c2", "thr-c2", "turn-1").await;
+            turn_over(&rig.daemon, &uid, &mut ws, "thr-c2", "turn-1", &[]).await;
+            let b = rig.daemon.store.add_account("codex", "B").unwrap();
+            assert!(rig
+                .daemon
+                .store
+                .activate_account("codex", Some(&b.id))
+                .unwrap());
+            rig.daemon
+                .store
+                .set_switch_state(&uid, Some(crate::store::Store::SWITCH_MOVED))
+                .unwrap();
+            let watch = rig
+                .daemon
+                .db
+                .watched_host(uid.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            let gone = || {
+                protocol::proc_identity::liveness(&watch.host)
+                    == protocol::proc_identity::Liveness::Gone
+            };
+            if stopped {
+                // SAFETY: kill(2) of the group the stand-in leads, as the move's stop would.
+                unsafe { libc::kill(-watch.host.pid, libc::SIGTERM) };
+            }
+            for _ in 0..100 {
+                if !stopped || gone() {
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            let restarted = daemon_on(&rig.root);
+            restarted.recover().await;
+            restarted.recover_hosted_runs(&rig.root).await;
+            for _ in 0..200 {
+                if gone() {
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            let ended = gone();
+            restarted.watch_hosted_runs().await;
+            let mut ends = Vec::new();
+            for _ in 0..100 {
+                ends = restarted
+                    .db
+                    .events_after(uid.clone(), 0, 10_000)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|event| event.kind == EventKind::SessionEnd)
+                    .map(|event| event.payload["switched_to"]["label"].clone())
+                    .collect();
+                if !ends.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+            if !ended {
+                // SAFETY: kill(2) of the group the stand-in leads.
+                unsafe { libc::kill(-watch.host.pid, libc::SIGKILL) };
+            }
+            drop(ws);
+            assert!(
+                ended,
+                "stopped before: {stopped}: its app-server's stop is finished"
+            );
+            assert_eq!(
+                ends,
+                [json!("B")],
+                "stopped before: {stopped}: the switch's end"
+            );
+        }
+    }
+
     /// **A Codex move whose relaunch cannot start says why** (306 S9): the person's message moves a quiet run on A to
     /// B whose codex cannot start: the message is refused, and the run stays ended and relaunchable, reads `failed`,
     /// with a line of its own saying why.
@@ -10747,8 +10833,8 @@ mod tests {
     /// **A Codex run that is not live names its model as its menu did** (minor 46, for Codex too): live, its summary
     /// carries `menus` and no `model_label`; ended, or failed in a switch, it carries no `menus`, and `model_label` is
     /// the name its model's entry had (Codex's `displayName`). A model whose entry has no name of its own (one Codex
-    /// started on that its check did not list) carries none, and the apps show the id. One its switch is moving
-    /// offers its `menus` as a live run does (minor 51).
+    /// started on that its check did not list) carries none, and the apps show the id. One its switch ended, with no
+    /// message moving it, reads as ended too: its `menus` are offered only while a message moves it (minor 51).
     #[tokio::test]
     async fn a_codex_run_not_live_names_its_model_as_its_menu_did() {
         let _env = crate::ProcessEnvRead::take();
@@ -10775,11 +10861,6 @@ mod tests {
                 let shown = serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap();
                 assert_eq!(shown["switching"].as_str(), switching, "{shown}");
                 assert_eq!(shown["model"]["value"], model, "{shown}");
-                if state == Some(crate::store::Store::SWITCH_MOVED) {
-                    assert!(shown.get("menus").is_some(), "{shown}");
-                    assert_eq!(shown.get("model_label"), None, "{shown}");
-                    continue;
-                }
                 assert_eq!(shown.get("menus"), None, "{shown}");
                 assert_eq!(
                     shown["model_label"].as_str(),

@@ -2410,7 +2410,8 @@ impl Store {
     /// a turn of its process has completed and none has begun since; no message of the person's sent it waits to be
     /// taken or answered (a claim still `applying`, or one filed after its last turn began, which may run as a turn
     /// of its own); its last turn ran no command, subagent or task (Codex: no command or subagent), and its process
-    /// scheduled no prompt; and no mail wake is outstanding. `sending`, the message being sent
+    /// scheduled no prompt and started no work in the background; and no mail wake is outstanding. `sending`, the
+    /// message being sent
     /// now, is no message waiting. Anything not known reads not quiet.
     pub fn certainly_quiet(&self, session_uid: &str, sending: &str) -> Result<bool> {
         let conn = self.read();
@@ -2514,14 +2515,16 @@ impl Store {
                 }
                 // A Codex subagent its last turn spawned, which may work on after the turn.
                 kind if codex && i >= before && kind == "codex_collabAgentToolCall" => false,
+                // A prompt it scheduled, or work claude runs in the background, may still come or run, whichever turn
+                // began it: ccd files when such work starts, never when it ends.
                 kind if kind == EventKind::AgentMessage.as_str() => {
                     blocks(payload).iter().all(|block| {
                         !(block["name"] == "CronCreate"
+                            || block["input"]["run_in_background"] == true
                             || in_last_turn
-                                && (block["input"]["run_in_background"] == true
-                                    || ["Bash", "Task", "Agent"]
-                                        .iter()
-                                        .any(|name| block["name"] == *name)))
+                                && ["Bash", "Task", "Agent"]
+                                    .iter()
+                                    .any(|name| block["name"] == *name))
                     })
                 }
                 _ => true,
@@ -2722,35 +2725,25 @@ impl Store {
         )?)
     }
 
-    /// A restarted ccd's moves (306): a Codex run whose app-server its switch was ending is due again, its app-server
-    /// left to the liveness watch; a Claude run's host is sent its stop again once attached ([`crate::claude_host`]),
-    /// so the end it reports is the switch's. The message that was moving a run that has not started again since is
-    /// released, so its retry relaunches it. Only before this ccd starts any run of its own, once
-    /// [`Store::fail_unhosted_starts`] has put a relaunch that never got a host back to `exited`.
+    /// A restarted ccd's moves (306): a run its switch was ending stays so, its process stopped again once found
+    /// alive ([`crate::claude_host::attach_run`], [`crate::state::Daemon::recover_codex_runs`]), so the end it
+    /// reports is the switch's. The message that was moving a run that has not started again since, or retrying a
+    /// failed move, never reached a process, and is released, so its retry relaunches it. Only before this ccd starts
+    /// any run of its own, once [`Store::fail_unhosted_starts`] has put a relaunch that never got a host back to
+    /// `exited`.
     pub fn recover_moves(&self) -> Result<()> {
-        let mut conn = self.write();
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        tx.execute(
+        self.write().execute(
             "DELETE FROM text_mutations WHERE status = 'applying' AND session_uid IN
                     (SELECT h.session_uid FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
-                      WHERE h.switching = ?1 AND s.lifecycle IN (?2, ?3))",
+                      WHERE (h.switching = ?1 AND s.lifecycle IN (?3, ?4))
+                         OR (h.switching = ?2 AND s.lifecycle = ?4))",
             params![
                 Store::SWITCH_MOVED,
+                Store::SWITCH_FAILED,
                 lifecycle_str(Lifecycle::Live),
                 lifecycle_str(Lifecycle::Exited)
             ],
         )?;
-        tx.execute(
-            "UPDATE run_hosts SET switching = ?2 WHERE switching = ?1 AND session_uid IN
-                    (SELECT session_uid FROM all_sessions WHERE lifecycle = ?3 AND agent = ?4)",
-            params![
-                Store::SWITCH_MOVED,
-                Store::SWITCH_WAITING,
-                lifecycle_str(Lifecycle::Live),
-                AgentKind::Codex.as_str()
-            ],
-        )?;
-        tx.commit()?;
         Ok(())
     }
 
@@ -2878,74 +2871,6 @@ impl Store {
             "DELETE FROM text_mutations
               WHERE session_uid = ?1 AND status = 'applying' AND started_at < ?2",
             params![session_uid, before],
-        )?;
-        Ok(())
-    }
-
-    /// The run `session_uid`'s move left its old host's process group running, `old` its gone leader and `boot` its
-    /// boot: kept with the run, so End run, a delete or a restarted ccd stops it as a dead host's group is stopped.
-    pub fn keep_left_group(
-        &self,
-        session_uid: &str,
-        old: &ProcessIdentity,
-        boot: BootIdentity,
-    ) -> Result<()> {
-        self.write().execute(
-            "UPDATE run_hosts SET left_pid = ?2, left_start_sec = ?3, left_start_usec = ?4,
-                                  left_boot_sec = ?5, left_boot_usec = ?6
-              WHERE session_uid = ?1",
-            params![
-                session_uid,
-                old.pid,
-                old.birth.start_sec,
-                old.birth.start_usec,
-                boot.boot_sec,
-                boot.boot_usec
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// The process group a move left running beside the run `session_uid` ([`Store::keep_left_group`]): its leader
-    /// and boot, or `None`.
-    pub fn left_group(&self, session_uid: &str) -> Result<Option<(ProcessIdentity, BootIdentity)>> {
-        Ok(self
-            .read()
-            .query_row(
-                "SELECT left_pid, left_start_sec, left_start_usec, left_boot_sec, left_boot_usec
-                   FROM run_hosts WHERE session_uid = ?1 AND left_pid IS NOT NULL",
-                params![session_uid],
-                |row| {
-                    Ok((
-                        ProcessIdentity {
-                            pid: row.get(0)?,
-                            birth: protocol::proc_identity::BirthIdentity {
-                                start_sec: row.get(1)?,
-                                start_usec: row.get(2)?,
-                            },
-                        },
-                        BootIdentity {
-                            boot_sec: row.get(3)?,
-                            boot_usec: row.get(4)?,
-                        },
-                    ))
-                },
-            )
-            .optional()?)
-    }
-
-    /// The left group `old` of the run `session_uid` is stopped: forgotten, while it is still the one recorded.
-    pub fn clear_left_group(&self, session_uid: &str, old: &ProcessIdentity) -> Result<()> {
-        self.write().execute(
-            "UPDATE run_hosts SET left_pid = NULL, left_start_sec = NULL, left_start_usec = NULL,
-                                  left_boot_sec = NULL, left_boot_usec = NULL
-              WHERE session_uid = ?1 AND left_pid = ?2 AND left_start_sec = ?3 AND left_start_usec = ?4",
-            params![
-                session_uid,
-                old.pid,
-                old.birth.start_sec,
-                old.birth.start_usec
-            ],
         )?;
         Ok(())
     }
@@ -3615,8 +3540,7 @@ impl Store {
                                     WHERE b.session_uid = a.session_uid
                                       AND b.lifecycle NOT IN (?1, ?2))
                     AND NOT EXISTS(SELECT 1 FROM run_hosts AS h
-                                    WHERE h.session_uid = a.session_uid
-                                      AND (h.switching IS NOT NULL OR h.left_pid IS NOT NULL))
+                                    WHERE h.session_uid = a.session_uid AND h.switching IS NOT NULL)
                   ORDER BY created_at ASC, session_uid ASC",
             )?;
             let ended = params![
@@ -6609,13 +6533,7 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             screen_only     TEXT,
             account_id      TEXT,
             switching       INTEGER,
-            launch_account  TEXT,
-            -- The process group a move left running beside the run (its old host's, which led it), until stopped.
-            left_pid        INTEGER,
-            left_start_sec  INTEGER,
-            left_start_usec INTEGER,
-            left_boot_sec   INTEGER,
-            left_boot_usec  INTEGER
+            launch_account  TEXT
         );
 
         -- An agent's accounts on this computer: each a folder of ccd's own,
@@ -6839,11 +6757,6 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     ("run_hosts", "account_id", "TEXT"),
     ("run_hosts", "switching", "INTEGER"),
     ("run_hosts", "launch_account", "TEXT"),
-    ("run_hosts", "left_pid", "INTEGER"),
-    ("run_hosts", "left_start_sec", "INTEGER"),
-    ("run_hosts", "left_start_usec", "INTEGER"),
-    ("run_hosts", "left_boot_sec", "INTEGER"),
-    ("run_hosts", "left_boot_usec", "INTEGER"),
 ];
 
 /// Repair push tuples a rollback or a pre-tuple build could have left incoherent.

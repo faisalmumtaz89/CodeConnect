@@ -3568,9 +3568,11 @@ impl Daemon {
         // A Codex run that is not live keeps its menu only to name its model by.
         let mut codex_ended: Vec<(String, protocol::event::RunMenus)> = Vec::new();
         for row in &rows {
-            // A run its switch is moving offers them throughout: its next process takes a change.
+            // A run its switch is moving offers them while a message moves it (its move gate held): its next process
+            // takes a change. Ended by its switch with nothing moving it, it offers none, as an ended run.
             let live = row.lifecycle == Lifecycle::Live
-                || switching.get(&row.session_uid) == Some(&crate::store::Store::SWITCH_MOVED);
+                || switching.get(&row.session_uid) == Some(&crate::store::Store::SWITCH_MOVED)
+                    && self.move_gate(&row.session_uid).await.try_lock().is_err();
             let Some(models) = self.db.hosted_models(row.session_uid.clone()).await? else {
                 continue;
             };
@@ -3815,7 +3817,9 @@ impl Daemon {
                 return refuse("This computer could not read its sessions.");
             }
         };
-        let _moving = self.move_guard(&row.session_uid).await;
+        // Delivered under the run's move gate, marked or not: a choice and a message that come meanwhile move nothing
+        // until it is answered.
+        let _moving = self.move_gate(&row.session_uid).await.lock_owned().await;
         if row.agent == protocol::agent::AgentKind::Codex {
             let commands = match self.inner.lock().await.host_links.get(&row.session_uid) {
                 Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
@@ -3965,7 +3969,8 @@ impl Daemon {
     /// recorded app-server's group gets the ladder under its warrant, each in a task of its
     /// own: a start is never sent again. A run `stopping` whose recorded app-server is alive
     /// has its escalation started again ([`crate::claude_host::escalate_stop`]), as a Claude
-    /// run's is. Then every `live` Codex run whose recorded app-server is alive is connected
+    /// run's is. A `live` run its switch was ending has its app-server stopped, so its end is the switch's. Then
+    /// every other `live` Codex run whose recorded app-server is alive is connected
     /// again ([`crate::codex_host::reconnect`]), each in a task of its own, with `launcher`
     /// as the `codeconnect` its thread config names; one whose app-server is gone is the
     /// liveness watch's.
@@ -4012,13 +4017,28 @@ impl Daemon {
             }
             Err(err) => crate::log_error!("could not read the Codex runs stopping: {err:#}"),
         }
-        let live = match self.db.codex_live_runs().await {
+        let mut live = match self.db.codex_live_runs().await {
             Ok(live) => live,
             Err(err) => {
                 crate::log_error!("could not read the live Codex runs to connect again: {err:#}");
                 return;
             }
         };
+        // A run its switch was ending has its app-server's stop finished, not its link again: its end is the switch's.
+        let mut moving = Vec::new();
+        for run in &live {
+            if let Ok(Some(crate::store::Store::SWITCH_MOVED)) =
+                self.db.switch_state(run.session_uid.clone()).await
+            {
+                moving.push(run.session_uid.clone());
+                if let Some(watch) = run.host.clone() {
+                    tokio::spawn(async move {
+                        crate::codex_host::stop(&watch.session_uid, watch.host, watch.boot).await;
+                    });
+                }
+            }
+        }
+        live.retain(|run| !moving.contains(&run.session_uid));
         if live.is_empty() {
             return;
         }
@@ -4879,14 +4899,9 @@ impl Daemon {
             }
         }
         let uid = session_uid.to_string();
-        // What a move left running beside the run goes with it.
-        let left = self.db.left_group(uid.clone()).await.ok().flatten();
         let outcome = self.db.delete_exited_session(uid).await?;
         Ok(match outcome {
             crate::store::DeleteOutcome::Deleted { events } => {
-                if let Some((old, boot)) = left {
-                    tokio::spawn(crate::claude_host::stop_group(old, boot));
-                }
                 crate::log_info!("deleted session {session_uid} and {events} event(s) on request");
                 // Nothing left to ring about, and stale latches must not leak
                 // onto a future run.

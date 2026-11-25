@@ -13,12 +13,11 @@
 //! when a message comes only loses its mark, so choosing again, or choosing back, is never a lock.
 //!
 //! The decision and the send are one step under the run's move gate ([`crate::state::Daemon::move_gate`]): a
-//! second message, a mail wake, a settings change or a Stop waits for it. A Claude run moves once its old host is
-//! gone: what that host's group still holds (a job, server or watcher claude left running in an earlier turn) runs
-//! on, kept with the run until End run or a delete stops it, and the run does not move again while it runs. Accepted misses: a message queued inside Codex itself
-//! (`codex queue`) does not survive the app-server's end; a Codex command or helper left running in the background
-//! in an earlier turn is stopped when its session moves; and a Claude background job started before a move finishes
-//! on its own, but its notice reaches no one.
+//! second message, a mail wake, a settings change or a Stop waits for it. Work claude runs in the background holds
+//! the move for as long as its process runs (ccd files when it starts, never when it ends). Accepted misses: a
+//! message queued inside Codex itself (`codex queue`) does not survive the app-server's end; and a process a session
+//! started outside its agent's own tracking (a Claude `cmd &`, a Codex background command from an earlier turn) ends
+//! when the session moves.
 
 use std::sync::Arc;
 
@@ -38,8 +37,7 @@ pub(crate) fn switched_reason(label: &str) -> String {
 /// What the person's message `request_id` to the run `uid`, read live under its move gate, does with a switch: `false`, it is
 /// sent as any message is; `true`, its process is being ended by its switch ([`Store::SWITCH_MOVED`]) and the
 /// message relaunches it once it has ([`ended_for_move`]). A run due to move moves only when certainly quiet
-/// ([`crate::store::Store::certainly_quiet`], a card, `turn_running`, a Codex link's own word on its turn, and nothing
-/// an earlier move left running beside it, [`left_running`]); a
+/// ([`crate::store::Store::certainly_quiet`], a card, and `turn_running`, a Codex link's own word on its turn); a
 /// run on the active account already loses its mark and is not moved. A run already moving goes on moving.
 pub(crate) async fn moves(
     daemon: &Arc<Daemon>,
@@ -78,7 +76,6 @@ pub(crate) async fn moves(
             .await
             .unwrap_or(false)
         || daemon.has_pending_card(uid).await
-        || left_running(daemon, uid).await
     {
         return false;
     }
@@ -90,21 +87,6 @@ pub(crate) async fn moves(
         return false;
     }
     true
-}
-
-/// Whether what an earlier move left running beside the run `uid` still runs: its recorded group warranted as its own
-/// and holding members, as [`crate::claude_host::stop_left_group`] reads it. A run moves again only once it is gone, so
-/// no run leaves two; any doubt waits.
-async fn left_running(daemon: &Daemon, uid: &str) -> bool {
-    match daemon.db.left_group(uid.to_string()).await {
-        Ok(Some((old, boot))) => {
-            protocol::proc_identity::group_warrant(&old, boot)
-                == protocol::proc_identity::GroupWarrant::Warranted
-                && protocol::proc_identity::group_has_members(old.pid)
-        }
-        Ok(None) => false,
-        Err(_) => true,
-    }
 }
 
 /// The run `uid`, live on the account it records: due to move when that is not its agent's active account (a choice
@@ -133,20 +115,29 @@ pub(crate) async fn settle(daemon: &Daemon, uid: &str, doubt: bool) {
 const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Whether the run `uid`, its process stopped by its switch, has ended by `deadline`: its row `exited` and its
-/// recorded host or app-server gone, by its birth. What else its group holds runs on, kept with the run by the
-/// relaunch ([`crate::claude_host::stop_left_group`]).
+/// recorded host or app-server gone with no member left in its group, as a message's relaunch requires. What its
+/// group still holds once that host is gone (a process started outside the agent's own tracking) is stopped as a dead
+/// host's group is ([`crate::claude_host::stop_group`]), once.
 pub(crate) async fn ended_for_move(
     daemon: &Daemon,
     uid: &str,
     deadline: tokio::time::Instant,
 ) -> bool {
+    let mut laddered = false;
     loop {
         if let Ok(Some(watch)) = daemon.db.watched_host(uid.to_string()).await {
             if watch.lifecycle == protocol::event::Lifecycle::Exited
                 && protocol::proc_identity::liveness(&watch.host)
                     == protocol::proc_identity::Liveness::Gone
             {
-                return true;
+                if !protocol::proc_identity::group_has_members(watch.host.pid) {
+                    return true;
+                }
+                if let (false, Some(boot)) = (laddered, watch.boot) {
+                    laddered = true;
+                    crate::claude_host::stop_group(watch.host, boot).await;
+                    continue;
+                }
             }
         }
         if tokio::time::Instant::now() >= deadline {

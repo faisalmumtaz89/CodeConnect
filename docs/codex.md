@@ -14,8 +14,9 @@ send it a message, if nothing is running in it: its app server is ended, and you
 again on the same thread with the new sign-in. If something is running (a turn, a command or subagent it
 started in its last turn, a message of yours it hasn't answered), that message goes on the old account and
 the session moves at the next one. Its menus and settings stay as they are throughout. A message
-queued in Codex itself (`codex queue`) is not kept across a move, and a Codex background process
-started in an earlier turn, still alive at the first send after a switch, is ended by the move. When the new account's
+queued in Codex itself (`codex queue`) is not kept across a move, and a process a session started
+outside Codex's own tracking (a background command from an earlier turn) ends when the session moves
+accounts. When the new account's
 plan doesn't offer the model the session was on, it carries on with that plan's default model, one
 line in the conversation says so, and its model menu offers that plan's models.
 

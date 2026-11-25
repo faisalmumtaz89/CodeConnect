@@ -1315,7 +1315,10 @@ public final class AppModel {
             target: target,
             waiting: moving.count { $0.switching == .waiting },
             moved: moving.count { $0.switching == .moved },
-            failed: moving.filter { $0.switching == .failed }.map(\.projectLabel))
+            // A failed move is said only while its row reads ended and relaunchable: once a retry starts it, the
+            // listing may still carry the mark for an instant, and nothing has failed any more.
+            failed: moving.filter { $0.switching == .failed && $0.lifecycle == .exited && $0.relaunchesOnMessage }
+                .map(\.projectLabel))
     }
 
     /// Adds an account for `agent` and starts its sign-in in the browser at once; no name is asked of the person (an

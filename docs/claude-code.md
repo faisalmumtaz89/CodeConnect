@@ -21,9 +21,9 @@ Choosing another account stops nothing, and new sessions use it at once. An open
 it when you next send it a message, if nothing is running in it: it is stopped, and your message
 resumes the same conversation on the new account. If something is running (a turn, a command or
 task it started in its last turn, a message of yours it hasn't answered), that message goes on the
-old account and the session moves at the next one. Its menus and settings stay as they are. A
-background job started before a move finishes on its own, but its notice reaches no one; End run
-stops it.
+old account and the session moves at the next one, and work Claude Code runs in the background holds
+the move until the session's process ends. Its menus and settings stay as they are. A process a
+session started outside Claude Code's own tracking (a `cmd &`) ends when the session moves accounts.
 
 For each Claude Code account, and the Default, the Accounts page shows the email and plan it is
 signed in as (from `claude auth status`) and its plan's five-hour and seven-day usage, or that
