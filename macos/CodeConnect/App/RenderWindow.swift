@@ -81,13 +81,13 @@
         static var browsed: String? { UserDefaults.standard.string(forKey: "CC_BROWSE") }
         static var browsesHidden: Bool { UserDefaults.standard.bool(forKey: "CC_BROWSE_HIDDEN") }
         static var browseUnasked: Bool { UserDefaults.standard.bool(forKey: "CC_BROWSE_UNASKED") }
-        /// An account in `-CC_ACCOUNTS_WIRE`'s listing is signing in: its row's spinner turns.
+        /// An account, or an agent's own sign-in, in `-CC_ACCOUNTS_WIRE`'s listing is signing in: its row's spinner turns.
         static var accountSigningIn: Bool {
             let arguments = ProcessInfo.processInfo.arguments
             guard let flag = arguments.firstIndex(of: "-CC_ACCOUNTS_WIRE"), flag + 1 < arguments.count,
                 case .accounts(_, let book)? = try? JSONDecoder().decode(ServerMessage.self, from: Data(arguments[flag + 1].utf8))
             else { return false }
-            return book.accounts.contains(where: \.signingIn)
+            return book.accounts.contains(where: \.signingIn) || book.agentSignIns.contains(where: \.signingIn)
         }
         static var newFolderName: String? { UserDefaults.standard.string(forKey: "CC_NEW_FOLDER") }
         /// `-CC_BRANCH_PLACE <branch>`: the start form's place, the repository's worktree on that branch.

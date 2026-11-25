@@ -472,7 +472,7 @@ private struct AgentSignInGroup: View {
                         signedOut: signIn?.signedOut ?? false, signingIn: signIn?.signingIn ?? false,
                         note: signIn?.line(plan: book?.defaultFacts(for: agent)?.plan), columns: [], inUse: true,
                         choose: {}, acts: model.signsAgentsIn ? signIn?.acts ?? [] : [], remove: {},
-                        signOut: { signingOut = true })
+                        signOut: { signingOut = true }, reportsUsage: false)
                 } else {
                     Text("Asking this Mac…").font(Theme.ui(13)).foregroundStyle(Theme.text3)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 9)
@@ -633,6 +633,9 @@ private struct AccountRow: View {
     let remove: () -> Void
     /// Sign Out… of an agent's own sign-in: asks first, by its group's card.
     var signOut: () -> Void = {}
+    /// Its agent reports usage of its plan: a row whose agent reports none (Antigravity) shows no figures, not a "Not
+    /// reported yet" that would never change.
+    var reportsUsage = true
     @Environment(RowMenu.self) private var menu
     @State private var hovered = false
     @State private var moreFrame: CGRect = .zero
@@ -730,7 +733,9 @@ private struct AccountRow: View {
     /// empty cell where it names no such window. Or, in their place, "No plan limits" where its agent says none apply
     /// (`limitsAvailable` false), else "Not reported yet".
     @ViewBuilder private var figures: some View {
-        if let facts, !ReplyBar.limits(facts, now: .now).isEmpty {
+        if !reportsUsage {
+            EmptyView()
+        } else if let facts, !ReplyBar.limits(facts, now: .now).isEmpty {
             // Redrawn each minute while shown; each countdown is from the time of that drawing, since the schedule's own
             // date is the minute's start, up to 59 s earlier. The figures are the reply bar's (`ReplyBar.limits`).
             TimelineView(.everyMinute) { _ in
