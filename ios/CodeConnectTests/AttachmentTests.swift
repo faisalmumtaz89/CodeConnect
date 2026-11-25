@@ -259,6 +259,91 @@ final class AttachmentTests: XCTestCase {
             "b8d12f3b8e9ba8b7e74aaa1e659a5d3f22932372df995d66b31e8ece194457f0")
     }
 
+    // MARK: The start box
+
+    private func startModel() -> (AppModel, Wire, StartProject) {
+        let model = AppModel(cache: EventCache())
+        model.connection.simulateConnectedForTesting()
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(
+                canApproveReliably: true, sendText: true,
+                extra: ["uploads": .bool(true), "start_session": .bool(true)]),
+            minor: 50)
+        let wire = Wire()
+        model.connection.sendStub = { [weak model] message in
+            wire.frames.append(message)
+            switch message {
+            case .putFile(_, let id, _, let size, let offset, let data):
+                let result: PutFileResult =
+                    wire.refuse.map { .refused($0) } ?? .received(min(size, offset + (Data(base64Encoded: data)?.count ?? 0)))
+                model?.connection.injectForTesting(.putFileResult(uploadID: id, result: result))
+            case .startSession(let requestID, _, _, _, _, _, _, let ids):
+                // The first start is refused, as ccd refuses one naming uploads it cannot take; the next starts.
+                let first = wire.frames.filter { if case .startSession = $0 { true } else { false } }.count == 1
+                model?.connection.injectForTesting(
+                    .startSessionResult(
+                        requestID: requestID,
+                        outcome: first
+                            ? .failed(.launchFailed, detail: "\(ids.first ?? "") is not a finished upload this start may attach")
+                            : .started(sessionUID: "u-new")))
+            default:
+                break
+            }
+        }
+        let project = StartProject(
+            path: "/work", name: "work", lastUsed: Date(), lastAgent: .claude, gitBranch: "main", exists: true)
+        return (model, wire, project)
+    }
+
+    private func outcome(_ model: AppModel, _ id: String) async -> StartOutcome? {
+        for _ in 0..<500 {
+            if let outcome = model.starter.starts[id]?.outcome { return outcome }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return nil
+    }
+
+    private func startedIDs(_ wire: Wire) -> [[String]] {
+        wire.frames.compactMap { if case .startSession(_, _, _, _, _, _, _, let ids) = $0 { ids } else { nil } }
+    }
+
+    /// The start box's files go with the start, for no session; a start the computer refused has spent them, so Start
+    /// again sends the same bytes under new ids, and that start goes.
+    func testARefusedStartSendsItsFilesAgainUnderNewIDs() async throws {
+        let (model, wire, project) = startModel()
+        let draft = StartDraft()
+        draft.attach(name: "notes.md", size: 5) { Data("hello".utf8) }
+
+        let first = model.startSession(project, agent: .claude, prompt: "read this", files: draft.files)
+        guard case .failed = await outcome(model, first) else { return XCTFail("the first start is refused") }
+        let second = model.startSession(project, agent: .claude, prompt: "read this", files: draft.files)
+        guard case .started = await outcome(model, second) else { return XCTFail("Start again starts") }
+
+        let ids = startedIDs(wire)
+        XCTAssertEqual(ids.count, 2)
+        XCTAssertEqual(ids.map(\.count), [1, 1])
+        XCTAssertTrue(Set(ids[0]).isDisjoint(with: ids[1]), "the second start's files are new uploads: \(ids)")
+        XCTAssertFalse(ids.flatMap { $0 }.contains(draft.files[0].id), "a draft's tile id is never an upload's")
+        for frame in wire.frames {
+            if case .putFile(let session, _, _, _, _, _) = frame { XCTAssertNil(session, "a start's file names no run") }
+        }
+        XCTAssertEqual(draft.files.count, 1, "the start box keeps its tiles")
+    }
+
+    /// A file that does not arrive fails the start with why, and no start leaves.
+    func testAStartWhoseFileDidNotArriveIsNotSent() async throws {
+        let (model, wire, project) = startModel()
+        wire.refuse = "No room left."
+        let draft = StartDraft()
+        draft.attach(name: "notes.md", size: 5) { Data("hello".utf8) }
+        let id = model.startSession(project, agent: .claude, prompt: "", files: draft.files)
+        guard case .failed(.launchFailed, let detail) = await outcome(model, id) else {
+            return XCTFail("\(String(describing: model.starter.starts[id]?.outcome))")
+        }
+        XCTAssertEqual(detail, "notes.md didn’t reach the computer: No room left.")
+        XCTAssertTrue(startedIDs(wire).isEmpty, "no start_session may leave")
+    }
+
     // MARK: A sent message's files
 
     func testASentMessagesFilesAreReadBackFromItsText() {

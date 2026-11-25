@@ -705,6 +705,7 @@ where
                     }
                     let daemon = daemon.clone();
                     let replies = replies_tx.clone();
+                    let connection = connection.id;
                     tokio::spawn(async move {
                         match parsed {
                             ClientMessage::ListProjects => {
@@ -712,7 +713,7 @@ where
                             }
                             parsed => {
                                 let _ = replies
-                                    .send(crate::start_session::answer(&daemon, parsed).await);
+                                    .send(crate::start_session::answer(&daemon, connection, parsed).await);
                             }
                         }
                     });
@@ -1447,26 +1448,29 @@ where
             offset,
             data,
         } => {
-            let result = if device_id.is_none() {
-                protocol::ws::PutFileResult::Refused {
-                    reason: "only a paired device may send files".into(),
-                }
-            } else {
-                match daemon.resolve(&session_id).await {
-                    Ok(row) => put_file(
-                        daemon,
-                        connection,
-                        &row.session_uid,
-                        &upload_id,
-                        &name,
-                        size,
-                        offset,
-                        &data,
-                    ),
-                    Err(err) => protocol::ws::PutFileResult::Refused {
-                        reason: format!("{err}"),
-                    },
-                }
+            // A file for a run names its session; one for a start names none, and is held
+            // pending, this connection's alone, until a start takes it.
+            let session_uid = match (device_id, session_id) {
+                (None, _) => Err("only a paired device may send files".to_string()),
+                (Some(_), None) => Ok(crate::uploads::PENDING.to_string()),
+                (Some(_), Some(session_id)) => daemon
+                    .resolve(&session_id)
+                    .await
+                    .map(|row| row.session_uid)
+                    .map_err(|err| format!("{err}")),
+            };
+            let result = match session_uid {
+                Ok(session_uid) => put_file(
+                    daemon,
+                    connection,
+                    &session_uid,
+                    &upload_id,
+                    &name,
+                    size,
+                    offset,
+                    &data,
+                ),
+                Err(reason) => protocol::ws::PutFileResult::Refused { reason },
             };
             send(sink, &ServerMessage::PutFileResult { upload_id, result }).await?;
         }
@@ -5929,6 +5933,7 @@ mod tests {
                 worktree: None,
                 model: None,
                 trust: None,
+                attachments: Vec::new(),
             })
             .unwrap(),
             "start_session_unlisted_started": reply(protocol::ws::StartSessionResult::Started {
@@ -6076,6 +6081,7 @@ mod tests {
                 worktree: Some(worktree),
                 model: None,
                 trust: None,
+                attachments: Vec::new(),
             })
             .unwrap()
         };
@@ -6251,6 +6257,7 @@ mod tests {
                 worktree: None,
                 model: None,
                 trust: None,
+                attachments: Vec::new(),
             })
             .unwrap(),
             "projects": projects,
@@ -6711,6 +6718,7 @@ mod tests {
                     worktree: None,
                     model: None,
                     trust: None,
+                    attachments: Vec::new(),
                 })
                 .unwrap(),
             )
@@ -7138,6 +7146,54 @@ mod tests {
         );
         crate::switch::window::keep(&frames, "accounts-answer-then-push-wire.json");
         let _ = std::fs::remove_dir_all(&agents);
+    }
+
+    /// **A file sent from the start box is held pending, for a paired device only, until its
+    /// connection closes** (minor 50): a `put_file` naming no session lands under `.pending`,
+    /// the bootstrap token is refused, and closing the phone's connection removes what no start
+    /// took.
+    #[tokio::test]
+    async fn a_start_box_file_is_held_pending_until_its_connection_closes() {
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let chunk = |id: &str| {
+            Message::Text(
+                serde_json::json!({"type": "put_file", "upload_id": id, "name": "a.txt",
+                                   "size": 1, "offset": 0, "data": "YQ=="})
+                .to_string(),
+            )
+        };
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(ack["capabilities"]["uploads"], false, "{ack}");
+        bootstrap.send(chunk("pend-b")).await.unwrap();
+        let reply = next_json(&mut bootstrap).await.unwrap();
+        assert_eq!(reply["result"]["status"], "refused", "{reply}");
+
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["uploads"], true, "{ack}");
+        phone.send(chunk("pend-p")).await.unwrap();
+        let reply = next_json(&mut phone).await.unwrap();
+        assert_eq!(
+            reply["result"],
+            serde_json::json!({"status": "received", "received": 1}),
+            "{reply}"
+        );
+        let file = crate::uploads::root()
+            .join(crate::uploads::PENDING)
+            .join("pend-p")
+            .join("a.txt");
+        assert_eq!(std::fs::read(&file).unwrap(), b"a");
+        drop(phone);
+        let mut gone = false;
+        for _ in 0..100 {
+            if !file.exists() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(gone, "the closed connection's pending file was removed");
     }
 
     /// **Accounts are kept and chosen by a paired device only** (minor 48): advertised to it and not to the bootstrap

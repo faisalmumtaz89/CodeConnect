@@ -3,61 +3,70 @@ import CodeConnectKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The box's paperclip, first in its bar, on a run whose computer takes files: it opens the Mac's file panel, and each
-/// file chosen goes to the computer at once (Kit's `attach`).
+/// The box's paperclip, first in its bar, where the computer takes files: it opens the Mac's file panel, and each file
+/// chosen goes to `take`.
 struct AttachButton: View {
-    let model: AppModel
-    let key: String
+    let id: String
+    let take: FileIntake.Take
 
     var body: some View {
-        Button { FileIntake.choose(model: model, key: key) } label: {
+        Button { FileIntake.choose(take) } label: {
             Image(systemName: "paperclip")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(Theme.text2)
                 .inputBoxChip(open: false)
         }
-        .buttonStyle(.hover(radius: 8, id: "session.composer.attach"))
+        .buttonStyle(.hover(radius: 8, id: id))
         .help("Attach files")
         .accessibilityLabel("Attach files")
-        .accessibilityIdentifier("session.composer.attach")
+        .accessibilityIdentifier(id)
     }
 }
 
-/// How files reach a run's tray: the file panel, a drop on the box, and a picture pasted into it.
+/// How files reach a tray: the file panel, a drop on the box, and a picture pasted into it. Each file goes to `take` by
+/// its name and size, and is read only if `take` keeps it (Kit's limits).
 @MainActor
 enum FileIntake {
-    static func choose(model: AppModel, key: String) {
+    typealias Take = (_ name: String, _ size: Int, _ read: () throws -> Data) -> Void
+
+    static func choose(_ take: Take) {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         guard panel.runModal() == .OK else { return }
-        add(panel.urls, model: model, key: key)
+        add(panel.urls, take)
     }
 
-    /// Files by their URLs, each checked by its size before it is read.
-    static func add(_ urls: [URL], model: AppModel, key: String) {
+    static func add(_ urls: [URL], _ take: Take) {
         for url in urls {
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            model.attach(name: url.lastPathComponent, size: size, to: key) { try Data(contentsOf: url) }
+            take(url.lastPathComponent, size) { try Data(contentsOf: url) }
         }
     }
 
     /// What a drop on the box carries: files by their URLs, or a picture with none.
-    static func drop(_ providers: [NSItemProvider], model: AppModel, key: String) -> Bool {
+    static func drop(_ providers: [NSItemProvider], _ take: @escaping Take) -> Bool {
         var taken = false
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 taken = true
-                _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                    guard let url else { return }
-                    Task { @MainActor in add([url], model: model, key: key) }
+                Task {
+                    // The provider answers on a queue of its own; only what it read crosses back.
+                    let url: URL? = await withCheckedContinuation { answer in
+                        _ = provider.loadObject(ofClass: URL.self) { url, _ in answer.resume(returning: url) }
+                    }
+                    if let url { add([url], take) }
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                 taken = true
-                provider.loadDataRepresentation(forTypeIdentifier: UTType.png.identifier) { data, _ in
-                    guard let data else { return }
-                    Task { @MainActor in model.attach(data: data, name: "image.png", to: key) }
+                Task {
+                    let data: Data? = await withCheckedContinuation { answer in
+                        _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.png.identifier) { data, _ in
+                            answer.resume(returning: data)
+                        }
+                    }
+                    if let data { take("image.png", data.count) { data } }
                 }
             }
         }
@@ -66,20 +75,31 @@ enum FileIntake {
 
     /// ⌘V with a picture, or files, on the pasteboard and no words: they go to the tray, and the paste is taken.
     /// Words paste into the field as ever.
-    static func paste(model: AppModel, key: String) -> Bool {
+    static func paste(_ take: Take) -> Bool {
         let board = NSPasteboard.general
         if board.string(forType: .string) != nil { return false }
         if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
             !urls.isEmpty
         {
-            add(urls, model: model, key: key)
+            add(urls, take)
             return true
         }
         guard let image = NSImage(pasteboard: board), let tiff = image.tiffRepresentation,
             let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
         else { return false }
-        model.attach(data: png, name: "image.png", to: key)
+        take("image.png", png.count) { png }
         return true
+    }
+}
+
+extension View {
+    /// The box takes files dropped on it, and a picture or files pasted into it, while `on`.
+    func takesFiles(_ on: Bool, _ take: @escaping FileIntake.Take) -> some View {
+        onDrop(of: [.fileURL, .image], isTargeted: nil) { providers in on && FileIntake.drop(providers, take) }
+            .onKeyPress(keys: ["v"], phases: .down) { press in
+                guard press.modifiers == .command, on, FileIntake.paste(take) else { return .ignored }
+                return .handled
+            }
     }
 }
 
@@ -87,17 +107,17 @@ enum FileIntake {
 /// file as a tile of its icon, whole name and size, each with its ×. One on its way shows how far it has got in its
 /// icon's place; one that failed offers Retry there. Under them, in one line, why they hold the message back.
 struct FileTray: View {
-    let model: AppModel
-    let key: String
+    let files: [Attachment]
+    let reason: String?
+    let remove: (String) -> Void
+    let retry: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ScrollView(.horizontal) {
                 HStack(spacing: 10) {
-                    ForEach(model.files(for: key)) { file in
-                        FileTile(file: file) { model.removeFile(file.id, from: key) } retry: {
-                            model.retryFile(file.id, in: key)
-                        }
+                    ForEach(files) { file in
+                        FileTile(file: file) { remove(file.id) } retry: { retry(file.id) }
                     }
                 }
                 // Room for each tile's ×, which stands half outside it.
@@ -105,7 +125,7 @@ struct FileTray: View {
                 .padding(.trailing, 6)
             }
             .scrollIndicators(.never)
-            if let reason = model.filesBlockedReason(for: key) {
+            if let reason {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.amber).accessibilityHidden(true)
                     Text(reason).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.middle)

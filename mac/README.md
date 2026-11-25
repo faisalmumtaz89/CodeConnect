@@ -1341,8 +1341,13 @@ only when there are any. The message claims them before it is sent, and the agen
 absolute path on a line after `Attached:`, after the typed words (whose 8 KiB bound is unchanged);
 files alone are the whole message. A Claude run is started and resumed with its own uploads folder
 as an additional directory, so claude reads them without a card; a Codex run reads them as any path.
-An upload no message attached is removed when its connection closes, and a run's folder goes with
-the run (`delete_session`, `prune`).
+A file sent from the start box names no `session_id`: it is held under
+`uploads/.pending/<upload_id>/`, its connection's alone, and `start_session`'s `attachments` (at
+most ten) move it by rename into the new run's folder once the run is named, before its first
+message is written; that message carries the same path lines, and a start that cannot take one of
+them takes none and starts nothing. The start has no payload hash: its `request_id` alone makes it
+idempotent. An upload nothing attached is removed when its connection closes or ccd starts again,
+and a run's folder goes with the run (`delete_session`, `prune`).
 
 ## How it fits together
 
