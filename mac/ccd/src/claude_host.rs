@@ -3969,7 +3969,7 @@ mod tests {
         assert_eq!(cursor(&rig, &played.uid), 2);
         let event = broadcast.try_recv().unwrap();
         assert_eq!(
-            (event.kind, event.payload["link"].as_str()),
+            (event.kind.clone(), event.payload["link"].as_str()),
             (EventKind::LinkState, Some("detached"))
         );
         assert!(broadcast.try_recv().is_err());

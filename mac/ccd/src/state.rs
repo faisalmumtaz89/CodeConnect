@@ -53,7 +53,7 @@ use protocol::config::Config;
 
 /// Broadcast ring size. A subscriber that falls this far behind gets an
 /// explicit `Resync` rather than a silent gap.
-const BROADCAST_CAPACITY: usize = 1024;
+const BROADCAST_CAPACITY: usize = 256;
 
 /// Revocation ring size. Tiny on purpose: a human revoking devices produces a
 /// handful of messages in a lifetime, and a connection that somehow lags off
@@ -107,7 +107,7 @@ pub struct Daemon {
     pub store: Arc<Store>,
     /// The async handle to the same store. See [`crate::db`].
     pub db: Db,
-    pub events_tx: broadcast::Sender<Event>,
+    pub events_tx: broadcast::Sender<Arc<Event>>,
     /// Device ids whose access has just been withdrawn.
     ///
     /// Revocation used to reach an open socket only when that socket next did
@@ -934,6 +934,15 @@ impl Daemon {
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
     }
 
+    /// Fan out an already-committed event to live WebSocket subscribers.
+    /// Skips cloning and ring insertion when no client is listening; a subscriber
+    /// that joins later replays from SQLite.
+    fn broadcast_event(&self, event: &Event) {
+        if self.events_tx.receiver_count() > 0 {
+            let _ = self.events_tx.send(Arc::new(event.clone()));
+        }
+    }
+
     /// Persist a fact and fan it out. Returns `None` if it was a duplicate.
     pub async fn ingest(&self, pending: PendingEvent) -> Result<Option<Event>> {
         let mut pending = pending;
@@ -943,12 +952,12 @@ impl Daemon {
         let gate = self.publish_gate(&session_uid).await;
         let event = {
             let _ordered = gate.lock().await;
-            let event = self.db.append_event(pending.clone()).await?;
+            let event = self.db.append_event(pending).await?;
             if let Some(event) = &event {
                 // Published inside the gate, so no later seq can overtake this
                 // one on the way to a socket. A send error only means nobody is
                 // subscribed; the log already has it.
-                let _ = self.events_tx.send(event.clone());
+                self.broadcast_event(event);
             }
             event
         };
@@ -988,7 +997,7 @@ impl Daemon {
                 return Ok(None);
             };
             for event in &events {
-                let _ = self.events_tx.send(event.clone());
+                self.broadcast_event(event);
             }
             events
         };
@@ -1557,7 +1566,7 @@ impl Daemon {
                 event: Some(event), ..
             }) = &raised
             {
-                let _ = self.events_tx.send(event.clone());
+                self.broadcast_event(event);
             }
             let (registered, raise) = (take_back.armed, take_back.raise);
             if matches!(&raised, Ok(raise) if raise.is_open()) {
@@ -1754,7 +1763,7 @@ impl Daemon {
                 )
                 .await;
             if let Ok(Some(event)) = &retired {
-                let _ = self.events_tx.send(event.clone());
+                self.broadcast_event(event);
             }
             retired
         };
@@ -3356,7 +3365,7 @@ impl Daemon {
                 return Ok(false);
             };
             for event in &events {
-                let _ = self.events_tx.send(event.clone());
+                self.broadcast_event(event);
             }
             events
         };
@@ -4050,7 +4059,7 @@ impl Daemon {
                 return Ok(false);
             };
             for event in &events {
-                let _ = self.events_tx.send(event.clone());
+                self.broadcast_event(event);
             }
             events
         };
@@ -4085,7 +4094,7 @@ impl Daemon {
                 )
                 .await?;
             for event in &events {
-                let _ = self.events_tx.send(event.clone());
+                self.broadcast_event(event);
             }
             events
         };
@@ -4128,7 +4137,7 @@ impl Daemon {
                 return Ok(false);
             };
             for event in &events {
-                let _ = self.events_tx.send(event.clone());
+                self.broadcast_event(event);
             }
             events
         };
@@ -4188,7 +4197,7 @@ impl Daemon {
                 return Ok(None);
             };
             for event in &events {
-                let _ = self.events_tx.send(event.clone());
+                self.broadcast_event(event);
             }
             events
         };
@@ -4560,7 +4569,7 @@ impl Daemon {
                 return Ok(false);
             };
             for event in &events {
-                let _ = self.events_tx.send(event.clone());
+                self.broadcast_event(event);
             }
             events
         };

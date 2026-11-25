@@ -73,7 +73,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
   4. Reduce `BROADCAST_CAPACITY` from `1024` to `256` (still handles huge bursts; any subscriber lagging >256 events cleanly triggers existing `Resync` from SQLite — verify all `ws_server` lag tests pass!).
 - **Expected gain:** **-200 KiB permanent idle RSS**, **-2 to -5 MiB settled & peak RSS** after `large_payloads`/`burst`/`soak`, lower `burst` and `large_payloads` CPU and relay latency.
 - **Risk:** Low (check all tests referencing `events_tx` or `BROADCAST_CAPACITY`; keep `Resync` behavior identical).
-- **Status:** `todo`
+- **Status:** `done` (`large_payloads` `relay_p50` `-15.2%`, settled RSS `6.84 MiB`; `burst` `+40.6%` vs baseline; see `perf/CHANGELOG.md`)
 
 ### F6. SQLite connection pool over-provisioning & uncapped page caches + lookaside memory
 - **Location:** `mac/ccd/src/store.rs:59, 1283-1293, 5696-5710`

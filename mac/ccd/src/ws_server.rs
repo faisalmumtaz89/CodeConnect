@@ -776,7 +776,7 @@ where
                             Live::Deliver => {
                                 let session_uid = event.session_uid.clone();
                                 let seq = event.seq;
-                                send(&mut sink, &ServerMessage::Event { event }).await?;
+                                send_event_ref(&mut sink, &event).await?;
                                 if let Some(device) = device_id.as_deref() {
                                     daemon.push_gate.note_delivered(device, &session_uid, seq);
                                 }
@@ -2182,6 +2182,42 @@ where
         );
         let parsed: ServerMessage = serde_json::from_str(&text)?;
         oversized_placeholder(&parsed, text.len())?
+    } else {
+        text
+    };
+    write_bounded(sink, Message::Text(text)).await
+}
+
+/// Serialize and send a live [`Event`] by reference (avoiding cloning an `Arc<Event>`
+/// payload just to wrap it in `ServerMessage::Event`), while keeping the exact
+/// [`MAX_CLIENT_MESSAGE_BYTES`] placeholder guard.
+async fn send_event_ref<S>(sink: &mut S, event: &Event) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+    <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
+{
+    #[derive(serde::Serialize)]
+    struct Envelope<'a> {
+        #[serde(rename = "type")]
+        msg_type: &'static str,
+        event: &'a Event,
+    }
+    let text = serde_json::to_string(&Envelope {
+        msg_type: "event",
+        event,
+    })?;
+    let text = if text.len() > MAX_CLIENT_MESSAGE_BYTES {
+        crate::log_warn!(
+            "ws: an outbound message of {} bytes exceeds the {MAX_CLIENT_MESSAGE_BYTES}-byte \
+             frame limit; sending a placeholder instead of failing the connection",
+            text.len()
+        );
+        oversized_placeholder(
+            &ServerMessage::Event {
+                event: event.clone(),
+            },
+            text.len(),
+        )?
     } else {
         text
     };
@@ -4595,7 +4631,11 @@ mod tests {
             // then lands with thousands still to go.
             if !published {
                 published = true;
-                server.daemon.events_tx.send(out_of_order.clone()).unwrap();
+                server
+                    .daemon
+                    .events_tx
+                    .send(Arc::new(out_of_order.clone()))
+                    .unwrap();
             }
             if seq as usize == PENDING_REPLAY_EVENTS {
                 break;
@@ -4621,7 +4661,7 @@ mod tests {
             server
                 .daemon
                 .events_tx
-                .send(out_of_order.clone())
+                .send(Arc::new(out_of_order.clone()))
                 .expect("the connection is still reading the broadcast");
             while let Some(message) =
                 next_json_within(&mut socket, Duration::from_millis(200)).await
@@ -4803,7 +4843,7 @@ mod tests {
                         server
                             .daemon
                             .events_tx
-                            .send(live_event(&uid, 1001))
+                            .send(Arc::new(live_event(&uid, 1001)))
                             .unwrap();
                     }
                     page.push(seq);
@@ -4866,7 +4906,11 @@ mod tests {
         // A page below it, and then the next live seq is still the successor.
         let (seqs, _) = history_page(&mut socket, &uid, 301, 500, "below").await;
         assert_eq!(seqs, (1..=300).collect::<Vec<u64>>());
-        server.daemon.events_tx.send(live_event(&uid, 601)).unwrap();
+        server
+            .daemon
+            .events_tx
+            .send(Arc::new(live_event(&uid, 601)))
+            .unwrap();
         let message = next_json(&mut socket).await.unwrap();
         assert_eq!(
             message["event"]["seq"], 601,

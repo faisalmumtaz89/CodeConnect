@@ -65,3 +65,20 @@ Each entry corresponds to one logical commit on `perf/baseline-and-optimizations
   - `reconnect_churn` CPU / Wakeups/s: `61.34% / 11,248` (F3: `54.37% / 8,110`) -> **`49.37% / 7,390/s`** (**-19.5% / -34.3%** vs baseline)
   - `burst` throughput: `924.7 ev/s` (F3: `1,072.1`) -> **`1,236.7 ev/s`** (**+33.7%** vs baseline)
   - `burst` `relay_p50_ms` / `p95`: `810.5 / 958.0 ms` (F3: `614.4 / 742.4`) -> **`499.5 / 611.3 ms`** (**-38.4% / -36.2%** vs baseline)
+
+---
+
+## F5 — `broadcast::Sender<Arc<Event>>` (capacity 256), `receiver_count() > 0` guard, and zero-clone live delivery
+
+- **Files:** `mac/ccd/src/state.rs`, `mac/ccd/src/ws_server.rs`, `mac/ccd/src/switch.rs`, `mac/ccd/src/claude_host.rs`
+- **Change:**
+  - Changed `Daemon::events_tx` from `broadcast::Sender<Event>` (1024 slots ≈ 246 KiB permanent heap) to `broadcast::Sender<Arc<Event>>` (256 slots ≈ 6 KiB).
+  - Added `Daemon::broadcast_event` gated on `self.events_tx.receiver_count() > 0` so events are neither cloned nor pinned in the ring when no client is listening.
+  - Removed redundant `pending.clone()` in `Daemon::ingest`.
+  - Added `ws_server::send_event_ref` to serialize live `Arc<Event>` by reference without cloning per subscriber.
+- **Before vs After (`x86_64-unknown-linux-musl`, 3 runs median, vs F4 / baseline):**
+  - `large_payloads` `relay_p50_ms` / `p95`: `484.0 / 849.5 ms` -> **`410.5 / 782.1 ms`** (**-15.2% / -7.9%**)
+  - `large_payloads` settled RSS: `7.00 MiB` (baseline `8.84 MiB`) -> **`6.84 MiB`** (**-22.6%** vs baseline)
+  - `large_payloads` Wakeups/s: `3,133/s` -> **`2,744/s`** (**-12.4%**)
+  - `burst` throughput: `1,236.7 ev/s` (baseline `924.7`) -> **`1,299.9 ev/s`** (**+40.6%** vs baseline)
+  - `burst` settled / Peak RSS: `9.53 / 11.61 MiB` -> **`9.26 / 11.37 MiB`**

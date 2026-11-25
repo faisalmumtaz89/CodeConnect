@@ -245,7 +245,10 @@ pub(crate) mod window {
                     .filter(|row| row.session_uid == uid)
                     .collect();
                 frames.push(
-                    serde_json::to_value(protocol::ws::ServerMessage::Event { event }).unwrap(),
+                    serde_json::to_value(protocol::ws::ServerMessage::Event {
+                        event: (*event).clone(),
+                    })
+                    .unwrap(),
                 );
                 frames.push(
                     serde_json::to_value(protocol::ws::ServerMessage::Sessions { sessions })
