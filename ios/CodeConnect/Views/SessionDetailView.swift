@@ -2280,13 +2280,12 @@ private struct SessionComposeBar: View {
         // just-taken outcome (a Stop they tapped) wins over the block. Computed in `composeOutcomeOrBlock`
         // so the precedence has a test; the neutral "observe only" note stays below, as before.
         // The files' own reason is said once, under the tray.
-        if let note = model.composeOutcomeOrBlock(for: key, draft: text, lastSend: result),
-            note.text != model.filesBlockedReason(for: key)
-        {
+        let filesReason = model.filesBlockedReason(for: key)
+        if let note = model.composeOutcomeOrBlock(for: key, draft: text, lastSend: result), note.text != filesReason {
             composeNote(note)
         } else if case .failed(let reason, let needsSettings) = dictation.phase {
             micFailureNote(reason: reason, needsSettings: needsSettings)
-        } else if let note = model.standingNote(for: key, draft: text) {
+        } else if let note = model.standingNote(for: key, draft: text), note.text != filesReason {
             composeNote(note)
         }
     }

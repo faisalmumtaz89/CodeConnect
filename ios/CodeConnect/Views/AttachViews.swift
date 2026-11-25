@@ -25,7 +25,8 @@ struct AttachMenu: View {
             }
             Button { showFiles = true } label: { Label("Choose File", systemImage: "folder") }
         } label: {
-            CCIcon("plus", size: 18, weight: .semibold)
+            // As large as the pill's own circle lets it grow: the field's words start past it.
+            CCIcon("plus", size: 18, weight: .semibold, maxSize: 22)
                 .foregroundStyle(CC.text.secondary)
                 .frame(width: CC.size.controlSm, height: CC.size.controlSm)
                 .ccHitTarget()
@@ -150,7 +151,7 @@ struct AttachmentTray: View {
 
     private func removeButton(_ file: Attachment) -> some View {
         Button { onRemove(file.id) } label: {
-            CCIcon("x", size: 9, weight: .bold)
+            CCIcon("x", size: 9, weight: .bold, maxSize: 11)
                 .foregroundStyle(CC.text.primary)
                 .frame(width: 20, height: 20)
                 .background(CC.color.surfaceOverlay, in: Circle())
