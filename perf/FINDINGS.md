@@ -17,7 +17,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
 - **Proposed fix:** Add a streaming `protocol::hash::sha256_file_hex(path: &Path)` helper using a fixed 64 KiB stack/heap buffer and `Sha256::update`, and call it from `main.rs:114` (and any other whole-file binary hashers).
 - **Expected gain:** **-4.5 to -5.5 MiB Peak RSS** on `cold_idle`, `idle_client`, `concurrent_1/10/50`, and `reconnect_churn` (~40–45% Peak RSS reduction!), lower allocator fragmentation, faster cold start.
 - **Risk:** Very low (identical SHA-256 hex digest; verify with unit test against `sha256_hex`).
-- **Status:** `todo`
+- **Status:** `done` (Peak RSS `-41.2%` idle / `-30.6%` 10-session; see `perf/CHANGELOG.md`)
 
 ### F2. `protocol::proc_identity::read_stat` allocates ~50 `String`s per PID + `codex_host` runs `TOOL_SCAN` synchronously on Tokio worker threads every 1 s per active Codex session
 - **Location:** `mac/protocol/src/proc_identity.rs:254-292, 526-542`; `mac/ccd/src/codex_host.rs:773-777, 986-993`

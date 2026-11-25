@@ -16,6 +16,23 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex_of(sha256_bytes(bytes))
 }
 
+/// Stream a file through SHA-256 in fixed chunks rather than reading it into
+/// heap memory at once (used to fingerprint multi-megabyte executables).
+pub fn sha256_file_hex(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex_of(hasher.finalize().into()))
+}
+
 /// The one hex encoder. Lowercase, fixed width, no separators — the single
 /// spelling every digest in this codebase has, so two equal digests can never
 /// compare unequal as text.
@@ -244,5 +261,22 @@ mod tests {
             send_text_hash("cc-1", "true\nx", true),
             send_text_hash("cc-1\ntrue", "x", true)
         );
+    }
+
+    #[test]
+    fn sha256_file_hex_matches_in_memory_digest() {
+        let dir = std::env::temp_dir().join(format!("cc-hash-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("empty.bin");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(sha256_file_hex(&empty).unwrap(), sha256_hex(b""));
+
+        // Larger than the 64 KiB streaming chunk so multiple reads are exercised.
+        let payload: Vec<u8> = (0..(150 * 1024)).map(|i| (i % 251) as u8).collect();
+        let large = dir.join("large.bin");
+        std::fs::write(&large, &payload).unwrap();
+        assert_eq!(sha256_file_hex(&large).unwrap(), sha256_hex(&payload));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
