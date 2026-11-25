@@ -202,15 +202,15 @@ test('a start that names a model sets it on the session before its prompt; a mod
   });
 }, 15_000);
 
-test('the start\'s outcome carries agy\'s model families, each with its efforts, and its modes; the opening reply follows it', async () => {
+test('the start\'s outcome carries agy\'s model families, each with its efforts from the lowest up, and its modes; the opening reply follows it', async () => {
   const { ccd, outcome } = await run();
   expect(outcome).toMatchObject({ status: 'done' });
   expect(outcome.initialize).toStrictEqual({
     commands: [],
     account: {},
     models: [
-      { value: 'gemini-4-neon', displayName: 'Gemini 4 Neon', supportedEffortLevels: ['high', 'xhigh', 'medium', 'low'] },
-      { value: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', supportedEffortLevels: ['high', 'medium', 'low'] },
+      { value: 'gemini-4-neon', displayName: 'Gemini 4 Neon', supportedEffortLevels: ['low', 'medium', 'high', 'xhigh'] },
+      { value: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', supportedEffortLevels: ['low', 'medium', 'high'] },
       { value: 'gpt-oss-120b-medium', displayName: 'GPT-OSS 120B (Medium)', supportedEffortLevels: [] },
       { value: 'gemini-pro-orchestrator', displayName: 'Orchestrator (Carbon)', supportedEffortLevels: [] },
       { value: 'gemini-pro-orchestrator-neon', displayName: 'Orchestrator (Neon)', supportedEffortLevels: [] },

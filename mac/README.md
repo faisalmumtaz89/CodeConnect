@@ -969,7 +969,8 @@ rest), each with the efforts agy runs it at (the last part of agy's own model id
 marked `confirm`: none lets agy work without asking (Auto still asks before an irreversible
 action). The host reads them from agy's answer to the session's opening and hands them to ccd on
 the start's outcome; the start box lists the same families, from a session ccd opens with no
-prompt and closes at once (agy keeps it in no history), kept while agy is signed in, and an agy
+prompt and closes at once (agy lists it in no history, `session/list`; its empty conversation
+file stays in agy's folder), kept while agy is signed in, and an agy
 that answers "Authentication required" is listed as not signed in. A model goes to agy as
 `session/set_config_option` (`model`), an effort as its `thought_level`, a mode as
 `session/set_mode`, answered `applied`, or `refused` with agy's words. The run's model, effort

@@ -1941,8 +1941,9 @@ async fn ask(
 
 /// What the agy at `agy` offers a start: the model families its settings name, and whether it is signed in. agy has
 /// no list of its own over ACP, so it is asked by opening one session with no prompt (`session/new`, which a signed-out
-/// agy refuses with "Authentication required") and closing it at once (`session/close`): agy 1.5.15 keeps such a
-/// session in no history (measured, `session/list` before and after). Asking starts agy and reaches Google, so a
+/// agy refuses with "Authentication required") and closing it at once (`session/close`): agy 1.5.15 lists such a
+/// session in no history (measured, `session/list` before and after), though its empty conversation file stays in
+/// agy's folder. Asking starts agy and reaches Google, so a
 /// signed-in answer is kept for that binary (its size and time: agy names no version); a signed-out one is asked
 /// again at each list, as nothing cheaper says when it is signed in. None when agy answered neither way in time.
 async fn agy_offer(
@@ -5393,7 +5394,7 @@ esac"#;
     }
 
     /// **Antigravity is listed with agy's own models** (S1): its start box offers the model families agy's settings
-    /// name, read from one session opened with no prompt and closed again (which agy keeps in no history), asked
+    /// name, read from one session opened with no prompt and closed again (which agy lists in no history), asked
     /// once while it is signed in. A signed-out agy is listed as such, with no models; none found, as not installed,
     /// in its own name.
     #[tokio::test]

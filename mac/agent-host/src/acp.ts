@@ -62,9 +62,13 @@ type Answer = Extract<ToHost, { type: 'answer' }>;
 type Interrupt = Extract<ToHost, { type: 'interrupt' }>;
 type Setting = Extract<ToHost, { type: 'set_model' | 'set_mode' }>;
 
+// The efforts' order, the lowest first, as Claude's menu runs; a level not listed goes after them, in agy's order.
+const LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const rank = (level: string) => (LEVELS.includes(level) ? LEVELS.indexOf(level) : LEVELS.length);
+
 /** What an app may choose for the run, from its session's opening reply, in the shape ccd keeps Claude's initialize
  * answer in: each model family of agy's `model` option, its name, and its efforts (the last part of agy's own model
- * ids for it, `gemini-4-neon-high`: one holding no `-` that is not itself a family), and agy's modes. */
+ * ids for it, `gemini-4-neon-high`: one holding no `-` that is not itself a family), lowest first, and agy's modes. */
 export function menus(opening: any): InitializeAnswer {
   const options: any[] = opening?.configOptions ?? [];
   const of = (category: string): any[] => options.find((option) => option.category === category)?.options ?? [];
@@ -79,7 +83,8 @@ export function menus(opening: any): InitializeAnswer {
       supportedEffortLevels: ids
         .filter((id) => id.startsWith(`${option.value}-`) && !families.includes(id))
         .map((id) => id.slice(String(option.value).length + 1))
-        .filter((level) => !level.includes('-')),
+        .filter((level) => !level.includes('-'))
+        .sort((a, b) => rank(a) - rank(b)),
     })),
     modes: of('mode').map((option) => ({ value: option.value, label: option.name })),
   };
