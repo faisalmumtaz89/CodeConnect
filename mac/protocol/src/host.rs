@@ -1,4 +1,4 @@
-//! The protocol between ccd and the agent host it runs for each Claude run.
+//! The protocol between ccd and the agent host it runs for each Claude or Antigravity run.
 //!
 //! One JSON object per line over the run's unix socket, whole lines only. ccd's first
 //! line on every connection is [`ToHost::Attach`] with its committed cursor. The host
@@ -14,9 +14,15 @@
 //!
 //! `fixtures/host/messages.jsonl` holds a line of every message, emitted by this
 //! module's tests. It is the fixture for the agent host's side of the same lines.
+//!
+//! An Antigravity run's host speaks the Agent Client Protocol to `agy acp` and sends each
+//! message agy writes as [`FromHost::Acp`]; its permission requests and the commands that
+//! drive it are the lines a Claude run's are.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::agent::AgentKind;
 
 /// The version the host writes into `host.json`. A new host is admitted only at this
 /// version, but a restarted ccd attaches a running host again without reading it: a change
@@ -103,8 +109,12 @@ pub enum ToHost {
 /// What the run's `query()` is started with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartOptions {
+    /// The agent the run runs. Absent, Claude: every start before Antigravity is one.
+    #[serde(default, skip_serializing_if = "AgentKind::is_claude")]
+    pub agent: AgentKind,
     pub cwd: String,
-    /// The claude the probe found.
+    /// The path of the agent's binary the probe found, whichever agent `agent` names: claude,
+    /// or Antigravity's `agy`. Named for the one agent it was first for.
     pub claude_path: String,
     /// The mode the app chose. Absent, `query()` is given none, and claude picks its
     /// starting mode itself: the person's `defaultMode`, else its own default.
@@ -170,6 +180,9 @@ pub enum FromHost {
     /// claude.ai connectors' commands, which the host leaves out as it does from the
     /// initialize answer's.
     Sdk { seq: u64, message: Value },
+    /// A message `agy acp` wrote, untouched: a `session/update` notification, or the reply
+    /// to a `session/prompt`. Its permission requests come as [`FromHost::Permission`].
+    Acp { seq: u64, message: Value },
     /// A `canUseTool` call, held in the host until it is answered or withdrawn.
     Permission {
         seq: u64,
@@ -290,6 +303,7 @@ mod tests {
     fn from_host_name(message: &FromHost) -> &'static str {
         match message {
             FromHost::Sdk { .. } => "sdk",
+            FromHost::Acp { .. } => "acp",
             FromHost::Permission { .. } => "permission",
             FromHost::Withdrawn { .. } => "withdrawn",
             FromHost::Outcome { .. } => "outcome",
@@ -310,8 +324,9 @@ mod tests {
         "interrupt",
         "stop",
     ];
-    const FROM_HOST: [&str; 6] = [
+    const FROM_HOST: [&str; 7] = [
         "sdk",
+        "acp",
         "permission",
         "withdrawn",
         "outcome",
@@ -351,6 +366,7 @@ mod tests {
             to(ToHost::Start {
                 uuid: "c-start".into(),
                 options: StartOptions {
+                    agent: AgentKind::Claude,
                     cwd: "/Users/person/project".into(),
                     claude_path: "/Users/person/.local/bin/claude".into(),
                     permission_mode: None,
@@ -366,6 +382,7 @@ mod tests {
             to(ToHost::Start {
                 uuid: "c-continue".into(),
                 options: StartOptions {
+                    agent: AgentKind::Claude,
                     cwd: "/Users/person/project".into(),
                     claude_path: "/Users/person/.local/bin/claude".into(),
                     permission_mode: Some("acceptEdits".into()),
@@ -377,6 +394,22 @@ mod tests {
                     mail: mail(),
                 },
                 prompt: "and the docs".into(),
+            }),
+            to(ToHost::Start {
+                uuid: "c-antigravity".into(),
+                options: StartOptions {
+                    agent: AgentKind::Antigravity,
+                    cwd: "/Users/person/project".into(),
+                    claude_path: "/Users/person/.local/bin/agy".into(),
+                    permission_mode: None,
+                    trust: Trust::Trusted,
+                    resume: None,
+                    model: None,
+                    effort: None,
+                    worktree: None,
+                    mail: mail(),
+                },
+                prompt: "fix the tests".into(),
             }),
             to(ToHost::Say {
                 uuid: "c-say".into(),
@@ -431,6 +464,14 @@ mod tests {
             from(FromHost::Sdk {
                 seq: 1,
                 message: json!({"type": "system", "subtype": "init", "session_id": "5f0c1e2a-0000-4000-8000-000000000001", "uuid": "9d1f0000-0000-4000-8000-000000000002"}),
+            }),
+            from(FromHost::Acp {
+                seq: 1,
+                message: json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Done."}}}}),
+            }),
+            from(FromHost::Acp {
+                seq: 2,
+                message: json!({"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}),
             }),
             from(FromHost::Permission {
                 seq: 2,

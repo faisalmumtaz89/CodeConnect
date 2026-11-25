@@ -15,6 +15,7 @@
 
 use std::path::PathBuf;
 
+pub mod acp_map;
 pub mod agent;
 pub mod build_identity;
 pub mod claude_bin;

@@ -556,6 +556,7 @@ impl Daemon {
         vec![
             protocol::agent::AgentKind::Claude,
             protocol::agent::AgentKind::Codex,
+            protocol::agent::AgentKind::Antigravity,
         ]
     }
 
@@ -613,8 +614,15 @@ impl Daemon {
     /// then does its durable write later — `send_text` in the same breath,
     /// `answer` five awaits later. A run's agent is filed once, when the run
     /// begins, and nothing writes it again.
+    ///
+    /// An Antigravity run is admitted: it is a hosted run as a Claude run is, its row in
+    /// `sessions` beside theirs (`store::session_tables_for`), so a v0.6.0 daemon that sweeps
+    /// its texts and answers already sweeps the row they belong to.
     fn shared_ledgers_admit(&self, agent: &protocol::agent::AgentKind) -> bool {
-        agent.is_claude()
+        matches!(
+            agent,
+            protocol::agent::AgentKind::Claude | protocol::agent::AgentKind::Antigravity
+        )
     }
 
     /// Re-derive from the database everything a restart would otherwise lose.
@@ -2320,6 +2328,12 @@ impl Daemon {
                     }
                 }
             }
+            protocol::agent::AgentKind::Antigravity => {
+                return refuse(crate::codex_refusals::interrupt_on_unsupported(
+                    &row.session_uid,
+                    "Antigravity",
+                ))
+            }
             protocol::agent::AgentKind::Unsupported(ref name) => {
                 return refuse(crate::codex_refusals::interrupt_on_unsupported(
                     &row.session_uid,
@@ -2566,6 +2580,12 @@ impl Daemon {
             // name. Neither silently does the other's job.
             protocol::agent::AgentKind::Claude => {
                 return refuse(crate::codex_refusals::compose_on_claude(&row.session_uid))
+            }
+            protocol::agent::AgentKind::Antigravity => {
+                return refuse(crate::codex_refusals::compose_on_unsupported(
+                    &row.session_uid,
+                    "Antigravity",
+                ))
             }
             protocol::agent::AgentKind::Unsupported(ref name) => {
                 return refuse(crate::codex_refusals::compose_on_unsupported(
@@ -2998,6 +3018,11 @@ impl Daemon {
                      does not offer for it",
                     row.session_uid
                 )),
+                protocol::agent::AgentKind::Antigravity => ClaudeOnly::WrongAgent(format!(
+                    "{} is an Antigravity session, and {what} is something this daemon \
+                     can only do for Claude",
+                    row.session_uid
+                )),
                 protocol::agent::AgentKind::Unsupported(ref name) => {
                     ClaudeOnly::WrongAgent(format!(
                         "{} is a {name} session, and {what} is something this daemon \
@@ -3061,7 +3086,10 @@ impl Daemon {
         // sentence.
         let codex = match self.db.get_session(session_uid.clone()).await {
             Ok(Some(row)) => match row.agent {
-                protocol::agent::AgentKind::Claude => None,
+                // A hosted run: its agent host holds the request.
+                protocol::agent::AgentKind::Claude | protocol::agent::AgentKind::Antigravity => {
+                    None
+                }
                 protocol::agent::AgentKind::Codex => Some(row),
                 protocol::agent::AgentKind::Unsupported(ref name) => {
                     return AnswerResult::Rejected {
@@ -3461,7 +3489,9 @@ impl Daemon {
                 protocol::agent::AgentKind::Codex => {
                     codex_ended.push((row.session_uid.clone(), crate::codex_host::menus(&models)));
                 }
-                protocol::agent::AgentKind::Unsupported(_) => {}
+                // No menus yet: its models and modes come with a later slice.
+                protocol::agent::AgentKind::Antigravity
+                | protocol::agent::AgentKind::Unsupported(_) => {}
             }
         }
         // An ended run the person's next message relaunches, of either agent.

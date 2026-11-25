@@ -1,4 +1,5 @@
-//! A Claude run's agent host, from ccd's side (P0 §2.1 H1-H3).
+//! A Claude run's agent host, from ccd's side (P0 §2.1 H1-H3). An Antigravity run is hosted
+//! the same way, its host speaking the Agent Client Protocol to `agy acp`.
 //!
 //! ccd writes the run's row first, with the app's start request id, so a repeated
 //! request finds the run instead of starting another. Then it makes the run's folder
@@ -89,6 +90,8 @@ pub(crate) const PROCESS_ENDED: &str = "Stopped: its process ended";
 
 /// One Claude start, as the app asked for it and the checks before the row resolved it.
 pub(crate) struct Run<'a> {
+    /// The agent the host runs: Claude, or Antigravity through `agy acp`.
+    pub agent: AgentKind,
     /// This daemon's state folder, which holds `runs/`.
     pub root: &'a Path,
     pub request_id: &'a str,
@@ -106,7 +109,7 @@ pub(crate) struct Run<'a> {
     /// trusted, only the person's own settings and CodeConnect's MCP server (decision
     /// 157, the host's `queryOptions`).
     pub trust: Trust,
-    /// The claude the start's check found.
+    /// The agent's binary the start's check found: claude, or Antigravity's agy.
     pub claude_path: &'a str,
     /// The agent host to spawn.
     pub host_bin: &'a Path,
@@ -185,7 +188,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         lifecycle: Lifecycle::Starting,
         created_at: now.clone(),
         updated_at: now,
-        agent: AgentKind::Claude,
+        agent: run.agent.clone(),
         codex_thread_id: None,
     };
     match daemon
@@ -530,6 +533,7 @@ async fn connect(
 /// The run's `query()` options.
 fn start_options(uid: &str, run: &Run<'_>) -> StartOptions {
     StartOptions {
+        agent: run.agent.clone(),
         cwd: run.cwd.to_string(),
         claude_path: run.claude_path.to_string(),
         // The app chooses no mode at a start, so claude picks its own: the person's
@@ -829,7 +833,9 @@ async fn relaunched_send(
 /// order. It applies the run's `state` and the outcome of the run's start, which makes
 /// the run `live` or `failed` and is told to `begun` once committed; `begun` hears instead
 /// why the link ended if it ends first. A `live` run's SDK messages are its events
-/// ([`apply_sdk`]); the host sends none before the outcome. A `live` run's `exited` ends the
+/// ([`apply_sdk`]), and an Antigravity run's `acp` lines are ([`protocol::acp_map`]), a run of
+/// its chunks joined and acknowledged at the next other line ([`file_joined`]); the host sends
+/// none before the outcome. A `live` run's `exited` ends the
 /// run (H6, `Daemon::end_hosted_run`). After a refusal claude's `exited` changes nothing
 /// in the `failed` run and is applied so its host can end. After a re-attach, the host
 /// replays what it kept and then sends its `state`, so the first `state` ends the replay
@@ -879,6 +885,10 @@ async fn link(
         lifecycle == Lifecycle::Failed,
     );
     let mut stopping = lifecycle == Lifecycle::Stopping;
+    // An Antigravity run's words or thoughts so far: its chunk lines, unacknowledged, so
+    // the host keeps them until the joined text is committed.
+    let mut joining: Option<Joining> = None;
+    let key = SessionKey::new(&uid, &uid);
     let ended = loop {
         let line = tokio::select! {
             line = lines.next_line() => match line {
@@ -894,7 +904,38 @@ async fn link(
                 continue;
             }
         };
-        match serde_json::from_str::<FromHost>(&line) {
+        let read = serde_json::from_str::<FromHost>(&line);
+        let acp = match &read {
+            Ok(FromHost::Acp { seq, message }) if live => {
+                Some(protocol::acp_map::read(&key, *seq, message))
+            }
+            _ => None,
+        };
+        if let Some(protocol::acp_map::Read::Chunk { thought, text }) = &acp {
+            let Ok(FromHost::Acp { seq, .. }) = &read else {
+                unreachable!("a chunk is read from an acp line")
+            };
+            if let Some(open) = joining.take_if(|open| open.thought != *thought) {
+                if let Err(why) = file_joined(&daemon, &uid, &key, host, open, &mut write).await {
+                    break why;
+                }
+            }
+            let open = joining.get_or_insert_with(|| Joining {
+                thought: *thought,
+                text: String::new(),
+                first: *seq,
+                last: *seq,
+            });
+            open.text.push_str(text);
+            open.last = *seq;
+            continue;
+        }
+        if let Some(open) = joining.take() {
+            if let Err(why) = file_joined(&daemon, &uid, &key, host, open, &mut write).await {
+                break why;
+            }
+        }
+        match read {
             Ok(FromHost::State { seq, pending, .. }) => {
                 match daemon.db.commit_cursor(uid.clone(), host, seq).await {
                     Ok(true) => {}
@@ -1074,6 +1115,25 @@ async fn link(
                     });
                 }
             }
+            Ok(FromHost::Acp { seq, .. }) if live => {
+                let Some(protocol::acp_map::Read::Events(events)) = acp else {
+                    unreachable!("a live run's acp line is read above")
+                };
+                match daemon
+                    .ingest_host_message(&uid, host, seq, events, RunNotes::default())
+                    .await
+                {
+                    Ok(Some(_)) => {
+                        if let Err(why) = send(&mut write, &ToHost::Ack { seq }).await {
+                            break why;
+                        }
+                    }
+                    Ok(None) => {
+                        break format!("message {seq} is not past the run's cursor for this host")
+                    }
+                    Err(err) => break format!("{err:#}"),
+                }
+            }
             Ok(FromHost::Exited { seq, code, signal }) if live => {
                 // Ended by its switch: the end names the account it goes on; its next message starts it there. Any
                 // other end of a run waiting to move is what it is, and the move is off.
@@ -1158,6 +1218,39 @@ async fn link(
     }
     daemon.host_link_detached(&uid).await;
     end_if_host_gone(&daemon, &uid).await;
+}
+
+/// A run of an Antigravity run's chunks: its words, or its thoughts, from the host's line
+/// `first` to `last`.
+struct Joining {
+    thought: bool,
+    text: String,
+    first: u64,
+    last: u64,
+}
+
+/// The joined chunks as one event, committed with the cursor at their last line, then
+/// acknowledged: the host drops them only then.
+async fn file_joined(
+    daemon: &Arc<Daemon>,
+    uid: &str,
+    key: &SessionKey,
+    host: ProcessIdentity,
+    open: Joining,
+    write: &mut OwnedWriteHalf,
+) -> Result<(), String> {
+    let event = protocol::acp_map::joined(key, open.thought, &open.text, open.first);
+    match daemon
+        .ingest_host_message(uid, host, open.last, vec![event], RunNotes::default())
+        .await
+    {
+        Ok(Some(_)) => send(write, &ToHost::Ack { seq: open.last }).await,
+        Ok(None) => Err(format!(
+            "message {} is not past the run's cursor for this host",
+            open.last
+        )),
+        Err(err) => Err(format!("{err:#}")),
+    }
 }
 
 /// What became of a dead host's group.
@@ -2106,6 +2199,7 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         }
     };
     let run = Run {
+        agent: AgentKind::Claude,
         root,
         request_id,
         cwd: &ended.cwd,
@@ -3017,6 +3111,7 @@ mod tests {
 
     fn run<'a>(rig: &'a Rig, request_id: &'a str, cwd: &'a str, host_bin: &'a Path) -> Run<'a> {
         Run {
+            agent: AgentKind::Claude,
             root: &rig.root,
             request_id,
             cwd,
@@ -3339,6 +3434,7 @@ mod tests {
             start(
                 &daemon,
                 Run {
+                    agent: AgentKind::Claude,
                     worktree: Some("feature-x"),
                     trust: Trust::Trusted,
                     ..run(&rig, "req-1", &cwd, &host)
@@ -3436,6 +3532,105 @@ mod tests {
             .await
             .expect("the link reads detached once its connection ends");
         stop(&dir);
+    }
+
+    /// An Antigravity run is a hosted run: its start names its agent and its agy, its row is
+    /// Antigravity's, and its `acp` lines are its events. A run of the agent's chunks is
+    /// joined into one reply and acknowledged only with it, at its last line, when the next
+    /// line comes; the host keeps the chunks until then.
+    #[tokio::test]
+    async fn an_antigravity_runs_acp_lines_are_its_events_and_its_words_are_joined() {
+        let rig = rig();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let daemon = Arc::clone(&rig.daemon);
+        let (result, mut played) = tokio::join!(
+            start(
+                &daemon,
+                Run {
+                    agent: AgentKind::Antigravity,
+                    claude_path: "/nonexistent/agy",
+                    ..run(&rig, "req-agy", &cwd, &host)
+                }
+            ),
+            async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid, "status": "done"}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        let uid = started_uid(&result);
+        match &played.start {
+            ToHost::Start { options, .. } => {
+                assert_eq!(options.agent, AgentKind::Antigravity);
+                assert_eq!(options.claude_path, "/nonexistent/agy");
+            }
+            other => panic!("no start: {other:?}"),
+        }
+        let update = |seq: u64, update: serde_json::Value| {
+            serde_json::json!({"type": "acp", "seq": seq, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-1", "update": update}}})
+        };
+        let chunk = |seq: u64, text: &str| {
+            update(
+                seq,
+                serde_json::json!({"sessionUpdate": "agent_message_chunk",
+                                   "content": {"type": "text", "text": text}}),
+            )
+        };
+        say(&mut played.write, chunk(3, "Hel")).await;
+        say(&mut played.write, chunk(4, "lo.")).await;
+        say(
+            &mut played.write,
+            update(
+                5,
+                serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "call_1",
+                                   "title": "cat NOTE.txt", "kind": "read", "status": "pending",
+                                   "rawInput": {"command": "cat NOTE.txt"}}),
+            ),
+        )
+        .await;
+        // The chunks are acknowledged together, with the reply they make, only now.
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 6, "message": {"jsonrpc": "2.0", "id": 3,
+                               "result": {"stopReason": "end_turn"}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 6 }));
+        assert_eq!(cursor(&rig, &uid), 6);
+        let conn = rusqlite::Connection::open(rig.root.join("events.db")).unwrap();
+        let agent: String = conn
+            .query_row(
+                "SELECT agent FROM sessions WHERE session_uid = ?1",
+                [&uid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(agent, "antigravity");
+        let filed: Vec<(String, String, String)> = conn
+            .prepare(
+                "SELECT kind, source, payload FROM events WHERE session_uid = ?1 AND source = 'acp'
+                  ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([&uid], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let kinds: Vec<&str> = filed.iter().map(|(kind, _, _)| kind.as_str()).collect();
+        assert_eq!(kinds, ["agent_message", "tool_call", "turn_complete"]);
+        let reply: serde_json::Value = serde_json::from_str(&filed[0].2).unwrap();
+        assert_eq!(reply, serde_json::json!({"text": "Hello."}));
+        stop(&played.dir);
     }
 
     /// A start the host refuses: its outcome makes the run `failed`, and the app is
@@ -4164,6 +4359,7 @@ mod tests {
             options: start_options(
                 &uid,
                 &Run {
+                    agent: AgentKind::Claude,
                     trust,
                     ..run(rig, "req-1", cwd, host)
                 },
@@ -10812,6 +11008,7 @@ mod tests {
         let started = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 claude_path: claude.to_str().unwrap(),
                 ..run(rig, name, &cwd, host)
             },
@@ -11003,6 +11200,7 @@ mod tests {
         let started = start(
             &daemon,
             Run {
+                agent: AgentKind::Claude,
                 root: &root,
                 request_id: "g2",
                 cwd: &cwd,
@@ -11099,6 +11297,7 @@ mod tests {
             let started = start(
                 &daemon,
                 Run {
+                    agent: AgentKind::Claude,
                     root: &root,
                     request_id: "restart",
                     cwd: &cwd,
@@ -11340,6 +11539,7 @@ mod tests {
         let started = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 root: &rig.root,
                 request_id: "g6",
                 cwd: &cwd,
@@ -11513,6 +11713,7 @@ mod tests {
         let started = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 root: &rig.root,
                 request_id: name,
                 cwd: &cwd,
@@ -14390,6 +14591,7 @@ mod tests {
         let started = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 claude_path: claude.to_str().unwrap(),
                 ..run(&rig, "perm", &cwd, &host)
             },
@@ -14448,6 +14650,7 @@ mod tests {
             let started = start(
                 &daemon,
                 Run {
+                    agent: AgentKind::Claude,
                     claude_path: claude.to_str().unwrap(),
                     ..run(&rig, "restart", &cwd, &host)
                 },
@@ -14593,6 +14796,7 @@ mod tests {
             let refused = start(
                 &rig.daemon,
                 Run {
+                    agent: AgentKind::Claude,
                     claude_path: refusing.to_str().unwrap(),
                     ..run(&rig, request, &cwd, &host)
                 },
@@ -14648,6 +14852,7 @@ mod tests {
         let result = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 claude_path: claude.to_str().unwrap(),
                 ..run(&rig, "req-1", &cwd, &host)
             },
@@ -14730,6 +14935,7 @@ mod tests {
         let early_start = start(
             &rig.daemon,
             Run {
+                agent: AgentKind::Claude,
                 claude_path: early.to_str().unwrap(),
                 ..run(&rig, "req-3", &cwd, &host)
             },

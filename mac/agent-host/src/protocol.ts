@@ -22,7 +22,10 @@ export interface McpCommand {
 
 /** What the run's `query()` is started with. */
 export interface StartOptions {
+  /** The agent the run runs; absent, Claude. */
+  agent?: 'antigravity';
   cwd: string;
+  /** The path of the agent's binary, whichever agent `agent` names: claude, or Antigravity's agy. */
   claude_path: string;
   /** The mode the app chose; absent, claude picks its starting mode itself: the person's `defaultMode`, else its own default. */
   permission_mode?: string;
@@ -79,6 +82,8 @@ export interface InitializeAnswer {
 /** A line the host sends ccd. Each carries its sequence number and is kept until ccd acknowledges it. */
 export type FromHost =
   | { type: 'sdk'; seq: number; message: Json }
+  /** A message `agy acp` wrote: a `session/update` notification, or a `session/prompt` reply. */
+  | { type: 'acp'; seq: number; message: Json }
   | { type: 'permission'; seq: number; request: PermissionRequest }
   | { type: 'withdrawn'; seq: number; tool_use_id: string }
   | {

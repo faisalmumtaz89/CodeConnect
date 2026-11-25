@@ -393,7 +393,8 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                 .unwrap_or_default();
             let result = match agent {
                 AgentKind::Claude => {
-                    let start = claude_start(
+                    let start = hosted_start(
+                        AgentKind::Claude,
                         daemon,
                         crate::state::codex_launcher(),
                         &state_dir,
@@ -410,6 +411,23 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                 }
                 AgentKind::Codex => {
                     let start = codex_start(
+                        daemon,
+                        crate::state::codex_launcher(),
+                        &state_dir,
+                        &request_id,
+                        &path,
+                        prompt,
+                        worktree.as_ref(),
+                        model.as_deref(),
+                        &environment,
+                        account.as_ref(),
+                        trust,
+                    );
+                    daemon.starts.once(&request_id, start).await
+                }
+                AgentKind::Antigravity => {
+                    let start = hosted_start(
+                        AgentKind::Antigravity,
                         daemon,
                         crate::state::codex_launcher(),
                         &state_dir,
@@ -825,16 +843,17 @@ pub(crate) async fn declined(db: &crate::db::Db, folder: &Path) -> bool {
     )
 }
 
-/// A Claude start: the run its request already has (H1), or the start's checks, then
-/// its row and its agent host ([`crate::claude_host`]). The checks here come before
+/// A Claude or Antigravity start: the run its request already has (H1), or the start's
+/// checks, then its row and its agent host ([`crate::claude_host`]). The checks here come before
 /// the row, so a start they refuse leaves none: the cheap refusals, the folder
 /// question, the claude check, the host binary, and `launcher` (the `codeconnect`
 /// that runs the mail server), all before the place, the one step that can change the
 /// repository. A refusal after the row, from the host's admission or from claude
 /// itself, leaves the row `failed`. A new worktree is claude's to make, as
-/// `--worktree` makes it today.
+/// `--worktree` makes it today; Antigravity has no such flag, so its start refuses one.
 #[allow(clippy::too_many_arguments)]
-async fn claude_start(
+async fn hosted_start(
+    agent: AgentKind,
     daemon: &Arc<Daemon>,
     launcher: Result<PathBuf, String>,
     root: &Path,
@@ -858,11 +877,30 @@ async fn claude_start(
         Ok(trust) => trust,
         Err(asked) => return asked,
     };
-    let ready =
-        match claude_preflight(environment, account, daemon.config.claude_bin.as_deref()).await {
-            Ok(ready) => ready,
-            Err(refusal) => return refusal,
-        };
+    let binary = match agent {
+        AgentKind::Antigravity => {
+            if matches!(worktree, Some(StartWorktree::New { .. })) {
+                return failed(
+                    StartFailure::LaunchFailed,
+                    "Antigravity cannot make a new worktree; start it in an existing one.".into(),
+                );
+            }
+            match agy_path(environment).await {
+                Some(path) => path,
+                None => {
+                    let (reason, detail) = missing(&agent);
+                    return failed(reason, detail);
+                }
+            }
+        }
+        _ => {
+            match claude_preflight(environment, account, daemon.config.claude_bin.as_deref()).await
+            {
+                Ok(ready) => ready.path,
+                Err(refusal) => return refusal,
+            }
+        }
+    };
     let host_bin = match crate::claude_host::host_binary(&daemon.config) {
         Ok(host_bin) => host_bin,
         Err(why) => return failed(StartFailure::LaunchFailed, why),
@@ -871,12 +909,13 @@ async fn claude_start(
         Ok(codeconnect) => codeconnect,
         Err(why) => return failed(StartFailure::LaunchFailed, why),
     };
-    let Some(claude_path) = ready.path.to_str() else {
+    let Some(claude_path) = binary.to_str() else {
         return failed(
             StartFailure::LaunchFailed,
             format!(
-                "the claude at {} has a path that is not text",
-                ready.path.display()
+                "the {} at {} has a path that is not text",
+                product(&agent),
+                binary.display()
             ),
         );
     };
@@ -916,6 +955,7 @@ async fn claude_start(
     crate::claude_host::start(
         daemon,
         crate::claude_host::Run {
+            agent,
             root,
             request_id,
             cwd: &cwd,
@@ -1337,6 +1377,7 @@ const CODEX_FLOOR: (u32, u32, u32) = (0, 167, 0);
 fn product(agent: &AgentKind) -> &'static str {
     match agent {
         AgentKind::Codex => "Codex",
+        AgentKind::Antigravity => "Antigravity",
         _ => "Claude Code",
     }
 }
@@ -1569,6 +1610,15 @@ pub(crate) async fn codex_path(
         ),
         launcher.as_deref(),
     )
+}
+
+/// The `agy` an Antigravity start runs: the first on the login shell's `PATH`, else its
+/// installer's `~/.local/bin/agy`.
+async fn agy_path(environment: &HashMap<OsString, OsString>) -> Option<PathBuf> {
+    let home = home_in(environment);
+    let mut candidates = login_path_hits(environment, &home, "agy").await;
+    candidates.push(home.join(".local/bin/agy"));
+    protocol::claude_bin::first_runnable(not_installed_in_tests(candidates, None), None)
 }
 
 /// Every `name` on the `PATH` the user's login shell in `environment` sets up, in
@@ -2527,7 +2577,8 @@ mod tests {
                     .await
                 }
                 _ => {
-                    claude_start(
+                    hosted_start(
+                        AgentKind::Claude,
                         &self.daemon,
                         Ok(self.launcher.clone()),
                         &self.root,
@@ -2764,7 +2815,8 @@ mod tests {
             .unwrap();
         let daemon = hosted_daemon(&root, &claude, &host);
         let project = root.join("project");
-        let result = claude_start(
+        let result = hosted_start(
+            AgentKind::Claude,
             &daemon,
             Ok(root.join("codeconnect")),
             &root,
@@ -2825,7 +2877,8 @@ mod tests {
                        trust: Option<Trust>| {
             let (daemon, root, environment) = (&daemon, &root, &environment);
             async move {
-                claude_start(
+                hosted_start(
+                    AgentKind::Claude,
                     daemon,
                     Ok(root.join("codeconnect")),
                     root,
@@ -3091,7 +3144,8 @@ mod tests {
             }
             None => None,
         };
-        let started = claude_start(
+        let started = hosted_start(
+            AgentKind::Claude,
             &daemon,
             Ok(root.join("codeconnect")),
             &root,
@@ -3334,7 +3388,8 @@ mod tests {
         std::fs::write(&host, "#!/bin/sh\n").unwrap();
         let daemon = hosted_daemon(&root, &claude, &host);
         let project = root.join("project");
-        let result = claude_start(
+        let result = hosted_start(
+            AgentKind::Claude,
             &daemon,
             Ok(root.join("codeconnect")),
             &root,
@@ -3385,7 +3440,8 @@ mod tests {
             .display()
             .to_string();
         let start = |request_id: &'static str, trust: Option<Trust>| {
-            claude_start(
+            hosted_start(
+                AgentKind::Claude,
                 &daemon,
                 Ok(root.join("codeconnect")),
                 &root,
@@ -3442,7 +3498,8 @@ mod tests {
         let host = root.join("stand-in-host");
         std::fs::write(&host, "#!/bin/sh\n").unwrap();
         let daemon = hosted_daemon(&root, &claude, &host);
-        let result = claude_start(
+        let result = hosted_start(
+            AgentKind::Claude,
             &daemon,
             Err("no codeconnect here".into()),
             &root,
@@ -3495,7 +3552,8 @@ mod tests {
             .unwrap();
         let daemon = hosted_daemon(&root, &claude, &host);
         let project = root.join("project");
-        claude_start(
+        hosted_start(
+            AgentKind::Claude,
             &daemon,
             Ok(root.join("codeconnect")),
             &root,

@@ -739,13 +739,17 @@ fn hosted_run_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostedRun> {
 ///
 /// Returns `(table, other)`: the table a run of `agent` lives in, and the other one.
 ///
-/// **Everything that is not Claude goes to `codex_sessions`**, including an
+/// **Everything that is not a hosted run goes to `codex_sessions`**, including an
 /// [`AgentKind::Unsupported`] run. That is deliberate: `sessions` is the table a
 /// rolled-back v0.6.0 daemon sweeps, and an agent this build understands even less than
 /// Codex is not the one to leave in it. The table is named for the agent it was
 /// built for, not for the only agent it can ever hold.
+///
+/// An Antigravity run is a hosted run, its agent host's as a Claude run's is, so it lives
+/// in `sessions`: the hosts this ccd attaches again are read from there, and every path
+/// over `codex_sessions` takes a recorded host as a Codex app-server.
 fn session_tables_for(agent: &AgentKind) -> (&'static str, &'static str) {
-    if agent.is_claude() {
+    if matches!(agent, AgentKind::Claude | AgentKind::Antigravity) {
         ("sessions", "codex_sessions")
     } else {
         ("codex_sessions", "sessions")
@@ -7180,6 +7184,7 @@ fn parse_source(value: &str) -> Source {
         "daemon" => Source::Daemon,
         "codex" => Source::Codex,
         "sdk" => Source::Sdk,
+        "acp" => Source::Acp,
         "pty" => Source::Pty,
         // An unrecognised persisted source — a fact written by a newer daemon,
         // read back after a rollback — is the lowest trust there is, never the

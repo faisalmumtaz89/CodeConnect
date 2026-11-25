@@ -1,5 +1,6 @@
-// The agent host, one per Claude run, started by ccd as `cc-agent-host <run dir>`. It records itself in
-// <run dir>/host.json and speaks the lines of mac/protocol/src/host.rs to ccd over <run dir>/host.sock (link.ts).
+// The agent host, one per Claude or Antigravity run (acp.ts), started by ccd as `cc-agent-host <run dir>`. It records
+// itself in <run dir>/host.json and speaks the lines of mac/protocol/src/host.rs to ccd over <run dir>/host.sock
+// (link.ts).
 //
 // host.json is created exclusively: a second host for the same run finds it and exits 3, touching nothing. Having won
 // it, the host removes a socket file a dead host left, and listens. It exits 4 if no `start` arrives within 30 s.
@@ -24,6 +25,7 @@
 // interrupt's receipt are in, with the result's `terminal_reason` and the receipt's `cancelled`. claude's end is the last
 // message, `exited`. Once the run is over and ccd has acknowledged everything, the host exits 0.
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import { runAcp } from './acp.ts';
 import { spawn } from 'node:child_process';
 import { closeSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -31,7 +33,7 @@ import { join } from 'node:path';
 import { createLink } from './link.ts';
 import { createPermissions } from './permissions.ts';
 import { printUsage } from './usage.ts';
-import { HOST_PROTOCOL_VERSION, type HostFile, type ToHost } from './protocol.ts';
+import { HOST_PROTOCOL_VERSION, type HostFile, type PermissionRequest, type ToHost } from './protocol.ts';
 import {
   type Facts,
   firstMessage,
@@ -96,8 +98,10 @@ const link = createLink({
   drained: () => process.exit(0),
 });
 
-// The run's permission requests, once it has a query.
-let permissions: ReturnType<typeof createPermissions> | undefined;
+// The run's permission requests, once it has a query (or, for Antigravity, an agy).
+let permissions:
+  | { answer(command: Extract<ToHost, { type: 'answer' }>): void; pending(): PermissionRequest[] }
+  | undefined;
 
 // A message the run cannot take: before its start, or once its input has ended.
 function refuse(uuid: string): void {
@@ -125,6 +129,17 @@ function begin(start: Start): void {
   begun = true;
   clearTimeout(noStart);
   facts = startFacts(start.options);
+  // An Antigravity run is agy's, over the Agent Client Protocol (acp.ts); it takes no wake yet.
+  if (start.options.agent === 'antigravity') {
+    const run = runAcp(start, (body) => link.send(body), () => link.finish());
+    permissions = run;
+    say = (command) => (command.type === 'say' ? run.say(command) : refuse(command.uuid));
+    stop = () => {
+      stop = undefined;
+      run.stop();
+    };
+    return;
+  }
   let claudeEnded: Promise<{ code: number | null; signal: string | null }> | undefined;
   // The run's later messages, in the order ccd sent them. Each one's outcome is `done` once the SDK has taken it from
   // the input; claude then folds it into the running turn or runs it next.

@@ -888,7 +888,8 @@ impl Daemon {
             Ok(Some(row)) => match row.agent {
                 AgentKind::Claude => true,
                 AgentKind::Codex => false,
-                AgentKind::Unsupported(_) => return,
+                // Its host does not take a wake yet: its mail waits to be read.
+                AgentKind::Antigravity | AgentKind::Unsupported(_) => return,
             },
             Ok(None) => return,
             Err(err) => {
@@ -1167,6 +1168,7 @@ fn agent_name(agent: &AgentKind) -> &str {
     match agent {
         AgentKind::Claude => "Claude",
         AgentKind::Codex => "Codex",
+        AgentKind::Antigravity => "Antigravity",
         AgentKind::Unsupported(name) => name,
     }
 }
