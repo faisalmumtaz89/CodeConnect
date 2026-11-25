@@ -8,7 +8,8 @@
 //! (`tool_use_id`, `tool_name`, `tool_input`; the name its ACP kind's word), its result's outcome as `status` and
 //! `aggregated_output`, and the prompt's reply as the turn's end. The session's settings, as its opening's reply
 //! (which the host forwards too) and each `config_option_update` and `current_mode_update` name them, are filed as
-//! the run's settings ([`ACP_SETTINGS`]). Updates the timeline does not draw (plans, commands, usage) file nothing.
+//! the run's settings ([`ACP_SETTINGS`]). Updates the timeline does not draw (plans, commands, usage) file nothing; the
+//! link keeps a turn's newest context ([`usage_of`]) and files it once at the turn's end ([`usage`]).
 //!
 //! Event ids are stable across a replay and unique to the host that sent them: each begins
 //! with `run`, the uuid of the start that host was started with (a relaunch's is its own), as
@@ -148,6 +149,34 @@ pub fn read(
         ]);
     }
     Read::Events(Vec::new())
+}
+
+/// The context a `usage_update` reports: the tokens in use and the window's size. None for any other message.
+pub fn usage_of(message: &Value) -> Option<(u64, u64)> {
+    let update = &message["params"]["update"];
+    (update["sessionUpdate"] == "usage_update")
+        .then(|| Some((update["used"].as_u64()?, update["size"].as_u64()?)))
+        .flatten()
+}
+
+/// The `usage` event of the turn that ends at the line `seq` of the host started as `run`: its newest context, in the
+/// keys a Claude or Codex turn's usage has (`last.totalTokens`, `modelContextWindow`), filed once at the turn's end.
+pub fn usage(
+    session: &SessionKey,
+    run: &str,
+    seq: u64,
+    turn: Option<&str>,
+    used: u64,
+    size: u64,
+) -> PendingEvent {
+    PendingEvent::new(
+        session,
+        EventKind::Usage,
+        json!({ "last": { "totalTokens": used }, "modelContextWindow": size }),
+        Source::Acp,
+    )
+    .with_source_event_id(format!("{run}/usage/{seq}"))
+    .with_turn_id(turn.map(str::to_string))
 }
 
 /// The settings agy's `configOptions` say are current, as the run's settings are filed ([`ACP_SETTINGS`]): each

@@ -604,6 +604,8 @@ struct Turns {
     context: Option<(u64, String)>,
     /// An Antigravity run's turn of its latest `acp` line: a line of another turn starts one.
     acp: Option<String>,
+    /// An Antigravity turn's newest context (tokens in use, window), filed once at its end.
+    acp_usage: Option<(u64, u64)>,
 }
 
 /// The mark of a turn's start or end at `now`, strictly after the link's latest one,
@@ -898,6 +900,7 @@ async fn link(
         launched: if resumed { "resume" } else { "startup" },
         context: None,
         acp: None,
+        acp_usage: None,
     };
     let (mut live, mut refused) = (
         matches!(lifecycle, Lifecycle::Live | Lifecycle::Stopping),
@@ -1160,9 +1163,29 @@ async fn link(
                 }
             }
             Ok(FromHost::Acp { seq, turn, message }) if live => {
-                let Some(protocol::acp_map::Read::Events(events)) = acp else {
+                let Some(protocol::acp_map::Read::Events(mut events)) = acp else {
                     unreachable!("a live run's acp line is read above")
                 };
+                // agy's context, several times a turn: the newest is filed once, as the turn ends.
+                if let Some(context) = protocol::acp_map::usage_of(&message) {
+                    turns.acp_usage = Some(context);
+                }
+                if let Some(end) = events
+                    .iter()
+                    .position(|event| event.kind == EventKind::TurnComplete)
+                {
+                    if let Some((used, size)) = turns.acp_usage.take() {
+                        let usage = protocol::acp_map::usage(
+                            &key,
+                            &start_uuid,
+                            seq,
+                            turn.as_deref(),
+                            used,
+                            size,
+                        );
+                        events.insert(end, usage);
+                    }
+                }
                 let session = acp_session(&message);
                 if let Err(why) = apply_acp(
                     &daemon, &uid, host, seq, turn, session, events, &mut turns, &mut write,
@@ -3962,6 +3985,54 @@ mod tests {
         assert_eq!(kinds, ["agent_message", "tool_call", "turn_complete"]);
         let reply: serde_json::Value = serde_json::from_str(&filed[0].2).unwrap();
         assert_eq!(reply, serde_json::json!({"text": "Hello."}));
+        stop(&played.dir);
+    }
+
+    /// **An Antigravity turn's context is filed once, at its end** (row 11): agy reports its context in use and its
+    /// window several times a turn (`usage_update`); the turn's end files one `usage` event with the newest, in the keys
+    /// the apps read a Claude or Codex turn's by (`last.totalTokens`, `modelContextWindow`).
+    #[tokio::test]
+    async fn an_antigravity_turns_context_is_filed_once_at_its_end() {
+        let rig = rig();
+        let (uid, mut played) = antigravity_run(&rig).await;
+        let turn = played.start_uuid();
+        let usage = |seq: u64, used: u64| {
+            serde_json::json!({"type": "acp", "seq": seq, "turn": turn, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-7", "update": {
+                "sessionUpdate": "usage_update", "used": used, "size": 1048576}}}})
+        };
+        say(&mut played.write, usage(3, 9801)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        say(&mut played.write, usage(4, 9942)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 5, "turn": turn, "message": {
+                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let conn = rusqlite::Connection::open(rig.root.join("events.db")).unwrap();
+        let filed: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT kind, payload FROM events WHERE session_uid = ?1 AND source = 'acp' ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([&uid], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let kinds: Vec<&str> = filed.iter().map(|(kind, _)| kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["usage", "turn_complete"],
+            "one usage event, at the turn's end"
+        );
+        let payload: serde_json::Value = serde_json::from_str(&filed[0].1).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({"last": {"totalTokens": 9942}, "modelContextWindow": 1048576})
+        );
         stop(&played.dir);
     }
 
