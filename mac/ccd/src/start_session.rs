@@ -933,7 +933,7 @@ pub(crate) async fn declined(db: &crate::db::Db, folder: &Path) -> bool {
 /// that runs the mail server), all before the place, the one step that can change the
 /// repository. A refusal after the row, from the host's admission or from claude
 /// itself, leaves the row `failed`. A new worktree is claude's to make, as
-/// `--worktree` makes it today; Antigravity has no such flag, so its start refuses one.
+/// `--worktree` makes it today; Antigravity has no such flag, so ccd makes its new worktree, as Codex's.
 #[allow(clippy::too_many_arguments)]
 async fn hosted_start(
     agent: AgentKind,
@@ -962,12 +962,6 @@ async fn hosted_start(
     };
     let binary = match agent {
         AgentKind::Antigravity => {
-            if matches!(worktree, Some(StartWorktree::New { .. })) {
-                return failed(
-                    StartFailure::LaunchFailed,
-                    "Antigravity cannot make a new worktree; start it in an existing one.".into(),
-                );
-            }
             match agy_path(environment, daemon.config.agy_bin.as_deref()).await {
                 Some(path) => path,
                 None => {
@@ -1004,10 +998,13 @@ async fn hosted_start(
     };
     let (cwd, new_worktree) = match worktree {
         None => (path.to_string(), None),
-        Some(StartWorktree::New { name }) => match check_worktree_name(name) {
-            Ok(()) => (path.to_string(), Some(name.as_str())),
-            Err(why) => return failed(StartFailure::LaunchFailed, why),
-        },
+        // Claude makes its own (`--worktree`); agy has no such flag, so ccd makes one for it as for Codex.
+        Some(StartWorktree::New { name }) if agent != AgentKind::Antigravity => {
+            match check_worktree_name(name) {
+                Ok(()) => (path.to_string(), Some(name.as_str())),
+                Err(why) => return failed(StartFailure::LaunchFailed, why),
+            }
+        }
         Some(worktree) => match place(
             environment,
             daemon.config.git_bin.as_deref(),
@@ -2764,11 +2761,14 @@ mod tests {
                 ),
             );
             let (claude, env) = test_claude(&root.join("claude-rig"));
+            // An agy the stand-in host is handed for an Antigravity start; never run here.
+            let agy = program("stand-in-agy", "exit 1".into());
             let daemon = Daemon::new(
                 protocol::config::Config {
                     claude_bin: Some(claude.display().to_string()),
                     codex_bin: Some(codex.display().to_string()),
                     agent_host_bin: Some(host.display().to_string()),
+                    agy_bin: Some(agy.display().to_string()),
                     ..Default::default()
                 },
                 Arc::clone(&store),
@@ -2831,9 +2831,9 @@ mod tests {
                     )
                     .await
                 }
-                _ => {
+                agent => {
                     hosted_start(
-                        AgentKind::Claude,
+                        agent,
                         &self.daemon,
                         Ok(self.launcher.clone()),
                         &self.root,
@@ -4512,6 +4512,30 @@ mod tests {
             own_declined.contains(r#"trust_level = "untrusted""#)
                 && !own_declined.contains(r#"trust_level = "trusted""#),
             "{own_declined}"
+        );
+    }
+
+    /// **A new Antigravity worktree is made as a Codex one is** (S3, row 6): agy has no worktree flag of its own, so
+    /// ccd makes it, where Claude Code makes one, on a branch named as typed, and the run starts in it.
+    #[tokio::test]
+    async fn a_new_antigravity_worktree_is_made_as_a_codex_one_is() {
+        let rig = recording("new-agy");
+        let main = rig.main();
+        let result = rig
+            .start_in(
+                &rig.project(),
+                AgentKind::Antigravity,
+                StartWorktree::New {
+                    name: "fix/agy".into(),
+                },
+            )
+            .await;
+        assert!(reached(&result), "{result:?}");
+        let folder = Path::new(&main).join(".claude/worktrees/fix+agy");
+        assert_eq!(rig.host_cwd(), folder.canonicalize().unwrap());
+        assert_eq!(
+            git(&folder, &["symbolic-ref", "--short", "HEAD"]),
+            "fix/agy"
         );
     }
 
