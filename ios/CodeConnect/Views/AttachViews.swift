@@ -3,15 +3,17 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// **`+` at the reply pill's leading edge**: the system's menu of where a file comes from — Photos, the camera,
-/// Files. What is picked goes to Kit's `attach`, which applies the limits and starts the upload at once; the tile
-/// over the pill shows the rest.
+/// Kit's `attach(name:size:read:)` for the box the "+" belongs to: the reply box's run, or the start box's draft.
+typealias TakeFile = (_ name: String, _ size: Int, _ read: () throws -> Data) -> Void
+
+/// **`+` at a message pill's leading edge**: the system's menu of where a file comes from — Photos, the camera,
+/// Files. What is picked goes to Kit, which applies the limits (and, in a reply, starts the upload at once); the
+/// tile over the pill shows the rest.
 struct AttachMenu: View {
-    let key: String
     /// How many more files this message can take.
     let room: Int
+    let take: TakeFile
 
-    @Environment(AppModel.self) private var model
     @State private var showPhotos = false
     @State private var picked: [PhotosPickerItem] = []
     @State private var showCamera = false
@@ -46,7 +48,7 @@ struct AttachMenu: View {
         .fullScreenCover(isPresented: $showCamera) {
             CameraCapture { image in
                 if let jpeg = image.jpegData(compressionQuality: 0.85) {
-                    model.attach(data: jpeg, name: "photo.jpg", to: key)
+                    take("photo.jpg", jpeg.count) { jpeg }
                 }
             }
             .ignoresSafeArea()
@@ -61,7 +63,7 @@ struct AttachMenu: View {
         guard let data = try? await item.loadTransferable(type: Data.self),
               let photo = PhotoExport.prepare(data, types: item.supportedContentTypes)
         else { return }
-        model.attach(data: photo.data, name: photo.name, to: key)
+        take(photo.name, photo.data.count) { photo.data }
     }
 
     /// A file from Files, read only when Kit finds it within the limits: a larger one is a refused tile, its bytes
@@ -70,7 +72,7 @@ struct AttachMenu: View {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        model.attach(name: url.lastPathComponent, size: size, to: key) { try Data(contentsOf: url) }
+        take(url.lastPathComponent, size) { try Data(contentsOf: url) }
     }
 }
 

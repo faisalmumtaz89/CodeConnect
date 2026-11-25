@@ -2133,7 +2133,10 @@ private struct SessionComposeBar: View {
         // `+` at the leading edge, where the computer takes files: the circle's 4pt inset, mirrored.
         .overlay(alignment: .bottomLeading) {
             if model.canUpload(key) {
-                AttachMenu(key: key, room: Attachment.maxCount - files.count).padding(CC.space.xxs)
+                AttachMenu(room: Attachment.maxCount - files.count) { name, size, read in
+                    model.attach(name: name, size: size, to: key, read: read)
+                }
+                .padding(CC.space.xxs)
             }
         }
         .background { CCPillSurface() }
