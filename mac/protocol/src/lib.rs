@@ -895,8 +895,11 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     `attachments`, upload ids in order, at most [`ws::MAX_ATTACHMENTS`], hashed after the text only when there are
 ///     any; each reaches the agent as its absolute path on a line after "Attached:", and a Claude run is started
 ///     and resumed with its own uploads folder as an additional directory, so it reads them without asking. The
-///     daemon bounds a file at [`ws::MAX_UPLOAD_BYTES`] and a chunk at [`ws::MAX_UPLOAD_CHUNK_BYTES`]. A daemon below
-///     50 answers `put_file` with `bad_request` and advertises no `uploads`.
+///     daemon bounds a file at [`ws::MAX_UPLOAD_BYTES`] and a chunk at [`ws::MAX_UPLOAD_CHUNK_BYTES`]. A `put_file`
+///     without `session_id` is for a start: held under `uploads/.pending/`, its connection's alone, and
+///     [`ws::ClientMessage::StartSession`]'s `attachments` move it into the new run's folder before its first message,
+///     which carries the same path lines. A daemon below 50 answers `put_file` with `bad_request` and advertises no
+///     `uploads`.
 pub const PROTOCOL_MINOR: u32 = 50;
 
 #[cfg(test)]

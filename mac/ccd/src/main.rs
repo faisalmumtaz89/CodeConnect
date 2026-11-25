@@ -159,6 +159,9 @@ async fn main() -> Result<()> {
     // The hosts of Claude runs outlive ccd: each one still running is attached again, in a
     // task started before the listeners.
     daemon.recover_hosted_runs(&protocol::root_dir()).await;
+    // Before a phone can send one: the start box's uploads the last process held for its
+    // connections.
+    uploads::remove_pending(&uploads::root());
 
     let socket_path = protocol::socket_path();
     let ipc = tokio::spawn(ipc_server::serve(Arc::clone(&daemon), socket_path.clone()));
