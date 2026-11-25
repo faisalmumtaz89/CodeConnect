@@ -71,15 +71,19 @@ public enum NativeCommand: Sendable, Hashable {
     }
 
     /// The agent's own answer to this command above `baseline`, as a terminal phase, or nil while there is none: Claude
-    /// Code's receipt; for Antigravity, which runs `/compact` as a prompt, that prompt's turn ending. The sequence fences
-    /// out a backfill that publishes an older receipt.
+    /// Code's receipt; for Antigravity, which runs `/compact` as a prompt, that prompt's own turn ending, confirmed only
+    /// when agy ended it as done. The sequence fences out a backfill that publishes an older receipt.
     func receiptPhase(
         from receipts: SessionState.Receipts?, after baseline: UInt64, agent: AgentKind = .claude
     ) -> CommandPhase? {
         switch self {
         case .compact where agent == .antigravity:
-            guard let ended = receipts?.turnEndSeq, ended > baseline else { return nil }
-            return .confirmed("Antigravity compacted its context.")
+            guard let turn = receipts?.compactTurn, turn.sentSeq > baseline, let reason = turn.endReason else {
+                return nil
+            }
+            return reason == "end_turn"
+                ? .confirmed("Antigravity compacted its context.")
+                : .failed("Antigravity didn’t finish compacting.")
         case .compact:
             guard let signal = receipts?.compact, let seq = receipts?.compactSeq, seq > baseline else { return nil }
             switch signal {

@@ -227,13 +227,38 @@ final class AntigravityKitTests: XCTestCase {
             "Ask Antigravity to compact its current context. Instructions are optional.")
         XCTAssertEqual(CompactPrompt.placeholder(for: .antigravity), "What should Antigravity preserve?")
 
+        XCTAssertNil(
+            NativeCommand.compact(instructions: "").receiptPhase(
+                from: SessionState.Receipts(compact: nil, compactSeq: 0, turnEndSeq: 12), after: 10, agent: .claude),
+            "Claude's waits for its receipt")
+    }
+
+    /// **An Antigravity `/compact` is answered by its own turn alone**, as ccd files it: the send as `say:<uuid>`, the
+    /// prompt's turn under that uuid. A turn running when it was sent ends without settling it; its own turn settles it,
+    /// confirmed only when agy ended it as done.
+    func testAnAntigravityCompactIsSettledByItsOwnTurnOnly() throws {
+        func event(_ json: String) throws -> Event { try JSONDecoder().decode(Event.self, from: Data(json.utf8)) }
+        func row(_ seq: Int, _ body: String) throws -> Event {
+            try event(#"{"seq":\#(seq),"session_id":"cc-1","ts":"2026-11-25T20:00:00.000Z",\#(body)}"#)
+        }
+        let sent = try row(11, #""kind":"user_message","source":"daemon","source_event_id":"say:U2","payload":{"text":"/compact"}"#)
+        let earlier = try row(12, #""kind":"turn_complete","source":"acp","turn_id":"U1","payload":{"stop_reason":"end_turn"}"#)
+        func own(_ reason: String) throws -> Event {
+            try row(14, #""kind":"turn_complete","source":"acp","turn_id":"U2","payload":{"stop_reason":"\#(reason)"}"#)
+        }
         let compact = NativeCommand.compact(instructions: "")
-        let ended = SessionState.Receipts(compact: nil, compactSeq: 0, turnEndSeq: 12)
-        XCTAssertEqual(
-            compact.receiptPhase(from: ended, after: 10, agent: .antigravity),
-            .confirmed("Antigravity compacted its context."))
-        XCTAssertNil(compact.receiptPhase(from: ended, after: 12, agent: .antigravity), "no turn end after the send")
-        XCTAssertNil(compact.receiptPhase(from: ended, after: 10, agent: .claude), "Claude's waits for its receipt")
+        func phase(_ events: [Event], after baseline: UInt64 = 10) -> CommandPhase? {
+            compact.receiptPhase(
+                from: SessionState.Receipts(
+                    compact: nil, compactSeq: 0, turnEndSeq: events.last?.seq ?? 0,
+                    compactTurn: SessionState.compactTurn(in: events)),
+                after: baseline, agent: .antigravity)
+        }
+        XCTAssertNil(phase([sent, earlier]), "the turn running when it was sent does not answer it")
+        XCTAssertEqual(phase([sent, earlier, try own("end_turn")]), .confirmed("Antigravity compacted its context."))
+        XCTAssertEqual(phase([sent, earlier, try own("cancelled")]), .failed("Antigravity didn’t finish compacting."))
+        XCTAssertEqual(phase([sent, try own("error")]), .failed("Antigravity didn’t finish compacting."))
+        XCTAssertNil(phase([sent, try own("end_turn")], after: 11), "a /compact at the fence is not this send")
     }
 
     /// Stop follows the hosted rule, and its sentences name Antigravity.
