@@ -355,8 +355,9 @@ pub enum ClientMessage {
     /// `send_text` or `compose` on this connection may attach it. Without `session_id` it is
     /// for a run not started yet: held under `~/.codeconnect/uploads/.pending/<upload_id>/`,
     /// bound to this connection alone, for a [`ClientMessage::StartSession`] on it to attach.
-    /// One that nothing attached is removed when the connection closes. A refused chunk ends
-    /// the upload for the client: it sends the file again under a new id, from offset 0.
+    /// One that nothing attached is removed when the connection closes, or when ccd starts
+    /// again. A refused chunk ends the upload for the client: it sends the file again under a
+    /// new id, from offset 0.
     PutFile {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,

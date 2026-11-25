@@ -64,6 +64,12 @@ pub fn remove_session(root: &Path, session_uid: &str) {
     }
 }
 
+/// Remove the start box's uploads no start took, when ccd starts: each was its connection's,
+/// and no connection outlives the process that held it.
+pub fn remove_pending(root: &Path) {
+    remove_session(root, PENDING);
+}
+
 /// `text` with each attached file's path on a line after "Attached:", as the agent is sent it.
 pub fn attached(text: String, paths: &[PathBuf]) -> String {
     if paths.is_empty() {
@@ -403,6 +409,24 @@ mod tests {
         assert_eq!(mode(&folder.join("a.png")), 0o600);
         assert_eq!(mode(&folder), 0o700);
         assert_eq!(mode(&root.join(UID)), 0o700);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// **The start box's uploads no start took go when ccd starts again**: what the next process
+    /// finds is the files, and no connection or upload in memory. A run's own files stay.
+    #[test]
+    fn a_restart_removes_the_pending_uploads_no_start_took() {
+        let root = root("restart");
+        let before = Uploads::default();
+        assert_eq!(before.put(&root, 1, PENDING, "p1", "a", 1, 0, b"a"), Ok(1));
+        assert_eq!(before.put(&root, 1, UID, "u1", "b", 1, 0, b"b"), Ok(1));
+
+        remove_pending(&root);
+        assert!(!root.join(PENDING).exists());
+        assert_eq!(
+            std::fs::read(root.join(UID).join("u1").join("b")).unwrap(),
+            b"b"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
