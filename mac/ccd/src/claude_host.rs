@@ -1024,7 +1024,7 @@ async fn link(
                     ),
                 };
                 // agy refusing a start as signed out (signed out outside CodeConnect, or Google ended it): what is kept
-                // of its sign-in is old, and is read again.
+                // of its sign-in is old, and is read again, the accounts listing then pushed.
                 if said
                     .as_ref()
                     .is_err_and(|why| why == "Authentication required")
@@ -1034,6 +1034,8 @@ async fn link(
                     daemon
                         .account_facts
                         .forget(&crate::accounts::default_key(&AgentKind::Antigravity));
+                    let daemon = Arc::clone(&daemon);
+                    tokio::spawn(async move { crate::start_session::refresh_facts(&daemon).await });
                 }
                 let initialize = match initialize.as_ref().map(serde_json::to_string).transpose() {
                     Ok(initialize) => initialize,
@@ -3965,12 +3967,14 @@ mod tests {
 
     /// **An Antigravity start agy refuses as signed out forgets what is kept of its sign-in** (round 1): agy signed out
     /// outside CodeConnect (in agy itself, or Google ended it) still read "Signed in" from what ccd kept. agy's own
-    /// "Authentication required" for a start drops that, so the accounts listing reads agy again.
+    /// "Authentication required" for a start drops that, reads agy again and pushes the accounts listing.
     #[tokio::test]
     async fn an_antigravity_start_refused_as_signed_out_forgets_its_kept_sign_in() {
+        let _env = crate::ProcessEnvRead::take();
         let rig = rig();
         let key = crate::accounts::default_key(&AgentKind::Antigravity);
         rig.daemon.account_facts.keep_agent_signed(&key, Some(true));
+        let mut pushed = rig.daemon.accounts_tx.subscribe();
         let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
         let cwd = rig.root.to_str().unwrap().to_string();
         let (result, played) = tokio::join!(
@@ -4004,6 +4008,12 @@ mod tests {
             serde_json::to_value(listing).unwrap().get("agent_sign_ins"),
             None,
             "what was kept of agy's sign-in is gone, to be read again"
+        );
+        // Read again at once and told: a Settings page already open does not keep "Signed in".
+        let told = tokio::time::timeout(Duration::from_secs(10), pushed.recv()).await;
+        assert!(
+            matches!(told, Ok(Ok(protocol::ws::ServerMessage::Accounts { .. }))),
+            "the accounts listing is pushed after the refusal: {told:?}"
         );
         stop(&played.dir);
     }
