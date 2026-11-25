@@ -25,8 +25,9 @@ final class AttachmentTests: XCTestCase {
         }
     }
 
-    private func list() throws -> ServerMessage {
-        .sessions([
+    private func list(codex: Bool) throws -> ServerMessage {
+        let agent = codex ? #""agent":"codex","codex_link":"subscribed""# : #""agent":"claude""#
+        return .sessions([
             try JSONDecoder().decode(
                 SessionSummary.self,
                 from: Data(
@@ -34,26 +35,33 @@ final class AttachmentTests: XCTestCase {
                     {"session_uid":"u-1","session_id":"cc-1",
                      "cwd":"/work","project_label":"work","lifecycle":"live","link":"attached",
                      "last_seq":0,"created_at":"2026-08-18T09:00:00.000Z",
-                     "updated_at":"2026-08-18T09:00:00.000Z","blocked_on":[],"agent":"claude"}
+                     "updated_at":"2026-08-18T09:00:00.000Z","blocked_on":[],\(agent)}
                     """.utf8))
         ])
     }
 
-    private func model(uploads: Bool = true) async throws -> (AppModel, Wire) {
+    private func model(uploads: Bool = true, codex: Bool = false) async throws -> (AppModel, Wire) {
         let model = AppModel(cache: EventCache())
         model.connection.simulateConnectedForTesting()
         model.connection.simulateCapabilitiesForTesting(
-            Capabilities(canApproveReliably: true, sendText: true, extra: ["uploads": .bool(uploads)]), minor: 50)
+            Capabilities(
+                canApproveReliably: true, sendText: true,
+                extra: ["uploads": .bool(uploads), "codex_compose": .bool(codex)]),
+            minor: 50)
         let wire = Wire()
         model.connection.sendStub = { [weak model] message in
             wire.frames.append(message)
+            if case .compose(let session, let requestID, _, _, _) = message {
+                model?.connection.injectForTesting(
+                    .composeResult(sessionID: session, requestID: requestID, result: .started(turnID: "t-1")))
+            }
             guard case .putFile(_, let id, _, let size, let offset, let data) = message else { return }
             wire.statesAtChunk.append(model?.files(for: "u-1").first?.state ?? .arrived)
             let result: PutFileResult =
                 wire.refuse.map { .refused($0) } ?? .received(min(size, offset + (Data(base64Encoded: data)?.count ?? 0)))
             model?.connection.injectForTesting(.putFileResult(uploadID: id, result: result))
         }
-        model.connection.injectForTesting(try list())
+        model.connection.injectForTesting(try list(codex: codex))
         try await XCTUnwrap(model.statesForTesting["u-1"]).settleForTesting()
         XCTAssertNotNil(model.drafts(for: "u-1"))
         return (model, wire)
@@ -215,6 +223,40 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(model.files(for: "u-1").first?.state, .failed("The link dropped before it was sent."))
     }
 
+    // MARK: Only the reply box's send is the tray's
+
+    /// A diff comment to a Codex run carries none of the reply box's files and leaves its tray as it was; and the
+    /// comment's own box is not held back by those files.
+    func testACodexCommentCarriesNoFilesAndLeavesTheTray() async throws {
+        let (model, _) = try await model(codex: true)
+        model.attach(data: Data(repeating: 2, count: 3), name: "a.png", to: "u-1")
+        await settled(model)
+        model.attach(name: "big.mov", size: 2 * Attachment.maxBytes, to: "u-1") { Data() }
+        XCTAssertNotNil(model.sendBlockedReason(for: "u-1", draft: "look"), "the reply box waits on its files")
+        XCTAssertNil(
+            model.sendBlockedReason(for: "u-1", draft: "look", files: false), "a comment's box is not held by them")
+
+        _ = await model.composeToCodex(sessionKey: "u-1", text: "a comment")
+        XCTAssertEqual(model.connection.sentAttachments.last, [], "a comment carries no files")
+        XCTAssertEqual(model.files(for: "u-1").count, 2, "and leaves the tray as it was")
+    }
+
+    /// A file added while a send waits for its answer is the next message's: the send takes out only what it carried.
+    func testAFileAddedWhileTheSendWaitsStaysForTheNextMessage() async throws {
+        let (model, _) = try await model()
+        model.attach(data: Data(repeating: 2, count: 3), name: "a.png", to: "u-1")
+        await settled(model)
+        let sent = model.files(for: "u-1").map(\.id)
+        model.connection.sendTextStub = { [weak model] _, _ in
+            model?.attach(data: Data(repeating: 3, count: 4), name: "later.txt", to: "u-1")
+            return .sent(matched: "work")
+        }
+        _ = await model.send(text: "look", to: "u-1", files: true)
+        await settled(model)
+        XCTAssertEqual(model.files(for: "u-1").map(\.name), ["later.txt"])
+        XCTAssertFalse(model.files(for: "u-1").contains { sent.contains($0.id) })
+    }
+
     // MARK: Wire
 
     /// Frames as `ws.rs` reads them: attachments only when there are any, and a chunk's fields.
@@ -342,6 +384,28 @@ final class AttachmentTests: XCTestCase {
         let chunks = wire.frames.filter { if case .putFile = $0 { true } else { false } }
         XCTAssertEqual(chunks.count, 1, "one upload of the one file: \(wire.frames)")
         XCTAssertEqual(startedIDs(wire).count, 1)
+    }
+
+    /// Opening the started run spends the start box's files with its message: the next New Agent box is empty.
+    func testOpeningTheStartedRunEmptiesTheStartBox() {
+        let draft = StartDraft()
+        draft.message = "read this"
+        draft.attach(name: "notes.md", size: 5) { Data("hello".utf8) }
+        draft.didOpen()
+        XCTAssertEqual(draft.message, "")
+        XCTAssertTrue(draft.files.isEmpty)
+    }
+
+    /// An answered start lets its files' bytes go: starts are kept for the app's life.
+    func testAnAnsweredStartLetsItsFilesBytesGo() async throws {
+        let (model, _, project) = startModel()
+        let draft = StartDraft()
+        draft.attach(name: "notes.md", size: 5) { Data("hello".utf8) }
+        let id = model.startSession(project, agent: .claude, prompt: "", files: draft.files)
+        _ = await outcome(model, id)
+        let kept = try XCTUnwrap(model.starter.starts[id]?.files)
+        XCTAssertEqual(kept.count, 1)
+        XCTAssertTrue(kept.allSatisfy { $0.data == nil }, "no start keeps its files' bytes once answered")
     }
 
     /// A file that does not arrive fails the start with why, and no start leaves.

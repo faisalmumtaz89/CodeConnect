@@ -139,7 +139,8 @@ struct HunkCommentField: View {
 
     private var model: AppModel { actions.model }
     private var key: String { actions.key }
-    private var blocked: String? { model.sendBlockedReason(for: key, draft: draft) }
+    /// The reply box's files are not this comment's.
+    private var blocked: String? { model.sendBlockedReason(for: key, draft: draft, files: false) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {

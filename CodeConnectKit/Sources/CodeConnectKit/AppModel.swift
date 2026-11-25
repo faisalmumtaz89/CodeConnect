@@ -3546,9 +3546,10 @@ public final class AppModel {
 
     /// **Say something to this Codex session.**
     @discardableResult
-    /// The run's tray goes with it: every file, once all have arrived.
-    public func composeToCodex(sessionKey key: String, text: String) async -> ComposeResult? {
-        let files = arrivedFileIDs(key)
+    /// `files`: the run's tray goes with it, every file once all have arrived (the reply box's send); no other caller
+    /// carries files.
+    public func composeToCodex(sessionKey key: String, text: String, files withFiles: Bool = false) async -> ComposeResult? {
+        let files = withFiles ? arrivedFileIDs(key) : []
         let controls = codexControls(for: key)
         guard let summary = summary(for: key) else {
             controls.composeNotSent("This run is not in the fleet.")
@@ -3594,7 +3595,7 @@ public final class AppModel {
                 session: reference, requestID: requestID, text: text, payloadHash: hash, attachments: files)
             controls.settleCompose(result, material: hash)
             switch result {
-            case .started, .steered, .duplicate: filesSent(key)
+            case .started, .steered, .duplicate: filesSent(files, from: key)
             default: break
             }
             states[key]?.codexTurnsChanged()
@@ -4066,7 +4067,7 @@ public final class AppModel {
             switch result {
             case .sent(let matched):
                 pendingSendIdentities[mutation] = nil
-                if !files.isEmpty { filesSent(key) }
+                filesSent(files, from: key)
                 return .sent(matched: matched)
             case .refused(let reason):
                 // A refusal promises nothing was typed, so the next attempt
@@ -4075,7 +4076,7 @@ public final class AppModel {
                 return .refused(reason)
             case .duplicate(_, let appliedAt):
                 pendingSendIdentities[mutation] = nil
-                if !files.isEmpty { filesSent(key) }
+                filesSent(files, from: key)
                 return .alreadyApplied(appliedAt: appliedAt)
             case .indeterminate(let reason):
                 retainIdentityIfListed(mutation, requestID)
