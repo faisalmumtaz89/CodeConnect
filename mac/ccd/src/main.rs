@@ -56,8 +56,22 @@ use crate::state::{Daemon, Endpoint};
 use crate::store::Store;
 use protocol::config::Config;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Most workers ccd runs async tasks on. Its sockets and timers need few; database, file and
+/// process work runs on the blocking pool. Tokio's default of one worker per core parked 28 idle
+/// threads on a 28-core Mac.
+const MAX_WORKERS: usize = 4;
+
+fn main() -> Result<()> {
+    let workers = std::thread::available_parallelism().map_or(1, |cores| cores.get());
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers.min(MAX_WORKERS))
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     log::init_from_env();
     if std::env::args().any(|arg| arg == "--version") {
         println!(
