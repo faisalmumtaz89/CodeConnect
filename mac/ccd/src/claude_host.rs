@@ -927,6 +927,7 @@ async fn link(
         let acp = match &read {
             Ok(FromHost::Acp { seq, turn, message }) if live => Some(protocol::acp_map::read(
                 &key,
+                &start_uuid,
                 *seq,
                 turn.as_deref(),
                 message,
@@ -951,6 +952,7 @@ async fn link(
                 last: *seq,
                 turn: turn.clone(),
                 session: acp_session(message),
+                run: start_uuid.clone(),
             });
             open.text.push_str(text);
             open.last = *seq;
@@ -1253,6 +1255,8 @@ struct Joining {
     turn: Option<String>,
     /// The ACP session its first chunk names.
     session: Option<String>,
+    /// The uuid of the start its host was started with, which its event's id begins with.
+    run: String,
 }
 
 /// The ACP session an `acp` line's `session/update` names; a prompt's reply names none.
@@ -1273,6 +1277,7 @@ async fn file_joined(
 ) -> Result<(), String> {
     let event = protocol::acp_map::joined(
         key,
+        &open.run,
         open.thought,
         &open.text,
         open.first,
@@ -2461,7 +2466,9 @@ pub(crate) async fn interrupt(
             return InterruptReport::NotApplied(says::INTERRUPT_ALREADY_WAITING.into())
         }
         Lifecycle::Starting => {
-            return InterruptReport::NotApplied(says::CLAUDE_TURN_NOT_RUNNING.into())
+            return InterruptReport::NotApplied(says::hosted_turn_not_running(
+                agent_named(daemon, uid).await,
+            ))
         }
         _ => return InterruptReport::NotApplied(says::INTERRUPT_RUN_IS_GONE.into()),
     }
@@ -2897,7 +2904,9 @@ async fn settle_stop(
         {
             crate::log_error!("{uid}: could not give back the refused stop: {err:#}");
         }
-        return InterruptReport::NotApplied(says::CLAUDE_TURN_NOT_RUNNING.into());
+        return InterruptReport::NotApplied(says::hosted_turn_not_running(
+            agent_named(daemon, uid).await,
+        ));
     }
     let reason = told.terminal_reason.unwrap_or("completed");
     // Claude's stopped turn ends `aborted_*`; an Antigravity prompt's, `cancelled` (ACP's word).
@@ -8701,23 +8710,37 @@ mod tests {
         )
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        // A Stop of a turn the host is not running is refused in Antigravity's name.
+        let (refused, _) = tokio::join!(
+            stop_as_app(&rig.daemon, &uid, "stop-0", "not-the-turn"),
+            async {
+                let (uuid, _) = host_reads_stop(&mut played).await;
+                host_refuses_stop(&mut played, 4, &uuid).await;
+            }
+        );
+        assert_eq!(
+            refused,
+            protocol::ws::InterruptResult::Rejected {
+                reason: crate::codex_refusals::hosted_turn_not_running("Antigravity")
+            }
+        );
         let (stopped, _) = tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", &turn), async {
             let (uuid, named) = host_reads_stop(&mut played).await;
             assert_eq!(named, turn);
             say(
                 &mut played.write,
-                serde_json::json!({"type": "acp", "seq": 4, "turn": turn, "message": {
+                serde_json::json!({"type": "acp", "seq": 5, "turn": turn, "message": {
                     "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "cancelled"}}}),
             )
             .await;
-            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
             say(
                 &mut played.write,
-                serde_json::json!({"type": "outcome", "seq": 5, "uuid": uuid, "status": "done",
+                serde_json::json!({"type": "outcome", "seq": 6, "uuid": uuid, "status": "done",
                                    "terminal_reason": "cancelled", "cancelled": []}),
             )
             .await;
-            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 6 }));
         });
         assert_eq!(
             stopped,
@@ -8845,7 +8868,7 @@ mod tests {
         assert_eq!(
             refused,
             protocol::ws::InterruptResult::Rejected {
-                reason: crate::codex_refusals::CLAUDE_TURN_NOT_RUNNING.into()
+                reason: crate::codex_refusals::hosted_turn_not_running("Claude")
             }
         );
         assert_eq!(stop_record(&rig.daemon, &uid, "stop-4").await, None);
@@ -8937,7 +8960,7 @@ mod tests {
         let (starting, _) = begun(&rig, &cwd, &host, Trust::Trusted).await;
         assert_eq!(
             stop_as_app(&rig.daemon, &starting, "stop-1", "turn-1").await,
-            says(crate::codex_refusals::CLAUDE_TURN_NOT_RUNNING)
+            says(&crate::codex_refusals::hosted_turn_not_running("Claude"))
         );
         assert_eq!(stop_record(&rig.daemon, &starting, "stop-1").await, None);
     }
@@ -12343,7 +12366,10 @@ mod tests {
     /// **An Antigravity run whose agy ended on its own is relaunched by the person's next
     /// message**, as a Claude run is: the ACP session its lines named is kept as the run's
     /// session, and the new host's `start` names the agent, the agy a start finds (config
-    /// `agy_bin`) and that session to resume, with the message as its prompt.
+    /// `agy_bin`) and that session to resume, with the message as its prompt. The session is
+    /// never offered to the apps as Claude Code's (no `claude_session_id`, which they resume
+    /// with `claude --resume`). The relaunched host numbers its lines from 1 again, and its
+    /// reply and its turn's end are filed beside the first host's, not taken for them.
     #[tokio::test]
     async fn a_message_relaunches_an_antigravity_run_resuming_its_session() {
         let _env = crate::ProcessEnvRead::take();
@@ -12379,10 +12405,17 @@ mod tests {
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
         say(
             &mut played.write,
-            serde_json::json!({"type": "exited", "seq": 4, "code": 1}),
+            serde_json::json!({"type": "acp", "seq": 4, "turn": turn, "message": {
+                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
         )
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
         let old = pid_in(&played.dir, "stub.pid");
         stop(&played.dir);
         gone(old).await;
@@ -12390,8 +12423,13 @@ mod tests {
         let dir = played.dir.clone();
         drop(played);
         until_detached(&rig.daemon, &uid).await;
-        assert!(summary(&rig.daemon, &uid).await.relaunchable);
-        let (sent, relaunched) = tokio::join!(
+        let ended = summary(&rig.daemon, &uid).await;
+        assert!(ended.relaunchable);
+        assert_eq!(
+            ended.claude_session_id, None,
+            "an ACP session is not Claude Code's"
+        );
+        let (sent, mut relaunched) = tokio::join!(
             send_as_app(&rig.daemon, &uid, "r-again", "carry on"),
             async {
                 let mut relaunched = play_relaunched(&dir, old).await;
@@ -12426,6 +12464,43 @@ mod tests {
             }
         );
         assert_eq!(kept(&rig, &uid).0, "live");
+        let again = send_uuid(&uid, "r-again");
+        say(
+            &mut relaunched.write,
+            serde_json::json!({"type": "acp", "seq": 3, "turn": again, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-7", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Back."}}}}}),
+        )
+        .await;
+        say(
+            &mut relaunched.write,
+            serde_json::json!({"type": "acp", "seq": 4, "turn": again, "message": {
+                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
+        )
+        .await;
+        assert_eq!(
+            next(&mut relaunched.lines).await,
+            Some(ToHost::Ack { seq: 3 })
+        );
+        assert_eq!(
+            next(&mut relaunched.lines).await,
+            Some(ToHost::Ack { seq: 4 })
+        );
+        let events = stored(&rig, &uid);
+        assert!(
+            events.iter().any(
+                |event| event["kind"] == "agent_message" && event["payload"]["text"] == "Back."
+            ),
+            "the relaunched run's reply is filed"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["kind"] == "turn_complete")
+                .count(),
+            2,
+            "both hosts' turn ends are filed"
+        );
         stop(&relaunched.dir);
     }
 

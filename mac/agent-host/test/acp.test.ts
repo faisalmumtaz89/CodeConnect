@@ -115,6 +115,8 @@ test('an interrupt of the running turn cancels it, drops the prompts queued afte
     outcome: { outcome: 'cancelled' },
   });
   expect(lines.find((message) => message.method === 'session/cancel').params).toStrictEqual({ sessionId: 'sess-1' });
+  // Its card is withdrawn, so ccd closes it.
+  expect(ccd.lines.find((line) => line.type === 'withdrawn')).toMatchObject({ tool_use_id: '101' });
   // The queued say never reached agy.
   await Bun.sleep(300);
   expect(stdin(dir).filter((message) => message.method === 'session/prompt')).toHaveLength(1);
@@ -125,6 +127,7 @@ test('stop answers an open request cancelled, cancels the session and ends agy; 
   await ccd.line('the permission request', (line) => line.type === 'permission');
   ccd.send({ type: 'stop', uuid: 'c-stop' });
   await ccd.line('the run\'s end', (line) => line.type === 'exited');
+  expect(ccd.lines.find((line) => line.type === 'withdrawn')).toMatchObject({ tool_use_id: '101' });
   const lines = stdin(dir);
   expect(lines.find((message) => message.id === 101 && message.method === undefined).result).toStrictEqual({
     outcome: { outcome: 'cancelled' },

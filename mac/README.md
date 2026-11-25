@@ -1367,6 +1367,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `ws_loopback` | `true` | Also listen on `127.0.0.1`, for tools on this Mac. The token is still required. |
 | `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. A start checks the claude this list finds. |
 | `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
+| `agy_bin` | auto | Explicit path to Antigravity's `agy`. Unset, it is the first `agy` on `PATH` as your shell finds it, then `~/.local/bin/agy`, where its installer puts it. |
 | `agent_host_bin` | beside ccd | Explicit path to `cc-agent-host`, the agent host ccd runs for each Claude run started from the app. Unset, it is the `cc-agent-host` next to ccd's own executable, where every install puts it. |
 | `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |
 | `tls_required` | `false` | Refuse plaintext. Turn on once every client speaks `wss://`; both share one port until then. |

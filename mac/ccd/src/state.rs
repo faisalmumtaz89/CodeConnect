@@ -4690,7 +4690,9 @@ impl Daemon {
                 cwd: row.cwd,
                 lifecycle: row.lifecycle,
                 link,
-                claude_session_id: row.claude_session_id,
+                // Claude Code's own session, which an app resumes with `claude --resume`: an
+                // Antigravity run's ACP session is kept in the same column for its relaunch alone.
+                claude_session_id: row.claude_session_id.filter(|_| row.agent.is_claude()),
                 transcript_path: row.transcript_path,
                 last_seq: last_seqs.get(&row.session_uid).copied().unwrap_or_default(),
                 created_at: row.created_at,

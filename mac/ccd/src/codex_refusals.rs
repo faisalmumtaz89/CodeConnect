@@ -152,11 +152,15 @@ pub(crate) const INTERRUPT_TURN_NOT_RUNNING: &str =
     "that turn is not the one this Codex session is running, so nothing was \
     sent; it may have finished already";
 
-/// [`INTERRUPT_TURN_NOT_RUNNING`]'s twin for a Claude run CodeConnect started: its agent host
-/// is not running that turn (another one, or the turn has ended), so nothing reached claude.
-pub(crate) const CLAUDE_TURN_NOT_RUNNING: &str =
-    "that turn is not the one Claude is running, so nothing was sent; it may have \
-    finished already";
+/// [`INTERRUPT_TURN_NOT_RUNNING`]'s twin for a run CodeConnect started on its agent host,
+/// whose agent `agent` names (Claude, Antigravity): the host is not running that turn (another
+/// one, or the turn has ended), so nothing reached the agent.
+pub(crate) fn hosted_turn_not_running(agent: &str) -> String {
+    format!(
+        "that turn is not the one {agent} is running, so nothing was sent; it may have \
+         finished already"
+    )
+}
 
 pub(crate) const INTERRUPT_ALREADY_WAITING: &str =
     "an interrupt for that turn is already waiting to take effect, so nothing \
@@ -477,7 +481,7 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "interrupt",
             "rejected",
             "permanent",
-            CLAUDE_TURN_NOT_RUNNING.to_string(),
+            hosted_turn_not_running("Claude"),
         ),
         row(
             "interrupt_already_waiting",
