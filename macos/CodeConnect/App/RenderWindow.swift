@@ -294,14 +294,11 @@
         /// `-CC_UPDATE_FEED <url>`: the updater starts, with this feed in place of the app's; it checks when asked
         /// (Check for Updates…).
         static var updateFeed: String? { UserDefaults.standard.string(forKey: "CC_UPDATE_FEED") }
-        /// `-CC_UPDATE_STEP <name>`: the update window shows the step of this name (`Updates.Step.name`) with fixed values,
-        /// over the main window once a render has placed it, and the render photographs the two. No updater starts.
-        /// `-CC_UPDATE_NOTES <text>`: the release notes the `found` step shows.
-        static var updateStep: String? { UserDefaults.standard.string(forKey: "CC_UPDATE_STEP") }
-        static var updateNotes: String { UserDefaults.standard.string(forKey: "CC_UPDATE_NOTES") ?? "" }
-
-        /// The main window, once a render has placed it.
-        @MainActor private(set) static var placedMain: NSWindow?
+        /// `-CC_UPDATE_STATE <name>`: the update button shows in the state of this name (`Updates.State`). No updater
+        /// starts.
+        static var updateState: Updates.State? {
+            UserDefaults.standard.string(forKey: "CC_UPDATE_STATE").flatMap(Updates.State.init(rawValue:))
+        }
 
         /// `-CC_HOVER <id>,<id>`: the buttons with these identifiers draw as if the pointer were on them, since a test
         /// launch has no pointer.
@@ -412,7 +409,6 @@
                     backdrop.order(.below, relativeTo: window.windowNumber)
                     self.backdrop = backdrop
                     window.alphaValue = 1
-                    RenderWindow.placedMain = window
                     self.placed = true
                     self.renderIfReady()
                 }
@@ -437,10 +433,9 @@
             }
         }
 
-        /// Photographs `window`, with `over` in front of it, into the render's PNG, then quits: 0 once written, 1 if it
-        /// could not be. `still`: the photograph waits for a frame that stops changing; a step with a moving bar never
-        /// stops, so it is taken once the window has had a moment to draw. A window `over` has its frame printed beside
-        /// the main window's.
+        /// Photographs `window` into the render's PNG, then quits: 0 once written, 1 if it could not be. `still`: the
+        /// photograph waits for a frame that stops changing; a screen with a turning ring never stops, so it is taken once
+        /// the window has had a moment to draw.
         /// What this launch drew wrongly in a way no picture shows: said at once, and a render with any fails.
         @MainActor private(set) static var faults: [String] = []
 
@@ -484,7 +479,7 @@
             return "\(CTFontCopyFamilyName(face) as String) \(weight.intValue)\(italic)"
         }
 
-        @MainActor static func renderAndQuit(_ window: NSWindow, over: NSWindow? = nil, still: Bool = true) {
+        @MainActor static func renderAndQuit(_ window: NSWindow, still: Bool = true) {
             guard let path = UserDefaults.standard.string(forKey: "CC_RENDER_WINDOW") else { return }
             checkFaces()
             Task { @MainActor in
@@ -492,13 +487,12 @@
                 try? await Task.sleep(for: .seconds(UserDefaults.standard.double(forKey: "CC_RENDER_DELAY")))
                 do {
                     guard faults.isEmpty else { throw RenderFailure(faults.joined(separator: "; ")) }
-                    let rep = try await RenderWindow.photograph(window, over: over, still: still)
+                    let rep = try await RenderWindow.photograph(window, still: still)
                     guard let png = rep.representation(using: .png, properties: [:]) else {
                         throw RenderFailure("could not encode the PNG")
                     }
                     try png.write(to: URL(fileURLWithPath: path))
                     let active = RenderWindow.everActive || NSApp.isActive
-                    if let over { print("frames: main \(window.frame) over \(over.frame)") }
                     print("render: \(rep.pixelsWide)x\(rep.pixelsHigh) -> \(path) active=\(active)")
                     RenderWindow.removeThrowawayData()
                     exit(0)
@@ -517,12 +511,11 @@
 
         /// The window as the screen shows it, with its attached sheet where it sits: the window
         /// server composes this app's windows in the window's frame, and nothing else on the screen.
-        @MainActor static func photograph(_ window: NSWindow, over: NSWindow? = nil, still: Bool = true) async throws
+        @MainActor static func photograph(_ window: NSWindow, still: Bool = true) async throws
             -> NSBitmapImageRep
         {
             if let sheet = window.attachedSheet { try await settle { sheet.frame } }
-            if let over { try await settle { over.frame } }
-            let windows = [window] + (window.attachedSheet.map { [$0] } ?? []) + (over.map { [$0] } ?? [])
+            let windows = [window] + (window.attachedSheet.map { [$0] } ?? [])
             var last: Data?
             for attempt in 0..<40 {
                 let content = try await SCShareableContent.currentProcess

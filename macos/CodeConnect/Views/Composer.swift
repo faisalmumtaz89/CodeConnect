@@ -360,7 +360,7 @@ private struct Composer: View {
         }
         .coordinateSpace(.named(Self.space))
         // Files dropped on the box, or a picture pasted into it, go with the message, where the computer takes them.
-        .takesFiles(model.canUpload(key), takeFile)
+        .takesFiles(model.canUpload(key), pasting: fieldFocused, takeFile)
         .onGeometryChange(for: CGFloat.self) { $0.size.width - 2 * InputBoxLayout.barInset } action: { rowWidth = $0 }
         // The slash palette above the box, clear of it by the panels' one gap, as wide as the box.
         .overlay(alignment: .topLeading) {
@@ -475,7 +475,7 @@ private struct Composer: View {
         result = nil
         retire?.cancel()
         Task {
-            let outcome = await model.composeToCodex(sessionKey: key, text: draft)
+            let outcome = await model.composeToCodex(sessionKey: key, text: draft, files: true)
             sending = false
             if outcome?.landed == true, kept.reply == draft { kept.reply = "" }
         }

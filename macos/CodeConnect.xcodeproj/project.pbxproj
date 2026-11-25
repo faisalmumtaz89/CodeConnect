@@ -218,7 +218,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.19.20;
+				MARKETING_VERSION = 0.19.21;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.mac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SPARKLE_PUBLIC_KEY = "nSom6l0rYK1V8xiydOFkHGCKudUqbuOic+DA0O6qfPY=";
@@ -247,7 +247,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.19.20;
+				MARKETING_VERSION = 0.19.21;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.mac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SPARKLE_PUBLIC_KEY = "nSom6l0rYK1V8xiydOFkHGCKudUqbuOic+DA0O6qfPY=";

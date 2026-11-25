@@ -601,7 +601,7 @@ struct StartForm: View {
             ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }
             startButton
         }
-        .takesFiles(context.takesUploads, draft.attach)
+        .takesFiles(context.takesUploads, pasting: messageFocused, draft.attach)
         #if DEBUG
             .task { AppModel.seedFixtureFiles(draft) }
         #endif

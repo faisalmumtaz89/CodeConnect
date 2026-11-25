@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.21
+
+- On the Mac, an update is one quiet button at the right end of the title bar: "Update" when a new version is out,
+  "Downloading…" while it downloads, then "Restart to Update", which installs it and opens the new version. The
+  update window and its release notes are gone.
+- On the Mac, Check for Updates…, in the app menu and in Settings, drives the same button, and says nothing when there
+  is no update. A download that fails shows "Update" again.
+
 ## CodeConnect 0.19.20
 
 - On the Mac, a Codex session no longer jumps to the top of the list when CodeConnect restarts; the iPhone's next
