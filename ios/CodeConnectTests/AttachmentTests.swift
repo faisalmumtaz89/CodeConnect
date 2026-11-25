@@ -79,8 +79,10 @@ final class AttachmentTests: XCTestCase {
         model.attach(data: Data(repeating: 7, count: size), name: "trace.log", to: "u-1")
         await settled(model)
 
-        XCTAssertEqual(wire.chunks.map(\.offset), [0, Attachment.chunkBytes, 2 * Attachment.chunkBytes])
-        XCTAssertEqual(wire.chunks.map(\.bytes), [Attachment.chunkBytes, Attachment.chunkBytes, 1_000])
+        // The daemon's bound, `ws.rs` MAX_UPLOAD_CHUNK_BYTES, written out: a chunk one byte over it is refused there.
+        let bound = 512 * 1024
+        XCTAssertEqual(wire.chunks.map(\.offset), [0, bound, 2 * bound])
+        XCTAssertEqual(wire.chunks.map(\.bytes), [bound, bound, size - 2 * bound])
         XCTAssertEqual(
             wire.statesAtChunk,
             [.uploading(sent: 0), .uploading(sent: Attachment.chunkBytes), .uploading(sent: 2 * Attachment.chunkBytes)])
