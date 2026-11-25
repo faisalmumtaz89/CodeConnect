@@ -8,6 +8,11 @@
 //! carries as a line of its text ([`attached`]). An upload no message attached is removed
 //! when its connection closes; a run's whole folder goes with the run.
 //!
+//! An upload sent before its run exists, for a start in the start box, names no session: it is
+//! held under [`PENDING`], its connection's alone, and the start that attaches it moves it into
+//! the new run's folder by rename, under the same id, before the run's first message is written
+//! ([`Uploads::adopt`]).
+//!
 //! The daemon enforces every bound here; a client's own checks are a courtesy to the person.
 
 use std::collections::HashMap;
@@ -25,6 +30,17 @@ pub const MAX_NAME_BYTES: usize = 255;
 /// file name of any allowed length fits beside it, and no name an upload may have, since none
 /// starts with a dot.
 const PART: &str = ".part";
+
+/// The folder, in place of a run's uid, of uploads sent before their run exists: no run's uid
+/// starts with a dot.
+pub const PENDING: &str = ".pending";
+
+/// The uploads a start attaches: sent from `connection` before the run was named, in order.
+#[derive(Clone, Copy, Default)]
+pub struct Pending<'a> {
+    pub connection: u64,
+    pub ids: &'a [String],
+}
 
 /// Where uploads live: `~/.codeconnect/uploads`.
 pub fn root() -> PathBuf {
@@ -231,6 +247,62 @@ impl Uploads {
         }
         for id in ids {
             held.get_mut(id).expect("checked above").claimed = true;
+        }
+        Ok(paths)
+    }
+
+    /// Give the start's `pending` uploads to the run `session_uid`, which is not yet recorded: each
+    /// moved by rename from [`PENDING`] into the run's folder, and attached. Their new paths, or
+    /// why none was given, every one of them then where it was. Each must be complete,
+    /// unattached, pending and `pending`'s connection's.
+    pub fn adopt(
+        &self,
+        root: &Path,
+        pending: Pending<'_>,
+        session_uid: &str,
+    ) -> Result<Vec<PathBuf>, String> {
+        let ids = pending.ids;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if ids.len() > MAX_ATTACHMENTS {
+            return Err(format!("a start attaches at most {MAX_ATTACHMENTS} files"));
+        }
+        let mut held = self.held.lock().unwrap();
+        for (index, id) in ids.iter().enumerate() {
+            if ids[..index].contains(id) {
+                return Err(format!("{id} is attached twice"));
+            }
+            match held.get(id) {
+                Some(upload)
+                    if upload.session_uid == PENDING
+                        && upload.connection == pending.connection
+                        && upload.file.is_none()
+                        && !upload.claimed => {}
+                _ => {
+                    return Err(format!(
+                        "{id} is not a finished upload this start may attach"
+                    ))
+                }
+            }
+        }
+        let folder = session_folder(root, session_uid)
+            .map_err(|err| format!("could not make the run's uploads folder: {err}"))?;
+        for (index, id) in ids.iter().enumerate() {
+            if let Err(err) = std::fs::rename(root.join(PENDING).join(id), folder.join(id)) {
+                // Every one moved so far goes back, so a refused start leaves them all pending.
+                for moved in &ids[..index] {
+                    let _ = std::fs::rename(folder.join(moved), root.join(PENDING).join(moved));
+                }
+                return Err(format!("could not move {id} to the run: {err}"));
+            }
+        }
+        let mut paths = Vec::with_capacity(ids.len());
+        for id in ids {
+            let upload = held.get_mut(id).expect("checked above");
+            upload.session_uid = session_uid.to_string();
+            upload.claimed = true;
+            paths.push(folder.join(id).join(&upload.name));
         }
         Ok(paths)
     }
@@ -444,6 +516,74 @@ mod tests {
         uploads.remove_session(&root, UID);
         assert!(!root.join(UID).exists());
         assert!(uploads.claim(&root, 2, UID, &["kept".into()]).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A file sent before its run exists waits pending, its connection's alone, and a start
+    /// moves it into the run's folder.** A message cannot attach it; another connection's start
+    /// cannot take it; a start naming one file it may not take moves none; the moved file is the
+    /// run's, and a closing connection no longer removes it.
+    #[test]
+    fn a_pending_upload_moves_whole_into_the_run_its_start_names() {
+        let root = root("pending");
+        let uploads = Uploads::default();
+        assert_eq!(
+            uploads.put(&root, 1, PENDING, "p1", "a.png", 2, 0, b"ab"),
+            Ok(2)
+        );
+        assert_eq!(
+            uploads.put(&root, 1, PENDING, "p2", "b.txt", 1, 0, b"b"),
+            Ok(1)
+        );
+        assert_eq!(
+            uploads.put(&root, 1, PENDING, "half", "c", 2, 0, b"c"),
+            Ok(1)
+        );
+        assert_eq!(mode(&root.join(PENDING).join("p1").join("a.png")), 0o600);
+        assert_eq!(
+            uploads.claim(&root, 1, UID, &["p1".into()]),
+            Err("p1 was sent for another session".into())
+        );
+        let both = ["p1".to_string(), "p2".to_string()];
+        let theirs = Pending {
+            connection: 2,
+            ids: &both,
+        };
+        assert!(uploads.adopt(&root, theirs, UID).is_err());
+        let with_half = ["p1".to_string(), "half".to_string()];
+        let mixed = Pending {
+            connection: 1,
+            ids: &with_half,
+        };
+        assert!(uploads.adopt(&root, mixed, UID).is_err());
+        assert!(root.join(PENDING).join("p1").join("a.png").exists());
+        let mine = Pending {
+            connection: 1,
+            ids: &both,
+        };
+        // The second cannot move (something is already where it would go): the first goes back.
+        let blocker = root.join(UID).join("p2").join("x");
+        std::fs::create_dir_all(&blocker).unwrap();
+        assert!(uploads.adopt(&root, mine, UID).is_err());
+        assert!(root.join(PENDING).join("p1").join("a.png").exists());
+        assert!(!root.join(UID).join("p1").exists());
+        std::fs::remove_dir_all(root.join(UID).join("p2")).unwrap();
+        let paths = uploads.adopt(&root, mine, UID).unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                root.join(UID).join("p1").join("a.png"),
+                root.join(UID).join("p2").join("b.txt")
+            ]
+        );
+        assert!(!root.join(PENDING).join("p1").exists());
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"ab");
+        uploads.close_connection(&root, 1);
+        assert!(paths[1].exists());
+        assert!(!root.join(PENDING).join("half").exists());
+        assert!(uploads
+            .adopt(&root, mine, "01OTHERRUN0000000000000000")
+            .is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 

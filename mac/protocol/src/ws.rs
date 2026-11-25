@@ -352,11 +352,14 @@ pub enum ClientMessage {
     /// its size and binds the upload to this connection and to the session's run; each next
     /// chunk starts where the last answer's `received` says. At exactly `size` the file is
     /// complete, under `~/.codeconnect/uploads/<session_uid>/<upload_id>/<name>`, and a
-    /// `send_text` or `compose` on this connection may attach it. One that no message
-    /// attached is removed when the connection closes. A refused chunk ends the upload for the
-    /// client: it sends the file again under a new id, from offset 0.
+    /// `send_text` or `compose` on this connection may attach it. Without `session_id` it is
+    /// for a run not started yet: held under `~/.codeconnect/uploads/.pending/<upload_id>/`,
+    /// bound to this connection alone, for a [`ClientMessage::StartSession`] on it to attach.
+    /// One that nothing attached is removed when the connection closes. A refused chunk ends
+    /// the upload for the client: it sends the file again under a new id, from offset 0.
     PutFile {
-        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         /// The client's id for this upload: one path component, no separators, not
         /// starting with a dot.
         upload_id: String,
@@ -405,6 +408,15 @@ pub enum ClientMessage {
     /// [`StartSessionResult::NeedsTrust`] and runs nothing; the app asks, then sends
     /// a new start, with a new `request_id`, carrying the answer. An answer given is
     /// kept for the folder, replacing any earlier one.
+    ///
+    /// `attachments` (minor 50, `uploads`) are this connection's uploads sent without a
+    /// `session_id`, in order, at most [`MAX_ATTACHMENTS`]. Once the run is named, before its
+    /// first message is written, they move into its uploads folder, and the first message
+    /// carries each as its absolute path on a line after "Attached:"; with no words, those
+    /// lines are the first message. A start that cannot take one of them takes none and
+    /// starts nothing; they stay this connection's. The start has no payload hash: its
+    /// `request_id` alone makes it idempotent, as above, and the attachments are the first
+    /// answer's.
     StartSession {
         request_id: String,
         path: String,
@@ -417,6 +429,8 @@ pub enum ClientMessage {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trust: Option<crate::host::Trust>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     /// **Every folder's answer to "trust this folder?"**, answered with one
     /// [`ServerMessage::FolderTrust`] carrying the same `request_id`.
@@ -2656,6 +2670,28 @@ mod tests {
                 ..
             }
         ));
+        // A file for a start names no session, and a start attaches it.
+        let pending: ClientMessage = serde_json::from_str(
+            r#"{"type":"put_file","upload_id":"01UR","name":"b.txt","size":1,"offset":0,
+                "data":"Yg=="}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            pending,
+            ClientMessage::PutFile {
+                session_id: None,
+                ..
+            }
+        ));
+        let start: ClientMessage = serde_json::from_str(
+            r#"{"type":"start_session","request_id":"r1","path":"/p","agent":"claude",
+                "attachments":["01UR"]}"#,
+        )
+        .unwrap();
+        match start {
+            ClientMessage::StartSession { attachments, .. } => assert_eq!(attachments, ["01UR"]),
+            other => panic!("wrong message: {other:?}"),
+        }
         let compose: ClientMessage = serde_json::from_str(
             r#"{"type":"compose","session_id":"cc-1","request_id":"c-1","text":"",
                 "payload_hash":"h","attachments":["01UP","01UQ"]}"#,
@@ -3486,6 +3522,7 @@ mod tests {
                 worktree: None,
                 model: None,
                 trust: Some(crate::host::Trust::NotTrusted),
+                attachments: Vec::new(),
             },
             serde_json::json!({"type": "start_session", "request_id": "r1",
                 "path": "/Users/me/src/app", "agent": "claude",
@@ -3500,6 +3537,7 @@ mod tests {
                 worktree: None,
                 model: None,
                 trust: None,
+                attachments: Vec::new(),
             },
             serde_json::json!({"type": "start_session", "request_id": "r2",
                 "path": "/srv/x", "agent": "codex"}),
@@ -3656,6 +3694,7 @@ mod tests {
                 worktree: None,
                 model: Some("claude-fable-5-1[1m]".into()),
                 trust: None,
+                attachments: Vec::new(),
             },
             serde_json::json!({"type": "start_session", "request_id": "r3",
                 "path": "/Users/me/src/app", "agent": "claude",
@@ -3753,6 +3792,7 @@ mod tests {
                     worktree: Some(worktree),
                     model: None,
                     trust: None,
+                    attachments: Vec::new(),
                 },
                 serde_json::json!({"type": "start_session", "request_id": "r1",
                     "path": "/Users/me/src/app", "agent": "claude", "worktree": expected}),
