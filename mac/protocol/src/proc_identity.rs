@@ -247,30 +247,117 @@ pub fn boot_identity() -> Option<BootIdentity> {
     }
 }
 
-/// The fields of `/proc/<pid>/stat` after the command name — the one field
-/// that may itself hold spaces and parentheses, so the split is at the last
-/// `)`. Counted from there, `state` is `[0]`, `pgrp` `[2]` and `starttime`
-/// `[19]`. `None` when the process does not exist.
+/// The four `/proc/<pid>/stat` fields needed by process identity and tool-group
+/// discovery, parsed directly from a stack buffer with zero heap allocations.
 #[cfg(target_os = "linux")]
-fn read_stat(pid: i32) -> Option<Vec<String>> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(") ")?;
-    Some(fields.split_whitespace().map(str::to_owned).collect())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StatFields {
+    state: u8,
+    ppid: i32,
+    pgid: i32,
+    starttime_ticks: i64,
+}
+
+#[cfg(target_os = "linux")]
+fn clock_ticks_per_sec() -> i64 {
+    static HZ: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *HZ.get_or_init(|| {
+        // SAFETY: `sysconf` reads a constant of the running system.
+        unsafe { libc::sysconf(libc::_SC_CLK_TCK) as i64 }
+    })
+}
+
+/// Parse the fields of `/proc/<pid>/stat` after the command name — the one field
+/// that may itself hold spaces and parentheses, so the split is at the last
+/// `)`. Counted from there, `state` is `[0]`, `ppid` `[1]`, `pgid` `[2]`, and
+/// `starttime` `[19]`. `None` when the process does not exist or cannot be parsed.
+#[cfg(target_os = "linux")]
+fn parse_stat_line(stat: &[u8]) -> Option<StatFields> {
+    let close = stat.windows(2).rposition(|w| w == b") ")?;
+    let rest = &stat[close + 2..];
+    let mut state: Option<u8> = None;
+    let mut ppid: Option<i32> = None;
+    let mut pgid: Option<i32> = None;
+    let mut starttime_ticks: Option<i64> = None;
+
+    let mut idx = 0usize;
+    let mut i = 0usize;
+    let len = rest.len();
+    while i < len {
+        while i < len && rest[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= len {
+            break;
+        }
+        let start = i;
+        while i < len && !rest[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let tok = &rest[start..i];
+        match idx {
+            0 => state = tok.first().copied(),
+            1 => ppid = std::str::from_utf8(tok).ok()?.parse().ok(),
+            2 => pgid = std::str::from_utf8(tok).ok()?.parse().ok(),
+            19 => {
+                starttime_ticks = std::str::from_utf8(tok).ok()?.parse().ok();
+                break;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    Some(StatFields {
+        state: state?,
+        ppid: ppid?,
+        pgid: pgid?,
+        starttime_ticks: starttime_ticks?,
+    })
+}
+
+/// Read and parse `/proc/<pid>/stat` using stack buffers only (zero heap allocations).
+#[cfg(target_os = "linux")]
+fn read_stat(pid: i32) -> Option<StatFields> {
+    use std::io::{Read, Write};
+    if pid <= 0 {
+        return None;
+    }
+    let mut path_buf = [0u8; 32];
+    let path_len = {
+        let mut cursor = std::io::Cursor::new(&mut path_buf[..]);
+        write!(cursor, "/proc/{pid}/stat").ok()?;
+        cursor.position() as usize
+    };
+    let path = std::str::from_utf8(&path_buf[..path_len]).ok()?;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = [0u8; 1024];
+    let mut total = 0usize;
+    while total < buf.len() {
+        let n = file.read(&mut buf[total..]).ok()?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+    }
+    parse_stat_line(&buf[..total])
 }
 
 /// Read the birth identity of `pid`: its `starttime`, in clock ticks since
 /// boot, as seconds and microseconds. `None` when the process does not exist.
 #[cfg(target_os = "linux")]
 pub fn read_birth_identity(pid: i32) -> Option<BirthIdentity> {
-    stat_birth(&read_stat(pid)?)
+    stat_birth(read_stat(pid)?)
 }
 
 /// The birth identity in a `/proc/<pid>/stat` line's fields ([`read_stat`]).
 #[cfg(target_os = "linux")]
-fn stat_birth(fields: &[String]) -> Option<BirthIdentity> {
-    let ticks: i64 = fields.get(19)?.parse().ok()?;
-    // SAFETY: `sysconf` reads a constant of the running system.
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as i64;
+fn stat_birth(fields: StatFields) -> Option<BirthIdentity> {
+    let ticks = fields.starttime_ticks;
+    let hz = clock_ticks_per_sec();
+    if hz <= 0 {
+        return None;
+    }
     Some(BirthIdentity {
         start_sec: ticks / hz,
         start_usec: ticks % hz * 1_000_000 / hz,
@@ -281,14 +368,14 @@ fn stat_birth(fields: &[String]) -> Option<BirthIdentity> {
 /// its birth identity comes from.
 #[cfg(target_os = "linux")]
 pub fn read_pgid(pid: i32) -> Option<i32> {
-    read_stat(pid)?.get(2)?.parse().ok()
+    Some(read_stat(pid)?.pgid)
 }
 
 /// Whether `pid` is a **zombie** (exited, awaiting reap), from its `state`:
 /// `Z`, or `X` in the instant it is being reaped. `None` when it cannot be read.
 #[cfg(target_os = "linux")]
 pub fn is_zombie(pid: i32) -> Option<bool> {
-    Some(matches!(read_stat(pid)?.first()?.as_str(), "Z" | "X"))
+    Some(matches!(read_stat(pid)?.state, b'Z' | b'X'))
 }
 
 /// The OS boot identity: the kernel's random `boot_id`, fixed for one boot,
@@ -466,6 +553,21 @@ struct Entry {
     birth: BirthIdentity,
 }
 
+/// One snapshot of the system's process table, reusable across multiple
+/// [`ProcessTable::tool_groups`] queries without re-scanning `/proc` or
+/// `proc_listallpids` per session.
+pub struct ProcessTable(Vec<Entry>);
+
+impl ProcessTable {
+    pub fn snapshot() -> Self {
+        Self(process_table())
+    }
+
+    pub fn tool_groups(&self, group: i32) -> Vec<ProcessIdentity> {
+        led_by_members(group, &self.0)
+    }
+}
+
 /// The groups a process group's members started and that lead themselves: each process whose parent is a member of
 /// `group` and whose own group id is its pid, other than `group` itself. This is how Codex runs a command, a shell
 /// snapshot or an MCP server: in a group of its own, as a child of the app-server, which B3's ladder on the
@@ -476,11 +578,17 @@ pub fn tool_groups(group: i32) -> Vec<ProcessIdentity> {
 }
 
 fn led_by_members(group: i32, table: &[Entry]) -> Vec<ProcessIdentity> {
-    let members: std::collections::HashSet<i32> = table
-        .iter()
-        .filter(|entry| entry.pgid == group)
-        .map(|entry| entry.pid)
-        .collect();
+    // A hosted run's process group typically holds 1–4 processes, so a tiny Vec
+    // avoids HashSet hashing/allocation overhead completely.
+    let mut members: Vec<i32> = Vec::new();
+    for entry in table {
+        if entry.pgid == group {
+            members.push(entry.pid);
+        }
+    }
+    if members.is_empty() {
+        return Vec::new();
+    }
     table
         .iter()
         .filter(|entry| {
@@ -528,17 +636,26 @@ fn process_table() -> Vec<Entry> {
     let Ok(dir) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
-    dir.filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
-        .filter_map(|pid| {
-            let fields = read_stat(pid)?;
-            Some(Entry {
-                pid,
-                ppid: fields.get(1)?.parse().ok()?,
-                pgid: fields.get(2)?.parse().ok()?,
-                birth: stat_birth(&fields)?,
-            })
-        })
-        .collect()
+    let mut out = Vec::with_capacity(128);
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue;
+        };
+        let Some(fields) = read_stat(pid) else {
+            continue;
+        };
+        let Some(birth) = stat_birth(fields) else {
+            continue;
+        };
+        out.push(Entry {
+            pid,
+            ppid: fields.ppid,
+            pgid: fields.pgid,
+            birth,
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -756,5 +873,17 @@ mod tests {
             "{listed:?} lacks {leading_id:?}"
         );
         assert!(listed.iter().all(|id| id.pid != staying_pid), "{listed:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_stat_line_handles_spaces_and_parens_in_comm() {
+        // Real Linux /proc/<pid>/stat shape where comm itself contains spaces and ") ".
+        let line = b"4242 (my (weird) proc) Z 100 200 300 0 -1 4194304 1 0 0 0 0 0 0 0 20 0 1 0 987654 12345 100\n";
+        let fields = parse_stat_line(line).expect("parsed stat fields");
+        assert_eq!(fields.state, b'Z');
+        assert_eq!(fields.ppid, 100);
+        assert_eq!(fields.pgid, 200);
+        assert_eq!(fields.starttime_ticks, 987654);
     }
 }

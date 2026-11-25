@@ -769,12 +769,14 @@ async fn link(
         .map(|watch| watch.host);
     let launch = host.as_ref().map_or(0, launch_generation);
     let mut tools: Vec<ProcessIdentity> = Vec::new();
-    record_tools(host.as_ref(), &mut tools);
+    record_tools_async(host.as_ref(), &mut tools, false).await;
     let mut scan = tokio::time::interval(TOOL_SCAN);
     scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The initial pass above already scanned; avoid an immediate duplicate scan on tick 0.
+    scan.tick().await;
     loop {
         tokio::select! {
-            _ = scan.tick(), if running.is_some() => record_tools(host.as_ref(), &mut tools),
+            _ = scan.tick(), if running.is_some() => record_tools_async(host.as_ref(), &mut tools, true).await,
             frame = client.server_frame() => {
                 let Some(frame) = frame else { break };
                 if frame.get("id").is_some() {
@@ -805,7 +807,7 @@ async fn link(
                         }
                     }
                     (Some("turn/completed"), _, Some(turn)) => {
-                        record_tools(host.as_ref(), &mut tools);
+                        record_tools_async(host.as_ref(), &mut tools, false).await;
                         if running.as_ref().is_some_and(|(_, on)| on == turn) {
                             running = None;
                         }
@@ -915,7 +917,7 @@ async fn link(
                     let _ = ask.reply.send(told);
                 }
                 LinkCommand::Stop => {
-                    record_tools(host.as_ref(), &mut tools);
+                    record_tools_async(host.as_ref(), &mut tools, false).await;
                     stop_gracefully(&daemon, &uid, &client, &mut running).await;
                 }
                 LinkCommand::SwitchIfIdle => {
@@ -980,15 +982,61 @@ async fn link(
     crate::claude_host::end_if_host_gone(&daemon, &uid).await;
 }
 
+/// Shared short-TTL process-table snapshot used by periodic `TOOL_SCAN` ticks so N
+/// concurrent active Codex sessions share one `/proc` (or `proc_listallpids`) scan
+/// instead of walking the full OS process table N times per second.
+const TOOL_TABLE_TTL: Duration = Duration::from_millis(500);
+
+fn cached_tool_groups(group: i32, allow_cached: bool) -> Vec<ProcessIdentity> {
+    if !allow_cached {
+        return protocol::proc_identity::tool_groups(group);
+    }
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Arc<protocol::proc_identity::ProcessTable>)>> =
+        std::sync::Mutex::new(None);
+    let now = std::time::Instant::now();
+    let table = {
+        let guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .filter(|(at, _)| now.saturating_duration_since(*at) < TOOL_TABLE_TTL)
+            .map(|(_, t)| Arc::clone(t))
+    };
+    let table = match table {
+        Some(t) => t,
+        None => {
+            let fresh = Arc::new(protocol::proc_identity::ProcessTable::snapshot());
+            let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some((std::time::Instant::now(), Arc::clone(&fresh)));
+            fresh
+        }
+    };
+    table.tool_groups(group)
+}
+
 /// The group rule's one record (ruling D5), kept in the link's memory (D6): each group the
 /// run's members started and lead themselves
 /// ([`protocol::proc_identity::tool_groups`]) that the link does not hold yet.
-fn record_tools(host: Option<&ProcessIdentity>, tools: &mut Vec<ProcessIdentity>) {
+///
+/// Runs off the Tokio worker pool via `spawn_blocking` so `/proc` / `proc_listallpids`
+/// never stalls WebSocket or IPC I/O.
+async fn record_tools_async(
+    host: Option<&ProcessIdentity>,
+    tools: &mut Vec<ProcessIdentity>,
+    allow_cached: bool,
+) {
     let Some(host) = host else { return };
-    for found in protocol::proc_identity::tool_groups(host.pid) {
-        if !tools.contains(&found) {
-            tools.push(found);
+    let pid = host.pid;
+    let found = tokio::task::spawn_blocking(move || cached_tool_groups(pid, allow_cached))
+        .await
+        .unwrap_or_default();
+    for item in found {
+        if !tools.contains(&item) {
+            tools.push(item);
         }
+    }
+    // Bound growth on very long-lived Codex runs by pruning groups with no remaining members.
+    if tools.len() > 32 {
+        tools.retain(|tool| group_has_members(tool.pid));
     }
 }
 

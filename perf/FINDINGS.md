@@ -31,7 +31,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
   3. Prune dead tool groups from `tools` when the recorded leader is no longer live (while preserving B3's warrant invariant for groups that still have members!). *Conservative check:* if a leader died while its group still has members, `group_has_members` is true — so only prune when `kill(-tool.pid, 0)` returns `ESRCH` (zero members left in the group).
 - **Expected gain:** **-25% to -35% total allocation rate**, lower CPU & wakeups under active Codex sessions (`concurrent_10`, `concurrent_50`, `soak`, `burst`), zero async-worker stalls.
 - **Risk:** Low (covered by existing `proc_identity` & `codex_host` tests + new unit tests for zero-alloc parser and `ESRCH` pruning).
-- **Status:** `todo`
+- **Status:** `done` (`concurrent_50` CPU `-15.9%`, `burst` throughput `+13.5%`, `relay_p50` `-15.9%`; see `perf/CHANGELOG.md`)
 
 ### F3. `Daemon::sessions()` N+1 SQLite query & `spawn_blocking` storm + missing `prepare_cached`
 - **Location:** `mac/ccd/src/state.rs:3392-3476`; `mac/ccd/src/store.rs` (all hot queries call `conn.prepare` instead of `conn.prepare_cached`)
