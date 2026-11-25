@@ -144,7 +144,6 @@ struct AttachmentTray: View {
                     .accessibilityIdentifier("attach.problem")
             }
         }
-        .accessibilityIdentifier("attach.tray")
     }
 
     private var problem: String? {
@@ -204,6 +203,10 @@ private struct AttachmentTile: View {
             Image(uiImage: thumbnail).resizable().scaledToFill()
         } else {
             VStack(spacing: 4) {
+                // While it travels, the ring takes the glyph's place.
+                if case .uploading = file.state {
+                    Color.clear.frame(width: 22, height: 22)
+                } else {
                 Group {
                     if file.isImage {
                         Image(systemName: "photo").font(.system(size: 18))
@@ -212,6 +215,7 @@ private struct AttachmentTile: View {
                     }
                 }
                 .foregroundStyle(CC.text.secondary)
+                }
                 Text(verbatim: file.name)
                     .font(.system(size: 10))
                     .foregroundStyle(CC.text.secondary)
@@ -230,6 +234,7 @@ private struct AttachmentTile: View {
         case .uploading(let sent):
             ZStack {
                 Color.black.opacity(0.45)
+                    .opacity(thumbnail == nil ? 0 : 1)
                 Circle().stroke(.white.opacity(0.25), lineWidth: 2.5).frame(width: 22, height: 22)
                 Circle()
                     .trim(from: 0, to: file.size > 0 ? CGFloat(sent) / CGFloat(file.size) : 0)
@@ -237,6 +242,7 @@ private struct AttachmentTile: View {
                     .rotationEffect(.degrees(-90))
                     .frame(width: 22, height: 22)
             }
+            .padding(.bottom, thumbnail == nil ? 16 : 0)
             .clipShape(shape)
         case .failed:
             Button(action: onRetry) {

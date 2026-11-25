@@ -30,7 +30,7 @@ extension RenderCatalog {
             arguments: upload(["-CC_FIXTURE_FILES", "YES"])
         ) { app, driver in
             try driver.require(driver.text(containing: "Turn complete", in: app), "the conversation")
-            try driver.requireExists(app.descendants(matching: .any)["attach.tray"], "the tray")
+            try driver.requireExists(app.descendants(matching: .any)["attach.tile"], "the tray's tiles")
             try driver.requireExists(app.descendants(matching: .any)["attach.problem"], "the first problem, in words")
         },
         RenderScenario(
