@@ -1,13 +1,14 @@
 //! Moving a computer's live runs to an agent's active account (decision 306, Slice E; decision 311).
 //!
 //! Choosing an account (`ActivateAccount`) marks every live run of that agent switching. A marked run moves at its
-//! next idle point, its turn over, no card waiting and no message of the person's still unread by the agent: ccd
-//! ends its process and files that end typed as a switch (`switched_to`). The run reads live and `moved` from then
-//! on, and its next message relaunches it, as a message relaunches any ended run, on the agent's ACTIVE account as of
-//! that message, resuming its session with its model, its mode (Bypass and Full Access included, decision 308) and
-//! its effort, with no effort notice. That relaunch going live ends the switch; one that does not go through leaves
-//! the run ended and relaunchable, its own line saying why, `failed`. A run already on the active account when its
-//! idle point comes only loses its mark, so choosing again, or choosing back, is never a lock.
+//! next idle point, its turn over, no card waiting and no message of the person's unread by the agent or read with no
+//! turn begun for it: ccd ends its process and files that end typed as a switch (`switched_to`). The run reads live
+//! and `moved` from then on, its waiting mail kept, and its next message relaunches it, as a message relaunches any
+//! ended run, on the agent's ACTIVE account as of that message, resuming its session with its model, its mode (Bypass
+//! and Full Access included, decision 308) and its effort, with no effort notice. That relaunch going live ends the
+//! switch; one that does not go through leaves the run ended and relaunchable, its own line saying why, `failed`. A run
+//! already on the active account when its idle point comes only loses its mark, so choosing again, or choosing back,
+//! is never a lock; a run already moved stays moved whatever is chosen after, and starts on the account active then.
 //!
 //! A moved run offers no settings, as an ended run offers none: they can be changed once its next message has
 //! started it. A Codex run with no link when the choice is made moves when its link
@@ -170,15 +171,21 @@ pub(crate) async fn relaunched(daemon: &Arc<Daemon>, uid: &str, outcome: Result<
     }
 }
 
-/// No turn running, no card waiting, and no message of the person's the agent has not read yet. A Codex run's turn
-/// is its link's to know: it asks only once none runs (`LinkCommand::SwitchIfIdle`, a turn's end).
+/// No turn running, no card waiting, and no message of the person's the agent has not read yet, or has read with no
+/// turn begun for it. A Codex run's turn is its link's to know: it asks only once none runs
+/// (`LinkCommand::SwitchIfIdle`, a turn's end).
 async fn idle(daemon: &Arc<Daemon>, uid: &str, agent: &AgentKind) -> bool {
     (*agent == AgentKind::Codex
-        || !daemon
+        || !(daemon
             .db
             .turn_running(uid.to_string())
             .await
-            .unwrap_or(true))
+            .unwrap_or(true)
+            || daemon
+                .db
+                .message_awaits_turn(uid.to_string())
+                .await
+                .unwrap_or(true)))
         && !daemon.has_pending_card(uid).await
         && daemon
             .db

@@ -1763,12 +1763,13 @@ impl Store {
                 ],
                 protocol::facts::permission_mode_fact,
             )?,
-            // An effort is the ended process's own ([`protocol::facts::SessionFacts::ended`]).
+            // An effort is the ended process's own ([`protocol::facts::SessionFacts::ended`]); a switch's end keeps it.
             effort: newest_decided(
                 &conn,
                 session_uid,
                 "kind IN (?2, ?3, ?4) AND seq > COALESCE((SELECT MAX(seq) FROM events
-                                                       WHERE session_uid = ?1 AND kind = ?5), 0)",
+                                                       WHERE session_uid = ?1 AND kind = ?5
+                                                         AND json_extract(payload, '$.switched_to') IS NULL), 0)",
                 &[
                     EventKind::Notification.as_str(),
                     EventKind::UserMessage.as_str(),
@@ -1782,13 +1783,15 @@ impl Store {
                 params![session_uid, EventKind::SessionEnd.as_str()],
                 |row| row.get::<_, i64>(0),
             )? as u64,
-            // The effort the newest end's process held: decided before that end and after the end before it.
+            // The effort the newest end's process held: decided before that end and after the end before it, a
+            // switch's end, which keeps the effort, not counted.
             ended_with: newest_decided(
                 &conn,
                 session_uid,
                 "kind IN (?2, ?3, ?4)
                  AND seq < (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1 AND kind = ?5)
                  AND seq > (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1 AND kind = ?5
+                              AND json_extract(payload, '$.switched_to') IS NULL
                               AND seq < (SELECT MAX(seq) FROM events WHERE session_uid = ?1 AND kind = ?5))",
                 &[
                     EventKind::Notification.as_str(),
@@ -2414,6 +2417,28 @@ impl Store {
             )
             .optional()?;
         Ok(newest.as_deref() == Some(EventKind::SessionStart.as_str()))
+    }
+
+    /// Whether a message ccd gave the Claude run `session_uid` waits for its turn: its newest `user_message` filed
+    /// by ccd (the person's words, a relaunch's prompt) is newer than its newest `session_start`, so claude has it
+    /// and has not begun the turn that answers it.
+    pub fn message_awaits_turn(&self, session_uid: &str) -> Result<bool> {
+        let conn = self.read();
+        let newest = conn
+            .query_row(
+                "SELECT kind FROM events WHERE session_uid = ?1
+                    AND (kind = ?2 OR (kind = ?3 AND source = ?4))
+                  ORDER BY seq DESC LIMIT 1",
+                params![
+                    session_uid,
+                    EventKind::SessionStart.as_str(),
+                    EventKind::UserMessage.as_str(),
+                    Source::Daemon.as_str()
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(newest.as_deref() == Some(EventKind::UserMessage.as_str()))
     }
 
     /// Whether the Codex run `session_uid` is in a turn: its newest user message, the
@@ -3045,15 +3070,18 @@ impl Store {
     pub const SWITCH_FAILED: i64 = 2;
     pub const SWITCH_MOVED: i64 = 3;
 
-    /// Marks every live run of `agent` as switching to its agent's active account; the uids marked.
+    /// Marks every live run of `agent` as switching to its agent's active account; the uids marked. A run already
+    /// moved, its process being stopped, is left moved: its next message starts it on the account active then.
     pub fn mark_switching(&self, agent: &str) -> Result<Vec<String>> {
         let conn = self.write();
         let mut stmt = conn.prepare(
             "SELECT h.session_uid FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
-              WHERE s.agent = ?1 AND s.lifecycle = 'live'",
+              WHERE s.agent = ?1 AND s.lifecycle = 'live' AND h.switching IS NOT ?2",
         )?;
         let uids = stmt
-            .query_map(params![agent], |row| row.get::<_, String>(0))?
+            .query_map(params![agent, Store::SWITCH_MOVED], |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for uid in &uids {
             conn.execute(
@@ -5075,7 +5103,8 @@ impl Store {
     }
 
     /// **Settle what time and ended sessions decide:** unread messages past their
-    /// expiry are expired, those for a run that has ended are ended, a sent
+    /// expiry are expired, those for a run that has ended are ended (a run its switch of
+    /// account ended keeps its waiting mail for its next process), a sent
     /// message no computer took within the unread time is expired, one taken whose
     /// answer never came is expired once the receiver's unread time for it has
     /// surely run out, and settled rows older than [`MailLimits::settled_ms`] are
@@ -5092,8 +5121,10 @@ impl Store {
         settle_mail(
             &tx,
             "state IN ('waiting', 'offered')
-             AND session_uid IN (SELECT session_uid FROM all_sessions WHERE lifecycle = ?1)",
-            params![lifecycle_str(Lifecycle::Exited)],
+             AND session_uid IN (SELECT session_uid FROM all_sessions WHERE lifecycle = ?1)
+             AND NOT (state = 'waiting'
+                      AND session_uid IN (SELECT session_uid FROM run_hosts WHERE switching = ?2))",
+            params![lifecycle_str(Lifecycle::Exited), Store::SWITCH_MOVED],
             "ended",
         )?;
         // A receiver takes a message up to one unread time after it was written, and
@@ -5118,14 +5149,17 @@ impl Store {
         Ok(())
     }
 
-    /// A run ended: its unread messages are ended now.
+    /// A run ended: its unread messages are ended now. A run its switch of account ended goes on under its uid, so
+    /// what waits for it is kept for its next process.
     pub fn end_mail(&self, session_uid: &str) -> Result<usize> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let ended = settle_mail(
             &tx,
-            "session_uid = ?1 AND state IN ('waiting', 'offered')",
-            params![session_uid],
+            "session_uid = ?1 AND state IN ('waiting', 'offered')
+             AND NOT (state = 'waiting'
+                      AND session_uid IN (SELECT session_uid FROM run_hosts WHERE switching = ?2))",
+            params![session_uid, Store::SWITCH_MOVED],
             "ended",
         )?;
         tx.commit()?;

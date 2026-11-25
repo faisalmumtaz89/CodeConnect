@@ -423,6 +423,11 @@ impl Db {
             .await
     }
 
+    pub async fn message_awaits_turn(&self, session_uid: String) -> Result<bool> {
+        self.run(move |store| store.message_awaits_turn(&session_uid))
+            .await
+    }
+
     pub async fn codex_turn_running(&self, session_uid: String) -> Result<bool> {
         self.run(move |store| store.codex_turn_running(&session_uid))
             .await
