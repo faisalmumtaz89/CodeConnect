@@ -31,7 +31,7 @@ final class SessionStartTests: XCTestCase {
 
         var starts: [(requestID: String, path: String, agent: String, prompt: String?)] {
             sent.compactMap {
-                guard case .startSession(let id, let path, let agent, let prompt, _, _, _) = $0 else { return nil }
+                guard case .startSession(let id, let path, let agent, let prompt, _, _, _, _) = $0 else { return nil }
                 return (id, path, agent, prompt)
             }
         }

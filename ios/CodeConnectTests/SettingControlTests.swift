@@ -203,7 +203,7 @@ final class SettingControlTests: XCTestCase {
     func testACodexNextTurnNoteClearsWhenThisAppSendsTheNextMessage() async throws {
         let (model, key) = try await liveModel("session_codex_live", in: "codex-settings-wire")
         let composed = { [weak model] (message: ClientMessage) in
-            guard case .compose(let session, let request, _, _) = message else { return }
+            guard case .compose(let session, let request, _, _, _) = message else { return }
             model?.connection.injectForTesting(
                 .composeResult(sessionID: session, requestID: request, result: .started(turnID: "t-\(request)")))
         }

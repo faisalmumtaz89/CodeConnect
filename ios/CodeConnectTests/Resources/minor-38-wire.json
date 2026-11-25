@@ -67,7 +67,8 @@
     "stop_run": true,
     "test_push": false,
     "tls": false,
-    "tls_active": false
+    "tls_active": false,
+    "uploads": true
   },
   "output_effort": {
     "kind": "user_message",

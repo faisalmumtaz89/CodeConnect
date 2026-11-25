@@ -111,6 +111,9 @@ pub(crate) struct Run<'a> {
     pub account: Option<&'a crate::accounts::AccountEnv>,
     /// The person's folder answer, as the start resolved it: the trust list's level.
     pub trust: Trust,
+    /// Uploads sent for the start, moved into the run's folder once it is named, before its
+    /// first message: their paths are that message's last lines.
+    pub attachments: crate::uploads::Pending<'a>,
 }
 
 /// What the run's task needs for the first message, owned: it outlives the start.
@@ -152,6 +155,18 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
             Ok(names) => names,
             Err(err) => return failed(format!("could not name the run: {err}")),
         };
+    // As a Claude run's: the start's uploads become the run's before its row, or nothing.
+    let prompt = match daemon
+        .uploads
+        .adopt(&crate::uploads::root(), run.attachments, &uid)
+    {
+        Ok(paths) => crate::uploads::attached(run.prompt.to_string(), &paths),
+        Err(why) => return failed(why),
+    };
+    let run = Run {
+        prompt: &prompt,
+        ..run
+    };
     let now = protocol::time::now_rfc3339();
     let row = SessionRow {
         session_uid: uid.clone(),
@@ -2493,6 +2508,7 @@ async fn launch_again(
         environment: &environment,
         account,
         trust: run.trust,
+        attachments: crate::uploads::Pending::default(),
     };
     let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
     // A run moved by a switch of account keeps its mode (decision 308).
@@ -3325,7 +3341,51 @@ mod tests {
             environment: &rig.environment,
             account: None,
             trust: Trust::NotTrusted,
+            attachments: crate::uploads::Pending::default(),
         }
+    }
+
+    /// **A Codex start that cannot take its files starts nothing** (minor 50): no codex is
+    /// launched, no run is recorded, and the file it could take stays pending.
+    #[tokio::test]
+    async fn a_codex_start_that_cannot_take_its_files_launches_nothing() {
+        let rig = rig();
+        let root = crate::uploads::root();
+        let pending = crate::uploads::PENDING;
+        assert_eq!(
+            rig.daemon
+                .uploads
+                .put(&root, 11, pending, "c-1", "a.txt", 1, 0, b"a"),
+            Ok(1)
+        );
+        let codex = stand_in(&rig, "");
+        let ids = ["c-1".to_string(), "c-none".to_string()];
+        let result = start(
+            &rig.daemon,
+            Run {
+                attachments: crate::uploads::Pending {
+                    connection: 11,
+                    ids: &ids,
+                },
+                ..run(&rig, "req-files", &codex)
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, StartSessionResult::Failed { .. }),
+            "{result:?}"
+        );
+        assert_eq!(launches(&rig), 0);
+        assert!(rig
+            .daemon
+            .db
+            .hosted_run_for_request("req-files".into())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(root.join(pending).join("c-1").join("a.txt").exists());
+        rig.daemon.uploads.close_connection(&root, 11);
+        assert!(!root.join(pending).join("c-1").exists());
     }
 
     fn launches(rig: &Rig) -> usize {
@@ -6552,6 +6612,8 @@ mod tests {
                     "req-nolink-say",
                     "hello".into(),
                     &protocol::hash::compose_hash(&uid, "hello"),
+                    0,
+                    &[],
                 )
                 .await;
             (answered, stopped, said)
@@ -6600,7 +6662,7 @@ mod tests {
         );
         tokio::spawn(async move {
             let hash = protocol::hash::compose_hash(&uid, &text);
-            daemon.compose(&uid, &request_id, text, &hash).await
+            daemon.compose(&uid, &request_id, text, &hash, 0, &[]).await
         })
     }
 
@@ -8212,7 +8274,7 @@ mod tests {
         let hash = protocol::hash::compose_hash(uid, text);
         tokio::time::timeout(
             Duration::from_secs(20),
-            daemon.compose(uid, request_id, text.into(), &hash),
+            daemon.compose(uid, request_id, text.into(), &hash, 0, &[]),
         )
         .await
         .expect("the message was answered at once")

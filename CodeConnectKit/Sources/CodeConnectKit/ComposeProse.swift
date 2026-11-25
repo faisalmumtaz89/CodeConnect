@@ -181,7 +181,8 @@ extension AppModel {
     ///
     /// A send cannot work for the reasons an answer cannot: the link, and what the computer said it can do.
     /// **Except for Codex**: there is no `send_text`, so its reasons are its own and are asked first.
-    public func sendBlockedReason(for key: String, draft: String) -> String? {
+    /// `files`: the reply box's own send, which the run's files hold back; any other box's (a diff comment) is not theirs.
+    public func sendBlockedReason(for key: String, draft: String, files: Bool = true) -> String? {
         // The sample fleet's reason, not the link's: "Not paired with a computer."
         // beside a card that answers in sample vocabulary would be two different
         // accounts of the same absence on one screen.
@@ -190,6 +191,7 @@ extension AppModel {
             return "These agents are not real. Pair with \(computer) to talk to your own."
         }
         if let reason = linkHealth.disabledReason { return reason }
+        if files, let reason = filesBlockedReason(for: key) { return reason }
         let summary = shownSummary(for: key)
         if let summary, summary.isCodex {
             // The draft's own ceiling comes first: it is the one the reader can

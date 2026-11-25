@@ -117,6 +117,9 @@ pub(crate) struct Run<'a> {
     pub environment: &'a HashMap<OsString, OsString>,
     /// The account the run starts on, which it records; None is Claude Code's Default.
     pub account: Option<&'a crate::accounts::AccountEnv>,
+    /// Uploads sent for the start, moved into the run's folder once it is named, before its
+    /// first message: their paths are that message's last lines.
+    pub attachments: crate::uploads::Pending<'a>,
 }
 
 /// The run's folder: `<root>/runs/<uid>/`.
@@ -166,6 +169,19 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
             Ok(names) => names,
             Err(err) => return failed(format!("could not name the run: {err}")),
         };
+    // The start's uploads become the run's before anything of it is recorded or sent: a start
+    // that cannot take them records nothing, and leaves them where they were.
+    let prompt = match daemon
+        .uploads
+        .adopt(&crate::uploads::root(), run.attachments, &uid)
+    {
+        Ok(paths) => crate::uploads::attached(run.prompt.to_string(), &paths),
+        Err(why) => return failed(why),
+    };
+    let run = Run {
+        prompt: &prompt,
+        ..run
+    };
     let start = ToHost::Start {
         uuid: start_uuid.clone(),
         options: start_options(&uid, &run),
@@ -543,6 +559,15 @@ fn start_options(uid: &str, run: &Run<'_>) -> StartOptions {
             .map(str::to_string),
         effort: None,
         worktree: run.worktree.map(str::to_string),
+        // Its own uploads folder and no other, so a file sent with a message is read without a
+        // card ([`crate::uploads`]). Made now, so it is there for the run's whole life.
+        additional_directories: match crate::uploads::session_folder(&crate::uploads::root(), uid) {
+            Ok(folder) => vec![folder.to_string_lossy().into_owned()],
+            Err(err) => {
+                crate::log_error!("{uid}: could not make its uploads folder: {err}");
+                Vec::new()
+            }
+        },
         mail: McpCommand {
             command: run.codeconnect.to_string_lossy().into_owned(),
             args: protocol::ipc::mail_server_args(uid, &protocol::socket_path()),
@@ -2118,6 +2143,7 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         codeconnect: &codeconnect,
         environment: &environment,
         account: account.as_ref(),
+        attachments: crate::uploads::Pending::default(),
     };
     let uuid = send_uuid(uid, request_id);
     let mut options = start_options(uid, &run);
@@ -3029,6 +3055,7 @@ mod tests {
             codeconnect: Path::new("/nonexistent/codeconnect"),
             environment: &rig.environment,
             account: rig.account.as_ref(),
+            attachments: crate::uploads::Pending::default(),
         }
     }
 
@@ -5116,7 +5143,15 @@ mod tests {
     ) -> SendTextResult {
         let hash = protocol::hash::send_text_hash(uid, text, true);
         daemon
-            .send_text(uid, text.to_string(), Some(request_id), Some(&hash), true)
+            .send_text(
+                uid,
+                text.to_string(),
+                Some(request_id),
+                Some(&hash),
+                true,
+                0,
+                &[],
+            )
             .await
     }
 
@@ -5175,6 +5210,157 @@ mod tests {
             }
         }
         assert_eq!(live, [serde_json::json!("and the docs")], "broadcast live");
+        stop(&played.dir);
+    }
+
+    /// **A file sent with a message reaches claude as its path, from the one folder claude was
+    /// given to read** (minor 50). The run starts with its own uploads folder as its additional
+    /// directory and no other; a message attaching a file its connection sent reaches the host
+    /// as the words, then the file's path on a line after "Attached:"; one naming a file this
+    /// computer does not hold is refused, and nothing reaches the host.
+    #[tokio::test]
+    async fn a_file_sent_with_a_message_reaches_claude_as_its_path_in_the_runs_folder() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let root = crate::uploads::root();
+        let ToHost::Start { options, .. } = &played.start else {
+            panic!("not a start");
+        };
+        assert_eq!(
+            options.additional_directories,
+            [root.join(&uid).to_string_lossy().into_owned()]
+        );
+
+        let ids = ["u-unknown".to_string()];
+        let hash = protocol::hash::send_text_hash_with(&uid, "look", true, &ids);
+        let refused = rig
+            .daemon
+            .send_text(&uid, "look".into(), Some("r-0"), Some(&hash), true, 7, &ids)
+            .await;
+        assert!(
+            matches!(refused, SendTextResult::Refused { .. }),
+            "{refused:?}"
+        );
+
+        assert_eq!(
+            rig.daemon
+                .uploads
+                .put(&root, 7, &uid, "u-1", "a.png", 3, 0, b"png"),
+            Ok(3)
+        );
+        let ids = ["u-1".to_string()];
+        let hash = protocol::hash::send_text_hash_with(&uid, "look", true, &ids);
+        let (result, (_, text)) = tokio::join!(
+            rig.daemon
+                .send_text(&uid, "look".into(), Some("r-1"), Some(&hash), true, 7, &ids),
+            host_takes(&mut played, 3, "done")
+        );
+        let path = root.join(&uid).join("u-1").join("a.png");
+        assert_eq!(text, format!("look\n\nAttached:\n{}", path.display()));
+        assert!(matches!(result, SendTextResult::Sent { .. }), "{result:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"png");
+
+        // Asked again once this computer's uploads hold nothing of it, as after a restart: the
+        // record answers, and nothing reaches the host a second time.
+        rig.daemon.uploads.remove_session(&root, &uid);
+        let again = rig
+            .daemon
+            .send_text(&uid, "look".into(), Some("r-1"), Some(&hash), true, 8, &ids)
+            .await;
+        assert!(
+            matches!(again, SendTextResult::Duplicate { .. }),
+            "{again:?}"
+        );
+        stop(&played.dir);
+    }
+
+    /// **A file sent in the start box becomes the run's before its first message** (minor 50).
+    /// A start attaching a file this connection did not finish starts nothing, records no run
+    /// and leaves the finished one pending; the next start takes it: it is moved by rename into
+    /// the new run's folder, and the first message carries its new path after the words.
+    #[tokio::test]
+    async fn a_file_sent_with_a_start_moves_into_the_new_run_before_its_first_message() {
+        let rig = rig();
+        let root = crate::uploads::root();
+        let pending = crate::uploads::PENDING;
+        assert_eq!(
+            rig.daemon
+                .uploads
+                .put(&root, 9, pending, "s-1", "a.png", 3, 0, b"png"),
+            Ok(3)
+        );
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+
+        let unknown = ["s-1".to_string(), "s-none".to_string()];
+        let refused = start(
+            &rig.daemon,
+            Run {
+                attachments: crate::uploads::Pending {
+                    connection: 9,
+                    ids: &unknown,
+                },
+                ..run(&rig, "req-refused", &cwd, &host)
+            },
+        )
+        .await;
+        assert!(
+            matches!(refused, StartSessionResult::Failed { .. }),
+            "{refused:?}"
+        );
+        assert!(root.join(pending).join("s-1").join("a.png").exists());
+        assert!(rig
+            .daemon
+            .db
+            .hosted_run_for_request("req-refused".into())
+            .await
+            .unwrap()
+            .is_none());
+
+        let ids = ["s-1".to_string()];
+        let daemon = Arc::clone(&rig.daemon);
+        let (result, played) = tokio::join!(
+            start(
+                &daemon,
+                Run {
+                    attachments: crate::uploads::Pending {
+                        connection: 9,
+                        ids: &ids,
+                    },
+                    ..run(&rig, "req-files", &cwd, &host)
+                }
+            ),
+            async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                   "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        let uid = started_uid(&result);
+        let moved = root.join(&uid).join("s-1").join("a.png");
+        let ToHost::Start { prompt, .. } = &played.start else {
+            panic!("not a start");
+        };
+        assert_eq!(
+            prompt,
+            &format!("fix the tests\n\nAttached:\n{}", moved.display())
+        );
+        assert_eq!(std::fs::read(&moved).unwrap(), b"png");
+        assert!(!root.join(pending).join("s-1").exists());
+        rig.daemon.uploads.close_connection(&root, 9);
+        assert!(
+            moved.exists(),
+            "the run's file outlives the start's connection"
+        );
+        rig.daemon.uploads.remove_session(&root, &uid);
         stop(&played.dir);
     }
 
@@ -6708,13 +6894,13 @@ mod tests {
         let staged = protocol::hash::send_text_hash(&uid, "half", false);
         refused(
             rig.daemon
-                .send_text(&uid, "half".into(), Some("s"), Some(&staged), false)
+                .send_text(&uid, "half".into(), Some("s"), Some(&staged), false, 0, &[])
                 .await,
         );
         refused(send_as_app(&rig.daemon, &uid, "e", "  ").await);
         refused(
             rig.daemon
-                .send_text(&uid, "no id".into(), None, None, true)
+                .send_text(&uid, "no id".into(), None, None, true, 0, &[])
                 .await,
         );
         assert_eq!(next(&mut played.lines).await, None, "nothing sent");
@@ -11015,6 +11201,7 @@ mod tests {
                 codeconnect: &codeconnect,
                 environment: &environment,
                 account: None,
+                attachments: crate::uploads::Pending::default(),
             },
         )
         .await;
@@ -11111,6 +11298,7 @@ mod tests {
                     codeconnect: &codeconnect,
                     environment: &environment,
                     account: None,
+                    attachments: crate::uploads::Pending::default(),
                 },
             )
             .await;
@@ -11352,6 +11540,7 @@ mod tests {
                 codeconnect: &codeconnect,
                 environment: &rig.environment,
                 account: None,
+                attachments: crate::uploads::Pending::default(),
             },
         )
         .await;
@@ -11529,6 +11718,7 @@ mod tests {
                 codeconnect: &codeconnect,
                 environment: &rig.environment,
                 account: None,
+                attachments: crate::uploads::Pending::default(),
             },
         )
         .await;

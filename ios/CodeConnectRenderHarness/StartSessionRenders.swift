@@ -424,4 +424,18 @@ extension RenderCatalog {
             try live(app, driver, withMessage: true)
         },
     ]
+
+    /// The start box with files: a picture and a file waiting for Start, and one over the limit holding it, said
+    /// once under the tray (Kit's `-CC_FIXTURE_FILES`).
+    static let startFiles: [RenderScenario] = [
+        RenderScenario(
+            name: "upload-start", purpose: "the start box: + at the message's start, files over it, Start held",
+            arguments: args() + ["-CC_FIXTURE_FILES", "YES"]
+        ) { app, driver in
+            try toReady(app, driver)
+            try driver.requireExists(app.descendants(matching: .any)["attach.tile"], "the start's files")
+            try driver.requireExists(app.descendants(matching: .any)["attach.problem"], "why Start waits")
+            try driver.requireExists(app.buttons["attach.menu"], "the + on the first message")
+        },
+    ]
 }
