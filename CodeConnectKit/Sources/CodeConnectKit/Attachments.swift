@@ -81,12 +81,12 @@ extension AppModel {
                 Attachment(id: Self.uploadID(), name: name, size: size, isImage: false, data: nil, state: .refused(reason)))
         }
         if drafts.files.count >= Attachment.maxCount {
-            return refuse("A message carries up to \(Attachment.maxCount) files.")
+            return refuse("\(name) can’t be sent: a message carries up to \(Attachment.maxCount) files.")
         }
-        if let reason = Self.sizeRefusal(size) { return refuse(reason) }
+        if let reason = Self.sizeRefusal(name, size) { return refuse(reason) }
         let data: Data
-        do { data = try read() } catch { return refuse(error.localizedDescription) }
-        if let reason = Self.sizeRefusal(data.count) { return refuse(reason) }
+        do { data = try read() } catch { return refuse("\(name) can’t be read: \(error.localizedDescription)") }
+        if let reason = Self.sizeRefusal(name, data.count) { return refuse(reason) }
         let file = Attachment(
             id: Self.uploadID(), name: name, size: data.count, isImage: Attachment.isImage(data), data: data,
             state: .uploading(sent: 0))
@@ -115,18 +115,15 @@ extension AppModel {
         Task { await upload(again.id, of: key) }
     }
 
-    /// Why the files hold this run's message back, or nil when every one has arrived (or there are none).
+    /// Why the files hold this run's message back, or nil when every one has arrived (or there are none): a file over a
+    /// limit first, in its own words, as it can only be removed; then one that failed; then those still on their way.
     public func filesBlockedReason(for key: String) -> String? {
         let files = files(for: key)
+        for file in files { if case .refused(let reason) = file.state { return reason } }
         let travelling = files.filter { if case .uploading = $0.state { true } else { false } }.count
-        let stuck = files.filter {
-            switch $0.state {
-            case .refused, .failed: true
-            default: false
-            }
-        }.count
-        if stuck > 0 {
-            return stuck == 1 ? "Remove or retry the file that didn’t arrive." : "Remove or retry the files that didn’t arrive."
+        let failed = files.filter { if case .failed = $0.state { true } else { false } }.count
+        if failed > 0 {
+            return failed == 1 ? "Retry or remove the file that didn’t arrive." : "Retry or remove the files that didn’t arrive."
         }
         if travelling > 0 {
             return travelling == 1 ? "Waiting for the file to arrive." : "Waiting for \(travelling) files to arrive."
@@ -201,10 +198,10 @@ extension AppModel {
         return true
     }
 
-    static func sizeRefusal(_ size: Int) -> String? {
-        if size == 0 { return "This file is empty." }
+    static func sizeRefusal(_ name: String, _ size: Int) -> String? {
+        if size == 0 { return "\(name) is empty." }
         if size > Attachment.maxBytes {
-            return "This file is \(Attachment.sizeText(size)). Files go up to \(Attachment.sizeText(Attachment.maxBytes))."
+            return "\(name) is \(Attachment.sizeText(size)); files over \(Attachment.sizeText(Attachment.maxBytes)) can’t be sent."
         }
         return nil
     }
@@ -263,7 +260,7 @@ public enum AttachedFiles {
                     state: .failed("The link dropped before it was sent.")),
                 Attachment(
                     id: "fx-up-4", name: "recording.mov", size: 48_300_000, isImage: false, data: nil,
-                    state: .refused(Self.sizeRefusal(48_300_000) ?? "")),
+                    state: .refused(Self.sizeRefusal("recording.mov", 48_300_000) ?? "")),
             ]
         }
 

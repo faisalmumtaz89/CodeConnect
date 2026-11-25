@@ -414,7 +414,10 @@ private struct Composer: View {
         if case .hostedLive(let settings) = model.runSettings(for: key), let outcome = settings.lastOutcome {
             return Line(text: outcome.text, tone: outcome.tone.composeTone)
         }
-        if let kit = model.outcomeNote(for: key, lastSend: result) ?? model.standingNote(for: key, draft: kept.reply) {
+        // Why the files hold the message back stands under them, not here as well.
+        let standing = blocked != nil && blocked == model.filesBlockedReason(for: key)
+            ? nil : model.standingNote(for: key, draft: kept.reply)
+        if let kit = model.outcomeNote(for: key, lastSend: result) ?? standing {
             return Line(text: kit.text, tone: kit.tone)
         }
         return nil

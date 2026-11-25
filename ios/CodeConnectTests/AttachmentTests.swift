@@ -129,7 +129,7 @@ final class AttachmentTests: XCTestCase {
     func testTheLimitsRefuseBeforeAnythingIsRead() async throws {
         let (model, wire) = try await model()
         var read = false
-        model.attach(name: "big.mov", size: Attachment.maxBytes + 1, to: "u-1") {
+        model.attach(name: "big.mov", size: 2 * Attachment.maxBytes, to: "u-1") {
             read = true
             return Data()
         }
@@ -143,7 +143,11 @@ final class AttachmentTests: XCTestCase {
         model.attach(data: Data([1]), name: "eleventh", to: "u-1")
         await settled(model)
         XCTAssertEqual(model.files(for: "u-1").count, Attachment.maxCount + 1)
-        XCTAssertEqual(model.files(for: "u-1").last?.state, .refused("A message carries up to 10 files."))
+        XCTAssertEqual(
+            model.files(for: "u-1").last?.state, .refused("eleventh can’t be sent: a message carries up to 10 files."))
+        XCTAssertEqual(
+            model.filesBlockedReason(for: "u-1"), "big.mov is 20 MB; files over 10 MB can’t be sent.",
+            "a file that can never go is named first, in its own words")
         XCTAssertEqual(wire.chunks.count, Attachment.maxCount - 1, "only the files inside the limits leave")
     }
 
