@@ -211,6 +211,8 @@ public enum StartFailure: String, Sendable {
     case agentMissing = "agent_missing"
     case folderMissing = "folder_missing"
     case launchFailed = "launch_failed"
+    /// A file for the first message did not reach the computer, so the start was not sent (the app's own).
+    case filesNotSent = "files_not_sent"
 }
 
 /// The person's answer to "trust this folder?" (`trust`).
@@ -298,6 +300,9 @@ public struct SessionStart: Identifiable, Hashable {
     public let machineName: String
     public let sentAt: Date
     public var outcome: StartOutcome?
+    /// The files going with the first message, and how far each has got on this send: every send of the start uploads
+    /// them again, under new ids, as the computer keeps a start's files only for the connection that sent them.
+    public var files: [Attachment] = []
     /// The reader asked this phone to stop retrying the start. It is kept — a
     /// late daemon answer still resolves it — but it is no longer resent and no
     /// longer the one New reopens. It never asserts the computer was told: the
@@ -450,15 +455,19 @@ public final class SessionStarter {
     @discardableResult
     public func start(
         project: StartProject, place: StartPlace = .folder, agent: StartAgent, model: String? = nil, prompt: String,
-        trust: FolderTrust? = nil, machineName: String
+        trust: FolderTrust? = nil, machineName: String, files: [Attachment] = []
     ) -> String {
         let requestID = UUID().uuidString.lowercased()
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         starts[requestID] = SessionStart(
             requestID: requestID, project: project, place: place, agent: agent, model: model,
-            prompt: trimmed.isEmpty ? nil : trimmed, trust: trust, machineName: machineName, sentAt: Date())
+            prompt: trimmed.isEmpty ? nil : trimmed, trust: trust, machineName: machineName, sentAt: Date(),
+            files: files)
         return requestID
     }
+
+    /// A start's files as this send has them.
+    func setFiles(_ files: [Attachment], of requestID: String) { starts[requestID]?.files = files }
 
     // MARK: Fixtures
 

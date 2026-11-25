@@ -2099,9 +2099,10 @@ public enum ClientMessage: Sendable {
     /// nil names none, and the agent starts on its own default. `trust` is the
     /// person's answer to "trust this folder?", kept for the folder; nil gives
     /// none, and a folder with none kept is answered `needsTrust`.
+    /// `attachments`: this connection's uploads sent with no session (minor 50), for the first message.
     case startSession(
         requestID: String, path: String, agent: String, prompt: String?, worktree: StartPlace = .folder,
-        model: String? = nil, trust: FolderTrust? = nil)
+        model: String? = nil, trust: FolderTrust? = nil, attachments: [String] = [])
     /// Every folder's answer to "trust this folder?", answered `folderTrust`.
     case listFolderTrust(requestID: String)
     /// Change one folder's answer (`path` as the computer gave it), answered
@@ -2308,7 +2309,7 @@ extension ClientMessage: Encodable {
             if confirmed { try c.encode(true, forKey: .confirmed) }
         case .listProjects:
             try c.encode("list_projects", forKey: .type)
-        case .startSession(let requestID, let path, let agent, let prompt, let worktree, let model, let trust):
+        case .startSession(let requestID, let path, let agent, let prompt, let worktree, let model, let trust, let attachments):
             try c.encode("start_session", forKey: .type)
             try c.encode(requestID, forKey: .requestID)
             try c.encode(path, forKey: .path)
@@ -2323,6 +2324,7 @@ extension ClientMessage: Encodable {
                 }
             try c.encodeIfPresent(request, forKey: .worktree)
             try c.encodeIfPresent(model, forKey: .model)
+            if !attachments.isEmpty { try c.encode(attachments, forKey: .attachments) }
             try c.encodeIfPresent(trust, forKey: .trust)
         case .listFolderTrust(let requestID):
             try c.encode("list_folder_trust", forKey: .type)

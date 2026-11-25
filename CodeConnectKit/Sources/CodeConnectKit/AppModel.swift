@@ -1461,13 +1461,14 @@ public final class AppModel {
     /// `start_session_result` under the returned request id. `trust` is the
     /// person's answer to "trust this folder?", sent with the start and with every
     /// resend of it.
+    /// `files` go with the first message: every send of the start uploads them first, under new ids, for no session.
     public func startSession(
         _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, model: String? = nil, prompt: String,
-        trust: FolderTrust? = nil
+        trust: FolderTrust? = nil, files: [Attachment] = []
     ) -> String {
         let requestID = starter.start(
             project: project, place: place, agent: agent, model: model, prompt: prompt, trust: trust,
-            machineName: machineName ?? HostDevice.current.computer("this computer"))
+            machineName: machineName ?? HostDevice.current.computer("this computer"), files: files)
         #if DEBUG
             if fixturesActive {
                 answerFixtureStart(requestID)
@@ -1499,10 +1500,12 @@ public final class AppModel {
             // not sent — the first send and every reconnect resend alike.
             guard let start = starter.starts[requestID], start.outcome == nil, !start.retryStopped
             else { return }
+            guard let ids = await sendStartFiles(requestID) else { return }
             try? await connection.send(
                 .startSession(
                     requestID: requestID, path: start.project.path, agent: start.agent.rawValue,
-                    prompt: start.prompt, worktree: start.place, model: start.model, trust: start.trust))
+                    prompt: start.prompt, worktree: start.place, model: start.model, trust: start.trust,
+                    attachments: ids))
         }
     }
 

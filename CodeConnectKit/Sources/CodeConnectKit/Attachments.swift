@@ -2,13 +2,13 @@ import Foundation
 
 /// **One file going with a message** (minor 50): sent to the computer as soon as it is added, in chunks, so the
 /// message waits only for what has not arrived yet. Its id is the upload's: a retry is another upload, under a new id.
-public struct Attachment: Identifiable, Equatable, Sendable {
+public struct Attachment: Identifiable, Hashable, Sendable {
     /// The daemon's bounds (`ws.rs`): a file, the files one message carries, and one chunk, decoded.
     public static let maxBytes = 10 * 1024 * 1024
     public static let maxCount = 10
     public static let chunkBytes = 512 * 1024
 
-    public enum State: Equatable, Sendable {
+    public enum State: Hashable, Sendable {
         /// On its way: `sent` of `size` bytes are on the computer.
         case uploading(sent: Int)
         /// All of it is on the computer, ready to go with the message.
@@ -56,6 +56,37 @@ public struct Attachment: Identifiable, Equatable, Sendable {
             || (starts(Array("RIFF".utf8)) && starts(Array("WEBP".utf8), at: 8))
     }
 
+    /// A file added to a tray that holds `count` already: refused on its name and size alone when over a limit (`read` is
+    /// then never called), or when it cannot be read; else ready to go, under a new id.
+    static func taking(name raw: String, size: Int, count: Int, read: () throws -> Data) -> Attachment {
+        let name = fileName(raw)
+        func refused(_ reason: String) -> Attachment {
+            Attachment(id: newID(), name: name, size: size, isImage: false, data: nil, state: .refused(reason))
+        }
+        if count >= maxCount { return refused("\(name) can’t be sent: a message carries up to \(maxCount) files.") }
+        if let reason = sizeRefusal(name, size) { return refused(reason) }
+        let data: Data
+        do { data = try read() } catch { return refused("\(name) can’t be read: \(error.localizedDescription)") }
+        if let reason = sizeRefusal(name, data.count) { return refused(reason) }
+        return Attachment(
+            id: newID(), name: name, size: data.count, isImage: isImage(data), data: data, state: .uploading(sent: 0))
+    }
+
+    /// The same bytes as a new upload, from the start.
+    func again() -> Attachment {
+        Attachment(id: Self.newID(), name: name, size: size, isImage: isImage, data: data, state: .uploading(sent: 0))
+    }
+
+    static func sizeRefusal(_ name: String, _ size: Int) -> String? {
+        if size == 0 { return "\(name) is empty." }
+        if size > maxBytes {
+            return "\(name) is \(sizeText(size)); files over \(sizeText(maxBytes)) can’t be sent."
+        }
+        return nil
+    }
+
+    static func newID() -> String { UUID().uuidString.lowercased() }
+
     /// A size as the tiles write it: "4 KB", "2.4 MB".
     public static func sizeText(_ bytes: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory)
@@ -75,23 +106,9 @@ extension AppModel {
     /// only its name and size: `read` is called only for a file inside them, and its failure refuses the tile.
     public func attach(name: String, size: Int, to key: String, read: () throws -> Data) {
         guard let drafts = drafts(for: key) else { return }
-        let name = Attachment.fileName(name)
-        func refuse(_ reason: String) {
-            drafts.files.append(
-                Attachment(id: Self.uploadID(), name: name, size: size, isImage: false, data: nil, state: .refused(reason)))
-        }
-        if drafts.files.count >= Attachment.maxCount {
-            return refuse("\(name) can’t be sent: a message carries up to \(Attachment.maxCount) files.")
-        }
-        if let reason = Self.sizeRefusal(name, size) { return refuse(reason) }
-        let data: Data
-        do { data = try read() } catch { return refuse("\(name) can’t be read: \(error.localizedDescription)") }
-        if let reason = Self.sizeRefusal(name, data.count) { return refuse(reason) }
-        let file = Attachment(
-            id: Self.uploadID(), name: name, size: data.count, isImage: Attachment.isImage(data), data: data,
-            state: .uploading(sent: 0))
+        let file = Attachment.taking(name: name, size: size, count: drafts.files.count, read: read)
         drafts.files.append(file)
-        Task { await upload(file.id, of: key) }
+        if case .uploading = file.state { Task { await upload(file.id, of: key) } }
     }
 
     public func attach(data: Data, name: String, to key: String) {
@@ -105,12 +122,9 @@ extension AppModel {
     /// The same bytes again, under a new id, from the start.
     public func retryFile(_ id: String, in key: String) {
         guard let drafts = drafts(for: key), let index = drafts.files.firstIndex(where: { $0.id == id }),
-            case .failed = drafts.files[index].state, let data = drafts.files[index].data
+            case .failed = drafts.files[index].state, drafts.files[index].data != nil
         else { return }
-        let old = drafts.files[index]
-        let again = Attachment(
-            id: Self.uploadID(), name: old.name, size: data.count, isImage: old.isImage, data: data,
-            state: .uploading(sent: 0))
+        let again = drafts.files[index].again()
         drafts.files[index] = again
         Task { await upload(again.id, of: key) }
     }
@@ -156,34 +170,39 @@ extension AppModel {
     }
 
     private func upload(_ id: String, of key: String) async {
-        guard let data = files(for: key).first(where: { $0.id == id })?.data,
-            let name = files(for: key).first(where: { $0.id == id })?.name
-        else { return }
+        guard let file = files(for: key).first(where: { $0.id == id }) else { return }
+        let end = await sendFile(file, session: key) { setFile(id, of: key, to: $0) }
+        setFile(id, of: key, to: end)
+    }
+
+    /// Sends one file to the computer in chunks, for `session`'s run or, with none, for a start on this connection:
+    /// `progress` hears each step on the way and stops the upload by answering false. What became of it: arrived, or
+    /// failed with why.
+    func sendFile(_ file: Attachment, session: String?, progress: (Attachment.State) -> Bool) async -> Attachment.State {
+        guard let data = file.data else { return .failed("\(file.name) can’t be read.") }
+        let id = file.id
+        let name = file.name
         var offset = 0
         while true {
             let end = min(offset + Attachment.chunkBytes, data.count)
             let result: PutFileResult
             do {
                 result = try await connection.putFile(
-                    session: key, uploadID: id, name: name, size: data.count, offset: offset,
+                    session: session, uploadID: id, name: name, size: data.count, offset: offset,
                     chunk: data.subdata(in: offset..<end))
             } catch {
-                setFile(id, of: key, to: .failed(error.localizedDescription))
-                return
+                return .failed(error.localizedDescription)
             }
             switch result {
             case .refused(let reason):
-                setFile(id, of: key, to: .failed(reason))
-                return
+                return .failed(reason)
             case .received(let held) where held >= data.count:
-                setFile(id, of: key, to: .arrived)
-                return
+                return .arrived
             case .received(let held) where held > offset:
                 offset = held
-                guard setFile(id, of: key, to: .uploading(sent: held)) else { return }
+                guard progress(.uploading(sent: held)) else { return .failed("Stopped.") }
             case .received:
-                setFile(id, of: key, to: .failed("The computer stopped taking the file."))
-                return
+                return .failed("The computer stopped taking the file.")
             }
         }
     }
@@ -198,15 +217,6 @@ extension AppModel {
         return true
     }
 
-    static func sizeRefusal(_ name: String, _ size: Int) -> String? {
-        if size == 0 { return "\(name) is empty." }
-        if size > Attachment.maxBytes {
-            return "\(name) is \(Attachment.sizeText(size)); files over \(Attachment.sizeText(Attachment.maxBytes)) can’t be sent."
-        }
-        return nil
-    }
-
-    private static func uploadID() -> String { UUID().uuidString.lowercased() }
 }
 
 /// **A sent message's files**, from its stored text: the daemon gives the agent each file's path on a line after
@@ -260,14 +270,47 @@ public enum AttachedFiles {
                     state: .failed("The link dropped before it was sent.")),
                 Attachment(
                     id: "fx-up-4", name: "recording.mov", size: 48_300_000, isImage: false, data: nil,
-                    state: .refused(Self.sizeRefusal("recording.mov", 48_300_000) ?? "")),
+                    state: .refused(Attachment.sizeRefusal("recording.mov", 48_300_000) ?? "")),
             ]
         }
 
+        /// `-CC_FIXTURE_FILES YES`: the start box holds a picture, a file and one over the limit. Nothing is sent.
+        public static func seedFixtureFiles(_ draft: StartDraft) {
+            guard UserDefaults.standard.bool(forKey: "CC_FIXTURE_FILES"), draft.files.isEmpty else { return }
+            draft.attach(name: "screenshot.png", size: fixturePicture.count) { fixturePicture }
+            draft.attach(name: "schema.sql", size: 4_210) { Data(count: 4_210) }
+            draft.attach(name: "recording.mov", size: 48_300_000) { Data() }
+        }
+
         /// A small picture for the fixture's image tile: a 96×64 PNG drawn as a page's screenshot.
-        private static let fixturePicture = Data(
+        static let fixturePicture = Data(
             base64Encoded:
                 "iVBORw0KGgoAAAANSUhEUgAAAGAAAABACAIAAABqVuVZAAAAzElEQVR42u3YMQ6CMBQGYCGegsHVE0BYOZGzxtHI7IlYCVzKwcFFnUrNa75/JaH0y2v7aNUcjjv5nhoBIECAAAECBAiQfMr+9+Pr5Zzza273UQVZYoAAyTuV6w4VBAgQoLCddNe1EWe1LKsKssT0QSoIECCJfcwnPM5VECDHvAoCBAgQIAEEKOOvxivDaU413vToS6ughDrJ3/Z/oC3mE8vIHgQIECBAgIoF2qKvi9Ur1pnnE66TduVqDwIECBAgQIAACSBAgAABAlRYnuXgGl8vRte/AAAAAElFTkSuQmCC")
             ?? Data()
     }
 #endif
+
+extension AppModel {
+    /// A start's files, sent for this send of it, each under a new id: the computer keeps a start's files only for the
+    /// connection that sent them, and a start that was sent has spent them. Their ids in order, or nil when one did not
+    /// arrive, which fails the start with why: nothing was started, and Start again sends them again.
+    func sendStartFiles(_ requestID: String) async -> [String]? {
+        guard let start = starter.starts[requestID], !start.files.isEmpty else { return [] }
+        var files = start.files.map { $0.again() }
+        starter.setFiles(files, of: requestID)
+        for index in files.indices {
+            let end = await sendFile(files[index], session: nil) { state in
+                files[index].state = state
+                starter.setFiles(files, of: requestID)
+                return starter.starts[requestID]?.retryStopped == false
+            }
+            files[index].state = end
+            starter.setFiles(files, of: requestID)
+            if case .failed(let reason) = end {
+                starter.resolve(requestID, .failed(.filesNotSent, detail: "\(files[index].name): \(reason)"))
+                return nil
+            }
+        }
+        return files.map(\.id)
+    }
+}

@@ -91,7 +91,7 @@ struct StartForm: View {
         guard let context, let folder, let pick else { return nil }
         return StartDraft.Ask(
             computerID: context.id, folderPath: folder.path, place: startPlace, agent: pick.agent, model: pick.model,
-            message: draft.message)
+            message: draft.message, files: draft.files.map(\.id))
     }
 
     /// The draft's page: the sent start found on its computer, or let go when that computer is gone.
@@ -128,7 +128,12 @@ struct StartForm: View {
         if StartAgent.allCases.contains(where: { context.models($0) == .checking }) { return context.checkingModels }
         guard pick != nil else { return context.noAgent }
         guard folder != nil else { return "Choose a folder." }
-        if draft.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return StartWords.writeTheFirstMessage }
+        // Files alone are a first message.
+        if draft.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, draft.files.isEmpty {
+            return StartWords.writeTheFirstMessage
+        }
+        if let reason = draft.filesBlockedReason { return reason }
+        if !draft.files.isEmpty, !context.takesUploads { return "\(context.machineName) can’t take files." }
         if let name = newName?.trimmingCharacters(in: .whitespaces) {
             if name.isEmpty { return StartWords.nameTheWorktree }
             // The rule is drawn in the branch menu, where the name is typed; this says it in Start's tooltip.
@@ -301,7 +306,7 @@ struct StartForm: View {
             draft.didResume()
         case .new:
             let requestID = context.start(
-                folder, place: startPlace, agent: pick.agent, model: pick.model, prompt: ask.message)
+                folder, place: startPlace, agent: pick.agent, model: pick.model, prompt: ask.message, files: draft.files)
             draft.didSend(requestID, asking: ask)
         }
     }
@@ -315,7 +320,7 @@ struct StartForm: View {
         guard let ask = draft.sent?.ask, draft.sent?.requestID == asked.requestID else { return }
         let requestID = context.start(
             asked.project, place: asked.place, agent: asked.agent, model: asked.model, prompt: asked.prompt ?? "",
-            trust: trust)
+            trust: trust, files: asked.files)
         draft.didSend(requestID, asking: ask)
     }
 
@@ -551,23 +556,30 @@ struct StartForm: View {
     /// Start (↩). The folder's and the computer's menus open below the bar, the model's and the branch's above it.
     private func composer(_ context: StartContext) -> some View {
         InputBox(barHeight: 50, trailingOpen: menuOpen) {
-            TextField(
-                "", text: $draft.message, selection: $messageSelection,
-                prompt: Text("What do you want to work on?").foregroundStyle(Theme.text.opacity(0.5)), axis: .vertical
-            )
-                .accessibilityLabel("First message")
-                .accessibilityIdentifier("start.message")
-                .textFieldStyle(.plain)
-                .font(Theme.ui(15))
-                .lineSpacing(InputBoxLayout.lineSpacing)
-                .lineLimit(short ? 1...6 : 3...8)
-                .focused($messageFocused)
-                // A chat box, as the reply box is: Return starts (`start` keeps the one rule, `startable`), ⇧ or ⌥ Return
-                // adds a line. Without it Return fell to the field's own end of editing, which selected all its text.
-                .sendsOnReturn(start)
-                // The message area stands at least 96 pt, its insets included.
-                .frame(minHeight: 96 - 28, alignment: .topLeading)
+            // The files going with the first message stand above its words.
+            VStack(alignment: .leading, spacing: 12) {
+                if !draft.files.isEmpty {
+                    FileTray(files: draft.files, reason: draft.filesBlockedReason, remove: draft.removeFile, retry: { _ in })
+                }
+                TextField(
+                    "", text: $draft.message, selection: $messageSelection,
+                    prompt: Text("What do you want to work on?").foregroundStyle(Theme.text.opacity(0.5)), axis: .vertical
+                )
+                    .accessibilityLabel("First message")
+                    .accessibilityIdentifier("start.message")
+                    .textFieldStyle(.plain)
+                    .font(Theme.ui(15))
+                    .lineSpacing(InputBoxLayout.lineSpacing)
+                    .lineLimit(short ? 1...6 : 3...8)
+                    .focused($messageFocused)
+                    // A chat box, as the reply box is: Return starts (`start` keeps the one rule, `startable`), ⇧ or ⌥ Return
+                    // adds a line. Without it Return fell to the field's own end of editing, which selected all its text.
+                    .sendsOnReturn(start)
+                    // The message area stands at least 96 pt, its insets included.
+                    .frame(minHeight: 96 - 28, alignment: .topLeading)
+            }
         } leading: {
+            if context.takesUploads { AttachButton(id: "start.attach", take: draft.attach) }
             computerChip(context)
             folderButton(context)
             if let folder, context.branchAhead(folder) {
@@ -585,6 +597,10 @@ struct StartForm: View {
             ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }
             startButton
         }
+        .takesFiles(context.takesUploads, draft.attach)
+        #if DEBUG
+            .task { AppModel.seedFixtureFiles(draft) }
+        #endif
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { box = $0 }
         .environment(\.startBox, box)
     }
