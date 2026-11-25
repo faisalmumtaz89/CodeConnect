@@ -615,8 +615,6 @@ enum Fixtures {
         case .launchFailed:
             return "`/opt/homebrew/bin/codex --version` exited with exit status: 127: "
                 + "env: node: No such file or directory"
-        case .filesNotSent:
-            return "trace.log: The link dropped before it was sent."
         }
     }
 

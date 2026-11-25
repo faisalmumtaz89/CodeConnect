@@ -330,11 +330,6 @@ extension StartFailure {
             // One plain headline and no sentence; the computer's own words go
             // under Details.
             return ("\(agent) didn’t start on \(start.machineName).", nil, "Start again")
-        case .filesNotSent:
-            return (
-                "Your files didn’t reach \(start.machineName)",
-                "Nothing was started. Start again sends them again.",
-                "Start again")
         }
     }
 }

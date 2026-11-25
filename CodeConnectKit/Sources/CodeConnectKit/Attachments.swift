@@ -293,7 +293,8 @@ public enum AttachedFiles {
 extension AppModel {
     /// A start's files, sent for this send of it, each under a new id: the computer keeps a start's files only for the
     /// connection that sent them, and a start that was sent has spent them. Their ids in order, or nil when one did not
-    /// arrive, which fails the start with why: nothing was started, and Start again sends them again.
+    /// arrive: the start fails as one that did not start, its details naming the file and why, and Start again sends them
+    /// again.
     func sendStartFiles(_ requestID: String) async -> [String]? {
         guard let start = starter.starts[requestID], !start.files.isEmpty else { return [] }
         var files = start.files.map { $0.again() }
@@ -307,7 +308,8 @@ extension AppModel {
             files[index].state = end
             starter.setFiles(files, of: requestID)
             if case .failed(let reason) = end {
-                starter.resolve(requestID, .failed(.filesNotSent, detail: "\(files[index].name): \(reason)"))
+                starter.resolve(
+                    requestID, .failed(.launchFailed, detail: "\(files[index].name) didn’t reach the computer: \(reason)"))
                 return nil
             }
         }

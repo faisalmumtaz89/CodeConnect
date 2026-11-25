@@ -337,10 +337,10 @@ final class AttachmentTests: XCTestCase {
         let draft = StartDraft()
         draft.attach(name: "notes.md", size: 5) { Data("hello".utf8) }
         let id = model.startSession(project, agent: .claude, prompt: "", files: draft.files)
-        guard case .failed(.filesNotSent, let detail) = await outcome(model, id) else {
+        guard case .failed(.launchFailed, let detail) = await outcome(model, id) else {
             return XCTFail("\(String(describing: model.starter.starts[id]?.outcome))")
         }
-        XCTAssertEqual(detail, "notes.md: No room left.")
+        XCTAssertEqual(detail, "notes.md didn’t reach the computer: No room left.")
         XCTAssertTrue(startedIDs(wire).isEmpty, "no start_session may leave")
     }
 

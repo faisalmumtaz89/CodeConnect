@@ -211,8 +211,6 @@ public enum StartFailure: String, Sendable {
     case agentMissing = "agent_missing"
     case folderMissing = "folder_missing"
     case launchFailed = "launch_failed"
-    /// A file for the first message did not reach the computer, so the start was not sent (the app's own).
-    case filesNotSent = "files_not_sent"
 }
 
 /// The person's answer to "trust this folder?" (`trust`).
