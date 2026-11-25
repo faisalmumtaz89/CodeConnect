@@ -264,6 +264,15 @@ final class AttachmentTests: XCTestCase {
         // Wherever the computer keeps its CodeConnect folder (CODECONNECT_HOME).
         let elsewhere = "/private/tmp/rig/cc/uploads/r/u1/b.bin"
         XCTAssertEqual(AttachedFiles.split("x\n\nAttached:\n\(elsewhere)").paths, [elsewhere])
+        // Only the trailing block the daemon appends: a path the person wrote stays words, and so does a block with
+        // anything after it that is not such a path.
+        let mention = "see \(path) and fix it"
+        XCTAssertEqual(AttachedFiles.split(mention).words, mention)
+        XCTAssertEqual(AttachedFiles.split(mention).paths, [])
+        let block = "Attached:\n\(path)\nthen this"
+        XCTAssertEqual(AttachedFiles.split(block).paths, [])
+        XCTAssertEqual(AttachedFiles.split("a\n\nAttached:\n\(path)\n\nmore words").paths, [])
+        XCTAssertEqual(AttachedFiles.split("Attached:\n/a/uploads/r/u").paths, [], "one component short")
         // Words that merely mention it, or paths elsewhere, are words.
         XCTAssertEqual(AttachedFiles.split("see\n\nAttached:\n/tmp/x").paths, [])
         XCTAssertEqual(AttachedFiles.split("Attached: nothing").words, "Attached: nothing")
