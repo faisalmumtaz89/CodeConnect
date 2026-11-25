@@ -955,10 +955,16 @@ async fn hosted_start(
     if let Some(refusal) = refusal(path, prompt) {
         return refusal;
     }
-    // The start path's answer; the folder the run runs in can only lower it (below).
-    let trust = match folder_question(&daemon.db, path, trust).await {
-        Ok(trust) => trust,
-        Err(asked) => return asked,
+    // The start path's answer; the folder the run runs in can only lower it (below). agy has no folder trust (its
+    // mode governs what it may do unasked), so an Antigravity start asks no question and goes as not trusted, a value
+    // its host never reads.
+    let trust = if agent == AgentKind::Antigravity {
+        Trust::NotTrusted
+    } else {
+        match folder_question(&daemon.db, path, trust).await {
+            Ok(trust) => trust,
+            Err(asked) => return asked,
+        }
     };
     let binary = match agent {
         AgentKind::Antigravity => {
@@ -3895,6 +3901,32 @@ mod tests {
     /// A rig whose starts reach their stand-ins.
     fn counting(tag: &str) -> Rig {
         Rig::new(tag, "exit 1")
+    }
+
+    /// **An Antigravity start asks no folder question** (row 5, the owner's ruling): agy has no folder trust, and its
+    /// mode governs what it may do unasked, so a question whose answer changes nothing is not asked. Its start in a
+    /// folder no one has answered for reaches its host and keeps no answer; a Claude start there is still asked.
+    #[tokio::test]
+    async fn an_antigravity_start_asks_no_folder_question() {
+        let rig = counting("agy-trust");
+        let path = rig.project();
+        let real = std::fs::canonicalize(&rig.project)
+            .unwrap()
+            .display()
+            .to_string();
+        let agy = rig
+            .start_as(AgentKind::Antigravity, &path, "fix the tests", None, None)
+            .await;
+        assert!(reached(&agy), "{agy:?}");
+        assert_eq!(
+            rig.db.folder_trust(real.clone()).await.unwrap(),
+            None,
+            "no answer kept"
+        );
+        assert_eq!(
+            rig.start_answering(&path, None).await,
+            StartSessionResult::NeedsTrust { path: real }
+        );
     }
 
     /// **A folder is asked about once.** The first start there, with no answer,
