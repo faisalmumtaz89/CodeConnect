@@ -906,13 +906,16 @@ async fn link(
         };
         let read = serde_json::from_str::<FromHost>(&line);
         let acp = match &read {
-            Ok(FromHost::Acp { seq, message }) if live => {
-                Some(protocol::acp_map::read(&key, *seq, message))
-            }
+            Ok(FromHost::Acp { seq, turn, message }) if live => Some(protocol::acp_map::read(
+                &key,
+                *seq,
+                turn.as_deref(),
+                message,
+            )),
             _ => None,
         };
         if let Some(protocol::acp_map::Read::Chunk { thought, text }) = &acp {
-            let Ok(FromHost::Acp { seq, .. }) = &read else {
+            let Ok(FromHost::Acp { seq, turn, .. }) = &read else {
                 unreachable!("a chunk is read from an acp line")
             };
             if let Some(open) = joining.take_if(|open| open.thought != *thought) {
@@ -925,6 +928,7 @@ async fn link(
                 text: String::new(),
                 first: *seq,
                 last: *seq,
+                turn: turn.clone(),
             });
             open.text.push_str(text);
             open.last = *seq;
@@ -1227,6 +1231,8 @@ struct Joining {
     text: String,
     first: u64,
     last: u64,
+    /// The turn of its first chunk.
+    turn: Option<String>,
 }
 
 /// The joined chunks as one event, committed with the cursor at their last line, then
@@ -1239,7 +1245,13 @@ async fn file_joined(
     open: Joining,
     write: &mut OwnedWriteHalf,
 ) -> Result<(), String> {
-    let event = protocol::acp_map::joined(key, open.thought, &open.text, open.first);
+    let event = protocol::acp_map::joined(
+        key,
+        open.thought,
+        &open.text,
+        open.first,
+        open.turn.as_deref(),
+    );
     match daemon
         .ingest_host_message(uid, host, open.last, vec![event], RunNotes::default())
         .await
@@ -2807,7 +2819,8 @@ async fn settle_stop(
         return InterruptReport::NotApplied(says::CLAUDE_TURN_NOT_RUNNING.into());
     }
     let reason = told.terminal_reason.unwrap_or("completed");
-    let (outcome, report) = if reason.starts_with("aborted") {
+    // Claude's stopped turn ends `aborted_*`; an Antigravity prompt's, `cancelled` (ACP's word).
+    let (outcome, report) = if reason.starts_with("aborted") || reason == "cancelled" {
         (
             crate::store::INTERRUPT_ABORTED,
             InterruptReport::Aborted {
@@ -3549,27 +3562,23 @@ mod tests {
         stop(&dir);
     }
 
-    /// An Antigravity run is a hosted run: its start names its agent and its agy, its row is
-    /// Antigravity's, and its `acp` lines are its events. A run of the agent's chunks is
-    /// joined into one reply and acknowledged only with it, at its last line, when the next
-    /// line comes; the host keeps the chunks until then.
-    #[tokio::test]
-    async fn an_antigravity_runs_acp_lines_are_its_events_and_its_words_are_joined() {
-        let rig = rig();
-        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+    /// A live Antigravity run on a stand-in host: its uid, and the host's side, its start's
+    /// outcome `done` (message 2) acknowledged.
+    async fn antigravity_run(rig: &Rig) -> (String, Played) {
+        let host = stub_host(rig, HOST_PROTOCOL_VERSION, None);
         let cwd = rig.root.to_str().unwrap().to_string();
         let daemon = Arc::clone(&rig.daemon);
-        let (result, mut played) = tokio::join!(
+        let (result, played) = tokio::join!(
             start(
                 &daemon,
                 Run {
                     agent: AgentKind::Antigravity,
                     claude_path: "/nonexistent/agy",
-                    ..run(&rig, "req-agy", &cwd, &host)
+                    ..run(rig, "req-agy", &cwd, &host)
                 }
             ),
             async {
-                let mut played = play_to_start(&rig).await;
+                let mut played = play_to_start(rig).await;
                 let uuid = played.start_uuid();
                 say(
                     &mut played.write,
@@ -3580,7 +3589,17 @@ mod tests {
                 played
             }
         );
-        let uid = started_uid(&result);
+        (started_uid(&result), played)
+    }
+
+    /// An Antigravity run is a hosted run: its start names its agent and its agy, its row is
+    /// Antigravity's, and its `acp` lines are its events. A run of the agent's chunks is
+    /// joined into one reply and acknowledged only with it, at its last line, when the next
+    /// line comes; the host keeps the chunks until then.
+    #[tokio::test]
+    async fn an_antigravity_runs_acp_lines_are_its_events_and_its_words_are_joined() {
+        let rig = rig();
+        let (uid, mut played) = antigravity_run(&rig).await;
         match &played.start {
             ToHost::Start { options, .. } => {
                 assert_eq!(options.agent, AgentKind::Antigravity);
@@ -8543,6 +8562,58 @@ mod tests {
             tokio::time::sleep(POLL).await;
         }
         panic!("the link to {uid}'s host did not end");
+    }
+
+    /// **An Antigravity run's Stop.** The app names the turn its events carry (the uuid of the
+    /// prompt's command); it reaches the host as `interrupt`, and the prompt's reply ending
+    /// `cancelled` (ACP's word for a stopped prompt) makes it `aborted`, as Claude's
+    /// `aborted_*` does.
+    #[tokio::test]
+    async fn an_antigravity_stop_is_aborted_by_its_prompts_cancelled_reply() {
+        let rig = rig();
+        let (uid, mut played) = antigravity_run(&rig).await;
+        let turn = played.start_uuid();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 3, "turn": turn, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-1", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "call_1", "title": "sleep 60",
+                "kind": "execute", "status": "in_progress"}}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let (stopped, _) = tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", &turn), async {
+            let (uuid, named) = host_reads_stop(&mut played).await;
+            assert_eq!(named, turn);
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "acp", "seq": 4, "turn": turn, "message": {
+                    "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "cancelled"}}}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "outcome", "seq": 5, "uuid": uuid, "status": "done",
+                                   "terminal_reason": "cancelled", "cancelled": []}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        });
+        assert_eq!(
+            stopped,
+            protocol::ws::InterruptResult::Aborted {
+                turn_id: turn.clone()
+            }
+        );
+        assert_eq!(
+            stop_record(&rig.daemon, &uid, "stop-1").await.as_deref(),
+            Some("aborted")
+        );
+        assert!(stored(&rig, &uid)
+            .iter()
+            .any(|event| event["kind"] == "turn_complete" && event["turn_id"] == turn.as_str()));
+        stop(&played.dir);
     }
 
     /// **B7 part 2 S1, S4 and S7: a Stop aborts the running turn, a second one waits, and

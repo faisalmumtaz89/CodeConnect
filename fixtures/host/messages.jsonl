@@ -13,7 +13,7 @@
 {"dir":"to_host","message":{"turn_id":"9d1f0000-0000-4000-8000-000000000002","type":"interrupt","uuid":"c-interrupt"}}
 {"dir":"to_host","message":{"type":"stop","uuid":"c-stop"}}
 {"dir":"from_host","message":{"message":{"session_id":"5f0c1e2a-0000-4000-8000-000000000001","subtype":"init","type":"system","uuid":"9d1f0000-0000-4000-8000-000000000002"},"seq":1,"type":"sdk"}}
-{"dir":"from_host","message":{"message":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"content":{"text":"Done.","type":"text"},"sessionUpdate":"agent_message_chunk"}}},"seq":1,"type":"acp"}}
+{"dir":"from_host","message":{"message":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"content":{"text":"Done.","type":"text"},"sessionUpdate":"agent_message_chunk"}}},"seq":1,"turn":"c-say","type":"acp"}}
 {"dir":"from_host","message":{"message":{"id":3,"jsonrpc":"2.0","result":{"stopReason":"end_turn"}},"seq":2,"type":"acp"}}
 {"dir":"from_host","message":{"request":{"input":{"command":"cargo test","description":"Run the tests"},"options":{"displayName":"Run command","title":"Claude wants to run cargo test"},"tool_name":"Bash","tool_use_id":"toolu_01"},"seq":2,"type":"permission"}}
 {"dir":"from_host","message":{"seq":3,"tool_use_id":"toolu_01","type":"withdrawn"}}

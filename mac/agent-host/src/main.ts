@@ -133,6 +133,7 @@ function begin(start: Start): void {
   if (start.options.agent === 'antigravity') {
     const run = runAcp(start, (body) => link.send(body), () => link.finish());
     permissions = run;
+    interrupt = run.interrupt;
     say = (command) => (command.type === 'say' ? run.say(command) : refuse(command.uuid));
     stop = () => {
       stop = undefined;

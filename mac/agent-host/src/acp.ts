@@ -2,11 +2,14 @@
 // the host's process group as claude is. The start initializes it (protocol version 1; no file system or terminal
 // offered, so agy uses its own) and opens one session in the run's folder with CodeConnect's mail server; its outcome
 // is `done` once the session is open, `refused` with agy's reason otherwise. Every notification agy sends, and the
-// reply to each prompt, goes to ccd whole as `acp`. A `say` is one more prompt, `done` as it is queued and sent once
-// the one before has its reply, so prompts never overlap. A permission request is held by its JSON-RPC
+// reply to each prompt, goes to ccd whole as `acp`, with the turn it belongs to: the uuid of the command whose prompt
+// is running (the start's for its own). A `say` is one more prompt, queued and `done` at once, and sent once the one
+// before has its reply, so prompts never overlap. An `interrupt` of the running turn answers its open requests
+// `cancelled`, cancels the session's prompt and drops the prompts queued after it; once the prompt's reply comes, its
+// outcome is `done` with the reply's stopReason and the uuids dropped. A permission request is held by its JSON-RPC
 // id and sent as `permission`; ccd's answer picks the request's own allow_once or reject_once option, and `done`
 // follows once it is written to agy. `stop` answers every request still open `cancelled`, cancels the session's
-// prompt and ends agy's input; agy's end is `exited`. Wakes, interrupts and settings are refused: a later slice.
+// prompt and ends agy's input; agy's end is `exited`. Wakes and settings are refused: a later slice.
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Unsequenced } from './link.ts';
@@ -17,6 +20,7 @@ import type { Say, Start } from './start.ts';
 const PROTOCOL_VERSION = 1;
 
 type Answer = Extract<ToHost, { type: 'answer' }>;
+type Interrupt = Extract<ToHost, { type: 'interrupt' }>;
 type Message = { id?: number | string; method?: string; params?: any; result?: any; error?: { message?: string } };
 type Held = { id: number | string; request: PermissionRequest; options: { optionId: string; kind: string }[] };
 
@@ -36,9 +40,15 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
   const held = new Map<string, Held>();
   let sessionId: string | undefined;
   let ended = false;
+  // The prompts waiting, in the order ccd sent them; the turn running, by its command's uuid; and an app's Stop of it,
+  // until its reply comes.
+  const queued: { uuid: string; text: string }[] = [];
+  let running: string | undefined;
+  let stopping: { uuid: string; cancelled: string[] } | undefined;
   // What agy says before the start's outcome waits for it: ccd files a run's messages only once it is live.
   let early: Json[] | undefined = [];
-  const forward = (message: Json) => (early ? early.push(message) : send({ type: 'acp', message }));
+  const forward = (message: Json) =>
+    early ? early.push(message) : send({ type: 'acp', ...(running === undefined ? {} : { turn: running }), message });
   const refuse = (uuid: string, detail: string) => send({ type: 'outcome', uuid, status: 'refused', detail });
 
   createInterface({ input: agy.stdout }).on('line', (text) => {
@@ -70,21 +80,33 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
     }
   });
 
-  // The prompts, one at a time: each is sent once the one before has its reply, which goes to ccd as the turn's end.
-  let prompts: Promise<void> = Promise.resolve();
-  const prompt = (uuid: string | undefined, text: string) => {
-    if (uuid !== undefined) {
-      if (ended) {
-        refuse(uuid, 'the run is not taking messages');
-        return;
+  // The prompts, one at a time: the next is sent once the one before has its reply, which goes to ccd as the turn's
+  // end, and a Stop's outcome after it.
+  let current: Promise<void> = Promise.resolve();
+  const next = () => {
+    if (running !== undefined || ended || sessionId === undefined || queued.length === 0) return;
+    const { uuid, text } = queued.shift()!;
+    running = uuid;
+    current = call('session/prompt', { sessionId, prompt: [{ type: 'text', text }] }).then((reply) => {
+      send({ type: 'acp', turn: uuid, message: reply as Json });
+      running = undefined;
+      if (stopping) {
+        const reason = reply.result?.stopReason;
+        send({
+          type: 'outcome',
+          uuid: stopping.uuid,
+          status: 'done',
+          ...(typeof reason === 'string' ? { terminal_reason: reason } : {}),
+          cancelled: stopping.cancelled,
+        });
+        stopping = undefined;
       }
-      send({ type: 'outcome', uuid, status: 'done' });
-    }
-    prompts = prompts.then(async () => {
-      if (ended || sessionId === undefined) return;
-      const reply = await call('session/prompt', { sessionId, prompt: [{ type: 'text', text }] });
-      send({ type: 'acp', message: reply as Json });
+      next();
     });
+  };
+  const cancelHeld = () => {
+    for (const open of held.values()) write({ id: open.id, result: { outcome: { outcome: 'cancelled' } } });
+    held.clear();
   };
 
   const opened = (async () => {
@@ -109,7 +131,8 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
       send({ type: 'outcome', uuid: start.uuid, status: 'done' });
       for (const message of early ?? []) send({ type: 'acp', message });
       early = undefined;
-      if (start.prompt !== '') prompt(undefined, start.prompt);
+      if (start.prompt !== '') queued.push({ uuid: start.uuid, text: start.prompt });
+      next();
     },
     (error) => {
       refuse(start.uuid, error instanceof Error ? error.message : String(error));
@@ -123,7 +146,7 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
     calls.clear();
     held.clear();
     opened.catch(() => {}).finally(() =>
-      prompts.finally(() => {
+      current.finally(() => {
         send({ type: 'exited', ...(code === null ? {} : { code }), ...(signal === null ? {} : { signal }) });
         finish();
       }),
@@ -138,7 +161,24 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
   });
 
   return {
-    say: (command: Say) => prompt(command.uuid, command.text),
+    say(command: Say): void {
+      if (ended) {
+        refuse(command.uuid, 'the run is not taking messages');
+        return;
+      }
+      queued.push({ uuid: command.uuid, text: command.text });
+      send({ type: 'outcome', uuid: command.uuid, status: 'done' });
+      next();
+    },
+    interrupt(command: Interrupt): void {
+      if (running === undefined || running !== command.turn_id || stopping) {
+        refuse(command.uuid, 'that turn is not running');
+        return;
+      }
+      stopping = { uuid: command.uuid, cancelled: queued.splice(0).map((prompt) => prompt.uuid) };
+      cancelHeld();
+      write({ method: 'session/cancel', params: { sessionId } });
+    },
     answer(command: Answer): void {
       const request = held.get(command.tool_use_id);
       const kind = command.decision.behavior === 'allow' ? 'allow_once' : 'reject_once';
@@ -153,8 +193,7 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
     },
     pending: () => [...held.values()].map((open) => open.request),
     stop(): void {
-      for (const open of held.values()) write({ id: open.id, result: { outcome: { outcome: 'cancelled' } } });
-      held.clear();
+      cancelHeld();
       if (sessionId !== undefined) write({ method: 'session/cancel', params: { sessionId } });
       agy.stdin.end();
     },

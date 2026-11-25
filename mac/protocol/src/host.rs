@@ -182,7 +182,14 @@ pub enum FromHost {
     Sdk { seq: u64, message: Value },
     /// A message `agy acp` wrote, untouched: a `session/update` notification, or the reply
     /// to a `session/prompt`. Its permission requests come as [`FromHost::Permission`].
-    Acp { seq: u64, message: Value },
+    /// `turn` is the uuid of the command whose prompt was running (the `start`'s or a
+    /// `say`'s): the turn an `interrupt` names.
+    Acp {
+        seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<String>,
+        message: Value,
+    },
     /// A `canUseTool` call, held in the host until it is answered or withdrawn.
     Permission {
         seq: u64,
@@ -467,10 +474,12 @@ mod tests {
             }),
             from(FromHost::Acp {
                 seq: 1,
+                turn: Some("c-say".into()),
                 message: json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Done."}}}}),
             }),
             from(FromHost::Acp {
                 seq: 2,
+                turn: None,
                 message: json!({"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}),
             }),
             from(FromHost::Permission {

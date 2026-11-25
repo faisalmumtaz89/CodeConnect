@@ -2317,22 +2317,16 @@ impl Daemon {
         let mut hosted = None;
         match row.agent {
             protocol::agent::AgentKind::Codex => {}
-            // A Claude run CodeConnect started is stopped through its agent host. Any
-            // other has no interrupt on this wire: its stop control is the keyboard at
-            // the Mac, and saying so is more useful than a bare refusal.
-            protocol::agent::AgentKind::Claude => {
+            // A Claude or Antigravity run CodeConnect started is stopped through its agent
+            // host. Any other has no interrupt on this wire: its stop control is the keyboard
+            // at the Mac, and saying so is more useful than a bare refusal.
+            protocol::agent::AgentKind::Claude | protocol::agent::AgentKind::Antigravity => {
                 match self.db.hosted_link(row.session_uid.clone()).await {
                     Ok(Some(linked)) => hosted = Some(linked.lifecycle),
                     _ => {
                         return refuse(crate::codex_refusals::interrupt_on_claude(&row.session_uid))
                     }
                 }
-            }
-            protocol::agent::AgentKind::Antigravity => {
-                return refuse(crate::codex_refusals::interrupt_on_unsupported(
-                    &row.session_uid,
-                    "Antigravity",
-                ))
             }
             protocol::agent::AgentKind::Unsupported(ref name) => {
                 return refuse(crate::codex_refusals::interrupt_on_unsupported(

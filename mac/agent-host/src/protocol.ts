@@ -82,8 +82,9 @@ export interface InitializeAnswer {
 /** A line the host sends ccd. Each carries its sequence number and is kept until ccd acknowledges it. */
 export type FromHost =
   | { type: 'sdk'; seq: number; message: Json }
-  /** A message `agy acp` wrote: a `session/update` notification, or a `session/prompt` reply. */
-  | { type: 'acp'; seq: number; message: Json }
+  /** A message `agy acp` wrote: a `session/update` notification, or a `session/prompt` reply; `turn` is the uuid of
+   * the command whose prompt was running. */
+  | { type: 'acp'; seq: number; turn?: string; message: Json }
   | { type: 'permission'; seq: number; request: PermissionRequest }
   | { type: 'withdrawn'; seq: number; tool_use_id: string }
   | {

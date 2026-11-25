@@ -10,7 +10,9 @@
 //! not draw (plans, commands, modes, usage) file nothing.
 //!
 //! Event ids are stable across a replay: a tool's are its `toolCallId`'s, a turn's end and
-//! a joined text are named by the host's sequence number of their line.
+//! a joined text are named by the host's sequence number of their line. Each event carries
+//! its line's turn, the uuid of the command whose prompt was running, which is what an app
+//! names to stop it.
 
 use serde_json::{json, Value};
 
@@ -25,10 +27,12 @@ pub enum Read {
     Events(Vec<PendingEvent>),
 }
 
-/// What `message`, the host's line `seq`, is.
-pub fn read(session: &SessionKey, seq: u64, message: &Value) -> Read {
+/// What `message`, the host's line `seq` of the turn `turn`, is.
+pub fn read(session: &SessionKey, seq: u64, turn: Option<&str>, message: &Value) -> Read {
     let event = |kind: EventKind, id: String, payload: Value| {
-        PendingEvent::new(session, kind, payload, Source::Acp).with_source_event_id(id)
+        PendingEvent::new(session, kind, payload, Source::Acp)
+            .with_source_event_id(id)
+            .with_turn_id(turn.map(str::to_string))
     };
     if message.get("method").and_then(Value::as_str) == Some("session/update") {
         let update = &message["params"]["update"];
@@ -104,8 +108,14 @@ pub fn read(session: &SessionKey, seq: u64, message: &Value) -> Read {
     Read::Events(Vec::new())
 }
 
-/// The run of chunks that began at the host's line `first`, as one event.
-pub fn joined(session: &SessionKey, thought: bool, text: &str, first: u64) -> PendingEvent {
+/// The run of chunks that began at the host's line `first`, of the turn `turn`, as one event.
+pub fn joined(
+    session: &SessionKey,
+    thought: bool,
+    text: &str,
+    first: u64,
+    turn: Option<&str>,
+) -> PendingEvent {
     let kind = if thought {
         EventKind::Reasoning
     } else {
@@ -113,6 +123,7 @@ pub fn joined(session: &SessionKey, thought: bool, text: &str, first: u64) -> Pe
     };
     PendingEvent::new(session, kind, json!({ "text": text }), Source::Acp)
         .with_source_event_id(format!("text/{first}"))
+        .with_turn_id(turn.map(str::to_string))
 }
 
 /// A finished tool's result: its status, and what it printed or wrote as text. Nothing
@@ -176,19 +187,20 @@ mod tests {
     fn the_agents_words_and_thoughts_are_chunks() {
         let words = update(json!({"sessionUpdate": "agent_message_chunk",
                                   "content": {"type": "text", "text": "Hel"}}));
-        assert!(matches!(read(&session(), 3, &words),
+        assert!(matches!(read(&session(), 3, None, &words),
             Read::Chunk { thought: false, text } if text == "Hel"));
         let thought = update(json!({"sessionUpdate": "agent_thought_chunk",
                                     "content": {"type": "text", "text": "hmm"}}));
-        assert!(matches!(read(&session(), 4, &thought),
+        assert!(matches!(read(&session(), 4, None, &thought),
             Read::Chunk { thought: true, text } if text == "hmm"));
-        let joined = joined(&session(), false, "Hello", 3);
+        let joined = joined(&session(), false, "Hello", 3, Some("c-say"));
         assert_eq!(joined.kind, EventKind::AgentMessage);
         assert_eq!(joined.payload, json!({"text": "Hello"}));
         assert_eq!(joined.source, Source::Acp);
         assert_eq!(joined.source_event_id.as_deref(), Some("text/3"));
+        assert_eq!(joined.turn_id.as_deref(), Some("c-say"));
         assert_eq!(
-            super::joined(&session(), true, "hmm", 4).kind,
+            super::joined(&session(), true, "hmm", 4, None).kind,
             EventKind::Reasoning
         );
     }
@@ -198,7 +210,7 @@ mod tests {
         let call = update(json!({"sessionUpdate": "tool_call", "toolCallId": "call_1",
             "title": "cat NOTE.txt", "kind": "read", "status": "pending",
             "rawInput": {"command": "cat NOTE.txt"}}));
-        let filed = events(read(&session(), 5, &call));
+        let filed = events(read(&session(), 5, None, &call));
         assert_eq!(filed.len(), 1);
         assert_eq!(filed[0].kind, EventKind::ToolCall);
         assert_eq!(
@@ -213,13 +225,13 @@ mod tests {
         // Still running: nothing yet.
         let running = update(json!({"sessionUpdate": "tool_call_update",
                                     "toolCallId": "call_1", "status": "in_progress"}));
-        assert!(events(read(&session(), 6, &running)).is_empty());
+        assert!(events(read(&session(), 6, None, &running)).is_empty());
         let done = update(
             json!({"sessionUpdate": "tool_call_update", "toolCallId": "call_1",
             "status": "completed",
             "content": [{"type": "content", "content": {"type": "text", "text": "the word"}}]}),
         );
-        let filed = events(read(&session(), 7, &done));
+        let filed = events(read(&session(), 7, None, &done));
         assert_eq!(filed[0].kind, EventKind::ToolResult);
         assert_eq!(
             filed[0].payload,
@@ -239,14 +251,14 @@ mod tests {
             "status": "failed", "kind": "execute",
             "content": [{"type": "content", "content": {"type": "text", "text": "exit 1"}}]}),
         );
-        let filed = events(read(&session(), 8, &failed));
+        let filed = events(read(&session(), 8, None, &failed));
         assert_eq!(filed[0].payload["status"], "failed");
         assert_eq!(filed[0].payload["tool"], "execute");
         assert_eq!(filed[0].payload["aggregated_output"], "exit 1");
         let written = update(json!({"sessionUpdate": "tool_call", "toolCallId": "call_3",
             "title": "Write a.txt", "kind": "edit", "status": "completed",
             "content": [{"type": "diff", "path": "/p/a.txt", "oldText": null, "newText": "hi"}]}));
-        let filed = events(read(&session(), 9, &written));
+        let filed = events(read(&session(), 9, None, &written));
         assert_eq!(
             filed.len(),
             2,
@@ -259,13 +271,18 @@ mod tests {
     #[test]
     fn the_prompts_reply_ends_the_turn_and_an_error_says_so() {
         let reply = json!({"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}});
-        let filed = events(read(&session(), 10, &reply));
+        let filed = events(read(&session(), 10, Some("c-say"), &reply));
+        assert_eq!(
+            filed[0].turn_id.as_deref(),
+            Some("c-say"),
+            "its turn is the prompt's"
+        );
         assert_eq!(filed[0].kind, EventKind::TurnComplete);
         assert_eq!(filed[0].payload, json!({"stop_reason": "end_turn"}));
         assert_eq!(filed[0].source_event_id.as_deref(), Some("turn/10"));
         let refused = json!({"jsonrpc": "2.0", "id": 4,
                              "error": {"code": -32000, "message": "Authentication required"}});
-        let filed = events(read(&session(), 11, &refused));
+        let filed = events(read(&session(), 11, None, &refused));
         assert_eq!(filed[0].kind, EventKind::Error);
         assert_eq!(
             filed[0].payload,
@@ -283,10 +300,13 @@ mod tests {
             "usage_update",
         ] {
             let message = update(json!({"sessionUpdate": kind}));
-            assert!(events(read(&session(), 12, &message)).is_empty(), "{kind}");
+            assert!(
+                events(read(&session(), 12, None, &message)).is_empty(),
+                "{kind}"
+            );
         }
         let image = update(json!({"sessionUpdate": "agent_message_chunk",
                                   "content": {"type": "image", "data": "", "mimeType": "image/png"}}));
-        assert!(events(read(&session(), 13, &image)).is_empty());
+        assert!(events(read(&session(), 13, None, &image)).is_empty());
     }
 }

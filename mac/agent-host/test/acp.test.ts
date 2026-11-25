@@ -74,11 +74,10 @@ test('Allow answers with the request\'s own allow_once option; the turn goes on 
   expect(await ccd.line('the refusal', (line) => line.uuid === 'c-again')).toMatchObject({ status: 'refused' });
 }, 15_000);
 
-test('Deny answers with reject_once; a say during a turn is done at once and is the next prompt', async () => {
+test('Deny answers with reject_once; a say is done at once and is the next prompt, after the turn before it', async () => {
   const { dir, ccd } = await run();
   const permission = await ccd.line('the permission request', (line) => line.type === 'permission');
   ccd.send({ type: 'say', uuid: 'c-say', text: 'and the docs' });
-  // Taken while the turn still waits on its card, so ccd's send wait is never spent on the turn before it.
   expect(await ccd.line('the say\'s outcome', (line) => line.uuid === 'c-say')).toMatchObject({ status: 'done' });
   ccd.send({
     type: 'answer', uuid: 'c-deny', tool_use_id: permission.request.tool_use_id,
@@ -89,10 +88,35 @@ test('Deny answers with reject_once; a say during a turn is done at once and is 
   expect(lines.find((message) => message.id === 101 && message.method === undefined).result).toStrictEqual({
     outcome: { outcome: 'selected', optionId: 'reject-once' },
   });
-  // The say reached agy only after the first prompt was answered.
+  // The say was sent to agy only after the first prompt was answered, and its lines carry its own turn.
   const prompts = lines.filter((message) => message.method === 'session/prompt');
   expect(prompts.map((message) => message.params.prompt[0].text)).toStrictEqual(['read the note', 'and the docs']);
   expect(lines.indexOf(prompts[1])).toBeGreaterThan(lines.findIndex((message) => message.id === 101 && !message.method));
+  const turns = ccd.lines.filter((line) => line.type === 'acp' && line.turn !== undefined).map((line) => line.turn);
+  expect([...new Set(turns)]).toStrictEqual([antigravityStart.uuid, 'c-say']);
+}, 15_000);
+
+test('an interrupt of the running turn cancels it, drops the prompts queued after it, and is done at its reply', async () => {
+  const { dir, ccd } = await run();
+  await ccd.line('the permission request', (line) => line.type === 'permission');
+  ccd.send({ type: 'interrupt', uuid: 'c-other', turn_id: 'not-the-turn' });
+  expect(await ccd.line('the refusal', (line) => line.uuid === 'c-other')).toMatchObject({ status: 'refused' });
+  ccd.send({ type: 'say', uuid: 'c-queued', text: 'and the docs' });
+  ccd.send({ type: 'interrupt', uuid: 'c-stop-turn', turn_id: antigravityStart.uuid });
+  const outcome = await ccd.line('the interrupt\'s outcome', (line) => line.uuid === 'c-stop-turn');
+  expect(outcome).toMatchObject({ status: 'done', terminal_reason: 'cancelled', cancelled: ['c-queued'] });
+  const reply = ccd.lines.findIndex((line) => line.type === 'acp' && line.message.result?.stopReason === 'cancelled');
+  expect(reply).toBeGreaterThan(-1);
+  expect(reply).toBeLessThan(ccd.lines.indexOf(outcome));
+  expect(ccd.lines[reply].turn).toBe(antigravityStart.uuid);
+  const lines = stdin(dir);
+  expect(lines.find((message) => message.id === 101 && !message.method).result).toStrictEqual({
+    outcome: { outcome: 'cancelled' },
+  });
+  expect(lines.find((message) => message.method === 'session/cancel').params).toStrictEqual({ sessionId: 'sess-1' });
+  // The queued say never reached agy.
+  await Bun.sleep(300);
+  expect(stdin(dir).filter((message) => message.method === 'session/prompt')).toHaveLength(1);
 }, 15_000);
 
 test('stop answers an open request cancelled, cancels the session and ends agy; its end is exited', async () => {
