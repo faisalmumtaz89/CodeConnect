@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.26
+
 ## CodeConnect 0.19.25
 
 - On the Mac and Linux, CodeConnect's background service starts much faster with a long history: with a million
