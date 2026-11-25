@@ -172,7 +172,7 @@ struct DecisionBlock: View {
             .accessibilityIdentifier("\(id).command")
             // Outside the command's one spoken element, so Copy is a control of its own.
             .overlay(alignment: .trailing) { CopyButton(text: command, id: "\(id).command.copy").padding(.bottom, 1) }
-            if summary?.agent == .claude { fullInput }
+            if summary?.agent == .claude || summary?.agent == .antigravity { fullInput }
             if let why = CodexCard.reason(in: approval.card.toolInput) {
                 Text(why).font(Theme.ui(12)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
             }
@@ -301,7 +301,8 @@ struct DecisionBlock: View {
                 linkReason: model.actionsBlockedReason, computer: model.machineName)
         case .unsupported(let raw):
             words = DecisionCard.unsupportedAgentReason(raw, computer: model.machineName)
-        case .claude:
+        // An Antigravity card is a hosted card, as a Claude one is; it is never a question.
+        case .claude, .antigravity:
             words = DecisionCard.claudeUnanswerableReason(
                 isQuestion: QuestionCard.isQuestionToolName(approval.card.toolName),
                 hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,

@@ -406,7 +406,7 @@ private struct AccountSettings: View {
             if let model, model.keepsAccounts, model.linkHealth.notice == nil {
                 Text("Each agent uses the account marked here. Click another to move its sessions to it.")
                     .font(Theme.ui(13)).foregroundStyle(Theme.text2)
-                ForEach(StartAgent.allCases) { agent in AgentAccounts(model: model, agent: agent) }
+                ForEach(StartAgent.withAccounts) { agent in AgentAccounts(model: model, agent: agent) }
                 if let problem = model.accountsProblem {
                     Text(problem).font(Theme.ui(12)).foregroundStyle(Theme.red)
                         .fixedSize(horizontal: false, vertical: true)

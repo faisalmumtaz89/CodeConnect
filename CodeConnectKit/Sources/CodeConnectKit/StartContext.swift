@@ -150,9 +150,17 @@ public struct StartContext {
         return .choices([StartModelChoice(agent: agent, model: nil, label: "Default", detail: nil)] + offered)
     }
 
+    /// The agents a start here offers, in the menu's order: Claude Code and Codex always, each saying why when it
+    /// cannot start; Antigravity only where this computer lists it, which a computer that predates it never does.
+    public var startAgents: [StartAgent] {
+        StartAgent.allCases.filter { agent in
+            agent != .antigravity || starter.agents.contains { $0.agent == agent }
+        }
+    }
+
     /// Every entry that can be chosen here, agent by agent.
     public var modelChoices: [StartModelChoice] {
-        StartAgent.allCases.flatMap { agent -> [StartModelChoice] in
+        startAgents.flatMap { agent -> [StartModelChoice] in
             switch models(agent) {
             case .choices(let choices): return choices
             case .checking, .missing, .signedOut: return []

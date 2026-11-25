@@ -53,6 +53,9 @@ public enum EventSource: Sendable, Hashable {
     /// A Claude run driven through the Agent SDK: the messages its agent host
     /// forwards (`Source::Sdk`, `event.rs`). Named for the same reason as `.codex`.
     case sdk
+    /// An Antigravity run's `agy acp` messages, which its agent host forwards (`Source::Acp`). Named for the same
+    /// reason as `.codex`.
+    case acp
     /// A source a newer daemon knows about and this build does not. Retained
     /// rather than coerced, so nothing reads it as the trusted `.daemon`.
     case unknown(String)
@@ -65,6 +68,7 @@ public enum EventSource: Sendable, Hashable {
         case .pty: return "pty"
         case .codex: return "codex"
         case .sdk: return "sdk"
+        case .acp: return "acp"
         case .unknown(let raw): return raw
         }
     }
@@ -119,6 +123,7 @@ extension EventSource: Codable {
         case "pty": self = .pty
         case "codex": self = .codex
         case "sdk": self = .sdk
+        case "acp": self = .acp
         case let other: self = .unknown(other)
         }
     }
@@ -192,6 +197,8 @@ public enum AnsweredOn: String, Codable, Sendable, Hashable {
 public enum AgentKind: Sendable, Hashable {
     case claude
     case codex
+    /// Google Antigravity's agent, `agy`, which the computer runs on its agent host as it runs Claude Code.
+    case antigravity
     /// An agent a newer daemon hosts and this build does not know how to drive.
     case unsupported(String)
 
@@ -199,6 +206,7 @@ public enum AgentKind: Sendable, Hashable {
         switch self {
         case .claude: return "claude"
         case .codex: return "codex"
+        case .antigravity: return "antigravity"
         case .unsupported(let raw): return raw
         }
     }
@@ -209,6 +217,7 @@ public enum AgentKind: Sendable, Hashable {
         switch self {
         case .claude: return "Claude"
         case .codex: return "Codex"
+        case .antigravity: return "Antigravity"
         case .unsupported(let raw): return raw
         }
     }
@@ -219,14 +228,21 @@ public enum AgentKind: Sendable, Hashable {
         switch self {
         case .claude: return StartAgent.claude.displayName
         case .codex: return StartAgent.codex.displayName
+        case .antigravity: return StartAgent.antigravity.displayName
         case .unsupported(let raw): return raw
         }
+    }
+
+    /// The agent a start of `agent` runs.
+    public init(_ agent: StartAgent) {
+        self.init(wire: agent.rawValue)
     }
 
     init(wire raw: String) {
         switch raw {
         case "claude": self = .claude
         case "codex": self = .codex
+        case "antigravity": self = .antigravity
         case let other: self = .unsupported(other)
         }
     }

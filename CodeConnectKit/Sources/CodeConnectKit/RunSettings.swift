@@ -7,8 +7,8 @@ import Foundation
 /// no menus suppresses the picker rather than falling back to a static family list, which is what keeps
 /// a detached, ended or older-daemon run off a list it cannot act on.
 public enum RunSettings: Sendable, Hashable {
-    /// Not a run these controls own: an agent they do not know. This entry draws
-    /// nothing.
+    /// Not a run these controls own: an agent they do not know, or Antigravity, which offers no settings yet. This
+    /// entry draws nothing.
     case deferToOtherPath
     /// A hosted Claude run with no menus — detached, ended, still starting, or a daemon below minor 39.
     /// No picker: the model shows read-only, by the label the daemon names it by (minor 46) or else exactly as it

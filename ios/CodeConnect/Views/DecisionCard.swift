@@ -832,7 +832,7 @@ struct DecisionCardView: View {
             // reader is checking, and its `request_id` is a short opaque token.
             // Claude's, and only on a card known to be Claude's. An unknown
             // agent gets no raw disclosure: the JSON may be Codex's.
-            if isClaudeCard {
+            if isClaudeCard || sessionAgent == .antigravity {
                 CCDisclosure("Full tool input", labelOnContentColumn: false) {
                     VStack(alignment: .leading, spacing: CC.space.sm) {
                         CCMonoBlock(approval.card.shownToolInput).onContainerEdge()
@@ -1278,7 +1278,8 @@ struct DecisionCardView: View {
                 linkReason: model.actionsBlockedReason)
         case .unsupported(let raw):
             return DecisionCard.unsupportedAgentReason(raw)
-        case .claude:
+        // An Antigravity card is a hosted card, as a Claude one is; it is never a question.
+        case .claude, .antigravity:
             return DecisionCard.claudeUnanswerableReason(
                 isQuestion: QuestionCard.isQuestionToolName(approval.card.toolName),
                 hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,

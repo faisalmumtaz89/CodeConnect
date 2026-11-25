@@ -1194,7 +1194,8 @@ public final class DaemonConnection {
         session: String, requestID: String, turnID: String, payloadHash: String,
         requires agent: AgentKind
     ) async throws -> InterruptResult {
-        let (advertised, flag): (Bool?, String) = agent == .claude
+        // A run on the agent host (Claude Code's or Antigravity's) is stopped through it, under `claude_interrupt`.
+        let (advertised, flag): (Bool?, String) = agent == .claude || agent == .antigravity
             ? (capabilities?.claudeInterrupt, "claude_interrupt")
             : (capabilities?.codexInterrupt, "codex_interrupt")
         guard advertised == true else {

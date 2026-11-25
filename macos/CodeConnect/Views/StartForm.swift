@@ -125,7 +125,7 @@ struct StartForm: View {
     /// Why Start can't be pressed yet, or nil when it can.
     private var blocked: String? {
         guard let context else { return "Choose a computer." }
-        if StartAgent.allCases.contains(where: { context.models($0) == .checking }) { return context.checkingModels }
+        if context.startAgents.contains(where: { context.models($0) == .checking }) { return context.checkingModels }
         guard pick != nil else { return context.noAgent }
         guard folder != nil else { return "Choose a folder." }
         if draft.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return StartWords.writeTheFirstMessage }

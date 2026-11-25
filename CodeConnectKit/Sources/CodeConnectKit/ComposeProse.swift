@@ -119,6 +119,9 @@ extension AppModel {
     /// commands, custom skills — is typed as written.
     public func submission(of draft: String, to key: String) -> Submission {
         if shownSummary(for: key)?.isCodex == true { return .codex }
+        // An Antigravity run takes the words as they are, through its agent host: no slash command of Claude Code's
+        // means anything to agy.
+        if shownSummary(for: key)?.agent == .antigravity { return .claude }
         let action = ClaudeCommandPolicy.action(for: draft)
         if case .passThrough = action { return .claude }
         return .command(action)

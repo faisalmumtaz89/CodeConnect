@@ -88,6 +88,11 @@ public enum DecisionCard {
             // held for is answered at the Mac.
             guard hookOnlyApprovals, hold == .held else { return .noneAnswerable }
             return .allowDeny(allowForSession: card.allowForSession == true)
+        case .antigravity:
+            // Allow or Deny, answered through the agent host that holds agy's request, as a Claude card is; agy's
+            // request has no "for this session" answer the computer sends.
+            guard hookOnlyApprovals, hold == .held else { return .noneAnswerable }
+            return .allowDeny(allowForSession: false)
         case .unsupported:
             // An agent this build cannot drive gets no answer surface at all.
             // Guessing a vocabulary for it would be guessing on the wire.
@@ -138,7 +143,8 @@ public enum DecisionCard {
         switch agent {
         case .claude: expected = QuestionCard.toolName
         case .codex: expected = QuestionCard.codexToolName
-        case .unsupported: return nil
+        // agy asks no question as a card.
+        case .antigravity, .unsupported: return nil
         }
         guard card.toolName == expected else { return nil }
         return QuestionCard(card: card)

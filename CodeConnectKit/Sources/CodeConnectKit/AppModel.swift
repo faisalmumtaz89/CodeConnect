@@ -3917,6 +3917,15 @@ public final class AppModel {
         case (.claude, .optionId):
             return "An option id is for a Codex run; this is a Claude run, "
                 + "so nothing was sent."
+        case (.antigravity, .allow), (.antigravity, .deny):
+            // Answered through the agent host that holds agy's request, as a Claude card is.
+            guard answersApprovalsByHook else {
+                return "\(HostDevice.current.computer("The computer"))’s CodeConnect is too old to answer Antigravity’s approvals from the "
+                    + "\(HostDevice.current.noun), so nothing was sent. Update it, or answer at \(HostDevice.current.computer("the computer"))."
+            }
+            return nil
+        case (.antigravity, _):
+            return "An Antigravity card is answered Allow or Deny, so nothing was sent."
         case (.unsupported(let raw), _):
             return "This app does not know how to answer a \(raw) run, so nothing was sent."
         default:

@@ -797,8 +797,8 @@ struct StateIcon: View {
     }
 }
 
-/// Which agent a run is: Claude's asterisk, Codex's brackets, or the daemon's own word for one this
-/// build does not know.
+/// Which agent a run is: Claude's asterisk, Codex's brackets, or the mark of an agent with none of its own (Antigravity,
+/// or one this build does not know), named by its product on hover.
 struct AgentMark: View {
     let agent: AgentKind
 
@@ -807,7 +807,7 @@ struct AgentMark: View {
             switch agent {
             case .claude: Image(systemName: "asterisk").font(.system(size: 9, weight: .bold))
             case .codex: Image(systemName: "chevron.left.forwardslash.chevron.right").font(.system(size: 7.5, weight: .bold))
-            case .unsupported: Image(systemName: "questionmark").font(.system(size: 8, weight: .bold))
+            case .antigravity, .unsupported: Image(systemName: "questionmark").font(.system(size: 8, weight: .bold))
             }
         }
         .foregroundStyle(Theme.text2)
