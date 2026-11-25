@@ -96,7 +96,8 @@ struct InputBoxSubmit: View {
     let help: String
     let action: () -> Void
 
-    private static let lit = Color(themeHex: 0xF4F4F5)
+    /// The lit fill, the app's white: the update button wears it too.
+    static let lit = Color(themeHex: 0xF4F4F5)
 
     var body: some View {
         Button(action: action) {
