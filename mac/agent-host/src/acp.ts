@@ -12,7 +12,8 @@
 // is held by its JSON-RPC id (its card named by the start's uuid and that id) and sent as `permission`; ccd's answer
 // picks the request's own allow_once or reject_once option, and `done` follows once it is written to agy. `stop`
 // answers every request still open `cancelled`, withdrawing its card, cancels the session's prompt and ends agy's
-// input; agy's end is `exited`. Settings changes are refused: a later slice.
+// input; a prompt agy then leaves unanswered ends `cancelled`, one cut off by any other end of agy's in the error "agy
+// ended". agy's end is `exited`. Settings changes are refused: a later slice.
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Unsequenced } from './link.ts';
@@ -34,10 +35,15 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
   const write = (message: object) => agy.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
   let nextId = 1;
   const calls = new Map<number, (message: Message) => void>();
+  // The running prompt's call, and whether the run was stopped: a prompt agy leaves unanswered when it ends after a
+  // stop ends `cancelled`, the turn the person stopped; after any other end of agy's, in an error.
+  let promptCall: number | undefined;
+  let stopped = false;
   const call = (method: string, params: object) =>
     new Promise<Message>((resolve) => {
       const id = nextId++;
       calls.set(id, resolve);
+      if (method === 'session/prompt') promptCall = id;
       write({ id, method, params });
     });
   const held = new Map<string, Held>();
@@ -168,7 +174,10 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
 
   agy.once('exit', (code, signal) => {
     ended = true;
-    for (const resolve of calls.values()) resolve({ error: { message: 'agy ended' } });
+    for (const [id, resolve] of calls) {
+      const cancelled = stopped && id === promptCall;
+      resolve(cancelled ? { result: { stopReason: 'cancelled' } } : { error: { message: 'agy ended' } });
+    }
     calls.clear();
     held.clear();
     opened.catch(() => {}).finally(() =>
@@ -219,6 +228,7 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
     },
     pending: () => [...held.values()].map((open) => open.request),
     stop(): void {
+      stopped = true;
       cancelHeld();
       if (sessionId !== undefined) write({ method: 'session/cancel', params: { sessionId } });
       agy.stdin.end();

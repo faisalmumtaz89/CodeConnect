@@ -2,6 +2,7 @@
 // what reaches agy (its arguments, its folder, every line) and what reaches ccd (the outcome, agy's messages as `acp`,
 // its permission requests, its end).
 import { afterAll, expect, test } from 'bun:test';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { type Ccd, cleanup, goldenLines, open, runDir, startHost, stubLog, waitFor, writeAgy } from './rig.ts';
@@ -11,7 +12,11 @@ afterAll(cleanup);
 const antigravityStart = goldenLines('to_host', 'start').find((m) => m.options.agent === 'antigravity')!;
 
 /** A host with an Antigravity start sent, its agy the stand-in. Resolves once the start's outcome has come. */
-async function run(script: { version?: number; resume?: boolean } = {}, prompt = 'read the note', resume?: string) {
+async function run(
+  script: { version?: number; resume?: boolean; quiet_on_cancel?: boolean } = {},
+  prompt = 'read the note',
+  resume?: string,
+) {
   const dir = runDir();
   const work = join(dir, 'work');
   mkdirSync(work);
@@ -193,6 +198,30 @@ test('a start that names a model sets it on the session before its prompt; a mod
   expect(await other.line('the start outcome', (line) => line.type === 'outcome')).toMatchObject({
     status: 'refused', detail: 'agy has no model no-such-model',
   });
+}, 15_000);
+
+test('a stop whose prompt agy leaves unanswered ends the turn cancelled, not in an error', async () => {
+  const { ccd } = await run({ quiet_on_cancel: true });
+  await ccd.line('the permission request', (line) => line.type === 'permission');
+  ccd.send({ type: 'stop', uuid: 'c-stop' });
+  await ccd.line('the run\'s end', (line) => line.type === 'exited');
+  // A prompt's reply, as agy wrote it or as the host closes it when agy has gone: no method.
+  const replies = acpLines(ccd).filter((message) => message.method === undefined);
+  expect(replies.at(-1)).toMatchObject({ result: { stopReason: 'cancelled' } });
+  expect(replies.some((message) => message.error)).toBe(false);
+}, 15_000);
+
+test('agy ending on its own, nobody having stopped it, ends the running prompt in an error', async () => {
+  const { dir, ccd } = await run();
+  await ccd.line('the permission request', (line) => line.type === 'permission');
+  const agy = stubLog(dir).find((event) => event.argv);
+  expect(agy).toBeDefined();
+  const pid = Number(execFileSync('/usr/bin/pgrep', ['-f', `stub-agy.ts ${join(dir, 'agy.json')}`]).toString().trim().split('\n')[0]);
+  process.kill(pid, 'SIGTERM');
+  await ccd.line('the run\'s end', (line) => line.type === 'exited');
+  // A prompt's reply, as agy wrote it or as the host closes it when agy has gone: no method.
+  const replies = acpLines(ccd).filter((message) => message.method === undefined);
+  expect(replies.at(-1)).toMatchObject({ error: { message: 'agy ended' } });
 }, 15_000);
 
 test('an agy at another ACP version is refused at the start, with the version it speaks', async () => {

@@ -6,7 +6,7 @@
 // `no-such-model`, which it refuses. At each `session/prompt` it writes its reply in
 // two chunks, a tool call, then asks permission for it with allow_once and reject_once options; once answered it ends
 // the tool as the answer says, writes one more chunk and answers the prompt `end_turn`. A request answered
-// `cancelled` ends the prompt `cancelled`. It records its argv, its folder and every line it read; its input's end
+// `cancelled` ends the prompt `cancelled`, unless its script says `quiet_on_cancel`. It records its argv, its folder and every line it read; its input's end
 // ends it.
 //
 //   stub-agy.ts <script.json> acp
@@ -72,7 +72,8 @@ for await (const text of createInterface({ input: process.stdin })) {
     waiting.delete(message.id);
     const outcome = message.result?.outcome;
     if (outcome?.outcome === 'cancelled') {
-      write({ id: promptId, result: { stopReason: 'cancelled' } });
+      // `quiet_on_cancel`: as agy may, it leaves the cancelled prompt unanswered and ends when its input does.
+      if (!script.quiet_on_cancel) write({ id: promptId, result: { stopReason: 'cancelled' } });
       continue;
     }
     const allowed = outcome?.optionId === 'allow-once';

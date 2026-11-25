@@ -192,7 +192,10 @@ export function writeStub(dir: string, script: StubScript): string {
 }
 
 /** Writes the stand-in agy for run `dir` (a sh wrapper running stub-agy.ts on the built host as Bun). */
-export function writeAgy(dir: string, script: { version?: number; resume?: boolean } = {}): string {
+export function writeAgy(
+  dir: string,
+  script: { version?: number; resume?: boolean; quiet_on_cancel?: boolean } = {},
+): string {
   const file = join(dir, 'agy.json');
   writeFileSync(file, JSON.stringify({ ...script, log: join(dir, 'stub.log') }));
   const wrapper = join(dir, 'agy');
