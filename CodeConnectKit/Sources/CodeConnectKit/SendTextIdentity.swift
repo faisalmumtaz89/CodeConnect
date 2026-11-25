@@ -13,9 +13,11 @@ import Foundation
 /// word `submit` or `stage`, never a boolean rendering, for the same
 /// cross-language reason.
 public enum SendTextIdentity {
-    public static func payloadHash(session: String, text: String, submit: Bool) -> String {
+    /// `attachments`, the upload ids in order (minor 50), are further fields of the same material, so a send with none
+    /// hashes exactly as before (`hash.rs::send_text_hash_with`).
+    public static func payloadHash(session: String, text: String, submit: Bool, attachments: [String] = []) -> String {
         var material = "codeconnect.send_text.v1"
-        for field in [session, submit ? "submit" : "stage", text] {
+        for field in [session, submit ? "submit" : "stage", text] + attachments {
             material += "\n\(field.utf8.count):\(field)"
         }
         let digest = SHA256.hash(data: Data(material.utf8))

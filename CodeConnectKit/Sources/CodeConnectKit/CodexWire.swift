@@ -43,8 +43,10 @@ public enum CodexHash {
     /// instant the daemon writes — so putting the turn in would turn the honest
     /// retry of an unacknowledged send, which is the whole reason the hash
     /// exists, into a conflict whenever the session had moved.
-    public static func compose(sessionRef: String, text: String) -> String {
-        digest(tag: "codeconnect.compose.v1", fields: [sessionRef, text])
+    /// `attachments`, the upload ids in order (minor 50), are further fields of the same material, so a message with
+    /// none hashes exactly as before (`hash.rs::compose_hash_with`).
+    public static func compose(sessionRef: String, text: String, attachments: [String] = []) -> String {
+        digest(tag: "codeconnect.compose.v1", fields: [sessionRef, text] + attachments)
     }
 
     private static func digest(tag: String, fields: [String]) -> String {
@@ -228,8 +230,13 @@ public enum CodexCard {
 /// being re-derived by the counter, the send button and the send path.
 public struct ComposeDraft: Sendable, Hashable {
     var text: String
+    /// Files the message carries: with any, no words is still a message.
+    var files: Int
 
-    public init(text: String) { self.text = text }
+    public init(text: String, files: Int = 0) {
+        self.text = text
+        self.files = files
+    }
 
     /// The measurement the Mac makes: `text.len()` in Rust is UTF-8 bytes.
     var byteCount: Int { text.utf8.count }
@@ -239,7 +246,7 @@ public struct ComposeDraft: Sendable, Hashable {
     /// bytes the Mac would have accepted — was refused by the phone in the
     /// daemon's name. If a stricter client policy is ever wanted it has to be
     /// argued for and labelled as the app's own, not smuggled in as the wire's.
-    private var isEffectivelyEmpty: Bool { text.isEmpty }
+    private var isEffectivelyEmpty: Bool { text.isEmpty && files == 0 }
 
     /// Why this draft cannot be sent, in the phone's own words, or nil when it
     /// can. Both refusals are ones the daemon would also make — the point of
