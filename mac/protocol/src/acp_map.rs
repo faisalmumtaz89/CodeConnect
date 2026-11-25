@@ -5,7 +5,7 @@
 //! chunks: [`read`] hands each back as a [`Read::Chunk`], and the link joins a run of them
 //! into one event ([`joined`]) when something else arrives. Everything else is filed in
 //! the shapes the apps already draw: a tool call and its result as a hook's are
-//! (`tool_use_id`, `tool_name`, `tool_input`), its result's outcome as `status` and
+//! (`tool_use_id`, `tool_name`, `tool_input`; the name its ACP kind's word), its result's outcome as `status` and
 //! `aggregated_output`, and the prompt's reply as the turn's end. Updates the timeline does
 //! not draw (plans, commands, modes, usage) file nothing.
 //!
@@ -62,7 +62,7 @@ pub fn read(
                     format!("{run}/tool_call/{call}"),
                     json!({
                         "tool_use_id": call,
-                        "tool_name": text("title").unwrap_or("tool"),
+                        "tool_name": tool_name(update).unwrap_or("tool"),
                         "tool_input": update.get("rawInput").cloned().unwrap_or_else(|| json!({})),
                     }),
                 )];
@@ -136,6 +136,23 @@ pub fn joined(
         .with_turn_id(turn.map(str::to_string))
 }
 
+/// A tool's name on its row: the word for its ACP `kind`, as the row's argument already shows what agy's title
+/// repeats (a command, a path); a tool of no known kind (`other`, or none) by its title.
+fn tool_name(update: &Value) -> Option<&str> {
+    let named = match update.get("kind").and_then(Value::as_str) {
+        Some("execute") => "Run",
+        Some("read") => "Read",
+        Some("edit") => "Edit",
+        Some("delete") => "Delete",
+        Some("move") => "Move",
+        Some("search") => "Search",
+        Some("fetch") => "Fetch",
+        Some("think") => "Think",
+        _ => return update.get("title").and_then(Value::as_str),
+    };
+    Some(named)
+}
+
 /// A finished tool's result: its status, and what it printed or wrote as text. Nothing
 /// while it is still running.
 fn result(update: &Value, call: &str) -> Option<Value> {
@@ -164,8 +181,8 @@ fn result(update: &Value, call: &str) -> Option<Value> {
         "status": status,
         "aggregated_output": output.join("\n"),
     });
-    if let Some(title) = update.get("title") {
-        payload["tool_name"] = title.clone();
+    if let Some(name) = tool_name(update) {
+        payload["tool_name"] = name.into();
     }
     if let Some(input) = update.get("rawInput") {
         payload["tool_input"] = input.clone();
@@ -225,7 +242,7 @@ mod tests {
         assert_eq!(filed[0].kind, EventKind::ToolCall);
         assert_eq!(
             filed[0].payload,
-            json!({"tool_use_id": "call_1", "tool_name": "cat NOTE.txt",
+            json!({"tool_use_id": "call_1", "tool_name": "Read",
                    "tool_input": {"command": "cat NOTE.txt"}})
         );
         assert_eq!(
@@ -275,7 +292,39 @@ mod tests {
             "a call that comes finished files its result too"
         );
         assert_eq!(filed[1].payload["aggregated_output"], "/p/a.txt\nhi");
-        assert_eq!(filed[1].payload["tool_name"], "Write a.txt");
+        assert_eq!(filed[1].payload["tool_name"], "Edit", "named by its kind");
+    }
+
+    #[test]
+    fn a_tool_is_named_by_its_kind_and_one_of_no_known_kind_by_its_title() {
+        for (kind, name) in [
+            ("execute", "Run"),
+            ("read", "Read"),
+            ("edit", "Edit"),
+            ("delete", "Delete"),
+            ("move", "Move"),
+            ("search", "Search"),
+            ("fetch", "Fetch"),
+            ("think", "Think"),
+        ] {
+            let call = update(json!({"sessionUpdate": "tool_call", "toolCallId": "c",
+                "title": "ls -la", "kind": kind, "rawInput": {"command": "ls -la"}}));
+            assert_eq!(
+                events(read(&session(), "c-start", 1, None, &call))[0].payload["tool_name"],
+                name
+            );
+        }
+        for kind in [Some("other"), None] {
+            let mut tool =
+                json!({"sessionUpdate": "tool_call", "toolCallId": "c", "title": "Ask the docs"});
+            if let Some(kind) = kind {
+                tool["kind"] = kind.into();
+            }
+            assert_eq!(
+                events(read(&session(), "c-start", 1, None, &update(tool)))[0].payload["tool_name"],
+                "Ask the docs"
+            );
+        }
     }
 
     #[test]
