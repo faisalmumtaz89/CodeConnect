@@ -84,12 +84,14 @@ struct CCStepRow<Accessory: View, Detail: View>: View {
                 // graphic centred on an 8pt column eventually reaches the text
                 // beside it. Measured at `accessibility-extra-large`, where the
                 // circle overlapped the first letter of every step title.
-                // Everything moves to one left edge instead.
+                // Everything moves to one left edge instead, the badge on its
+                // own line: beside the badge, a caps word as long as
+                // CODECONNECT is wider than what is left at AX5 and breaks
+                // inside itself; under it, the title has the row's full width
+                // and wraps at its words.
                 VStack(alignment: .leading, spacing: CC.space.xs) {
-                    HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
-                        badge.ccMark(beside: CC.type.fieldLabel)
-                        titleLabel
-                    }
+                    badge
+                    titleLabel
                     accessory()
                     stepBody
                 }
