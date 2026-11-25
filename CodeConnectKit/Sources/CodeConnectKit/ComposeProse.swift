@@ -119,10 +119,13 @@ extension AppModel {
     /// commands, custom skills — is typed as written.
     public func submission(of draft: String, to key: String) -> Submission {
         if shownSummary(for: key)?.isCodex == true { return .codex }
-        // An Antigravity run takes the words as they are, through its agent host: no slash command of Claude Code's
-        // means anything to agy.
-        if shownSummary(for: key)?.agent == .antigravity { return .claude }
         let action = ClaudeCommandPolicy.action(for: draft)
+        // An Antigravity run takes the words as they are, through its agent host, but for `/compact`, which opens
+        // Compact's own controls as it does on Claude (agy runs it as a prompt; typed, the sender refuses it).
+        if shownSummary(for: key)?.agent == .antigravity {
+            if case .nativeCompact = action { return .command(action) }
+            return .claude
+        }
         if case .passThrough = action { return .claude }
         return .command(action)
     }
