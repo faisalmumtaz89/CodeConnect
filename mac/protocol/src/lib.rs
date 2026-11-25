@@ -1077,7 +1077,8 @@ fn is_test_label(label: &str) -> bool {
 }
 
 /// Root of all CodeConnect state. `CODECONNECT_HOME` exists so tests never
-/// touch the real `~/.codeconnect`.
+/// touch the real `~/.codeconnect`: `mac/.cargo/config.toml` sets it to
+/// `target/test-home` for every process cargo runs, unless it is already set.
 ///
 /// **Absolute whenever the cwd can be read**, and that is the whole point
 /// of the wrapper. Both sources here can be relative — `CODECONNECT_HOME` is

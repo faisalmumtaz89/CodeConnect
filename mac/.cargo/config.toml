@@ -1,0 +1,6 @@
+# Every process cargo runs from this workspace — the tests, and `cargo run` — keeps
+# CodeConnect's folder in `target/test-home`, never the person's `~/.codeconnect`. A
+# `CODECONNECT_HOME` already set (a rig, a gate script) wins. A built binary run
+# outside cargo never sees this.
+[env]
+CODECONNECT_HOME = { value = "target/test-home", relative = true }

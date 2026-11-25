@@ -2187,11 +2187,24 @@ mod tests {
     }
 
     #[test]
+    fn the_suite_never_resolves_the_real_codeconnect_folder() {
+        // `mac/.cargo/config.toml` sets CODECONNECT_HOME for every process cargo runs.
+        let _env = crate::ProcessEnvRead::take();
+        let real = protocol::home_dir().join(".codeconnect");
+        let root = protocol::root_dir();
+        assert!(
+            !root.starts_with(&real),
+            "the tests resolve {}",
+            root.display()
+        );
+    }
+
+    #[test]
     fn the_boundary_covers_every_path_the_daemon_writes() {
         // `state_paths` derives from an explicit root so it can be tested; this
         // is what keeps that derivation in step with the protocol crate's own
         // idea of where things live. Both sides read `root_dir()`, which follows
-        // HOME when CODECONNECT_HOME is unset (as on CI), so they read it under
+        // HOME when CODECONNECT_HOME is unset, so they read it under
         // the process-environment read guard: no FakeHome moves HOME in between.
         let _env = crate::ProcessEnvRead::take();
         let root = protocol::root_dir();
@@ -2494,8 +2507,8 @@ mod tests {
         // one asserted it outright, which left an operator whose `ws_bind` is
         // their own tailnet address being told it was public by one line and
         // unverifiable by the next. The advice and the expected text each resolve
-        // `tls_dir()`, which follows HOME when CODECONNECT_HOME is unset (as on
-        // CI), so both are read under the process-environment read guard.
+        // `tls_dir()`, which follows HOME when CODECONNECT_HOME is unset, so both
+        // are read under the process-environment read guard.
         let _env = crate::ProcessEnvRead::take();
         let mut config = config_with(Some("100.64.12.34"));
         config.ws_allow_plaintext = true;
