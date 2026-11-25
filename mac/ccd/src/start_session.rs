@@ -292,8 +292,8 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
     push_accounts(daemon).await;
 }
 
-/// The agents the phone can start.
-const AGENTS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
+/// The agents the phone can start. An app that does not know one leaves it out of its menu.
+const AGENTS: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity];
 
 /// The answer to a `get_project_git`, `list_folder`, `create_folder`,
 /// `start_session` or one of the folder-trust frames. A `list_projects` is answered
@@ -574,6 +574,7 @@ async fn check_and_keep(
         accounts,
         daemon.config.claude_bin.as_deref(),
         daemon.config.codex_bin.as_deref(),
+        daemon.config.agy_bin.as_deref(),
     )
     .await;
     daemon.agents.set(selections(accounts), checked.clone());
@@ -586,10 +587,12 @@ async fn check_agents(
     accounts: &[Option<crate::accounts::AccountEnv>],
     claude_bin: Option<&str>,
     codex_bin: Option<&str>,
+    agy_bin: Option<&str>,
 ) -> Vec<AgentAvailability> {
     futures_util::future::join_all(AGENTS.iter().zip(accounts).map(|(agent, account)| {
         let configured = match agent {
             AgentKind::Codex => codex_bin,
+            AgentKind::Antigravity => agy_bin,
             _ => claude_bin,
         };
         agent_availability(agent, known, environment, account.as_ref(), configured)
@@ -1337,6 +1340,13 @@ async fn agent_availability(
         models: Vec::new(),
         signed_in: None,
     };
+    // Antigravity is startable where an agy is found; nothing is asked of it yet.
+    if *agent == AgentKind::Antigravity {
+        return match agy_path(environment, configured).await {
+            Some(_) => startable(agent, None, Vec::new(), &this_computer()),
+            None => unavailable(missing(agent).1),
+        };
+    }
     if *agent == AgentKind::Claude {
         return match claude_probe(environment, account, configured).await {
             Err((_, detail)) => unavailable(detail),
@@ -5248,6 +5258,47 @@ esac"#;
 
     async fn codex_listed(rig: &Rig, known: &KnownAgents) -> AgentAvailability {
         agent_availability(&AgentKind::Codex, known, &rig.env, None, None).await
+    }
+
+    /// **Antigravity is listed as startable when an agy is found**, with nothing asked of it
+    /// (no sign-in or models are read from agy yet), and as not installed, in its own name,
+    /// when none is.
+    #[tokio::test]
+    async fn antigravity_is_listed_when_an_agy_is_found() {
+        let rig = Rig::new("agy-listed", ANSWERING);
+        let known = KnownAgents::default();
+        let agy = rig.root.join("agy");
+        std::fs::write(&agy, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&agy, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let found = agent_availability(
+            &AgentKind::Antigravity,
+            &known,
+            &rig.env,
+            None,
+            agy.to_str(),
+        )
+        .await;
+        assert_eq!(found.agent, AgentKind::Antigravity);
+        assert!(found.available, "{found:?}");
+        assert_eq!(found.detail, None);
+        assert_eq!(found.signed_in, None);
+        let missing = agent_availability(
+            &AgentKind::Antigravity,
+            &known,
+            &rig.env,
+            None,
+            Some("/nonexistent/agy"),
+        )
+        .await;
+        assert!(!missing.available);
+        assert_eq!(
+            missing.detail,
+            Some(format!(
+                "Antigravity isn’t installed on {}.",
+                this_computer()
+            ))
+        );
     }
 
     /// **Codex is the user's own codex, run itself**: one on the login shell's `PATH`
