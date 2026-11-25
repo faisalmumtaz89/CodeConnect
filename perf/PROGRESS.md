@@ -5,8 +5,9 @@
 - Never touching `main`, release configs, tags, or signing keys.
 
 ## Current Phase
-- **Phase 1 — Baseline**: **COMPLETE** (committing harness + `perf/BASELINE.md` before any product code changes)
-- **Next**: **Phase 2 — Analysis (`perf/FINDINGS.md`)**, then **Phase 3 — Iterative Optimizations (`perf/CHANGELOG.md`, `perf/PROPOSALS.md`, `perf/RESULTS.md`)**
+- **Phase 1 — Baseline**: **COMPLETE** (`3aaf8fe`)
+- **Phase 2 — Analysis**: **COMPLETE** (`perf/FINDINGS.md` written with 16 ranked findings + 4 proposals)
+- **Phase 3 — Optimize**: **IN PROGRESS** (executing Tier 1 -> Tier 2 -> Tier 3 optimizations, one logical commit per change, verified with before/after benchmarks)
 
 ## Completed
 - [x] Inspected repository structure (`mac/` Rust workspace: `ccd`, `codeconnect`, `protocol`, `push-core`, `push-relay`, `demo-daemon`; `mac/agent-host` Bun/TS helper; `macos/` SwiftUI app + `CodeConnectKit`).
@@ -15,7 +16,8 @@
 - [x] Ran baseline workspace test suite (`1,604 passed, 1 failed, 60 ignored`; pre-existing container FD-ceiling failure in `protocol::fdlimit::tests::a_higher_soft_limit_is_left_as_it_is` documented and left untouched).
 - [x] Built reproducible offline benchmark harness under `bench/` (`bench/mocks/{mock-claude-host,mock-codex,mock-client}`, `bench/bin/mock-claude`, `bench/driver.py`, `bench/run.sh`, `bench/profile.sh`) and native macOS scripts under `bench/macos/`.
 - [x] Collected full Phase 1 baseline on `x86_64-unknown-linux-musl` (3 runs × all 8 scenarios including 3 × 5-min `cold_idle`, process-wide thread wakeup measurements, 500 s soak test with session churn), `x86_64-unknown-linux-gnu` comparison (3 runs), and `heaptrack` + `valgrind --tool=massif` profiles.
-- [x] Wrote `perf/BASELINE.md`.
+- [x] Wrote and committed `perf/BASELINE.md`.
+- [x] Completed Phase 2 analysis and wrote `perf/FINDINGS.md` (F1–F16 + P1–P4).
 
 ## Blockers Encountered & Workarounds
 1. **Linux `/tmp` ownership in `cargo test`**: `Store::open` hardens its state dir to `0700`, which fails on root-owned `/tmp`. Workaround: run tests with `TMPDIR=/tmp/cc-test-tmp` (matching `.github/workflows/ci.yml`).
