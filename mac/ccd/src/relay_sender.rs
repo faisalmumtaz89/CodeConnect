@@ -27,7 +27,6 @@ use anyhow::{bail, Context, Result};
 use protocol::secret::Redacted;
 use push_core::{terminal_refusal, ApnsEnvironment, COLLAPSE_ID, TEST_COLLAPSE_ID};
 use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::TlsConnector;
 
 use crate::apns::{
     CredentialRefused, NoRegistration, PushHint, PushMode, PushSender, SendRateLimited,
@@ -108,7 +107,7 @@ pub(crate) trait RelayTransport: Send + Sync {
 pub(crate) struct HttpsRelay {
     host: String,
     port: u16,
-    tls: TlsConnector,
+    tls: crate::tls::LazyOutboundH2,
 }
 
 impl HttpsRelay {
@@ -129,7 +128,7 @@ impl HttpsRelay {
         Ok(Self {
             host,
             port,
-            tls: crate::tls::outbound_h2("relay")?,
+            tls: crate::tls::LazyOutboundH2::new("relay"),
         })
     }
 }
@@ -173,10 +172,11 @@ fn relay_request(host: &str, credential: &Redacted) -> Result<http::Request<()>>
 async fn post(
     host: String,
     port: u16,
-    tls: TlsConnector,
+    tls: crate::tls::LazyOutboundH2,
     credential: Redacted,
     body: String,
 ) -> Result<RelayReply> {
+    let tls = tls.get().await?;
     let stream = tokio::time::timeout(
         CONNECT_TIMEOUT,
         tokio::net::TcpStream::connect((host.as_str(), port)),
@@ -1666,6 +1666,7 @@ mod tests {
     #[test]
     fn the_endpoint_is_baked_and_a_config_file_cannot_move_it() {
         let production = HttpsRelay::new().expect("the production endpoint builds");
+        assert!(!production.tls.is_initialized(), "TLS root store should load lazily on first push");
         assert_eq!(production.host, RELAY_HOST);
         assert_eq!(production.port, 443);
 

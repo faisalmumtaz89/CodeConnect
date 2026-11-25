@@ -27,6 +27,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use push_core::{is_terminal, terminal_refusal, ProviderToken, COLLAPSE_ID, TEST_COLLAPSE_ID};
 use tokio_rustls::rustls::pki_types::ServerName;
+#[cfg(test)]
 use tokio_rustls::TlsConnector;
 
 use crate::apns::{alert, PushHint, PushMode, PushSender, TestDelivery};
@@ -51,7 +52,7 @@ fn now_secs() -> i64 {
 pub struct ApnsPushSender {
     token: Arc<ProviderToken>,
     registry: Arc<dyn PushRegistry>,
-    tls: TlsConnector,
+    tls: crate::tls::LazyOutboundH2,
     queues: std::sync::Mutex<HashMap<String, Arc<DeviceQueue>>>,
 }
 
@@ -60,7 +61,7 @@ impl ApnsPushSender {
         Ok(Self {
             token: Arc::new(token),
             registry,
-            tls: crate::tls::outbound_h2("APNs")?,
+            tls: crate::tls::LazyOutboundH2::new("APNs"),
             queues: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -96,11 +97,11 @@ impl ApnsPushSender {
         Self {
             token: Arc::new(token),
             registry,
-            tls: TlsConnector::from(Arc::new(
+            tls: crate::tls::LazyOutboundH2::fixed(TlsConnector::from(Arc::new(
                 tokio_rustls::rustls::ClientConfig::builder()
                     .with_root_certificates(tokio_rustls::rustls::RootCertStore::empty())
                     .with_no_client_auth(),
-            )),
+            ))),
             queues: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -181,7 +182,7 @@ impl ApnsPushSender {
     /// One device's deliveries, one at a time, forever.
     async fn serve(
         queue: Arc<DeviceQueue>,
-        tls: TlsConnector,
+        tls: crate::tls::LazyOutboundH2,
         token: Arc<ProviderToken>,
         registry: Arc<dyn PushRegistry>,
     ) {
@@ -237,12 +238,13 @@ impl ApnsPushSender {
     /// can be faked, and a function that dials Apple cannot be. This is the seam,
     /// on exactly the same terms as [`ApnsPushSender::serve_attempting`].
     async fn post(
-        tls: TlsConnector,
+        tls: crate::tls::LazyOutboundH2,
         token: Arc<ProviderToken>,
         target: PushTarget,
         payload: String,
         collapse: &'static str,
     ) -> Result<Posted> {
+        let tls = tls.get().await?;
         let host = target.environment.host();
         let bearer = token.bearer()?;
         // **Bounded, because an unbounded connect can hang forever and say
@@ -321,7 +323,7 @@ impl ApnsPushSender {
     }
 
     async fn deliver(
-        tls: TlsConnector,
+        tls: crate::tls::LazyOutboundH2,
         token: Arc<ProviderToken>,
         registry: Arc<dyn PushRegistry>,
         target: PushTarget,

@@ -110,7 +110,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
 - **Proposed fix:** Initialize `TlsConnector` lazily on first push delivery via `std::sync::OnceLock` (or `Mutex<Option<TlsConnector>>` so a transient failure can retry), keeping exact error reporting when actually delivering a push. *(Verify no existing unit test asserts eager failure in `HttpsRelay::new()` / `ApnsPushSender::new()` — check tests first!)*
 - **Expected gain:** **-0.3 to -0.6 MiB idle RSS**, **-10 to -25 ms startup latency**.
 - **Risk:** Low (push delivery still validates full system trust anchors identically; zero security weakening).
-- **Status:** `todo`
+- **Status:** `done` (F8: `LazyOutboundH2` in `tls.rs`, `relay_sender.rs`, `apns_sender.rs`; `cold_idle` `RssAnon` `1.008 -> 0.918 MiB` [-8.9%, -47.9% vs baseline], total `5.59 MiB`)
 
 ### F9. Unnecessary idle wakeups & subprocess spawns (`mail_sweep`, `ws_server` `peers_refresh`, Tokio runtime thread pool caps)
 - **Location:** `mac/ccd/src/mail.rs:1022-1030`; `mac/ccd/src/ws_server.rs:906-922`; `mac/ccd/src/main.rs:54`

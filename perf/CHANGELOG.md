@@ -114,3 +114,17 @@ Each entry corresponds to one logical commit on `perf/baseline-and-optimizations
   - `soak` RSS start -> end (180 s, 8,248 events, 870 approvals): **`6.95 -> 6.85 MiB`** (net **-0.10 MiB**; baseline grew monotonically `7.70 -> 9.11 MiB` -> `10.72 MiB` settled)
   - `soak` CPU: `6.91%` -> **`5.57%`** (**-19.4%**)
   - `soak` `relay_p50 / p95 / max`: `3.66 / 84.82 / 2,537.6 ms` -> **`2.31 / 58.68 / 321.9 ms`** (**-36.9% / -30.8% / -87.3%**)
+
+---
+
+## F8 — Lazy outbound TLS root CA loading (`LazyOutboundH2`)
+
+- **Files:** `mac/ccd/src/tls.rs`, `mac/ccd/src/relay_sender.rs`, `mac/ccd/src/apns_sender.rs`
+- **Change:**
+  - Added `tls::LazyOutboundH2` to defer loading and parsing the OS root CA trust store (`rustls_native_certs`) until the first actual outbound push delivery (running the one-time load via `spawn_blocking` and caching the `TlsConnector`, while not caching failures so transient errors retry).
+  - Wired `LazyOutboundH2` into both `HttpsRelay` and `ApnsPushSender`, preserving identical TLS/ALPN certificate verification on delivery.
+  - Added lazy-init assertion in `relay_sender::tests::the_endpoint_is_baked_and_a_config_file_cannot_move_it`.
+- **Before vs After (`x86_64-unknown-linux-musl`, 3 runs median, vs F6 / baseline):**
+  - `cold_idle` anonymous heap+stack RSS (`RssAnon`): `1.008 MiB` (baseline `1.762 MiB`) -> **`0.918 MiB`** (**-8.9%** of remaining anonymous RAM; **-47.9%** vs baseline — total non-code RAM now under 1 MiB!)
+  - `cold_idle` total RSS / Peak RSS: `5.63 / 5.64 MiB` (baseline `6.30 / 10.78 MiB`) -> **`5.59 / 5.60 MiB`**
+  - `idle_client` total RSS / Peak RSS: baseline `6.37 / 10.89 MiB` -> **`5.64 / 5.68 MiB`** (**-11.5% / -47.8%** vs baseline)

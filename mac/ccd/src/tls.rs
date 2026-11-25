@@ -91,6 +91,66 @@ pub fn outbound_h2(what: &str) -> Result<TlsConnector> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
+/// Lazily initialized outbound HTTP/2 [`TlsConnector`].
+///
+/// Defers loading and parsing the OS root CA store (`rustls_native_certs`,
+/// ~150 certificates) until the first actual outbound push delivery, keeping
+/// idle memory and startup latency minimal when no push is sent. Failures are
+/// not cached so transient trust-store errors retry on the next delivery.
+#[derive(Clone)]
+pub struct LazyOutboundH2 {
+    what: &'static str,
+    inner: Arc<std::sync::Mutex<Option<TlsConnector>>>,
+}
+
+impl LazyOutboundH2 {
+    pub fn new(what: &'static str) -> Self {
+        Self {
+            what,
+            inner: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn fixed(connector: TlsConnector) -> Self {
+        Self {
+            what: "test",
+            inner: Arc::new(std::sync::Mutex::new(Some(connector))),
+        }
+    }
+
+    /// Return the cached [`TlsConnector`], loading the platform trust store on
+    /// a blocking thread the first time it is needed.
+    pub async fn get(&self) -> Result<TlsConnector> {
+        {
+            let guard = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(existing) = guard.as_ref() {
+                return Ok(existing.clone());
+            }
+        }
+        let what = self.what;
+        let built = tokio::task::spawn_blocking(move || outbound_h2(what))
+            .await
+            .context("trust store loader task failed")??;
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(guard.get_or_insert(built).clone())
+    }
+
+    #[cfg(test)]
+    pub fn is_initialized(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+}
+
 /// The node's own MagicDNS name, without the trailing dot.
 ///
 /// `Self.DNSName` is authoritative and already fully qualified; deriving it
