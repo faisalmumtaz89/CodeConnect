@@ -158,3 +158,13 @@ Each entry corresponds to one logical commit on `perf/baseline-and-optimizations
 - **Before vs After (`x86_64-unknown-linux-musl`, `-p ccd --release`):**
   - `ccd` release binary size: `6,300,320 bytes` (`6.008 MiB`) -> **`6,279,264 bytes`** (`5.988 MiB`, **-20.6 KiB**)
   - All workspace crates compile cleanly with `cargo check --workspace --tests`.
+
+---
+
+## F12 — Linear index-based line scanning in `agent-host/src/link.ts`
+
+- **Files:** `mac/agent-host/src/link.ts`
+- **Change:** Replaced the `rest = rest.slice(end + 1)` loop in `read()` with an index-based `text.indexOf('\n', start)` scan that slices only each completed line and slices the trailing partial line once.
+- **Before vs After (Bun 1.2.14 microbenchmark, 10,000-line chunk, mean of 10 runs):**
+  - Line-scanning loop: `2.19 ms` -> **`1.20 ms`** (**1.8× faster**, eliminates `O(k)` intermediate tail slices).
+  - Functional edge cases (multi-line chunks, split frames, partial-only chunks) verified directly via Bun.

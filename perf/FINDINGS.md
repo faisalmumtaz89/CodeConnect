@@ -155,7 +155,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
 - **Proposed fix:** Track `start = 0` and iterate `text.indexOf('\n', start)`, slicing only each individual line and returning `text.slice(start)` once at the end.
 - **Expected gain:** Eliminates quadratic string copies during bursty host IPC chunks (unmeasured in `ccd` harness since mock host is Rust; covered by `mac/agent-host/test/`).
 - **Risk:** Very low.
-- **Status:** `todo`
+- **Status:** `done` (F12: index-based scan in `mac/agent-host/src/link.ts`; 10k-line chunk scan `2.19 -> 1.20 ms` [1.8× faster] in Bun)
 
 ---
 

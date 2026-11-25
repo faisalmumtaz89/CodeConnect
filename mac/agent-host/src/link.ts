@@ -113,12 +113,12 @@ export function createLink(run: Run) {
     },
     /** Applies each whole line of `text` in order, and returns what follows the last one: a partial line. */
     read(connection: Connection, text: string): string {
-      let rest = text;
-      for (let end = rest.indexOf('\n'); end >= 0; end = rest.indexOf('\n')) {
-        apply(connection, rest.slice(0, end));
-        rest = rest.slice(end + 1);
+      let start = 0;
+      for (let end = text.indexOf('\n', start); end >= 0; end = text.indexOf('\n', start)) {
+        apply(connection, text.slice(start, end));
+        start = end + 1;
       }
-      return rest;
+      return start === 0 ? text : text.slice(start);
     },
     closed(connection: Connection): void {
       if (attacher === connection) attacher = null;
