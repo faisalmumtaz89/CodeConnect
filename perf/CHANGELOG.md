@@ -168,3 +168,14 @@ Each entry corresponds to one logical commit on `perf/baseline-and-optimizations
 - **Before vs After (Bun 1.2.14 microbenchmark, 10,000-line chunk, mean of 10 runs):**
   - Line-scanning loop: `2.19 ms` -> **`1.20 ms`** (**1.8× faster**, eliminates `O(k)` intermediate tail slices).
   - Functional edge cases (multi-line chunks, split frames, partial-only chunks) verified directly via Bun.
+
+---
+
+## F13–F15 — macOS SwiftUI clear-cut optimizations (**unmeasured on macOS**)
+
+- **Files:** `macos/CodeConnect/Views/DiffView.swift`, `macos/CodeConnect/Views/AgentText.swift`, `macos/CodeConnect/Views/MainWindow.swift`, `macos/CodeConnect/Views/TailscaleNote.swift`
+- **Change:**
+  - **F13 (`DiffView.swift`):** Switched `FileDiffView` diff rows from eager `VStack` to `LazyVStack` so offscreen diff lines inside `ChangesTab` / `DecisionBlock` scroll views are not eagerly materialized.
+  - **F14 (`AgentText.swift`):** Hoisted `shortColumns` and `needed(short:)` computation to once per `TableBlock.body` pass (previously `shortColumns` ran 4× — twice inside `.frame(minWidth: needed, idealWidth: needed)` and once per `ViewThatFits` branch — and `needed` ran 2×).
+  - **F15 (`MainWindow.swift`, `TailscaleNote.swift`):** Backed off `LocalDaemon.address(root:)` polling from 5 s to 30 s once a reachable non-loopback address is settled (preserving 5 s polling whenever unresolved or on loopback for fast Tailscale startup detection).
+- **Measurement status:** **Unmeasured on macOS** (no macOS host or Swift toolchain available in this Linux cloud environment; run `./bench/macos/run_macos_bench.sh` on a Mac to measure).

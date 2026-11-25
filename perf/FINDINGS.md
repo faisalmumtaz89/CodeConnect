@@ -167,7 +167,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
 - **Proposed fix:** Change line 68 `VStack(alignment: .leading, spacing: 0)` to `LazyVStack(alignment: .leading, spacing: 0)` (verify `ChangesTab.swift` hosts it in a `ScrollView` and check approval-card inline usage where `lineLimit` is small — `LazyVStack` works identically in both).
 - **Expected gain:** Major macOS GUI memory & render-latency reduction on large diffs (**unmeasured on macOS**).
 - **Risk:** Very low (SwiftUI standard drop-in; visually identical).
-- **Status:** `todo`
+- **Status:** `done` (**unmeasured on macOS** — `DiffView.swift:68` switched to `LazyVStack`)
 
 ### F14. `TableBlock` redundantly re-parses Markdown cells 3× inside `ViewThatFits` on every SwiftUI body pass *(unmeasured on macOS)*
 - **Location:** `macos/CodeConnect/Views/AgentText.swift:150-200`
@@ -175,7 +175,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
 - **Proposed fix:** Compute `let short = shortColumns` and `let minNeeded = needed(short: short)` once in `body` (or precompute in `init(table:)`), passing `short` into `grid(sized:short:)` so Markdown parsing happens once instead of 3× per pass.
 - **Expected gain:** ~66% less CPU and transient `AttributedString` allocations rendering Markdown tables (**unmeasured on macOS**).
 - **Risk:** Very low (pure local refactor inside private `TableBlock`).
-- **Status:** `todo`
+- **Status:** `done` (**unmeasured on macOS** — `AgentText.swift` computes `shortColumns` and `needed(short:)` once per body pass instead of 4×/2×)
 
 ### F15. `Sidebar` polls `LocalDaemon.address(root:)` over Unix socket every 5 s forever, even while occluded by Settings *(unmeasured on macOS)*
 - **Location:** `macos/CodeConnect/Views/MainWindow.swift:631-639`
@@ -183,7 +183,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
 - **Proposed fix:** Back off the polling interval once an address is known (e.g., 5 s while unresolved/on loopback, 30 s once bound to a non-loopback tailnet address) — reduces idle macOS GUI + `ccd` IPC wakeups by 6× without delaying startup Tailscale detection.
 - **Expected gain:** -83% steady-state macOS sidebar IPC wakeups (**unmeasured on macOS**).
 - **Risk:** Very low (still polls every 5 s whenever disconnected/on loopback; 30 s steady-state check).
-- **Status:** `todo`
+- **Status:** `done` (**unmeasured on macOS** — `MainWindow.swift` and `TailscaleNote.swift` back off to 30 s once non-loopback address settles)
 
 ### F16. `AppModel.startTicking()` mutates `@Observable` `self.now` every 1 s forever + unbounded `AppModel.diffs` cache *(unmeasured on macOS)*
 - **Location:** `CodeConnectKit/Sources/CodeConnectKit/AppModel.swift:1887-1899`

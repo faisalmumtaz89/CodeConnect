@@ -634,7 +634,8 @@ private struct SidebarFoot: View {
                 // A read that gets no answer (the service restarting onto Tailscale) keeps what it last said: the foot
                 // changes only on an answer.
                 if let read = await Task.detached(operation: { LocalDaemon.address(root: root) }).value { address = read }
-                try? await Task.sleep(for: .seconds(5))
+                let settled = address != nil && !TailscaleNote.onLoopback(address)
+                try? await Task.sleep(for: .seconds(settled ? 30 : 5))
             }
         }
     }

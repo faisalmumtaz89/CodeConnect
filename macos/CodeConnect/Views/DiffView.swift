@@ -65,7 +65,7 @@ struct FileDiffView: View {
             .padding(.horizontal, 12)
             .frame(height: 30)
             Rectangle().fill(Theme.hairline).frame(height: 1)
-            VStack(alignment: .leading, spacing: 0) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(rows) { row in
                     switch row {
                     case .header(let hunk, _): header(hunk)

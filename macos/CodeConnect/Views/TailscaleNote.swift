@@ -72,7 +72,8 @@ struct TailscaleNote: View {
             guard let root = setup.installer?.root else { return }
             while !Task.isCancelled {
                 address = await Task.detached { LocalDaemon.address(root: root) }.value
-                try? await Task.sleep(for: .seconds(5))
+                let settled = address != nil && !Self.onLoopback(address)
+                try? await Task.sleep(for: .seconds(settled ? 30 : 5))
             }
         }
     }

@@ -148,12 +148,16 @@ private struct TableBlock: View {
     static let padding: CGFloat = 12
 
     var body: some View {
+        // Compute short columns and required width once per layout pass instead
+        // of re-parsing inline markdown inside `needed` (x2) and both `grid` branches.
+        let short = shortColumns
+        let minNeeded = needed(short: short)
         // The first that fits: short columns at their own widths, the long ones sharing the pane; else the table at
         // its own width, panning.
         ViewThatFits(in: .horizontal) {
-            grid(sized: true)
-                .frame(minWidth: needed, idealWidth: needed, maxWidth: .infinity, alignment: .leading)
-            PanningTable(content: grid(sized: false).fixedSize())
+            grid(sized: true, short: short)
+                .frame(minWidth: minNeeded, idealWidth: minNeeded, maxWidth: .infinity, alignment: .leading)
+            PanningTable(content: grid(sized: false, short: short).fixedSize())
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(AgentProse.tableSummary(table))
@@ -171,9 +175,8 @@ private struct TableBlock: View {
 
     /// The width the table needs to fit without panning: short columns at their widest cell, long ones at their
     /// minimum, and the padding between.
-    private var needed: CGFloat {
-        let short = shortColumns
-        return table.headers.indices.reduce(0) { sum, index in
+    private func needed(short: Set<Int>) -> CGFloat {
+        table.headers.indices.reduce(0) { sum, index in
             let width = short.contains(index) ? column(index).map(Self.width).max() ?? 0 : Self.longMinimum
             return sum + width + (index == 0 ? 0 : Self.padding) + Self.padding
         }
@@ -194,9 +197,8 @@ private struct TableBlock: View {
             })
     }
 
-    private func grid(sized: Bool) -> some View {
-        let short = shortColumns
-        return Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+    private func grid(sized: Bool, short: Set<Int>) -> some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
             GridRow {
                 ForEach(table.headers.indices, id: \.self) { index in
                     cell(table.headers[index], column: index, header: true, short: short, sized: sized)
