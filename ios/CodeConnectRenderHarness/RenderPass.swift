@@ -125,8 +125,9 @@ final class RenderPass: XCTestCase {
             arguments: [],
             reach: { app, driver in
                 try driver.require(app.buttons["pairing-sample-mode"], "the first screen")
-                try driver.scrollUntil(app, "the agents sentence on screen") {
-                    driver.element(containing: "Antigravity", in: app).isHittable
+                try driver.scrollUntil(app, "the agents sentence whole on screen") {
+                    let sentence = driver.element(containing: "Antigravity", in: app)
+                    return sentence.exists && sentence.frame.maxY <= app.windows.firstMatch.frame.maxY
                 }
             }),
     ]
