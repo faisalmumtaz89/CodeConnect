@@ -2,7 +2,7 @@
 //!
 //! An upload lands under `~/.codeconnect/uploads/<session_uid>/<upload_id>/<name>`, never in
 //! the run's folder. It is bound to the connection and the run of its first chunk, written to
-//! `<name>.part` as its chunks arrive in order, and renamed to `<name>` at exactly the size
+//! [`PART`] in its own folder as its chunks arrive in order, and renamed to `<name>` at exactly the size
 //! its first chunk named. A message on that connection attaches it by id: from then it is the
 //! message's ([`Uploads::claim`]), and the agent reads it at its path, which the message
 //! carries as a line of its text ([`attached`]). An upload no message attached is removed
@@ -20,6 +20,11 @@ use protocol::ws::{MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNK_BYTES};
 
 /// The longest file name an upload may have, in bytes.
 pub const MAX_NAME_BYTES: usize = 255;
+
+/// What an upload is written to in its own folder until it is whole: one name, so a person's
+/// file name of any allowed length fits beside it, and no name an upload may have, since none
+/// starts with a dot.
+const PART: &str = ".part";
 
 /// Where uploads live: `~/.codeconnect/uploads`.
 pub fn root() -> PathBuf {
@@ -78,7 +83,7 @@ struct Upload {
     name: String,
     size: u64,
     received: u64,
-    /// The `.part` file, until the upload is complete.
+    /// Its [`PART`] file, until the upload is complete.
     file: Option<std::fs::File>,
     /// A message attached it: no connection's close removes it.
     claimed: bool,
@@ -120,7 +125,7 @@ impl Uploads {
                 if data.len() > MAX_UPLOAD_CHUNK_BYTES || data.len() as u64 > size {
                     return Err(format!("a chunk is at most {MAX_UPLOAD_CHUNK_BYTES} bytes"));
                 }
-                let file = create(root, session_uid, upload_id, name)
+                let file = create(root, session_uid, upload_id)
                     .map_err(|err| format!("could not keep the file: {err}"))?;
                 held.insert(
                     upload_id.to_string(),
@@ -180,8 +185,7 @@ impl Uploads {
         if upload.received == upload.size {
             upload.file = None;
             let folder = root.join(&upload.session_uid).join(upload_id);
-            let part = folder.join(format!("{}.part", upload.name));
-            if let Err(err) = std::fs::rename(&part, folder.join(&upload.name)) {
+            if let Err(err) = std::fs::rename(folder.join(PART), folder.join(&upload.name)) {
                 discard(root, &mut held, upload_id);
                 return Err(format!("could not keep the file: {err}"));
             }
@@ -254,14 +258,9 @@ impl Uploads {
     }
 }
 
-/// The upload's folder, made exclusively, and its `.part` file in it, created `0600` and
-/// never through a link.
-fn create(
-    root: &Path,
-    session_uid: &str,
-    upload_id: &str,
-    name: &str,
-) -> std::io::Result<std::fs::File> {
+/// The upload's folder, made exclusively, and its [`PART`] file in it, created `0600` and never
+/// through a link.
+fn create(root: &Path, session_uid: &str, upload_id: &str) -> std::io::Result<std::fs::File> {
     let folder = session_folder(root, session_uid)?.join(upload_id);
     std::fs::DirBuilder::new()
         .mode(protocol::fsperm::DIR_MODE)
@@ -271,7 +270,7 @@ fn create(
         .create_new(true)
         .mode(protocol::fsperm::FILE_MODE)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(folder.join(format!("{name}.part")))
+        .open(folder.join(PART))
 }
 
 /// Forget `upload_id` and remove its folder.
@@ -308,7 +307,7 @@ mod tests {
     }
 
     /// **A file sent in two chunks lands whole, owner-only, at its own name, and only at exactly
-    /// its size.** Until the last byte it is a `.part`: nothing a message could attach.
+    /// its size.** Until the last byte it is [`PART`]: nothing a message could attach.
     #[test]
     fn a_file_in_two_chunks_lands_owner_only_at_its_name_only_at_its_size() {
         let root = root("whole");
@@ -328,10 +327,25 @@ mod tests {
             Ok(5)
         );
         assert_eq!(std::fs::read(folder.join("a.png")).unwrap(), b"abcde");
-        assert!(!folder.join("a.png.part").exists());
+        assert!(!folder.join(PART).exists());
         assert_eq!(mode(&folder.join("a.png")), 0o600);
         assert_eq!(mode(&folder), 0o700);
         assert_eq!(mode(&root.join(UID)), 0o700);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// **A file whose name is as long as a name may be lands under it.** Its partial file has a
+    /// name of its own, so the person's name never grows past what the filesystem takes.
+    #[test]
+    fn a_file_named_at_the_longest_a_name_may_be_lands() {
+        let root = root("longest");
+        let uploads = Uploads::default();
+        let name = format!("{}.txt", "a".repeat(MAX_NAME_BYTES - 4));
+        assert_eq!(uploads.put(&root, 1, UID, "u1", &name, 1, 0, b"x"), Ok(1));
+        assert_eq!(
+            std::fs::read(root.join(UID).join("u1").join(&name)).unwrap(),
+            b"x"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -402,7 +416,7 @@ mod tests {
         std::fs::write(&target, b"keep").unwrap();
         let folder = root.join(UID).join("u2");
         std::fs::create_dir_all(&folder).unwrap();
-        std::os::unix::fs::symlink(&target, folder.join("b.part")).unwrap();
+        std::os::unix::fs::symlink(&target, folder.join(PART)).unwrap();
         assert!(uploads
             .put(&root, 1, UID, "u2", "b", 4, 0, b"evil")
             .is_err());

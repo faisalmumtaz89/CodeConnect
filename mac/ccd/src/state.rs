@@ -2612,10 +2612,26 @@ impl Daemon {
         // caller's own hash would make those two spellings different material under one
         // id, which the ledger would call a conflict.
         let claimed_hash = protocol::hash::compose_hash_with(&row.session_uid, &text, attachments);
-        // The files are the message's from here, before anything is said.
-        let text = match self.claim_uploads(connection, &row.session_uid, attachments, text) {
-            Ok(text) => text,
-            Err(reason) => return refuse(reason),
+        // The files are the message's from here, before anything is said. A message the ledger
+        // already holds claimed them when it was first sent, and is answered from its record
+        // below, after a restart too.
+        let recorded = matches!(
+            self.db
+                .mutation_status(
+                    crate::store::OPERATION_COMPOSE,
+                    row.session_uid.clone(),
+                    request_id.to_string(),
+                )
+                .await,
+            Ok(Some(_))
+        );
+        let text = if recorded {
+            text
+        } else {
+            match self.claim_uploads(connection, &row.session_uid, attachments, text) {
+                Ok(text) => text,
+                Err(reason) => return refuse(reason),
+            }
         };
 
         // **A run started on the engine is spoken to through its own link**, which claims the
@@ -3255,10 +3271,23 @@ impl Daemon {
         // no other run has anything to deliver it.
         match self.db.hosted_link(session_uid.clone()).await {
             Ok(Some(linked)) => {
-                // The files are the message's from here, before anything is said.
-                let text = match self.claim_uploads(connection, &session_uid, attachments, text) {
-                    Ok(text) => text,
-                    Err(reason) => return SendTextResult::Refused { reason },
+                // The files are the message's from here, before anything is said. A message the
+                // ledger already holds claimed them when it was first sent, and is answered from
+                // its record, after a restart too.
+                let recorded = match &identity {
+                    Some((request_id, _)) => matches!(
+                        self.db.send_request_ids(session_uid.clone()).await,
+                        Ok(ids) if ids.contains(request_id)
+                    ),
+                    None => false,
+                };
+                let text = if recorded {
+                    text
+                } else {
+                    match self.claim_uploads(connection, &session_uid, attachments, text) {
+                        Ok(text) => text,
+                        Err(reason) => return SendTextResult::Refused { reason },
+                    }
                 };
                 crate::claude_host::send_text(
                     self,
@@ -11620,6 +11649,30 @@ mod tests {
             },
             "the record names the turn these words began, and the dead link does not \
              change that"
+        );
+
+        // A message that landed with a file, asked again by a daemon whose uploads hold none of
+        // it, as after a restart: the record answers, not the missing file.
+        let files = vec!["u-sent".to_string()];
+        let with_files = protocol::hash::compose_hash_with(uid, &said, &files);
+        claim("say-9", &with_files);
+        store
+            .settle_mutation(
+                crate::store::OPERATION_COMPOSE,
+                uid,
+                "say-9",
+                &crate::store::compose_outcome(crate::store::COMPOSE_ROUTE_START, "turn-9"),
+                &now,
+            )
+            .unwrap();
+        assert_eq!(
+            daemon
+                .compose(uid, "say-9", said.clone(), &with_files, 0, &files)
+                .await,
+            protocol::ws::ComposeResult::Duplicate {
+                turn_id: "turn-9".into(),
+                started: true,
+            }
         );
 
         // The same id, different words. Not a duplicate — two mutations under one key.

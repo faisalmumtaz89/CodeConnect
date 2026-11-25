@@ -5242,7 +5242,18 @@ mod tests {
         assert_eq!(text, format!("look\n\nAttached:\n{}", path.display()));
         assert!(matches!(result, SendTextResult::Sent { .. }), "{result:?}");
         assert_eq!(std::fs::read(&path).unwrap(), b"png");
+
+        // Asked again once this computer's uploads hold nothing of it, as after a restart: the
+        // record answers, and nothing reaches the host a second time.
         rig.daemon.uploads.remove_session(&root, &uid);
+        let again = rig
+            .daemon
+            .send_text(&uid, "look".into(), Some("r-1"), Some(&hash), true, 8, &ids)
+            .await;
+        assert!(
+            matches!(again, SendTextResult::Duplicate { .. }),
+            "{again:?}"
+        );
         stop(&played.dir);
     }
 
