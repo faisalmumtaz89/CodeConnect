@@ -6,16 +6,16 @@
         "exit_code": null,
         "reason": "Switched to B",
         "switched_to": {
-          "account_id": "01M89G4WMBZCB20HZA6H62N8GC",
+          "account_id": "01M89T5ZA147BT7A8BN59AYCNR",
           "label": "B"
         }
       },
       "seq": 7,
-      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+      "session_id": "01M89T5Z51SXVEP19X4QRKVKFK",
+      "session_uid": "01M89T5Z51SXVEP19X4QRKVKFK",
       "source": "daemon",
-      "source_event_id": "exit:01M89G4WF7VPP746TMY6Y404JA:42483",
-      "ts": "2026-11-25T14:00:57.255Z"
+      "source_event_id": "exit:01M89T5Z51SXVEP19X4QRKVKFK:15884",
+      "ts": "2026-11-25T16:56:18.524Z"
     },
     "type": "event"
   },
@@ -30,8 +30,8 @@
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-25T14:00:57.063Z",
-        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
+        "created_at": "2026-11-25T16:56:18.337Z",
+        "cwd": "/tmp/ccx3.3J9739PW4Z/project",
         "effort": {
           "seq": 3,
           "value": "high"
@@ -194,10 +194,10 @@
           "value": "auto"
         },
         "project_label": "project",
-        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+        "session_id": "01M89T5Z51SXVEP19X4QRKVKFK",
+        "session_uid": "01M89T5Z51SXVEP19X4QRKVKFK",
         "switching": "moved",
-        "updated_at": "2026-11-25T14:00:57.255Z"
+        "updated_at": "2026-11-25T16:56:18.524Z"
       }
     ],
     "type": "sessions"
@@ -213,11 +213,11 @@
         "sandbox": "readOnly"
       },
       "seq": 8,
-      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+      "session_id": "01M89T5Z51SXVEP19X4QRKVKFK",
+      "session_uid": "01M89T5Z51SXVEP19X4QRKVKFK",
       "source": "codex",
-      "source_event_id": "thr-x6:settings:924016c4-78e4-420a-aace-96216c522a45",
-      "ts": "2026-11-25T14:00:57.349Z"
+      "source_event_id": "thr-x6:settings:21f5dafe-58cc-497e-820d-dcb52ce8e4cb",
+      "ts": "2026-11-25T16:56:18.620Z"
     },
     "type": "event"
   },
@@ -232,8 +232,8 @@
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-25T14:00:57.063Z",
-        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
+        "created_at": "2026-11-25T16:56:18.337Z",
+        "cwd": "/tmp/ccx3.3J9739PW4Z/project",
         "effort": {
           "seq": 3,
           "value": "high"
@@ -284,10 +284,10 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+        "session_id": "01M89T5Z51SXVEP19X4QRKVKFK",
+        "session_uid": "01M89T5Z51SXVEP19X4QRKVKFK",
         "switching": "moved",
-        "updated_at": "2026-11-25T14:00:57.282Z"
+        "updated_at": "2026-11-25T16:56:18.552Z"
       }
     ],
     "type": "sessions"
@@ -297,7 +297,7 @@
       "kind": "notification",
       "payload": {
         "account": {
-          "id": "01M89G4WMBZCB20HZA6H62N8GC",
+          "id": "01M89T5ZA147BT7A8BN59AYCNR",
           "label": "B"
         },
         "from_label": "GPT-6.1-Sol",
@@ -308,10 +308,10 @@
         "to_model": "gpt-6-luna"
       },
       "seq": 9,
-      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+      "session_id": "01M89T5Z51SXVEP19X4QRKVKFK",
+      "session_uid": "01M89T5Z51SXVEP19X4QRKVKFK",
       "source": "daemon",
-      "ts": "2026-11-25T14:00:57.350Z"
+      "ts": "2026-11-25T16:56:18.620Z"
     },
     "type": "event"
   },
@@ -319,20 +319,20 @@
     "sessions": [
       {
         "account": {
-          "id": "01M89G4WMBZCB20HZA6H62N8GC",
+          "id": "01M89T5ZA147BT7A8BN59AYCNR",
           "label": "B"
         },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-25T14:00:57.063Z",
-        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
+        "created_at": "2026-11-25T16:56:18.337Z",
+        "cwd": "/tmp/ccx3.3J9739PW4Z/project",
         "effort": {
           "seq": 3,
           "value": "high"
         },
-        "last_seq": 11,
+        "last_seq": 10,
         "lifecycle": "live",
         "link": "attached",
         "menus": {
@@ -378,95 +378,10 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+        "session_id": "01M89T5Z51SXVEP19X4QRKVKFK",
+        "session_uid": "01M89T5Z51SXVEP19X4QRKVKFK",
         "switching": "moved",
-        "updated_at": "2026-11-25T14:00:57.350Z"
-      }
-    ],
-    "type": "sessions"
-  },
-  {
-    "event": {
-      "kind": "session_start",
-      "payload": {
-        "source": "resume"
-      },
-      "seq": 10,
-      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
-      "source": "daemon",
-      "source_event_id": "start:01M89G4WF7VPP746TMY6Y404JA:42697",
-      "ts": "2026-11-25T14:00:57.350Z"
-    },
-    "type": "event"
-  },
-  {
-    "sessions": [
-      {
-        "account": {
-          "id": "01M89G4WMBZCB20HZA6H62N8GC",
-          "label": "B"
-        },
-        "agent": "codex",
-        "blocked_on": [],
-        "codex_link": "subscribed",
-        "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-25T14:00:57.063Z",
-        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
-        "effort": {
-          "seq": 3,
-          "value": "high"
-        },
-        "last_seq": 11,
-        "lifecycle": "live",
-        "link": "attached",
-        "menus": {
-          "models": [
-            {
-              "efforts": [],
-              "label": "GPT-6 Luna",
-              "value": "gpt-6-luna"
-            },
-            {
-              "efforts": [],
-              "label": "GPT-5.6 Terra",
-              "value": "gpt-5.6-terra"
-            }
-          ],
-          "modes": [
-            {
-              "label": "Default",
-              "value": "auto"
-            },
-            {
-              "label": "Read Only",
-              "value": "read-only"
-            },
-            {
-              "label": "Plan",
-              "value": "plan"
-            },
-            {
-              "confirm": true,
-              "label": "Full Access",
-              "value": "full-access"
-            }
-          ],
-          "selected_model": "gpt-6-luna"
-        },
-        "model": {
-          "seq": 8,
-          "value": "gpt-6-luna"
-        },
-        "permission_mode": {
-          "seq": 8,
-          "value": "read-only"
-        },
-        "project_label": "project",
-        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
-        "updated_at": "2026-11-25T14:00:57.350Z"
+        "updated_at": "2026-11-25T16:56:18.620Z"
       }
     ],
     "type": "sessions"
@@ -478,11 +393,11 @@
         "link": "attached",
         "reason": "agent host linked"
       },
-      "seq": 11,
-      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+      "seq": 10,
+      "session_id": "01M89T5Z51SXVEP19X4QRKVKFK",
+      "session_uid": "01M89T5Z51SXVEP19X4QRKVKFK",
       "source": "daemon",
-      "ts": "2026-11-25T14:00:57.350Z"
+      "ts": "2026-11-25T16:56:18.620Z"
     },
     "type": "event"
   },
@@ -490,20 +405,20 @@
     "sessions": [
       {
         "account": {
-          "id": "01M89G4WMBZCB20HZA6H62N8GC",
+          "id": "01M89T5ZA147BT7A8BN59AYCNR",
           "label": "B"
         },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-25T14:00:57.063Z",
-        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
+        "created_at": "2026-11-25T16:56:18.337Z",
+        "cwd": "/tmp/ccx3.3J9739PW4Z/project",
         "effort": {
           "seq": 3,
           "value": "high"
         },
-        "last_seq": 12,
+        "last_seq": 10,
         "lifecycle": "live",
         "link": "attached",
         "menus": {
@@ -549,9 +464,9 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
-        "updated_at": "2026-11-25T14:00:57.350Z"
+        "session_id": "01M89T5Z51SXVEP19X4QRKVKFK",
+        "session_uid": "01M89T5Z51SXVEP19X4QRKVKFK",
+        "updated_at": "2026-11-25T16:56:18.620Z"
       }
     ],
     "type": "sessions"
@@ -563,12 +478,12 @@
         "request_id": "say-plan",
         "text": "go on"
       },
-      "seq": 12,
-      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+      "seq": 11,
+      "session_id": "01M89T5Z51SXVEP19X4QRKVKFK",
+      "session_uid": "01M89T5Z51SXVEP19X4QRKVKFK",
       "source": "daemon",
-      "source_event_id": "say:a1b84d1b-fb5b-84ea-bb43-1a9e0bb273e2",
-      "ts": "2026-11-25T14:00:57.353Z",
+      "source_event_id": "say:faaddfcf-439c-82c0-8c43-28dd8eebeb8b",
+      "ts": "2026-11-25T16:56:18.623Z",
       "turn_id": "turn-2"
     },
     "type": "event"
@@ -577,20 +492,20 @@
     "sessions": [
       {
         "account": {
-          "id": "01M89G4WMBZCB20HZA6H62N8GC",
+          "id": "01M89T5ZA147BT7A8BN59AYCNR",
           "label": "B"
         },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-25T14:00:57.063Z",
-        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
+        "created_at": "2026-11-25T16:56:18.337Z",
+        "cwd": "/tmp/ccx3.3J9739PW4Z/project",
         "effort": {
           "seq": 3,
           "value": "high"
         },
-        "last_seq": 12,
+        "last_seq": 11,
         "lifecycle": "live",
         "link": "attached",
         "menus": {
@@ -636,9 +551,9 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
-        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
-        "updated_at": "2026-11-25T14:00:57.350Z"
+        "session_id": "01M89T5Z51SXVEP19X4QRKVKFK",
+        "session_uid": "01M89T5Z51SXVEP19X4QRKVKFK",
+        "updated_at": "2026-11-25T16:56:18.620Z"
       }
     ],
     "type": "sessions"

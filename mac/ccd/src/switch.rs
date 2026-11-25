@@ -315,8 +315,16 @@ pub(crate) mod window {
         keep(frames, name);
     }
 
-    /// `frames` written to `fixtures/accounts/<name>` when `CC_RECORD_SWITCH` is set.
+    /// `frames`, which file no start a timeline draws on any page (none names why it started), written to
+    /// `fixtures/accounts/<name>` when `CC_RECORD_SWITCH` is set.
     pub(crate) fn keep(frames: &[serde_json::Value], name: &str) {
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| frame["event"]["kind"] == "session_start"
+                    && frame["event"]["payload"].get("source").is_some()),
+            "a switch's start draws nothing: {frames:#?}"
+        );
         if std::env::var_os("CC_RECORD_SWITCH").is_some() {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../fixtures/accounts")

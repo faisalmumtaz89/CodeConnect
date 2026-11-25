@@ -2409,8 +2409,8 @@ impl Store {
     /// **Whether the run `session_uid` is certainly quiet, by what ccd has filed of it** ([`crate::switch::moves`]):
     /// a turn of its process has completed and none has begun since; no message of the person's sent it waits to be
     /// taken or answered (a claim still `applying`, or one filed after its last turn began, which may run as a turn
-    /// of its own); its last turn ran no command, subagent or task (Codex: no command), and its process scheduled no
-    /// prompt; and no mail wake is outstanding. `sending`, the message being sent
+    /// of its own); its last turn ran no command, subagent or task (Codex: no command or subagent), and its process
+    /// scheduled no prompt; and no mail wake is outstanding. `sending`, the message being sent
     /// now, is no message waiting. Anything not known reads not quiet.
     pub fn certainly_quiet(&self, session_uid: &str, sending: &str) -> Result<bool> {
         let conn = self.read();
@@ -2512,6 +2512,8 @@ impl Store {
                     serde_json::from_str::<serde_json::Value>(payload)
                         .is_ok_and(|payload| payload["tool"] == "file_change")
                 }
+                // A Codex subagent its last turn spawned, which may work on after the turn.
+                kind if codex && i >= before && kind == "codex_collabAgentToolCall" => false,
                 kind if kind == EventKind::AgentMessage.as_str() => {
                     blocks(payload).iter().all(|block| {
                         !(block["name"] == "CronCreate"
@@ -2720,10 +2722,11 @@ impl Store {
         )?)
     }
 
-    /// A restarted ccd's moves (306): a run whose process its switch was ending is due again, its process left to the
-    /// liveness watch, and the message that was moving a run that has not started again since is released, so its
-    /// retry relaunches it. Only before this ccd starts any run of its own, once [`Store::fail_unhosted_starts`] has
-    /// put a relaunch that never got a host back to `exited`.
+    /// A restarted ccd's moves (306): a Codex run whose app-server its switch was ending is due again, its app-server
+    /// left to the liveness watch; a Claude run's host is sent its stop again once attached ([`crate::claude_host`]),
+    /// so the end it reports is the switch's. The message that was moving a run that has not started again since is
+    /// released, so its retry relaunches it. Only before this ccd starts any run of its own, once
+    /// [`Store::fail_unhosted_starts`] has put a relaunch that never got a host back to `exited`.
     pub fn recover_moves(&self) -> Result<()> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2739,11 +2742,12 @@ impl Store {
         )?;
         tx.execute(
             "UPDATE run_hosts SET switching = ?2 WHERE switching = ?1 AND session_uid IN
-                    (SELECT session_uid FROM all_sessions WHERE lifecycle = ?3)",
+                    (SELECT session_uid FROM all_sessions WHERE lifecycle = ?3 AND agent = ?4)",
             params![
                 Store::SWITCH_MOVED,
                 Store::SWITCH_WAITING,
-                lifecycle_str(Lifecycle::Live)
+                lifecycle_str(Lifecycle::Live),
+                AgentKind::Codex.as_str()
             ],
         )?;
         tx.commit()?;
@@ -2915,8 +2919,9 @@ impl Store {
 
     /// A hosted run's start whose host was found gone, failed in one transaction: `starting` →
     /// `failed`, or `exited` for a relaunch by its switch, which its next message relaunches again; only while it is
-    /// still `starting` and `host`, the host the caller found gone, is still the one recorded for it. Whether it
-    /// moved.
+    /// still `starting` and `host`, the host the caller found gone, is still the one recorded for it. The message a
+    /// relaunch started with, which the gone host may or may not have given claude, is settled indeterminate, so its
+    /// retry is told so and no later move waits for it. Whether it moved.
     pub fn fail_hosted_start(&self, session_uid: &str, host: &ProcessIdentity) -> Result<bool> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2941,6 +2946,13 @@ impl Store {
                     lifecycle_str(Lifecycle::Starting),
                     lifecycle_str(Lifecycle::Exited)
                 ],
+            )?;
+        }
+        if moved == 1 {
+            tx.execute(
+                "UPDATE text_mutations SET status = 'indeterminate', settled_at = ?2
+                  WHERE session_uid = ?1 AND status = 'applying'",
+                params![session_uid, now],
             )?;
         }
         tx.commit()?;
@@ -3161,9 +3173,9 @@ impl Store {
             .optional()?)
     }
 
-    /// Makes `id` the account `agent`'s starts use, or its Default for `None`, and marks `agent`'s live runs due to
-    /// move to it ([`crate::switch`]), in one transaction. False, and nothing changed, for an id that is not one of
-    /// `agent`'s accounts.
+    /// Makes `id` the account `agent`'s starts use, or its Default for `None`, and marks `agent`'s live runs on another
+    /// account due to move to it ([`crate::switch`]), in one transaction. False, and nothing changed, for an id that is
+    /// not one of `agent`'s accounts.
     pub fn activate_account(&self, agent: &str, id: Option<&str>) -> Result<bool> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -3193,13 +3205,13 @@ impl Store {
                 )?;
             }
         }
-        // Its live runs are due to move to it, each at its next message ([`crate::switch::moves`]); a run already
-        // moving goes on moving, and starts on the account active then.
+        // Its live runs are due to move to it, each at its next message ([`crate::switch::moves`]), but a run already
+        // on it; a run already moving goes on moving, and starts on the account active then.
         tx.execute(
-            "UPDATE run_hosts SET switching = ?2
+            "UPDATE run_hosts SET switching = CASE WHEN account_id IS ?4 THEN NULL ELSE ?2 END
               WHERE switching IS NOT ?3 AND session_uid IN
                     (SELECT session_uid FROM all_sessions WHERE agent = ?1 AND lifecycle = 'live')",
-            params![agent, Store::SWITCH_WAITING, Store::SWITCH_MOVED],
+            params![agent, Store::SWITCH_WAITING, Store::SWITCH_MOVED, id],
         )?;
         tx.commit()?;
         Ok(true)
@@ -8521,7 +8533,8 @@ mod tests {
 
     /// A Codex run.
     /// **An account a live run is on is not removed** (306 Slice D, minor 2): with a live Codex run recorded on A,
-    /// removing A is refused with the sentence a person reads, and nothing is removed; once the run has exited, the
+    /// removing A is refused with the sentence a person reads, and nothing is removed: while A is chosen, to choose
+    /// another; once another is chosen, that its sessions move with their next message. Once the run has exited, the
     /// account is no longer in use.
     #[tokio::test]
     async fn an_account_a_live_run_is_on_is_not_removed() {
@@ -8536,32 +8549,40 @@ mod tests {
         );
         store.set_lifecycle(&run.uid, Lifecycle::Live).unwrap();
         assert!(store.account_in_use(&a.id).unwrap());
-        let refused = serde_json::to_value(
-            crate::accounts::remove_with(
-                &store,
-                &crate::accounts::SignIns::default(),
-                &std::collections::HashMap::new(),
-                crate::accounts::Agents::default(),
-                "r1".into(),
-                a.id.clone(),
+        for (chosen, words) in [
+            (
+                Some(a.id.as_str()),
+                "Sessions are running on this account. Choose another account first.",
+            ),
+            (
+                None,
+                "Open sessions started on A move with their next message; end them or send to them first.",
+            ),
+        ] {
+            assert!(store.activate_account("codex", chosen).unwrap());
+            let refused = serde_json::to_value(
+                crate::accounts::remove_with(
+                    &store,
+                    &crate::accounts::SignIns::default(),
+                    &std::collections::HashMap::new(),
+                    crate::accounts::Agents::default(),
+                    "r1".into(),
+                    a.id.clone(),
+                )
+                .await,
             )
-            .await,
-        )
-        .unwrap();
-        assert_eq!(
-            (
-                refused["type"].as_str(),
-                refused["code"].as_str(),
-                refused["message"].as_str()
-            ),
-            (
-                Some("accounts_refused"),
-                Some("accounts_in_use"),
-                Some("Sessions are running on this account. Choose another account first.")
-            ),
-            "{refused}"
-        );
-        assert_eq!(store.accounts().unwrap().len(), 1, "nothing removed");
+            .unwrap();
+            assert_eq!(
+                (
+                    refused["type"].as_str(),
+                    refused["code"].as_str(),
+                    refused["message"].as_str()
+                ),
+                (Some("accounts_refused"), Some("accounts_in_use"), Some(words)),
+                "{refused}"
+            );
+            assert_eq!(store.accounts().unwrap().len(), 1, "nothing removed");
+        }
         store.set_lifecycle(&run.uid, Lifecycle::Exited).unwrap();
         assert!(
             !store.account_in_use(&a.id).unwrap(),

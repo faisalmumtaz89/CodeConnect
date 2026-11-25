@@ -920,8 +920,9 @@ impl Daemon {
     }
 
     /// The run `session_uid`'s move gate, held while the run has a switch, read under it: a person's message to such a
-    /// run is decided and sent under it ([`crate::switch::moves`]). `None`, the gate let go, for a run with none, which
-    /// is sent to as before, a message at a time no more than before.
+    /// run is decided and sent under it ([`crate::switch::moves`]), and a settings change, an interrupt or a Stop to it
+    /// is delivered under it, so no move ends the process it is on its way to. `None`, the gate let go, for a run
+    /// with none, which is sent to as before, a message at a time no more than before.
     pub(crate) async fn move_guard(
         &self,
         session_uid: &str,
@@ -932,17 +933,6 @@ impl Daemon {
             Ok(Some(_))
         )
         .then_some(guard)
-    }
-
-    /// A settings change or a Stop to the run `session_uid` with a switch waits for a move under way to be over
-    /// ([`Daemon::move_gate`]), then goes as to any run.
-    async fn after_a_move(&self, session_uid: &str) {
-        if matches!(
-            self.db.switch_state(session_uid.to_string()).await,
-            Ok(Some(_))
-        ) {
-            drop(self.move_gate(session_uid).await.lock().await);
-        }
     }
 
     /// The gate serializing one session's recorded end ([`Daemon::end_hosted_run`]).
@@ -2348,7 +2338,7 @@ impl Daemon {
                 return refuse(crate::codex_refusals::SESSION_LOOKUP_FAILED.to_string());
             }
         };
-        self.after_a_move(&row.session_uid).await;
+        let _moving = self.move_guard(&row.session_uid).await;
         // A Claude run CodeConnect started: its lifecycle, for its own branch below.
         let mut hosted = None;
         match row.agent {
@@ -3798,7 +3788,7 @@ impl Daemon {
                 return refuse("This computer could not read its sessions.");
             }
         };
-        self.after_a_move(&row.session_uid).await;
+        let _moving = self.move_guard(&row.session_uid).await;
         crate::claude_host::stop_run(self, &row.session_uid).await
     }
 
@@ -3825,7 +3815,7 @@ impl Daemon {
                 return refuse("This computer could not read its sessions.");
             }
         };
-        self.after_a_move(&row.session_uid).await;
+        let _moving = self.move_guard(&row.session_uid).await;
         if row.agent == protocol::agent::AgentKind::Codex {
             let commands = match self.inner.lock().await.host_links.get(&row.session_uid) {
                 Some(HostLink::Codex(_, commands)) => Some(commands.clone()),

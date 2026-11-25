@@ -880,7 +880,7 @@ enum RenderCatalog {
             purpose: "a Codex run its message is moving to another account: no row, its reply box and settings kept",
             arguments: [
                 "-CC_SWITCH", "switch-codex", "-CC_SWITCH_STEP", "2",
-                "-CC_DEEPLINK", "codeconnect://session/01M89G4WEZW8QMHFVXM9WCN7N8",
+                "-CC_DEEPLINK", "codeconnect://session/01M89T5Z50QTD00VMHHYNBVR4C",
             ],
             reach: { app, driver in
                 try driver.requireExists(app.buttons["session.composer.settings"], "its settings")
@@ -890,7 +890,7 @@ enum RenderCatalog {
             purpose: "a move that could not start: Ended, one warning row, its reply box kept",
             arguments: [
                 "-CC_SWITCH", "switch-failed-then-recovered-claude", "-CC_SWITCH_STEP", "6",
-                "-CC_DEEPLINK", "codeconnect://session/01M89G4WF8XNPTVJRGNRVE69DZ",
+                "-CC_DEEPLINK", "codeconnect://session/01M89T5Z4ZAC3JWB35FH06S29P",
             ],
             reach: { app, driver in
                 try driver.requireExists(driver.text(containing: "Couldn", in: app), "the warning row")
@@ -900,7 +900,7 @@ enum RenderCatalog {
             purpose: "the failed move's run after its next message started it on the new account",
             arguments: [
                 "-CC_SWITCH", "switch-failed-then-recovered-claude",
-                "-CC_DEEPLINK", "codeconnect://session/01M89G4WF8XNPTVJRGNRVE69DZ",
+                "-CC_DEEPLINK", "codeconnect://session/01M89T5Z4ZAC3JWB35FH06S29P",
             ],
             reach: { app, driver in
                 try driver.requireExists(driver.text(containing: "on B now?", in: app), "the message that started it")
@@ -910,7 +910,7 @@ enum RenderCatalog {
             purpose: "a Codex run moved onto a plan without its model: one quiet row names the model it is now on",
             arguments: [
                 "-CC_SWITCH", "relaunch-plan-default-codex",
-                "-CC_DEEPLINK", "codeconnect://session/01M89G4WF7VPP746TMY6Y404JA",
+                "-CC_DEEPLINK", "codeconnect://session/01M89T5Z51SXVEP19X4QRKVKFK",
             ],
             reach: { app, driver in
                 try driver.requireExists(driver.text(containing: "Now on", in: app), "the model-changed row")

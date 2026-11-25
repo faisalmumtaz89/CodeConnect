@@ -5,8 +5,9 @@ import XCTest
 /// **A run moved to another account looks exactly as before** (decision 306; decision 311 v4, minor 51).
 ///
 /// The person's message moves a quiet run: ccd ends its process and files a `session_end` whose payload carries
-/// `switched_to` (`{"account_id", "label"}`, minor 48), then the message starts it again on the new account, which for
-/// a Codex run files the thread's resume start. The conversation draws nothing for any of it but the message itself;
+/// `switched_to` (`{"account_id", "label"}`, minor 48), then the message starts it again on the new account, which files
+/// no start a page could draw (a Claude start names no source; a Codex run files none). The conversation draws nothing
+/// for any of it but the message itself;
 /// every listing in the window reads live, linked and with its menus, so neither app shows the Ended band, loses the
 /// reply box or goes read only.
 ///
@@ -75,6 +76,19 @@ final class SwitchedRunTimelineTests: XCTestCase {
 
     func testACodexSwitchAndItsResumeDrawNothing() async throws {
         try await assertNothingDrawn("switch-codex-wire")
+    }
+
+    /// **A page that begins after a switch's end draws no start**: opened cold where the first event loaded follows the
+    /// switch's end, the conversation draws no "Run resumed" either, so loading the page before it changes nothing drawn.
+    func testAPageBeginningAfterTheSwitchsEndDrawsNoStart() async throws {
+        for resource in ["switch-codex-wire", "relaunch-plan-default-codex-wire", "switch-failed-then-recovered-claude-wire"] {
+            let all = events(try frames(resource))
+            let end = try XCTUnwrap(all.first { $0.kind == .sessionEnd }, "\(resource) carries no end")
+            let page = await state(all.filter { $0.seq > end.seq })
+            XCTAssertFalse(
+                notices(page).contains { $0.kind == .sessionStart },
+                "\(resource): a page after the switch's end draws no start")
+        }
     }
 
     /// Every listing in the window reads live, with what the run had drawn by then: never the Ended band, and the reply

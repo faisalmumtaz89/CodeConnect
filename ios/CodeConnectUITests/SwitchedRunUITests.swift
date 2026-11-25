@@ -8,10 +8,10 @@ import XCTest
 final class SwitchedRunUITests: XCTestCase {
 
     private static let claude = "01M89G4WF7VPP746TMY6Y404JB"
-    private static let codex = "01M89G4WEZW8QMHFVXM9WCN7N8"
-    private static let failed = "01M89G4WF8XNPTVJRGNRVE69DZ"
+    private static let codex = "01M89T5Z50QTD00VMHHYNBVR4C"
+    private static let failed = "01M89T5Z4ZAC3JWB35FH06S29P"
     private static let ended = "01M89G4WF8XNPTVJRGNRVE69DY"
-    private static let planLacksModel = "01M89G4WF7VPP746TMY6Y404JA"
+    private static let planLacksModel = "01M89T5Z51SXVEP19X4QRKVKFK"
 
     override func setUpWithError() throws {
         continueAfterFailure = false

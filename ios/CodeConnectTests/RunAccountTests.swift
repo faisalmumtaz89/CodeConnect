@@ -50,9 +50,9 @@ final class RunAccountTests: XCTestCase {
             let frames = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).arrayValue)
             return try frames.compactMap { $0["sessions"]?[0] }.map { try decoded($0).switching }
         }
-        XCTAssertEqual(try states("switch-codex-wire"), [.moved, .moved, nil, nil])
+        XCTAssertEqual(try states("switch-codex-wire"), [.moved, .moved, nil])
         XCTAssertEqual(
             try states("switch-failed-then-recovered-claude-wire"),
-            [.moved, .moved, .failed, .failed, nil, nil, nil, nil, nil])
+            [.moved, .moved, .failed, .failed, .failed, nil, nil, nil, nil])
     }
 }

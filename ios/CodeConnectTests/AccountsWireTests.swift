@@ -427,7 +427,7 @@ final class AccountsWireTests: XCTestCase {
         await waitUntil({ model.accountSwitch(for: .claude)?.failure != nil }, "the failed listing to be read")
         XCTAssertEqual(
             model.accountSwitch(for: .claude)?.failure,
-            "cch2.6WHK10G1C0 couldn't switch accounts. Its conversation says what to do.")
+            "cch2.3J9739PW4Y couldn't switch accounts. Its conversation says what to do.")
     }
 
     /// An account signing in is not signed out: the service says `signed_in: false` with `signing_in: true` while the

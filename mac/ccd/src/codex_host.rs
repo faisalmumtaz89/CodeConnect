@@ -2363,14 +2363,18 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
                 "{uid}: relaunched; its app-server's leader is {}",
                 leader.pid
             );
-            let start = PendingEvent::new(
-                &SessionKey::new(uid, uid),
-                EventKind::SessionStart,
-                json!({"source": "resume"}),
-                Source::Daemon,
-            )
-            .with_source_event_id(format!("start:{uid}:{}", leader.pid));
-            file(daemon, uid, vec![start]).await;
+            // A relaunch by a message files the thread's resume; a switch's is the switch itself and files none, so no
+            // page of the conversation draws one.
+            if !switching {
+                let start = PendingEvent::new(
+                    &SessionKey::new(uid, uid),
+                    EventKind::SessionStart,
+                    json!({"source": "resume"}),
+                    Source::Daemon,
+                )
+                .with_source_event_id(format!("start:{uid}:{}", leader.pid));
+                file(daemon, uid, vec![start]).await;
+            }
             tokio::spawn(link(
                 Arc::clone(daemon),
                 uid.to_string(),
@@ -8815,11 +8819,12 @@ mod tests {
 
     /// **A message to a Codex run not certainly quiet goes on the account it is on, and the run stays due** (306,
     /// decision 311 v4; gate 3): a command started in its last turn, or one whose result a resume rebuilt it with; a
-    /// turn its link runs though none is filed. Each message reaches the A app-server as a turn.
+    /// subagent its last turn spawned, which may still be working; a turn its link runs though none is filed. Each
+    /// message reaches the A app-server as a turn.
     #[tokio::test]
     async fn a_message_to_a_codex_run_not_certainly_quiet_goes_on_its_account() {
         let _env = crate::ProcessEnvRead::take();
-        for case in ["tool call", "tool result", "turn running"] {
+        for case in ["tool call", "tool result", "subagent", "turn running"] {
             let mut rig = rig();
             rig.daemon = relauncher(&rig);
             let (uid, mut ws) = engine_run(&rig, "req-busy", "thr-busy", "turn-1").await;
@@ -8837,6 +8842,9 @@ mod tests {
                 }
                 "tool result" => vec![json!({"method": "item/completed", "params": {
                     "threadId": "thr-busy", "turnId": "turn-1", "item": item}})],
+                "subagent" => vec![json!({"method": "item/completed", "params": {
+                    "threadId": "thr-busy", "turnId": "turn-1", "item": {"type": "collabAgentToolCall",
+                    "id": "agent-1", "tool": "spawnAgent", "status": "completed"}}})],
                 _ => Vec::new(),
             };
             turn_over(&rig.daemon, &uid, &mut ws, "thr-busy", "turn-1", &items).await;

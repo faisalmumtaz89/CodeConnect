@@ -902,17 +902,16 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     `uploads`.
 ///   * `51` — **A switch of account moves a run at its next message.**
 ///
-///     No message changes shape. Choosing an account ([`ws::ClientMessage::ActivateAccount`]) stops nothing: each
-///     live run of that agent reads [`event::Switching::Waiting`], due to move, and is otherwise exactly as before,
-///     its `menus` and settings, mail and messages those of a live run. A message the person sends it moves it when it
-///     is certainly quiet (no turn running, no message of theirs unanswered, no card, no mail wake outstanding, and
-///     nothing it started in its last turn that may still run): its process is ended, its end typed
-///     [`event::SWITCHED_TO`], and the message relaunches it on the account active then. Otherwise the message goes
-///     on the account it is on, and the run stays due; one already on the active account is no longer due. While its
-///     process is ended and the next started, a run reads [`event::Switching::Moved`], `live`, `link` attached, a
-///     Codex run's `codex_link` subscribed, and it carries its `menus`; a change or a Stop sent then waits for the
-///     move. A daemon of 48 to 50 ends a run at its first idle point after the choice, and sends a moved run no
-///     `menus`.
+///     No message changes shape. Choosing an account ([`ws::ClientMessage::ActivateAccount`]) stops nothing: each live
+///     run of that agent on another account reads [`event::Switching::Waiting`], due to move, and is otherwise exactly
+///     as before, its `menus` and settings, mail and messages those of a live run. A message the person sends it moves
+///     it when it is certainly quiet (no turn running, no message of theirs unanswered, no card, no mail wake
+///     outstanding, and nothing it started in its last turn that may still run): its process is ended, its end typed
+///     [`event::SWITCHED_TO`], and the message relaunches it on the account active then. Otherwise the message goes on
+///     the account it is on, and the run stays due; one already on the active account is no longer due. While its
+///     process is ended and the next started, a run reads [`event::Switching::Moved`], `live`, `link` attached, a Codex
+///     run's `codex_link` subscribed, and it carries its `menus`; a change or a Stop sent then waits for the move. A
+///     daemon of 48 to 50 ends a run at its first idle point after the choice, and sends a moved run no `menus`.
 pub const PROTOCOL_MINOR: u32 = 51;
 
 #[cfg(test)]
