@@ -7,6 +7,9 @@
 //! piece of session state either lives in SQLite or is re-derived when ccd
 //! attaches again.
 
+// Tests start their stand-ins directly; every start ccd itself makes goes through `spawn`.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod accounts;
 mod apns;
 mod apns_sender;
@@ -33,6 +36,7 @@ mod push_queue;
 mod question;
 mod relay_sender;
 mod secret;
+mod spawn;
 mod start_session;
 mod state;
 mod store;
@@ -1494,10 +1498,9 @@ async fn tailnet_addresses(config: &Config) -> Vec<IpAddr> {
         if !candidate.exists() {
             continue;
         }
-        let run = tokio::process::Command::new(&candidate)
-            .arg("ip")
-            .kill_on_drop(true)
-            .output();
+        let mut command = tokio::process::Command::new(&candidate);
+        command.arg("ip").kill_on_drop(true);
+        let run = crate::spawn::output(&mut command);
         let output = match tokio::time::timeout_at(deadline, run).await {
             Ok(Ok(output)) => output,
             Ok(Err(_)) => continue,
@@ -1536,10 +1539,9 @@ fn held_here(ip: IpAddr) -> bool {
 /// tailnet connection to this node's address on to `127.0.0.1` on the same port.
 async fn userspace_tailnet_address(config: &Config) -> Option<IpAddr> {
     let bin = config.tailscale_bin()?;
-    let run = tokio::process::Command::new(bin)
-        .args(["status", "--json"])
-        .kill_on_drop(true)
-        .output();
+    let mut command = tokio::process::Command::new(bin);
+    command.args(["status", "--json"]).kill_on_drop(true);
+    let run = crate::spawn::output(&mut command);
     let output = tokio::time::timeout(TAILSCALE_PROBE_TIMEOUT, run)
         .await
         .ok()?
