@@ -137,7 +137,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
 - **Proposed fix:** Remove `"logging"` from `tokio-rustls` (and `rustls` if unused by `push-relay`) and remove `"fs"` from `tokio` if unused across workspace crates. Measure binary size delta.
 - **Expected gain:** ~30–100 KiB smaller `ccd` binary (reduces file-backed RSS directly since `.text` is 4.54 MiB of the 6.30 MiB idle RSS!).
 - **Risk:** Very low (compile-time checked).
-- **Status:** `todo`
+- **Status:** `done` (F10: removed `tokio/fs` and `tokio-rustls/logging`; `ccd` musl `-p ccd` binary `6,300,320 -> 6,279,264 B` [-20.6 KiB])
 
 ### F11. Allocator evaluation (separate commit, measured on `musl` and `gnu`)
 - **Location:** `mac/ccd/Cargo.toml`, `mac/ccd/src/main.rs`

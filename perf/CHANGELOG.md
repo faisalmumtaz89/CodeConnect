@@ -146,3 +146,15 @@ Each entry corresponds to one logical commit on `perf/baseline-and-optimizations
   - `concurrent_50` Peak threads: `41` (`40` baseline; `61` on `gnu`) -> **`19`** (**-53.7%**)
   - `concurrent_50` Peak RSS / Wakeups/s: `9.04 MiB / 344/s` (baseline `11.49 MiB / 473/s`) -> **`8.77 MiB / 307/s`** (**-23.7% / -35.1%** vs baseline)
   - `burst` Peak threads / RSS / `relay_p50`: `23 / 7.14 MiB / 638 ms` -> **`19 / 6.99 MiB / 559 ms`**
+
+---
+
+## F10 — Remove unused `tokio/fs` and `tokio-rustls/logging` crate features
+
+- **Files:** `mac/Cargo.toml`
+- **Change:**
+  - Removed unused `"fs"` feature from workspace `tokio` dependency (verified zero `tokio::fs` references across all workspace crates).
+  - Removed unused `"logging"` feature from `tokio-rustls` (`ccd` uses its own logger `mac/ccd/src/log.rs` and never installs the `log` facade; `push-relay`'s own `rustls` dependency is left unchanged).
+- **Before vs After (`x86_64-unknown-linux-musl`, `-p ccd --release`):**
+  - `ccd` release binary size: `6,300,320 bytes` (`6.008 MiB`) -> **`6,279,264 bytes`** (`5.988 MiB`, **-20.6 KiB**)
+  - All workspace crates compile cleanly with `cargo check --workspace --tests`.
