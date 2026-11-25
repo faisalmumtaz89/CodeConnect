@@ -593,7 +593,8 @@ enum Fixtures {
     {
         let stamp = rfc3339(Date())
         let id = "cc-\(listed.count + 1)"
-        let agent = start.agent == .codex ? "\"agent\":\"codex\"," : ""
+        // Claude's summary names no agent, as ccd's does not.
+        let agent = start.agent == .claude ? "" : "\"agent\":\"\(start.agent.rawValue)\","
         let cwd = start.folder ?? Self.newWorktreeFolder(start)
         let summary = """
             {"session_uid":"\(uid)","session_id":"\(id)",\(agent)\
