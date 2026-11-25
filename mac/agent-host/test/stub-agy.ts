@@ -1,7 +1,8 @@
 // The stand-in agy a test gives an Antigravity run as its agy (rig.ts writeAgy), run on the built host as Bun. It
 // speaks `agy acp`'s Agent Client Protocol over stdio as the CLI's own changelog and the ACP schema describe it: it
-// answers `initialize` with its script's protocol version, and `session/new` with a session, after a notification of
-// its commands (which the host must hold until the start's outcome). At each `session/prompt` it writes its reply in
+// answers `initialize` with its script's protocol version, advertising session/resume unless its script says
+// `resume: false`, `session/new` with a session after a notification of its commands (which the host must hold until
+// the start's outcome), and `session/resume` with an empty result. At each `session/prompt` it writes its reply in
 // two chunks, a tool call, then asks permission for it with allow_once and reject_once options; once answered it ends
 // the tool as the answer says, writes one more chunk and answers the prompt `end_turn`. A request answered
 // `cancelled` ends the prompt `cancelled`. It records its argv, its folder and every line it read; its input's end
@@ -26,7 +27,13 @@ for await (const text of createInterface({ input: process.stdin })) {
   const message = JSON.parse(text);
   record({ stdin: message });
   if (message.method === 'initialize') {
-    write({ id: message.id, result: { protocolVersion: script.version ?? 1, agentCapabilities: { loadSession: true } } });
+    const sessionCapabilities = script.resume === false ? {} : { resume: {} };
+    write({
+      id: message.id,
+      result: { protocolVersion: script.version ?? 1, agentCapabilities: { loadSession: true, sessionCapabilities } },
+    });
+  } else if (message.method === 'session/resume') {
+    write({ id: message.id, result: {} });
   } else if (message.method === 'session/new') {
     update('sess-1', { sessionUpdate: 'available_commands_update', availableCommands: [] });
     write({ id: message.id, result: { sessionId: 'sess-1' } });

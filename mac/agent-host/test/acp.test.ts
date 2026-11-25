@@ -11,7 +11,7 @@ afterAll(cleanup);
 const antigravityStart = goldenLines('to_host', 'start').find((m) => m.options.agent === 'antigravity')!;
 
 /** A host with an Antigravity start sent, its agy the stand-in. Resolves once the start's outcome has come. */
-async function run(script: { version?: number } = {}, prompt = 'read the note') {
+async function run(script: { version?: number; resume?: boolean } = {}, prompt = 'read the note', resume?: string) {
   const dir = runDir();
   const work = join(dir, 'work');
   mkdirSync(work);
@@ -19,7 +19,8 @@ async function run(script: { version?: number } = {}, prompt = 'read the note') 
   startHost(dir);
   const ccd = await open(dir);
   await ccd.attach(0, 1);
-  ccd.send({ ...antigravityStart, prompt, options: { ...antigravityStart.options, cwd: work, claude_path: agy } });
+  const options = { ...antigravityStart.options, cwd: work, claude_path: agy, ...(resume ? { resume } : {}) };
+  ccd.send({ ...antigravityStart, prompt, options });
   const outcome = await ccd.line('the start outcome', (line) => line.type === 'outcome');
   return { dir, work, ccd, outcome };
 }
@@ -130,6 +131,33 @@ test('stop answers an open request cancelled, cancels the session and ends agy; 
   });
   expect(lines.find((message) => message.method === 'session/cancel').params).toStrictEqual({ sessionId: 'sess-1' });
   expect(ccd.lines.find((line) => line.type === 'exited')).toMatchObject({ code: 0 });
+}, 15_000);
+
+test('a relaunch resumes the run\'s session with the mail server again, then prompts it', async () => {
+  const { dir, work, ccd, outcome } = await run({}, 'carry on', 'sess-9');
+  expect(outcome).toMatchObject({ status: 'done' });
+  await ccd.line('the permission request', (line) => line.type === 'permission');
+  const lines = stdin(dir);
+  expect(lines.some((message) => message.method === 'session/new')).toBe(false);
+  expect(lines.find((message) => message.method === 'session/resume').params).toStrictEqual({
+    sessionId: 'sess-9',
+    cwd: work,
+    mcpServers: [{ name: 'codeconnect', ...antigravityStart.options.mail, env: [] }],
+  });
+  expect(lines.find((message) => message.method === 'session/prompt').params).toStrictEqual({
+    sessionId: 'sess-9',
+    prompt: [{ type: 'text', text: 'carry on' }],
+  });
+}, 15_000);
+
+test('an agy that does not advertise session/resume refuses a relaunch, and nothing is opened', async () => {
+  const { dir, ccd, outcome } = await run({ resume: false }, 'carry on', 'sess-9');
+  expect(outcome).toMatchObject({
+    status: 'refused',
+    detail: 'this agy does not offer session/resume, so the session cannot go on',
+  });
+  await waitFor('the run\'s end', () => ccd.lines.some((line) => line.type === 'exited'), 10_000);
+  expect(stdin(dir).map((message) => message.method)).toStrictEqual(['initialize']);
 }, 15_000);
 
 test('an agy at another ACP version is refused at the start, with the version it speaks', async () => {

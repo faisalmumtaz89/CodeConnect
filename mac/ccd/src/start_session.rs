@@ -885,7 +885,7 @@ async fn hosted_start(
                     "Antigravity cannot make a new worktree; start it in an existing one.".into(),
                 );
             }
-            match agy_path(environment).await {
+            match agy_path(environment, daemon.config.agy_bin.as_deref()).await {
                 Some(path) => path,
                 None => {
                     let (reason, detail) = missing(&agent);
@@ -1612,13 +1612,17 @@ pub(crate) async fn codex_path(
     )
 }
 
-/// The `agy` an Antigravity start runs: the first on the login shell's `PATH`, else its
-/// installer's `~/.local/bin/agy`.
-async fn agy_path(environment: &HashMap<OsString, OsString>) -> Option<PathBuf> {
+/// The `agy` an Antigravity start runs: config `agy_bin`, else the first on the login
+/// shell's `PATH`, else its installer's `~/.local/bin/agy`.
+pub(crate) async fn agy_path(
+    environment: &HashMap<OsString, OsString>,
+    agy_bin: Option<&str>,
+) -> Option<PathBuf> {
     let home = home_in(environment);
-    let mut candidates = login_path_hits(environment, &home, "agy").await;
+    let mut candidates: Vec<PathBuf> = agy_bin.map(PathBuf::from).into_iter().collect();
+    candidates.extend(login_path_hits(environment, &home, "agy").await);
     candidates.push(home.join(".local/bin/agy"));
-    protocol::claude_bin::first_runnable(not_installed_in_tests(candidates, None), None)
+    protocol::claude_bin::first_runnable(not_installed_in_tests(candidates, agy_bin), None)
 }
 
 /// Every `name` on the `PATH` the user's login shell in `environment` sets up, in

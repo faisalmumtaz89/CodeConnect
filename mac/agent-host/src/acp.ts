@@ -1,7 +1,8 @@
 // An Antigravity run: `agy acp`, the Agent Client Protocol over its stdio (JSON-RPC 2.0, one message per line), in
 // the host's process group as claude is. The start initializes it (protocol version 1; no file system or terminal
-// offered, so agy uses its own) and opens one session in the run's folder with CodeConnect's mail server; its outcome
-// is `done` once the session is open, `refused` with agy's reason otherwise. Every notification agy sends, and the
+// offered, so agy uses its own) and opens one session in the run's folder with CodeConnect's mail server, or, for a
+// relaunch (`resume`), resumes the run's session with that server again, only when agy advertises session/resume;
+// its outcome is `done` once the session is open, `refused` with the reason otherwise. Every notification agy sends, and the
 // reply to each prompt, goes to ccd whole as `acp`, with the turn it belongs to: the uuid of the command whose prompt
 // is running (the start's for its own). A `say`, or ccd's `wake` for the run's mail, is one more prompt, queued and
 // `done` at once, and sent once the one before has its reply, so prompts never overlap. An `interrupt` of the running turn answers its open requests
@@ -119,12 +120,23 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
       throw new Error(`agy speaks ACP version ${initialized.result?.protocolVersion}, not ${PROTOCOL_VERSION}`);
     }
     const mail = start.options.mail;
-    const session = await call('session/new', {
+    const opening = {
       cwd: start.options.cwd,
       mcpServers: [{ name: 'codeconnect', command: mail.command, args: mail.args, env: [] }],
-    });
-    if (session.error) throw new Error(session.error.message ?? 'agy refused the session');
-    sessionId = String(session.result?.sessionId);
+    };
+    const resume = start.options.resume;
+    if (resume !== undefined) {
+      if (initialized.result?.agentCapabilities?.sessionCapabilities?.resume === undefined) {
+        throw new Error('this agy does not offer session/resume, so the session cannot go on');
+      }
+      const resumed = await call('session/resume', { sessionId: resume, ...opening });
+      if (resumed.error) throw new Error(resumed.error.message ?? 'agy refused to resume the session');
+      sessionId = resume;
+    } else {
+      const session = await call('session/new', opening);
+      if (session.error) throw new Error(session.error.message ?? 'agy refused the session');
+      sessionId = String(session.result?.sessionId);
+    }
   })();
   opened.then(
     () => {
