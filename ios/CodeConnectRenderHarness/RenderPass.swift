@@ -118,6 +118,13 @@ final class RenderPass: XCTestCase {
 
     func testRendersTheUsageAtAX5() throws { try render(at: .ax5, Self.usage) }
 
+    /// The first-run screens: what a computer needs, as onboarding says it.
+    private static let onboarding = RenderCatalog.all.filter { $0.name.hasPrefix("onboarding") }
+
+    func testRendersTheOnboardingAtLarge() throws { try render(at: .large, Self.onboarding) }
+
+    func testRendersTheOnboardingAtAX5() throws { try render(at: .ax5, Self.onboarding) }
+
     // MARK: - The pass
 
     private func render(at size: Size, _ scenarios: [RenderScenario] = RenderCatalog.all) throws {
