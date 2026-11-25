@@ -118,9 +118,11 @@ private struct CameraCapture: UIViewControllerRepresentable {
 
 /// **What goes with the next reply**, 56-pt tiles over the pill, in order. Each says where it is — on its way (a
 /// ring), arrived (plain), refused before sending, or failed on the way (send it again) — and each has its ×.
-/// The first problem is said in words under the tiles.
+/// Why they hold the message back is said once, in Kit's words, under the tiles.
 struct AttachmentTray: View {
     let files: [Attachment]
+    /// Kit's `filesBlockedReason`.
+    let reason: String?
     let onRemove: (String) -> Void
     let onRetry: (String) -> Void
 
@@ -136,24 +138,14 @@ struct AttachmentTray: View {
                 .padding(.top, 6)
                 .padding(.trailing, 6)
             }
-            if let note = problem {
-                Text(note)
+            if let reason {
+                Text(reason)
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.color.danger)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("attach.problem")
             }
         }
-    }
-
-    private var problem: String? {
-        for file in files {
-            switch file.state {
-            case .refused(let reason), .failed(let reason): return "\(file.name): \(reason)"
-            default: continue
-            }
-        }
-        return nil
     }
 
     private func removeButton(_ file: Attachment) -> some View {
@@ -203,8 +195,10 @@ private struct AttachmentTile: View {
             Image(uiImage: thumbnail).resizable().scaledToFill()
         } else {
             VStack(spacing: 4) {
-                // While it travels, the ring takes the glyph's place.
+                // While it travels, or once it failed, the ring or Retry takes the glyph's place.
                 if case .uploading = file.state {
+                    Color.clear.frame(width: 22, height: 22)
+                } else if case .failed = file.state {
                     Color.clear.frame(width: 22, height: 22)
                 } else {
                 Group {
@@ -246,24 +240,18 @@ private struct AttachmentTile: View {
             .clipShape(shape)
         case .failed:
             Button(action: onRetry) {
-                ZStack {
-                    Color.black.opacity(0.55)
-                    Image(systemName: "arrow.clockwise").font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white)
-                }
-                .clipShape(shape)
+                Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(CC.text.primary)
+                    .frame(width: 30, height: 30)
+                    .background(CC.color.surfaceOverlay, in: Circle())
+                    .padding(.bottom, thumbnail == nil ? 16 : 0)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Send \(file.name) again")
             .accessibilityIdentifier("attach.retry")
-        case .refused:
-            ZStack {
-                Color.black.opacity(0.45)
-                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 15))
-                    .foregroundStyle(CC.color.danger)
-            }
-            .clipShape(shape)
-        case .arrived:
+        case .refused, .arrived:
             EmptyView()
         }
     }

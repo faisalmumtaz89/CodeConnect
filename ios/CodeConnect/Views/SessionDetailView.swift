@@ -2057,7 +2057,7 @@ private struct SessionComposeBar: View {
             byteCounter
             if !files.isEmpty {
                 AttachmentTray(
-                    files: files,
+                    files: files, reason: model.filesBlockedReason(for: key),
                     onRemove: { model.removeFile($0, from: key) },
                     onRetry: { model.retryFile($0, in: key) })
             }
@@ -2279,7 +2279,10 @@ private struct SessionComposeBar: View {
         // "answer the card first" — is what they need, not a stale send's verdict (R2T3-F1). But a
         // just-taken outcome (a Stop they tapped) wins over the block. Computed in `composeOutcomeOrBlock`
         // so the precedence has a test; the neutral "observe only" note stays below, as before.
-        if let note = model.composeOutcomeOrBlock(for: key, draft: text, lastSend: result) {
+        // The files' own reason is said once, under the tray.
+        if let note = model.composeOutcomeOrBlock(for: key, draft: text, lastSend: result),
+            note.text != model.filesBlockedReason(for: key)
+        {
             composeNote(note)
         } else if case .failed(let reason, let needsSettings) = dictation.phase {
             micFailureNote(reason: reason, needsSettings: needsSettings)
