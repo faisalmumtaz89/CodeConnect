@@ -240,9 +240,15 @@ public final class SessionState {
     public struct Receipts {
         public let compact: CompactConfirmation?
         public let compactSeq: UInt64
+        /// The newest turn end the run has filed: an Antigravity `/compact`, run as a prompt, ends with its turn.
+        public var turnEndSeq: UInt64 = 0
     }
 
-    var receipts: Receipts { Receipts(compact: lastCompactSignal, compactSeq: lastCompactSignalSeq) }
+    var receipts: Receipts {
+        Receipts(
+            compact: lastCompactSignal, compactSeq: lastCompactSignalSeq,
+            turnEndSeq: events.last { $0.kind == .turnComplete }?.seq ?? 0)
+    }
 
 
     /// What to tell the reader when this run will never ask them anything.

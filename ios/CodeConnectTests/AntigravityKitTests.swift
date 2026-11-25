@@ -214,6 +214,28 @@ final class AntigravityKitTests: XCTestCase {
         XCTAssertTrue(needed(true, [false, false, false]), "no service")
     }
 
+    /// An Antigravity run's "/" offers model, effort, compact and diff: agy has no `/clear`. Compact's words name
+    /// Antigravity, and its wait ends with the turn agy runs `/compact` in (a turn end after the send), as Claude's ends
+    /// with Claude Code's own receipt; a turn end does not settle a Claude compact.
+    func testAntigravitysSlashRowsAndCompactAreItsOwn() {
+        XCTAssertEqual(SlashPalette.rows(for: .antigravity).map(\.command), ["model", "effort", "compact", "diff"])
+        XCTAssertEqual(SlashPalette.rows(for: .claude).map(\.command), ["model", "effort", "compact", "clear", "diff"])
+        XCTAssertNil(SlashPalette.content(for: "/cl", agent: .antigravity))
+        XCTAssertEqual(SlashPalette.content(for: "/cl", agent: .claude)?.rows.map(\.command), ["clear"])
+        XCTAssertEqual(
+            CompactPrompt.explanation(for: .antigravity),
+            "Ask Antigravity to compact its current context. Instructions are optional.")
+        XCTAssertEqual(CompactPrompt.placeholder(for: .antigravity), "What should Antigravity preserve?")
+
+        let compact = NativeCommand.compact(instructions: "")
+        let ended = SessionState.Receipts(compact: nil, compactSeq: 0, turnEndSeq: 12)
+        XCTAssertEqual(
+            compact.receiptPhase(from: ended, after: 10, agent: .antigravity),
+            .confirmed("Antigravity compacted its context."))
+        XCTAssertNil(compact.receiptPhase(from: ended, after: 12, agent: .antigravity), "no turn end after the send")
+        XCTAssertNil(compact.receiptPhase(from: ended, after: 10, agent: .claude), "Claude's waits for its receipt")
+    }
+
     /// Stop follows the hosted rule, and its sentences name Antigravity.
     func testAnAntigravityTurnIsStoppedAsAHostedOne() {
         XCTAssertNil(

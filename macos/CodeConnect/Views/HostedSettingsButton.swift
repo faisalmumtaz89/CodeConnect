@@ -47,7 +47,7 @@ struct HostedSettingsButton: View {
         HStack(spacing: 2) {
             modelButton
             if !settings.modes.isEmpty { modeButton }
-            if agent == .claude { moreButton }
+            if agent == .claude || agent == .antigravity { moreButton }
         }
         .coordinateSpace(.named(Self.space))
         .overlay(alignment: .bottomLeading) {
@@ -97,7 +97,10 @@ struct HostedSettingsButton: View {
     }
 
     private var moreButton: some View {
-        control(.more, id: "session.composer.more", label: "More", help: RunSettingWords.compactOrClear) {
+        control(
+            .more, id: "session.composer.more", label: "More",
+            help: agent == .claude ? RunSettingWords.compactOrClear : RunSettingWords.compactOnly
+        ) {
             Image(systemName: "ellipsis").font(.system(size: 11, weight: .semibold))
                 .frame(width: 12)
         }
@@ -141,11 +144,15 @@ struct HostedSettingsButton: View {
                     open = nil
                     compact()
                 }
-                PanelItem(
-                    index: 1, title: "Clear…", symbol: PanelSymbol.clear, destructive: true, id: "session.composer.clear"
-                ) {
-                    open = nil
-                    clear()
+                // agy has no clear: Antigravity's "…" holds Compact… alone.
+                if agent == .claude {
+                    PanelItem(
+                        index: 1, title: "Clear…", symbol: PanelSymbol.clear, destructive: true,
+                        id: "session.composer.clear"
+                    ) {
+                        open = nil
+                        clear()
+                    }
                 }
             }
         }

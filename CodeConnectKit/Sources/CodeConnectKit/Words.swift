@@ -133,6 +133,8 @@ public enum SessionWords {
 public enum RunSettingWords {
     public static let permissionMode = "Permission mode"
     public static let compactOrClear = "Compact or clear the context"
+    /// An Antigravity run's "…": agy has no clear.
+    public static let compactOnly = "Compact the context"
 }
 
 /// An approval card: who asks for what, its answers, and what a Codex edit

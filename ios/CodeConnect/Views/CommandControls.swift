@@ -124,7 +124,7 @@ struct CompactSheet: View {
             VStack(spacing: 0) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: CC.space.md) {
-                        Text(CompactPrompt.explanation)
+                        Text(CompactPrompt.explanation())
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -141,7 +141,7 @@ struct CompactSheet: View {
                         CCCard(contentColumn: false) {
                             CCField(
                                 label: CompactPrompt.fieldLabel, text: $instructions,
-                                placeholder: CompactPrompt.placeholder,
+                                placeholder: CompactPrompt.placeholder(),
                                 submitLabel: .done, labelOnContentColumn: false,
                                 onSubmit: { apply() })
                         }
