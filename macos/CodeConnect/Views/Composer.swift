@@ -128,6 +128,8 @@ private struct Composer: View {
     private var summary: SessionSummary? { model.shownSummary(for: key) }
     private var isCodex: Bool { summary?.isCodex == true }
     private var blocked: String? { model.sendBlockedReason(for: key, draft: kept.reply) }
+    /// Why the run cannot be talked to now: what blocks a send, except the files, which hold back only the message.
+    private var runBlocked: String? { blocked == model.filesBlockedReason(for: key) ? nil : blocked }
     private var computer: String { HostDevice.current.computer("the computer", named: model.machineName) }
     private var busy: Bool { sending || running?.phase.busy == true }
 
@@ -318,14 +320,14 @@ private struct Composer: View {
             case .hostedLive(let settings):
                 HostedSettingsButton(
                     model: model, key: key, agent: summary?.agent ?? .claude, settings: settings,
-                    blocked: blocked, open: $panel, chose: takeOpener, compact: { compact(prefill: "") },
+                    blocked: runBlocked, open: $panel, chose: takeOpener, compact: { compact(prefill: "") },
                     clear: {
                         opener = nil
                         clearing = true
                     },
                     confirmMode: { confirmingMode = $0 },
                     box: CGRect(x: InputBoxLayout.barInset - controls.minX, y: 0, width: rowWidth, height: 0))
-                .disabled(blocked != nil || busy)
+                .disabled(runBlocked != nil || busy)
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { controls = $0 }
                 #if DEBUG
                     .task {
@@ -415,8 +417,7 @@ private struct Composer: View {
             return Line(text: outcome.text, tone: outcome.tone.composeTone)
         }
         // Why the files hold the message back stands under them, not here as well.
-        let standing = blocked != nil && blocked == model.filesBlockedReason(for: key)
-            ? nil : model.standingNote(for: key, draft: kept.reply)
+        let standing = blocked != nil && runBlocked == nil ? nil : model.standingNote(for: key, draft: kept.reply)
         if let kit = model.outcomeNote(for: key, lastSend: result) ?? standing {
             return Line(text: kit.text, tone: kit.tone)
         }
