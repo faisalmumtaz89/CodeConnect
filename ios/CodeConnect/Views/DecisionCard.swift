@@ -224,10 +224,9 @@ struct DecisionCardView: View {
                 // Its own `Come back to this` rides in the bar above instead, at
                 // every size, because that one is a queue control and not an
                 // answer.
-                if isClaudeCard,
-                    Self.subordinateControlsShown(
-                        isAccessibilitySize: typeSize.isAccessibilitySize,
-                        isActionable: isActionable)
+                if Self.footerHoldsSubordinates(
+                    agent: sessionAgent, isAccessibilitySize: typeSize.isAccessibilitySize,
+                    isActionable: isActionable)
                 {
                     subordinateControls
                 }
@@ -1327,6 +1326,12 @@ struct DecisionCardView: View {
     /// `isActionable` the view computes, matching every other surface's methodology.
     static func subordinateControlsShown(isAccessibilitySize: Bool, isActionable: Bool) -> Bool {
         isAccessibilitySize && isActionable
+    }
+
+    /// Whether the card's footer holds `subordinateControls` at this size: for every card whose action bar holds them
+    /// at the other sizes, so any agent but Codex, whose own bar keeps `Come back to this` at every size.
+    static func footerHoldsSubordinates(agent: AgentKind?, isAccessibilitySize: Bool, isActionable: Bool) -> Bool {
+        agent != .codex && subordinateControlsShown(isAccessibilitySize: isAccessibilitySize, isActionable: isActionable)
     }
 
     /// Whether the card draws **only** the queue control and no answer. True for
