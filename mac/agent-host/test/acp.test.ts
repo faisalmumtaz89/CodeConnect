@@ -3,7 +3,7 @@
 // its permission requests, its end).
 import { afterAll, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { type Ccd, cleanup, goldenLines, open, runDir, startHost, stubLog, waitFor, writeAgy } from './rig.ts';
 
@@ -41,7 +41,8 @@ test('a start initializes agy at version 1, opens a session in the folder with t
   expect(outcome.initialize?.models.length).toBe(5);
   const permission = await ccd.line('the permission request', (line) => line.type === 'permission');
   const [first] = stubLog(dir);
-  expect(first).toStrictEqual({ argv: ['acp'], cwd: work });
+  // agy's own reading of its folder is the real path, as the system resolves a temporary folder's symlink (/var).
+  expect(first).toStrictEqual({ argv: ['acp'], cwd: realpathSync(work) });
   const [initialize, session, prompt] = stdin(dir);
   expect(initialize.method).toBe('initialize');
   expect(initialize.params).toStrictEqual({
