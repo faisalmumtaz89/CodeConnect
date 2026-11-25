@@ -5,6 +5,19 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.26
 
+- On the Mac, Antigravity is an agent you can start beside Claude Code and Codex, on a Mac where Google's Antigravity
+  CLI (`agy`) is installed.
+- On the Mac, choose an Antigravity session's model, thinking level and mode when you start it and in the reply bar,
+  from Antigravity's own lists.
+- On the Mac, Settings › Accounts shows whether Antigravity is signed in and on which plan, with Sign In… (in your
+  browser) and Sign Out….
+- On the Mac, Set Up asks for your attention only when none of Claude Code, Codex and Antigravity can start: one agent
+  is enough.
+- On the Mac, an Antigravity session shows its context in the reply bar, and "/" offers its model, effort, Compact
+  and diff.
+- On the Mac, an Antigravity session sends and reads messages to and from your other sessions, and reads the files you
+  send with a message without asking, as the other agents do.
+
 ## CodeConnect 0.19.25
 
 - On the Mac and Linux, CodeConnect's background service starts much faster with a long history: with a million
