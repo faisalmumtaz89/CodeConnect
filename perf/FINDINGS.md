@@ -45,7 +45,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
   2. Switch hot-path queries in `store.rs` (`append_event`, `append_host_message`, `events_after`, `events_before`, `max_seq`, `device_lookup`, `list_sessions`, `sessions_snapshot`, etc.) from `conn.prepare` to `conn.prepare_cached`.
 - **Expected gain:** **-60% to -80% `sessions_rpc` latency** at 50 sessions (`14 ms -> ~2–4 ms`), major drop in `reconnect_churn` CPU/latency/wakeups, fewer `spawn_blocking` threads.
 - **Risk:** Low (pure read batching; exact same `SessionSummary` output; add unit tests verifying snapshot equivalence).
-- **Status:** `todo`
+- **Status:** `done` (`concurrent_50` `sessions_rpc` `-76%`, wakeups `-32%`; `burst` CPU `-10%`; `reconnect_churn` `-21%` latency; see `perf/CHANGELOG.md`)
 
 ### F4. Double JSON parse/serialize in WebSocket `subscribe` replay & `history` paging + unbounded per-page memory
 - **Location:** `mac/ccd/src/store.rs:1675-1728`; `mac/ccd/src/ws_server.rs:46, 1754-1788, 1840-1910`

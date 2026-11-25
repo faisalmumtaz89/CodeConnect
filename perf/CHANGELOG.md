@@ -32,3 +32,19 @@ Each entry corresponds to one logical commit on `perf/baseline-and-optimizations
   - `burst` throughput: `924.66 ev/s` -> **`1,049.88 ev/s`** (**+13.5%**)
   - `burst` `relay_p50_ms` / `p95`: `810.53 / 957.99 ms` -> **`681.59 / 793.54 ms`** (**-15.9% / -17.2%**)
   - `concurrent_10` CPU: `1.35%` -> **`1.27%`** (**-5.9%**)
+
+---
+
+## F3 — Batched `Store::sessions_snapshot` + `prepare_cached` for SQLite hot paths
+
+- **Files:** `mac/ccd/src/store.rs`, `mac/ccd/src/db.rs`, `mac/ccd/src/state.rs`
+- **Change:**
+  - Collapsed `Daemon::sessions()` (~150–200 sequential `spawn_blocking` hops and SQLite queries at N=50) into a single `Store::sessions_snapshot` blocking read holding one reader connection (single `run_hosts LEFT JOIN accounts` query for switching/accounts/models, single `GROUP BY` query for `max_seq`, SQL-prefiltered `INSTR(...)` model receipt lookup, and inline cached queries for open cards and exited relaunchables).
+  - Switched hot-path SQLite statements (`append_in_tx`, `events_after`, `events_before`, `max_seq`, `filed_event`, `count_events`, `list_sessions`, `device_by_token_hash`, `device_is_active`, `sessions_snapshot`) from `prepare`/`query_row`/`execute` to `prepare_cached`.
+- **Before vs After (`x86_64-unknown-linux-musl`, 3 runs median, vs baseline / previous step F2):**
+  - `concurrent_50` `sessions_rpc_p50_ms` / `p95`: `13.94 / 16.99 ms` -> **`3.34 / 3.87 ms`** (**-76.0% / -77.2%**, **4.2× faster!**)
+  - `concurrent_10` `sessions_rpc_p50_ms`: `4.49 ms` -> **`1.05 ms`** (**-76.6%**, **4.3× faster!**)
+  - `concurrent_50` Wakeups/s: `473.4/s` -> **`320.0/s`** (**-32.4%**); CPU: `6.43%` (F2: `5.41%`) -> **`4.93%`** (**-23.3%** vs baseline)
+  - `concurrent_10` Wakeups/s: `138.4/s` -> **`104.6/s`** (**-24.4%**); CPU: `1.35%` -> **`1.12%`** (**-17.0%**)
+  - `burst` CPU: `72.73%` (F2: `73.27%`) -> **`65.38%`** (**-10.1%**); `relay_p50_ms`: `810.5 ms` -> **`614.4 ms`** (**-24.2%**); throughput: `924.7` -> **`1,072.1 ev/s`** (**+15.9%**)
+  - `reconnect_churn` `cycle_p50_ms` / `p95`: `8.91 / 11.85 ms` -> **`7.04 / 9.22 ms`** (**-21.0% / -22.2%**); CPU: `61.34%` -> **`54.37%`** (**-11.4%**); Wakeups/s: `11,248` -> **`8,110/s`** (**-27.9%**)

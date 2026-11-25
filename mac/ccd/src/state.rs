@@ -3390,24 +3390,8 @@ impl Daemon {
     /// before. This is a *display*: it is re-read continuously, it resolves itself on the
     /// next listing, and nothing is actuated from it.
     pub async fn sessions(&self) -> Result<Vec<SessionSummary>> {
-        // A run moving to another account reads live throughout (306 Slice E, S1). Its mark is read before its row:
-        // the mark goes only once the run is live again, so a row read after it is never an earlier one unmarked.
-        let switching: HashMap<String, i64> = self.db.switching_runs().await?.into_iter().collect();
-        let accounts: HashMap<String, crate::store::RecordedAccount> =
-            self.db.run_accounts().await?.into_iter().collect();
-        let rows = self.db.list_sessions().await?;
-        // Read up front, before the lock is taken, one query per row.
-        let mut last_seqs: HashMap<String, u64> = HashMap::with_capacity(rows.len());
-        for row in &rows {
-            last_seqs.insert(
-                row.session_uid.clone(),
-                self.db.max_seq(row.session_uid.clone()).await?,
-            );
-        }
-        // And the request event of every open card, one query per card on the
-        // dedup index: the seq its pending ref names, and a Codex card's turn. The
-        // cards are snapshotted first, so one raised after the snapshot is listed in
-        // `blocked_on` without a ref this time; its event reaches the phone live.
+        // Snapshot open cards first so the batched store read resolves their
+        // request events on the dedup index in the same blocking call.
         let cards: Vec<(ApprovalId, Source)> = {
             let inner = self.inner.lock().await;
             inner
@@ -3416,17 +3400,16 @@ impl Daemon {
                 .map(|(id, entry)| (id.clone(), request_event_source(entry)))
                 .collect()
         };
-        let mut requests: HashMap<ApprovalId, (u64, Option<String>)> =
-            HashMap::with_capacity(cards.len());
-        for ((uid, request_id), source) in cards {
-            let filed = self
-                .db
-                .filed_event(uid.clone(), source, format!("perm:{request_id}"))
-                .await?;
-            if let Some(filed) = filed {
-                requests.insert((uid, request_id), filed);
-            }
-        }
+        let snapshot = self.db.sessions_snapshot(cards).await?;
+        let switching = snapshot.switching;
+        let accounts = snapshot.accounts;
+        let rows = snapshot.rows;
+        let last_seqs = snapshot.last_seqs;
+        let requests = snapshot.requests;
+        let mut hosted_models = snapshot.hosted_models;
+        let mut model_receipts = snapshot.model_receipts;
+        let relaunchable = snapshot.relaunchable;
+
         // A live run CodeConnect started offers its settings: a Claude run's from its start's
         // answer, with the one its model fact names marked (its newest receipt read for that
         // here); a Codex run's from its start's check and the model it started on, its model
@@ -3440,7 +3423,7 @@ impl Daemon {
         let mut codex_ended: Vec<(String, protocol::event::RunMenus)> = Vec::new();
         for row in &rows {
             let live = row.lifecycle == Lifecycle::Live;
-            let Some(models) = self.db.hosted_models(row.session_uid.clone()).await? else {
+            let Some(models) = hosted_models.remove(&row.session_uid) else {
                 continue;
             };
             match row.agent {
@@ -3448,10 +3431,7 @@ impl Daemon {
                     if live {
                         menus.insert(row.session_uid.clone(), crate::claude_host::menus(&models));
                     }
-                    let receipt = self
-                        .db
-                        .newest_model_receipt(row.session_uid.clone())
-                        .await?;
+                    let receipt = model_receipts.remove(&row.session_uid);
                     choosing.push((row.session_uid.clone(), models, receipt));
                 }
                 protocol::agent::AgentKind::Codex if live => {
@@ -3462,15 +3442,6 @@ impl Daemon {
                     codex_ended.push((row.session_uid.clone(), crate::codex_host::menus(&models)));
                 }
                 protocol::agent::AgentKind::Unsupported(_) => {}
-            }
-        }
-        // An ended run the person's next message relaunches, of either agent.
-        let mut relaunchable: HashSet<String> = HashSet::new();
-        for row in &rows {
-            if row.lifecycle == Lifecycle::Exited
-                && self.db.relaunchable(row.session_uid.clone()).await?
-            {
-                relaunchable.insert(row.session_uid.clone());
             }
         }
         let inner = self.inner.lock().await;

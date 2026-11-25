@@ -107,6 +107,7 @@ macro_rules! db_ops {
 db_ops! {
     /// Append one fact. `None` means it was a duplicate.
     fn append_event(pending: PendingEvent) -> Option<Event>;
+    #[cfg_attr(not(test), allow(dead_code))]
     fn max_seq(session_uid: String) -> u64;
     fn filed_event(session_uid: String, source: Source, source_event_id: String) -> Option<(u64, Option<String>)>;
     fn session_facts(session_uid: String) -> protocol::facts::SessionFacts;
@@ -115,6 +116,7 @@ db_ops! {
     fn get_session(session_uid: String) -> Option<SessionRow>;
     fn find_session(reference: String) -> Option<SessionRow>;
     fn list_sessions() -> Vec<SessionRow>;
+    fn sessions_snapshot(cards: Vec<((String, String), Source)>) -> crate::store::SessionsSnapshot;
     fn projects() -> Vec<crate::store::ProjectRow>;
     fn folder_trust(path: String) -> Option<protocol::host::Trust>;
     fn set_folder_trust(path: String, trust: protocol::host::Trust) -> ();
@@ -289,6 +291,7 @@ impl Db {
         self.run(|store| store.codex_live_runs()).await
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn relaunchable(&self, session_uid: String) -> Result<bool> {
         self.run(move |store| store.relaunchable(&session_uid))
             .await
@@ -838,10 +841,12 @@ impl Db {
             .await
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn run_accounts(&self) -> Result<Vec<(String, crate::store::RecordedAccount)>> {
         self.run(move |store| store.run_accounts()).await
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn switching_runs(&self) -> Result<Vec<(String, i64)>> {
         self.run(move |store| store.switching_runs()).await
     }

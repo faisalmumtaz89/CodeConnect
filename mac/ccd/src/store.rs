@@ -1263,6 +1263,18 @@ pub enum MutationClaim {
 /// (`None` once the account is removed).
 pub type RecordedAccount = Option<(String, Option<String>)>;
 
+/// Batched read snapshot for [`crate::state::Daemon::sessions`].
+pub struct SessionsSnapshot {
+    pub switching: std::collections::HashMap<String, i64>,
+    pub accounts: std::collections::HashMap<String, RecordedAccount>,
+    pub rows: Vec<SessionRow>,
+    pub last_seqs: std::collections::HashMap<String, u64>,
+    pub requests: std::collections::HashMap<(String, String), (u64, Option<String>)>,
+    pub hosted_models: std::collections::HashMap<String, Vec<serde_json::Value>>,
+    pub model_receipts: std::collections::HashMap<String, String>,
+    pub relaunchable: std::collections::HashSet<String>,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         if let Some(parent) = path.parent() {
@@ -1591,11 +1603,9 @@ impl Store {
 
     pub fn max_seq(&self, session_uid: &str) -> Result<u64> {
         let conn = self.read();
-        let seq: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1",
-            params![session_uid],
-            |row| row.get(0),
-        )?;
+        let mut stmt =
+            conn.prepare_cached("SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1")?;
+        let seq: i64 = stmt.query_row(params![session_uid], |row| row.get(0))?;
         Ok(seq as u64)
     }
 
@@ -1604,7 +1614,7 @@ impl Store {
     /// ([`protocol::ipc::is_mail_nudge`]).
     pub fn codex_turn_messages(&self, session_uid: &str, turn_id: &str) -> Result<(bool, usize)> {
         let conn = self.read();
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT kind, payload FROM events
               WHERE session_uid = ?1 AND source = ?2 AND turn_id = ?3 AND kind IN (?4, ?5)",
         )?;
@@ -1646,10 +1656,12 @@ impl Store {
         source_event_id: &str,
     ) -> Result<Option<(u64, Option<String>)>> {
         let conn = self.read();
-        let filed: Option<(i64, Option<String>)> = conn
+        let mut stmt = conn.prepare_cached(
+            "SELECT seq, turn_id FROM events
+              WHERE session_uid = ?1 AND source = ?2 AND source_event_id = ?3",
+        )?;
+        let filed: Option<(i64, Option<String>)> = stmt
             .query_row(
-                "SELECT seq, turn_id FROM events
-                  WHERE session_uid = ?1 AND source = ?2 AND source_event_id = ?3",
                 params![session_uid, source.as_str(), source_event_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1664,11 +1676,9 @@ impl Store {
     /// found either a lost event or a burnt seq.
     pub fn count_events(&self, session_uid: &str) -> Result<u64> {
         let conn = self.read();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM events WHERE session_uid = ?1",
-            params![session_uid],
-            |row| row.get(0),
-        )?;
+        let mut stmt =
+            conn.prepare_cached("SELECT COUNT(*) FROM events WHERE session_uid = ?1")?;
+        let count: i64 = stmt.query_row(params![session_uid], |row| row.get(0))?;
         Ok(count as u64)
     }
 
@@ -1679,7 +1689,7 @@ impl Store {
         limit: u32,
     ) -> Result<Vec<Event>> {
         let conn = self.read();
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT seq, session_id, ts, kind, payload, source, source_event_id, turn_id, item_id
                FROM events
               WHERE session_uid = ?1 AND seq > ?2
@@ -1706,7 +1716,7 @@ impl Store {
         limit: u32,
     ) -> Result<Vec<Event>> {
         let conn = self.read();
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT seq, session_id, ts, kind, payload, source, source_event_id, turn_id, item_id
                FROM events
               WHERE session_uid = ?1 AND seq < ?2
@@ -2657,6 +2667,7 @@ impl Store {
     /// relaunches ([`relaunchable_in`] for Codex, [`claude_relaunchable_in`] for Claude; a uid is
     /// in one table only): what the fleet reports `relaunchable` for, and a Codex run's
     /// `bound_not_started`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn relaunchable(&self, session_uid: &str) -> Result<bool> {
         let conn = self.read();
         Ok(relaunchable_in(&conn, session_uid)?.is_some()
@@ -3088,10 +3099,11 @@ impl Store {
     }
 
     /// Every run with a switch of account, and where it stands.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn switching_runs(&self) -> Result<Vec<(String, i64)>> {
         let conn = self.read();
         let mut stmt = conn
-            .prepare("SELECT session_uid, switching FROM run_hosts WHERE switching IS NOT NULL")?;
+            .prepare_cached("SELECT session_uid, switching FROM run_hosts WHERE switching IS NOT NULL")?;
         let runs = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -3116,6 +3128,7 @@ impl Store {
 
     /// Every run CodeConnect started, with the account it records: `None` for its agent's Default, `Some(id, label)`
     /// for an account, and a label of `None` for an account since removed.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn run_accounts(&self) -> Result<Vec<(String, RecordedAccount)>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
@@ -3163,7 +3176,7 @@ impl Store {
     /// not knowing the name of the second table, not by anything written here.
     pub fn list_sessions(&self) -> Result<Vec<SessionRow>> {
         let conn = self.read();
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT session_uid, session_id, cwd,
                     claude_session_id, transcript_path, lifecycle, created_at, updated_at,
                     agent, codex_thread_id
@@ -3175,6 +3188,146 @@ impl Store {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Everything [`crate::state::Daemon::sessions`] reads from SQLite, fetched in
+    /// one batched pass on a single reader connection (1 `spawn_blocking` hop
+    /// instead of ~3–4N sequential hops).
+    pub fn sessions_snapshot(
+        &self,
+        cards: &[((String, String), Source)],
+    ) -> Result<SessionsSnapshot> {
+        let conn = self.read();
+
+        // 1. Read run_hosts + accounts first (before all_sessions, preserving
+        //    the `switching` ordering invariant of Daemon::sessions).
+        let mut switching = std::collections::HashMap::new();
+        let mut accounts = std::collections::HashMap::new();
+        let mut hosted_models = std::collections::HashMap::new();
+        {
+            let mut stmt = conn.prepare_cached(
+                "SELECT h.session_uid, h.switching, h.account_id, a.label,
+                        json_extract(h.initialize, '$.models')
+                   FROM run_hosts AS h LEFT JOIN accounts AS a ON a.id = h.account_id",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let uid: String = row.get(0)?;
+                if let Some(sw) = row.get::<_, Option<i64>>(1)? {
+                    switching.insert(uid.clone(), sw);
+                }
+                let acct_id: Option<String> = row.get(2)?;
+                let acct_label: Option<String> = row.get(3)?;
+                accounts.insert(uid.clone(), acct_id.map(|id| (id, acct_label)));
+                if let Some(models_json) = row.get::<_, Option<String>>(4)? {
+                    let parsed: Vec<serde_json::Value> = serde_json::from_str(&models_json)
+                        .context("a hosted run's models")?;
+                    hosted_models.insert(uid, parsed);
+                }
+            }
+        }
+
+        // 2. Fleet rows.
+        let rows = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT session_uid, session_id, cwd,
+                        claude_session_id, transcript_path, lifecycle, created_at, updated_at,
+                        agent, codex_thread_id
+                   FROM all_sessions ORDER BY created_at ASC, session_uid ASC",
+            )?;
+            let mapped = stmt.query_map([], session_row_from)?;
+            let mut out = Vec::new();
+            for row in mapped {
+                out.push(row?);
+            }
+            out
+        };
+
+        // 3. Max seq per session in one GROUP BY over the (session_uid, seq) PK index.
+        let mut last_seqs = std::collections::HashMap::with_capacity(rows.len());
+        {
+            let mut stmt = conn
+                .prepare_cached("SELECT session_uid, MAX(seq) FROM events GROUP BY session_uid")?;
+            let mut seq_rows = stmt.query([])?;
+            while let Some(row) = seq_rows.next()? {
+                let uid: String = row.get(0)?;
+                let seq: i64 = row.get(1)?;
+                last_seqs.insert(uid, seq as u64);
+            }
+        }
+
+        // 4. Open card request events on the dedup index.
+        let mut requests = std::collections::HashMap::with_capacity(cards.len());
+        if !cards.is_empty() {
+            let mut stmt = conn.prepare_cached(
+                "SELECT seq, turn_id FROM events
+                  WHERE session_uid = ?1 AND source = ?2 AND source_event_id = ?3",
+            )?;
+            for ((uid, request_id), source) in cards {
+                let source_event_id = format!("perm:{request_id}");
+                let filed: Option<(i64, Option<String>)> = stmt
+                    .query_row(
+                        params![uid, source.as_str(), source_event_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((seq, turn_id)) = filed {
+                    requests.insert((uid.clone(), request_id.clone()), (seq as u64, turn_id));
+                }
+            }
+        }
+
+        // 5. Newest model receipt for hosted Claude runs (pre-filtered in SQL to avoid
+        //    deserializing unrelated user_message payloads).
+        let mut model_receipts = std::collections::HashMap::new();
+        {
+            let mut stmt = conn.prepare_cached(
+                "SELECT seq, session_id, ts, kind, payload, source, source_event_id, turn_id, item_id
+                   FROM events
+                  WHERE session_uid = ?1 AND kind = ?2
+                    AND (INSTR(payload, 'Set model to ') > 0 OR INSTR(payload, 'Kept model as ') > 0)
+                  ORDER BY seq DESC",
+            )?;
+            for row in &rows {
+                if row.agent != AgentKind::Claude || !hosted_models.contains_key(&row.session_uid) {
+                    continue;
+                }
+                let mut ev_rows = stmt.query(params![
+                    row.session_uid,
+                    EventKind::UserMessage.as_str()
+                ])?;
+                while let Some(ev_row) = ev_rows.next()? {
+                    if let Some(fact) =
+                        protocol::facts::model_fact(&event_from_row(&row.session_uid, ev_row)?)
+                    {
+                        model_receipts.insert(row.session_uid.clone(), fact.value);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 6. Relaunchable check for exited runs on the same connection.
+        let mut relaunchable = std::collections::HashSet::new();
+        for row in &rows {
+            if row.lifecycle == Lifecycle::Exited
+                && (relaunchable_in(&conn, &row.session_uid)?.is_some()
+                    || claude_relaunchable_in(&conn, &row.session_uid)?.is_some())
+            {
+                relaunchable.insert(row.session_uid.clone());
+            }
+        }
+
+        Ok(SessionsSnapshot {
+            switching,
+            accounts,
+            rows,
+            last_seqs,
+            requests,
+            hosted_models,
+            model_receipts,
+            relaunchable,
+        })
     }
 
     /// Remove exactly one ended run, by uid.
@@ -3955,15 +4108,14 @@ impl Store {
     /// now-valid token, and no caller can forget to check `revoked_at`.
     pub fn device_by_token_hash(&self, token_hash: &str) -> Result<TokenAuth> {
         let conn = self.read();
-        let row = conn
-            .query_row(
-                "SELECT device_id, name, created_at, last_seen_at, revoked_at,
-                        tailnet_node, paired_before_nodes
-                   FROM devices
-                  WHERE token_hash = ?1",
-                params![token_hash],
-                device_row_from,
-            )
+        let mut stmt = conn.prepare_cached(
+            "SELECT device_id, name, created_at, last_seen_at, revoked_at,
+                    tailnet_node, paired_before_nodes
+               FROM devices
+              WHERE token_hash = ?1",
+        )?;
+        let row = stmt
+            .query_row(params![token_hash], device_row_from)
             .optional()?;
         Ok(match row {
             Some(device) if device.revoked_at.is_some() => TokenAuth::Revoked,
@@ -3979,11 +4131,10 @@ impl Store {
     /// effect on sockets that are *already open*, not only on the next hello.
     pub fn device_is_active(&self, device_id: &str) -> Result<bool> {
         let conn = self.read();
-        let count: i64 = conn.query_row(
+        let mut stmt = conn.prepare_cached(
             "SELECT COUNT(*) FROM devices WHERE device_id = ?1 AND revoked_at IS NULL",
-            params![device_id],
-            |row| row.get(0),
         )?;
+        let count: i64 = stmt.query_row(params![device_id], |row| row.get(0))?;
         Ok(count == 1)
     }
 
@@ -7033,20 +7184,22 @@ fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Resul
     // the Claude table alone it reads a live Codex run as gone and drops the
     // event as if it were a dedup miss — silently, because `Ok(None)` is
     // exactly what a duplicate returns.
-    let known: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM all_sessions WHERE session_uid = ?1)",
-        params![pending.session_uid],
-        |row| row.get(0),
-    )?;
+    let known: bool = {
+        let mut stmt = tx
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM all_sessions WHERE session_uid = ?1)")?;
+        stmt.query_row(params![pending.session_uid], |row| row.get(0))?
+    };
     if !known {
         return Ok(None);
     }
 
     if let Some(source_event_id) = &pending.source_event_id {
-        let existing: Option<i64> = tx
-            .query_row(
+        let existing: Option<i64> = {
+            let mut stmt = tx.prepare_cached(
                 "SELECT seq FROM events
                   WHERE session_uid = ?1 AND source = ?2 AND source_event_id = ?3",
+            )?;
+            stmt.query_row(
                 params![
                     pending.session_uid,
                     pending.source.as_str(),
@@ -7054,24 +7207,27 @@ fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Resul
                 ],
                 |row| row.get(0),
             )
-            .optional()?;
+            .optional()?
+        };
         if existing.is_some() {
             return Ok(None);
         }
     }
 
-    let next: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE session_uid = ?1",
-        params![pending.session_uid],
-        |row| row.get(0),
-    )?;
+    let next: i64 = {
+        let mut stmt =
+            tx.prepare_cached("SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE session_uid = ?1")?;
+        stmt.query_row(params![pending.session_uid], |row| row.get(0))?
+    };
 
     let payload = serde_json::to_string(&pending.payload)?;
-    tx.execute(
-        "INSERT INTO events(session_uid, session_id, seq, ts, kind, payload, source,
-                            source_event_id, turn_id, item_id)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO events(session_uid, session_id, seq, ts, kind, payload, source,
+                                source_event_id, turn_id, item_id)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?;
+        stmt.execute(params![
             pending.session_uid,
             pending.session_id,
             next,
@@ -7082,8 +7238,8 @@ fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Resul
             pending.source_event_id,
             pending.turn_id,
             pending.item_id,
-        ],
-    )?;
+        ])?;
+    }
 
     Ok(Some(Event {
         seq: next as u64,
