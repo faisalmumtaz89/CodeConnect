@@ -425,7 +425,8 @@ public final class SessionStarter {
         // Answered, its files' bytes are let go: a start is kept for the app's life. One asking about the folder keeps
         // them, as the answer sends them again.
         if case .needsTrust = outcome { return }
-        starts[requestID]?.files = starts[requestID]?.files.map { $0.withoutBytes() } ?? []
+        // Read, then written: one expression doing both would overlap its accesses to `starts`.
+        if let files = starts[requestID]?.files { starts[requestID]?.files = files.map { $0.withoutBytes() } }
     }
 
     /// The reader stops this phone retrying an unanswered start. Kept so a late
