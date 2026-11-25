@@ -1,18 +1,18 @@
 // An Antigravity run: `agy acp`, the Agent Client Protocol over its stdio (JSON-RPC 2.0, one message per line), in
 // the host's process group as claude is. The start initializes it (protocol version 1; no file system or terminal
 // offered, so agy uses its own) and opens one session in the run's folder with CodeConnect's mail server, or, for a
-// relaunch (`resume`), resumes the run's session with that server again, only when agy advertises session/resume;
-// its outcome is `done` once the session is open, `refused` with the reason otherwise. Every notification agy sends,
-// and the reply to each prompt, goes to ccd whole as `acp`, with the turn it belongs to: the uuid of the command whose
-// prompt is running (the start's for its own). A `say`, or ccd's `wake` for the run's mail, is one more prompt, queued
-// and `done` at once, and sent once the one before has its reply, so prompts never overlap. An `interrupt` of the
-// running turn answers its open requests `cancelled`, withdrawing their cards, cancels the session's prompt and drops
-// the prompts queued after it; once the prompt's reply comes, its outcome is `done` with the reply's stopReason and the
-// uuids dropped. A permission request is held by its JSON-RPC id (its card named by the start's uuid and that id)
-// and sent as `permission`; ccd's answer picks the
-// request's own allow_once or reject_once option, and `done` follows once it is written to agy. `stop` answers every
-// request still open `cancelled`, withdrawing its card, cancels the session's prompt and ends agy's input; agy's end
-// is `exited`. Settings are refused: a later slice.
+// relaunch (`resume`), resumes the run's session with that server again, only when agy advertises session/resume; a
+// model the start names is set on the session (session/set_model). Its outcome is `done` once the session is open,
+// `refused` with the reason otherwise. Every notification agy sends, and the reply to each prompt, goes to ccd whole as
+// `acp`, with the turn it belongs to: the uuid of the command whose prompt is running (the start's for its own). A
+// `say`, or ccd's `wake` for the run's mail, is one more prompt, queued and `done` at once, and sent once the one
+// before has its reply, so prompts never overlap. An `interrupt` of the running turn answers its open requests
+// `cancelled`, withdrawing their cards, cancels the session's prompt and drops the prompts queued after it; once the
+// prompt's reply comes, its outcome is `done` with the reply's stopReason and the uuids dropped. A permission request
+// is held by its JSON-RPC id (its card named by the start's uuid and that id) and sent as `permission`; ccd's answer
+// picks the request's own allow_once or reject_once option, and `done` follows once it is written to agy. `stop`
+// answers every request still open `cancelled`, withdrawing its card, cancels the session's prompt and ends agy's
+// input; agy's end is `exited`. Settings changes are refused: a later slice.
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Unsequenced } from './link.ts';
@@ -144,6 +144,12 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
       const session = await call('session/new', opening);
       if (session.error) throw new Error(session.error.message ?? 'agy refused the session');
       sessionId = String(session.result?.sessionId);
+    }
+    // The model the app chose, set on the session before its first prompt.
+    const model = start.options.model;
+    if (model !== undefined) {
+      const set = await call('session/set_model', { sessionId, modelId: model });
+      if (set.error) throw new Error(set.error.message ?? `agy refused the model ${model}`);
     }
   })();
   opened.then(

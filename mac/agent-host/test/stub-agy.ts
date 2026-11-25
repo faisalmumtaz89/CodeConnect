@@ -2,7 +2,8 @@
 // speaks `agy acp`'s Agent Client Protocol over stdio as the CLI's own changelog and the ACP schema describe it: it
 // answers `initialize` with its script's protocol version, advertising session/resume unless its script says
 // `resume: false`, `session/new` with a session after a notification of its commands (which the host must hold until
-// the start's outcome), and `session/resume` with an empty result. At each `session/prompt` it writes its reply in
+// the start's outcome), `session/resume` with an empty result, and `session/set_model` with one, unless the model is
+// `no-such-model`, which it refuses. At each `session/prompt` it writes its reply in
 // two chunks, a tool call, then asks permission for it with allow_once and reject_once options; once answered it ends
 // the tool as the answer says, writes one more chunk and answers the prompt `end_turn`. A request answered
 // `cancelled` ends the prompt `cancelled`. It records its argv, its folder and every line it read; its input's end
@@ -32,6 +33,12 @@ for await (const text of createInterface({ input: process.stdin })) {
       id: message.id,
       result: { protocolVersion: script.version ?? 1, agentCapabilities: { loadSession: true, sessionCapabilities } },
     });
+  } else if (message.method === 'session/set_model') {
+    if (message.params.modelId === 'no-such-model') {
+      write({ id: message.id, error: { code: -32602, message: 'agy has no model no-such-model' } });
+    } else {
+      write({ id: message.id, result: {} });
+    }
   } else if (message.method === 'session/resume') {
     write({ id: message.id, result: {} });
   } else if (message.method === 'session/new') {

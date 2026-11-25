@@ -163,6 +163,38 @@ test('an agy that does not advertise session/resume refuses a relaunch, and noth
   expect(stdin(dir).map((message) => message.method)).toStrictEqual(['initialize']);
 }, 15_000);
 
+test('a start that names a model sets it on the session before its prompt; a model agy refuses refuses the start', async () => {
+  const dir = runDir();
+  const work = join(dir, 'work');
+  mkdirSync(work);
+  startHost(dir);
+  const ccd = await open(dir);
+  await ccd.attach(0, 1);
+  ccd.send({
+    ...antigravityStart, prompt: 'read the note',
+    options: { ...antigravityStart.options, cwd: work, claude_path: writeAgy(dir), model: 'gemini-3.1-flash-lite' },
+  });
+  expect(await ccd.line('the start outcome', (line) => line.type === 'outcome')).toMatchObject({ status: 'done' });
+  await ccd.line('the permission request', (line) => line.type === 'permission');
+  const methods = stdin(dir).map((message) => message.method);
+  expect(methods.slice(0, 4)).toStrictEqual(['initialize', 'session/new', 'session/set_model', 'session/prompt']);
+  expect(stdin(dir)[2].params).toStrictEqual({ sessionId: 'sess-1', modelId: 'gemini-3.1-flash-lite' });
+
+  const refused = runDir();
+  const there = join(refused, 'work');
+  mkdirSync(there);
+  startHost(refused);
+  const other = await open(refused);
+  await other.attach(0, 1);
+  other.send({
+    ...antigravityStart,
+    options: { ...antigravityStart.options, cwd: there, claude_path: writeAgy(refused), model: 'no-such-model' },
+  });
+  expect(await other.line('the start outcome', (line) => line.type === 'outcome')).toMatchObject({
+    status: 'refused', detail: 'agy has no model no-such-model',
+  });
+}, 15_000);
+
 test('an agy at another ACP version is refused at the start, with the version it speaks', async () => {
   const { ccd, outcome } = await run({ version: 2 });
   expect(outcome).toMatchObject({ status: 'refused', detail: 'agy speaks ACP version 2, not 1' });
