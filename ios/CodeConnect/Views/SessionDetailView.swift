@@ -1147,6 +1147,9 @@ struct SessionDetailView: View {
             // A session this phone just started with nothing to say yet opens
             // ready to type into.
             if route.focusComposer { composerFocused = true }
+            #if DEBUG
+                model.seedFixtureFiles(key)
+            #endif
         }
         .onDisappear {
             model.markReviewed(key)
@@ -1549,7 +1552,7 @@ struct SessionDetailView: View {
         let generation = model.connection.generation
         let sentAt = Date()
         Task {
-            let result = await model.send(text: text, to: key)
+            let result = await model.send(text: text, to: key, files: true)
             sending = false
             composeResult = result
             if case .indeterminate = result, !again {

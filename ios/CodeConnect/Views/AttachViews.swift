@@ -189,8 +189,8 @@ private struct AttachmentTile: View {
             .overlay { state }
             .overlay { shape.strokeBorder(edge, lineWidth: troubled ? 1.5 : CC.stroke.hairline) }
             .task(id: file.id) {
-                guard file.isImage, thumbnail == nil else { return }
-                thumbnail = await UIImage(data: file.data)?
+                guard file.isImage, thumbnail == nil, let data = file.data else { return }
+                thumbnail = await UIImage(data: data)?
                     .byPreparingThumbnail(ofSize: CGSize(width: Self.side * 3, height: Self.side * 3))
             }
             .accessibilityElement(children: .combine)
