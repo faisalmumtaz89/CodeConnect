@@ -91,6 +91,46 @@ pub fn outbound_h2(what: &str) -> Result<TlsConnector> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
+/// [`outbound_h2`], built when a push first needs it rather than at start: loading the platform
+/// trust store was most of a daemon's start and much of its idle memory, and a daemon may send
+/// nothing for hours. Pushes that come together wait for one build; a build that fails is not
+/// kept, so the next push tries again.
+#[derive(Clone)]
+pub struct LazyOutboundH2 {
+    what: &'static str,
+    built: Arc<tokio::sync::OnceCell<TlsConnector>>,
+}
+
+impl LazyOutboundH2 {
+    pub fn new(what: &'static str) -> Self {
+        Self {
+            what,
+            built: Arc::new(tokio::sync::OnceCell::new()),
+        }
+    }
+
+    /// **Test-only.** One already built, so a test's sender never reads the trust store.
+    #[cfg(test)]
+    pub fn built(connector: TlsConnector) -> Self {
+        Self {
+            what: "test",
+            built: Arc::new(tokio::sync::OnceCell::new_with(Some(connector))),
+        }
+    }
+
+    pub async fn get(&self) -> Result<TlsConnector> {
+        let what = self.what;
+        self.built
+            .get_or_try_init(|| async move {
+                tokio::task::spawn_blocking(move || outbound_h2(what))
+                    .await
+                    .context("loading the trust store")?
+            })
+            .await
+            .cloned()
+    }
+}
+
 /// The node's own MagicDNS name, without the trailing dot.
 ///
 /// `Self.DNSName` is authoritative and already fully qualified; deriving it
@@ -487,6 +527,17 @@ mod der {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The trust store is read on a push's first use, not before**, and once.
+    #[tokio::test]
+    async fn the_outbound_trust_store_is_built_on_first_use() {
+        let lazy = LazyOutboundH2::new("relay");
+        assert!(!lazy.built.initialized(), "built before anything needed it");
+        let shared = lazy.clone();
+        lazy.get().await.unwrap();
+        assert!(shared.built.initialized(), "a clone shares the one build");
+        shared.get().await.unwrap();
+    }
 
     #[test]
     fn hostnames_that_would_escape_the_tls_directory_are_refused() {
