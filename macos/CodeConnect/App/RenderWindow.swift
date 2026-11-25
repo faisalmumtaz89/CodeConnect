@@ -153,7 +153,7 @@
             return try? JSONDecoder().decode([FolderAnswer].self, from: Data(arguments[flag + 1].utf8))
         }
 
-        /// `-CC_SETUP_ROWS "service=missing:<sentence>;claude=ready:Ready;codex=checking;path=missing:<sentence>"`: the
+        /// `-CC_SETUP_ROWS "service=missing:<sentence>;claude=ready:Ready;codex=checking;antigravity=…;path=missing:<sentence>"`: the
         /// checklist opens with these answers, settled, and runs nothing.
         static var setupRows: [String: Setup.Row]? {
             guard let text = UserDefaults.standard.string(forKey: "CC_SETUP_ROWS") else { return nil }

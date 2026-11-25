@@ -23,6 +23,7 @@ struct SetupView: View {
                 row("Background service", setup.service, id: "setup.service")
                 row("Claude Code", setup.agent(.claude, in: machines), id: "setup.claude")
                 row("Codex", setup.agent(.codex, in: machines), id: "setup.codex")
+                row("Antigravity", setup.agent(.antigravity, in: machines), id: "setup.antigravity")
                 commandLine
             }
             .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))

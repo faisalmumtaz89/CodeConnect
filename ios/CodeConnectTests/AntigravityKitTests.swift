@@ -200,6 +200,20 @@ final class AntigravityKitTests: XCTestCase {
             "handed straight to Claude")
     }
 
+    /// Setup asks for the person only when the service is missing or no agent is ready (the owner's rule): a computer
+    /// with only Claude Code, only Codex or only Antigravity is fine; one with none, or no service, is not; an agent
+    /// still being checked is not missing.
+    func testSetupNeedsThePersonOnlyWhenNoAgentIsReady() {
+        let needed = { (service: Bool, agents: [Bool]) in
+            SetupAttention.needed(serviceMissing: service, agentsMissing: agents)
+        }
+        XCTAssertFalse(needed(false, [false, true, true]), "Claude Code only")
+        XCTAssertFalse(needed(false, [true, false, true]), "Codex only")
+        XCTAssertFalse(needed(false, [true, true, false]), "Antigravity only")
+        XCTAssertTrue(needed(false, [true, true, true]), "none")
+        XCTAssertTrue(needed(true, [false, false, false]), "no service")
+    }
+
     /// Stop follows the hosted rule, and its sentences name Antigravity.
     func testAnAntigravityTurnIsStoppedAsAHostedOne() {
         XCTAssertNil(
