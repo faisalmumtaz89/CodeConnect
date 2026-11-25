@@ -213,7 +213,8 @@ extension AppModel {
 }
 
 /// **A sent message's files**, from its stored text: the daemon gives the agent each file's path on a line after
-/// "Attached:", after the typed words, and the conversation shows them as files again.
+/// "Attached:", after the typed words, and the conversation shows them as files again. A path is the daemon's
+/// `<home>/uploads/<run>/<upload>/<name>`, where home is the computer's CodeConnect folder, wherever that is.
 public enum AttachedFiles {
     /// The typed words and the files' paths, or the text as it is with no paths when it carries none.
     public static func split(_ text: String) -> (words: String, paths: [String]) {
@@ -227,10 +228,17 @@ public enum AttachedFiles {
             return (text, [])
         }
         let paths = text[range.upperBound...].split(separator: "\n").map(String.init)
-        guard !paths.isEmpty, paths.allSatisfy({ $0.hasPrefix("/") && $0.contains("/.codeconnect/uploads/") }) else {
+        guard !paths.isEmpty, paths.allSatisfy(isUpload) else {
             return (text, [])
         }
         return (String(text[..<range.lowerBound]), paths)
+    }
+
+    /// An absolute path whose last four components are `uploads`, a run, an upload and a name.
+    private static func isUpload(_ path: String) -> Bool {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        return path.hasPrefix("/") && parts.count >= 5 && parts[parts.count - 4] == "uploads"
+            && !parts.suffix(3).contains(where: \.isEmpty)
     }
 }
 

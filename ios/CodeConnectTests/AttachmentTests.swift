@@ -261,6 +261,9 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(AttachedFiles.split("hi\n\nAttached:\n\(path)").paths, [path])
         XCTAssertEqual(AttachedFiles.split("Attached:\n\(path)\n\(path)").paths, [path, path])
         XCTAssertEqual(AttachedFiles.split("Attached:\n\(path)").words, "")
+        // Wherever the computer keeps its CodeConnect folder (CODECONNECT_HOME).
+        let elsewhere = "/private/tmp/rig/cc/uploads/r/u1/b.bin"
+        XCTAssertEqual(AttachedFiles.split("x\n\nAttached:\n\(elsewhere)").paths, [elsewhere])
         // Words that merely mention it, or paths elsewhere, are words.
         XCTAssertEqual(AttachedFiles.split("see\n\nAttached:\n/tmp/x").paths, [])
         XCTAssertEqual(AttachedFiles.split("Attached: nothing").words, "Attached: nothing")
