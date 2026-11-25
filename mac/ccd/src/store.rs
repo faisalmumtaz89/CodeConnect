@@ -55,8 +55,9 @@ use std::sync::Mutex;
 
 /// Read-only connections. Small on purpose: the readers are a phone replaying
 /// a backlog, the fleet listing, and the revocation check, and each is bounded
-/// and short. More connections would buy nothing but page cache.
-const READERS: usize = 4;
+/// and short. Two readers suffice for concurrent WAL reads while keeping page
+/// cache, lookaside buffers, and file descriptors minimal.
+const READERS: usize = 2;
 
 use anyhow::{Context, Result};
 use protocol::agent::AgentKind;
@@ -1311,7 +1312,21 @@ impl Store {
             temp: None,
         };
         store.migrate()?;
+        store.shrink_memory();
         Ok(store)
+    }
+
+    /// Ask SQLite to release unused page-cache and scratch buffers on every
+    /// connection in the pool. Best-effort; safe to call after migrations or
+    /// bulk deletes.
+    pub fn shrink_memory(&self) {
+        let _ = self.write().execute_batch("PRAGMA shrink_memory;");
+        for reader in &self.readers {
+            let conn = reader
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _ = conn.execute_batch("PRAGMA shrink_memory;");
+        }
     }
 
     /// A store on a fresh test database named after `prefix` (see
@@ -3505,6 +3520,8 @@ impl Store {
             });
         }
         tx.commit()?;
+        drop(conn);
+        self.shrink_memory();
         Ok(DeleteOutcome::Deleted { events })
     }
 
@@ -3654,6 +3671,10 @@ impl Store {
             return Ok(removed);
         }
         tx.commit()?;
+        drop(conn);
+        if !removed.is_empty() {
+            self.shrink_memory();
+        }
         Ok(removed)
     }
 
@@ -5908,16 +5929,37 @@ fn test_second_daemon_drops_allow_ssh(conn: &Connection) {
 fn open_connection(path: &Path) -> Result<Connection> {
     let conn =
         Connection::open(path).with_context(|| format!("opening sqlite at {}", path.display()))?;
+    // Shrink SQLite's per-connection lookaside allocator from the ~120 KiB
+    // default to 8 KiB (64-byte slots x 128) *before* running any statements so
+    // SQLite accepts the reconfiguration. Across 1 writer + 2 readers this
+    // reclaims ~336 KiB of idle heap with negligible impact on small queries.
+    unsafe {
+        rusqlite::ffi::sqlite3_db_config(
+            conn.handle(),
+            rusqlite::ffi::SQLITE_DBCONFIG_LOOKASIDE,
+            std::ptr::null_mut::<std::ffi::c_void>(),
+            64i32,
+            128i32,
+        );
+    }
     // WAL keeps readers (WSS replay) from blocking the hook write path, which
     // is the one place added latency is visible to the user.
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // Cap per-connection page cache at 256 KiB (768 KiB across the whole pool
+    // vs. SQLite's 2 MiB default per connection) and disable mmap I/O so large
+    // transcripts do not stay resident in the daemon's RSS after paging.
+    conn.pragma_update(None, "cache_size", -256)?;
+    conn.pragma_update(None, "mmap_size", 0)?;
     // Only ever waited out for a *second process* on the same file — the soak
     // harness, or `sqlite3` at a prompt. In-process there is one writer and one
     // mutex, so this is not the daemon waiting for itself. It is short because
     // the call now happens on a blocking thread with a deadline above it, not
     // because contention is expected.
     conn.pragma_update(None, "busy_timeout", 5_000)?;
+    // Cover all hot-path `prepare_cached` queries without letting unused
+    // ad-hoc statements accumulate indefinitely.
+    conn.set_prepared_statement_cache_capacity(32);
     Ok(conn)
 }
 
@@ -14019,5 +14061,34 @@ mod tests {
         assert_eq!(two.len(), 2);
         assert_eq!(two[0].seq, 1);
         assert_eq!(two[1].seq, 2);
+    }
+
+    #[test]
+    fn open_connection_caps_memory_pragmas_and_shrink_memory_succeeds() {
+        let store = Store::open_temp("sqlite-memory-pragmas");
+        assert_eq!(store.readers.len(), READERS);
+        {
+            let writer = store.write();
+            let cache_size: i64 = writer
+                .pragma_query_value(None, "cache_size", |r| r.get(0))
+                .unwrap();
+            let mmap_size: i64 = writer
+                .pragma_query_value(None, "mmap_size", |r| r.get(0))
+                .unwrap();
+            assert_eq!(cache_size, -256);
+            assert_eq!(mmap_size, 0);
+        }
+        for reader in &store.readers {
+            let conn = reader.lock().unwrap();
+            let cache_size: i64 = conn
+                .pragma_query_value(None, "cache_size", |r| r.get(0))
+                .unwrap();
+            let mmap_size: i64 = conn
+                .pragma_query_value(None, "mmap_size", |r| r.get(0))
+                .unwrap();
+            assert_eq!(cache_size, -256);
+            assert_eq!(mmap_size, 0);
+        }
+        store.shrink_memory();
     }
 }

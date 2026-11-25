@@ -82,3 +82,20 @@ Each entry corresponds to one logical commit on `perf/baseline-and-optimizations
   - `large_payloads` Wakeups/s: `3,133/s` -> **`2,744/s`** (**-12.4%**)
   - `burst` throughput: `1,236.7 ev/s` (baseline `924.7`) -> **`1,299.9 ev/s`** (**+40.6%** vs baseline)
   - `burst` settled / Peak RSS: `9.53 / 11.61 MiB` -> **`9.26 / 11.37 MiB`**
+
+---
+
+## F6 — SQLite pool sizing (`READERS = 2`), 256 KiB page cache cap, 8 KiB lookaside, and `PRAGMA shrink_memory`
+
+- **Files:** `mac/ccd/src/store.rs`
+- **Change:**
+  - Reduced SQLite WAL reader pool from `READERS = 4` to `READERS = 2` (3 total connections instead of 5), saving FDs and per-connection memory.
+  - Tuned `open_connection`: shrank lookaside allocator from SQLite's ~120 KiB default to 8 KiB (`64 x 128`) via `SQLITE_DBCONFIG_LOOKASIDE`, capped `PRAGMA cache_size = -256` (256 KiB per connection, 768 KiB pool ceiling vs. 10 MiB default), set `PRAGMA mmap_size = 0`, and set `set_prepared_statement_cache_capacity(32)`.
+  - Added `Store::shrink_memory()` (`PRAGMA shrink_memory` across writer + all readers) and called it after `Store::migrate()`, `delete_exited_session`, and non-empty `prune_exited_sessions`.
+  - Added unit test `open_connection_caps_memory_pragmas_and_shrink_memory_succeeds`.
+- **Before vs After (`x86_64-unknown-linux-musl`, 3 runs median, vs F5 / baseline):**
+  - `cold_idle` settled / Peak RSS: `6.29 / 6.32 MiB` (baseline `6.30 / 10.78 MiB`) -> **`5.63 / 5.64 MiB`** (**-10.5% RSS** vs F5; **-47.7% Peak RSS** vs baseline), FDs `23 -> 19`
+  - `concurrent_50` settled / Peak RSS: `10.02 / 10.50 MiB` (F3; baseline `10.67 / 11.49 MiB`) -> **`8.50 / 9.04 MiB`** (**-20.3% / -21.3%** vs baseline), `sessions_rpc_p50` `3.00 ms`, FDs `126 -> 120`
+  - `large_payloads` settled / Peak RSS: `6.84 / 18.84 MiB` (baseline `8.84 / 19.52 MiB`) -> **`5.94 / 13.81 MiB`** (**-32.8% / -29.3%** vs baseline; **-5.03 MiB peak** vs F5!)
+  - `burst` settled / Peak RSS: `9.26 / 11.37 MiB` (baseline `10.17 / 12.16 MiB`) -> **`7.14 / 9.36 MiB`** (**-22.9% / -17.7%** vs F5; **-29.8% / -23.0%** vs baseline), throughput `1,302.1 ev/s`, `approval_rtt_p95` `53.45 -> 34.66 ms`
+  - `reconnect_churn` settled / Peak RSS: `8.33 / 8.70 MiB` (F4; baseline `8.85 / 10.64 MiB`) -> **`6.38 / 6.63 MiB`** (**-27.9% / -37.7%** vs baseline), `cycle_p50/p95` `6.04 / 7.26 ms`

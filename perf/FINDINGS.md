@@ -87,7 +87,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
   3. Configure smaller SQLite lookaside (`SQLITE_DBCONFIG_LOOKASIDE`: e.g., 64 bytes × 128 slots = 8 KiB instead of 48 KiB per connection -> saves ~200 KiB immediately) via `rusqlite` or `PRAGMA shrink_memory` after `prune_ended_sessions` / periodic idle cleanup.
 - **Expected gain:** **-0.5 to -1.0 MiB idle RSS**, **major reduction in `soak` RSS growth slope** (`+2.64 MiB/hr` -> near `0 MiB/hr`), -2 FDs.
 - **Risk:** Low (WAL concurrency preserved; benchmark `concurrent_50`, `burst`, `large_payloads`, `reconnect_churn` to confirm zero latency regression).
-- **Status:** `todo`
+- **Status:** `done` (F6: `cold_idle` `6.29 -> 5.63 MiB`, `large_payloads` Peak `18.84 -> 13.81 MiB` [-26.7%], `burst` `9.26 -> 7.14 MiB` [-22.9%], `reconnect_churn` `8.33 -> 6.38 MiB` [-23.4%], FDs `-4` to `-6`)
 
 ### F7. Unbounded in-memory session maps (`session_facts`, `tree_facts`, `Starts`) leak over long daemon lifetimes
 - **Location:** `mac/ccd/src/state.rs:339, 343, 4746-4860`; `mac/ccd/src/start_session.rs:586-615`
