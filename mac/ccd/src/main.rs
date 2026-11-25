@@ -51,9 +51,9 @@ use crate::state::{Daemon, Endpoint};
 use crate::store::Store;
 use protocol::config::Config;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    log::init_from_env();
+fn main() -> Result<()> {
+    // Handle `--version` before constructing the async runtime so version
+    // checks do not spawn worker threads.
     if std::env::args().any(|arg| arg == "--version") {
         println!(
             "{}",
@@ -61,6 +61,24 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    // Bound worker and blocking thread pools so multi-core Macs/servers do not
+    // park 16+ idle worker threads (stacks + allocator arenas) and burst waves
+    // do not spawn 40-60+ blocking threads.
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get().clamp(2, 4))
+        .unwrap_or(2);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .max_blocking_threads(16)
+        .thread_keep_alive(Duration::from_secs(10))
+        .enable_all()
+        .build()
+        .context("building async runtime")?;
+    runtime.block_on(run())
+}
+
+async fn run() -> Result<()> {
+    log::init_from_env();
     // Before anything is opened, and so before any child: every socket a
     // session holds draws on this limit, and every agent host and Codex
     // app-server ccd starts inherits it.

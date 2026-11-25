@@ -916,7 +916,7 @@ where
             Some(frame) = peers_read.recv() => {
                 let json = serde_json::to_string(&frame)?;
                 if peers_sent.as_deref() != Some(json.as_str()) {
-                    send(&mut sink, &frame).await?;
+                    send_serialized(&mut sink, &frame, json.clone()).await?;
                     peers_sent = Some(json);
                 }
             }
@@ -2153,6 +2153,14 @@ where
     <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
 {
     let text = serde_json::to_string(message)?;
+    send_serialized(sink, message, text).await
+}
+
+async fn send_serialized<S>(sink: &mut S, message: &ServerMessage, text: String) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+    <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
+{
     let text = if text.len() > MAX_CLIENT_MESSAGE_BYTES {
         crate::log_warn!(
             "ws: an outbound message of {} bytes exceeds the {MAX_CLIENT_MESSAGE_BYTES}-byte \

@@ -134,6 +134,12 @@ pub struct Store {
     /// Round-robin start point, so `read()` does not always probe reader 0 and
     /// serialise everything behind it under light load.
     next_reader: std::sync::atomic::AtomicUsize,
+    /// True whenever `mail` or `mail_sent` may contain rows (starts true so
+    /// startup always sweeps pre-existing DB rows, then goes false once empty
+    /// so `run_mail_sweeps` sleeps event-driven with zero idle wakeups).
+    mail_has_rows: std::sync::atomic::AtomicBool,
+    /// Wakes `run_mail_sweeps` the instant a row is written to `mail` or `mail_sent`.
+    mail_notify: tokio::sync::Notify,
     /// A test's database, set by [`Store::open_temp`]. Last, so the connections
     /// close before it goes.
     #[cfg(test)]
@@ -1308,6 +1314,8 @@ impl Store {
             writer: Mutex::new(writer),
             readers,
             next_reader: std::sync::atomic::AtomicUsize::new(0),
+            mail_has_rows: std::sync::atomic::AtomicBool::new(true),
+            mail_notify: tokio::sync::Notify::new(),
             #[cfg(test)]
             temp: None,
         };
@@ -4970,6 +4978,7 @@ impl Store {
             ],
         )?;
         tx.commit()?;
+        self.note_mail_written();
         Ok(MailTaken::Kept)
     }
 
@@ -5383,7 +5392,49 @@ impl Store {
                 now_ms
             ],
         )?;
+        self.note_mail_written();
         Ok(())
+    }
+
+    fn note_mail_written(&self) {
+        self.mail_has_rows
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.mail_notify.notify_one();
+    }
+
+    /// Cheap cached read check: whether either `mail` or `mail_sent` currently
+    /// contains any row. Used by the background mail sweeper to skip write
+    /// transactions and `tailscale status --json` spawns when idle.
+    pub fn has_mail_activity(&self) -> Result<bool> {
+        let conn = self.read();
+        let mut stmt = conn
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM mail) OR EXISTS(SELECT 1 FROM mail_sent)")?;
+        let any: i64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(any != 0)
+    }
+
+    pub fn mail_has_rows(&self) -> bool {
+        self.mail_has_rows
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn mark_mail_idle(&self) {
+        self.mail_has_rows
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Sleep without timers until a row is written to `mail` or `mail_sent`.
+    pub async fn wait_for_mail(&self) {
+        loop {
+            if self.mail_has_rows() {
+                return;
+            }
+            let notified = self.mail_notify.notified();
+            if self.mail_has_rows() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// **Where a sent message stands now**, from the receiver. A state only moves
@@ -14090,5 +14141,39 @@ mod tests {
             assert_eq!(mmap_size, 0);
         }
         store.shrink_memory();
+    }
+
+    #[tokio::test]
+    async fn mail_activity_flag_and_wait_for_mail_wakes_on_insert() {
+        let store = std::sync::Arc::new(Store::open_temp("mail-idle-wakeup"));
+        // Starts true so startup sweeps pre-existing rows.
+        assert!(store.mail_has_rows());
+        assert!(!store.has_mail_activity().unwrap());
+        store.mark_mail_idle();
+        assert!(!store.mail_has_rows());
+
+        let waiter = std::sync::Arc::clone(&store);
+        let handle = tokio::spawn(async move {
+            waiter.wait_for_mail().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!handle.is_finished());
+
+        let sent = SentMail {
+            message_id: "m-wake-1".into(),
+            context_id: "c-wake-1".into(),
+            in_reply_to: None,
+            session_uid: "u-wake-1".into(),
+            recipient: "peer@host".into(),
+            recipient_computer: "host".into(),
+            text: "hello".into(),
+        };
+        store.file_sent_mail(&sent, 1_000).unwrap();
+        assert!(store.mail_has_rows());
+        assert!(store.has_mail_activity().unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("wait_for_mail should wake promptly on insert")
+            .unwrap();
     }
 }

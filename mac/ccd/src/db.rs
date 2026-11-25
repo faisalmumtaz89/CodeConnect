@@ -153,6 +153,7 @@ db_ops! {
     fn sent_mail_computer(message_id: String) -> Option<String>;
     fn unsent_mail() -> Vec<crate::store::SentMail>;
     fn untold_mail() -> Vec<crate::store::UntoldMail>;
+    fn has_mail_activity() -> bool;
     fn release_mail_wake(session_uid: String) -> ();
     fn mail_runs() -> Vec<(SessionRow, u32)>;
     fn orphan_event_count() -> u64;

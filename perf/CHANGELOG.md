@@ -128,3 +128,21 @@ Each entry corresponds to one logical commit on `perf/baseline-and-optimizations
   - `cold_idle` anonymous heap+stack RSS (`RssAnon`): `1.008 MiB` (baseline `1.762 MiB`) -> **`0.918 MiB`** (**-8.9%** of remaining anonymous RAM; **-47.9%** vs baseline — total non-code RAM now under 1 MiB!)
   - `cold_idle` total RSS / Peak RSS: `5.63 / 5.64 MiB` (baseline `6.30 / 10.78 MiB`) -> **`5.59 / 5.60 MiB`**
   - `idle_client` total RSS / Peak RSS: baseline `6.37 / 10.89 MiB` -> **`5.64 / 5.68 MiB`** (**-11.5% / -47.8%** vs baseline)
+
+---
+
+## F9 — Event-driven idle mail sweep, coalesced 10 s tailnet cache, single-pass peers JSON, and bounded Tokio thread pool
+
+- **Files:** `mac/ccd/src/store.rs`, `mac/ccd/src/db.rs`, `mac/ccd/src/mail.rs`, `mac/ccd/src/state.rs`, `mac/ccd/src/ws_server.rs`, `mac/ccd/src/main.rs`
+- **Change:**
+  - Made `mail::run_mail_sweeps` event-driven via `Store::mail_has_rows` + `tokio::sync::Notify` (`wait_for_mail`) and `Store::has_mail_activity`: starts `true` so pre-existing DB rows are swept immediately at startup (verified by `mail_at_start` integration test), then sleeps with zero timer wakeups, zero SQLite write transactions, and zero `tailscale status --json` spawns when `mail` and `mail_sent` are empty. Added `sweep_mail_smart` so `read_tailnet()` is only called when unsent or untold mail rows actually exist.
+  - Added a 10-second coalesced `tailnet_cache` on `Daemon::read_status` (non-test) while keeping `blocked_tailnet_nodes()` read fresh on every `read_tailnet()` call so device revocation remains immediate and fail-closed.
+  - Eliminated double JSON serialization of `peers_frame` in `ws_server.rs` via `send_serialized`, and added an early return in `watch_hosted_runs` when no hosted runs exist.
+  - Replaced `#[tokio::main]` in `main.rs` with an explicit runtime builder: `worker_threads(available_parallelism.clamp(2, 4))`, `max_blocking_threads(16)`, `thread_keep_alive(10s)`, handling `--version` before constructing the runtime.
+  - Added unit test `mail_activity_flag_and_wait_for_mail_wakes_on_insert`.
+- **Before vs After (`x86_64-unknown-linux-musl`, 3 runs median, vs F6–F8 / baseline):**
+  - `cold_idle` (65 s × 3) wakeups/s: baseline `0.500/s` -> **`0.188/s`** (**-62.4%**, 0.0% CV across all 3 runs)
+  - `cold_idle` RSS / Peak RSS: `5.59 / 5.60 MiB` (baseline `6.30 / 10.78 MiB`) -> **`5.50 / 5.50 MiB`** (**-12.7% / -49.0%** vs baseline), Startup **`89.1 ms`** (**-22.2%** vs baseline)
+  - `concurrent_50` Peak threads: `41` (`40` baseline; `61` on `gnu`) -> **`19`** (**-53.7%**)
+  - `concurrent_50` Peak RSS / Wakeups/s: `9.04 MiB / 344/s` (baseline `11.49 MiB / 473/s`) -> **`8.77 MiB / 307/s`** (**-23.7% / -35.1%** vs baseline)
+  - `burst` Peak threads / RSS / `relay_p50`: `23 / 7.14 MiB / 638 ms` -> **`19 / 6.99 MiB / 559 ms`**

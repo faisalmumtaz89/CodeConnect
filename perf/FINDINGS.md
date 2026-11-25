@@ -125,7 +125,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
   3. Build the Tokio runtime explicitly in `main.rs` with bounded `worker_threads(num_cpus.clamp(2, 4))`, `max_blocking_threads(16)`, and `thread_keep_alive(Duration::from_secs(10))` so idle blocking threads exit cleanly and multi-core Macs/servers don't allocate 16+ idle worker threads + stacks + arenas!
 - **Expected gain:** **-50% to -80% idle wakeups**, **zero idle `tailscale` subprocess spawns**, **peak threads capped <= 16–20** (from 40–61 -> huge glibc arena savings on Linux & stack savings on macOS!).
 - **Risk:** Low (preserve all mail delivery, tailnet peer refresh, and test semantics).
-- **Status:** `todo`
+- **Status:** `done` (F9: `cold_idle` wakeups `0.500 -> 0.188/s` [-62.4%], RSS `5.50 MiB`; `concurrent_50` threads `41 -> 19` [-53.7%], Peak RSS `8.77 MiB`)
 
 ---
 

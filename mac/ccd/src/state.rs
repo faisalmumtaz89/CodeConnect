@@ -186,6 +186,12 @@ pub struct Daemon {
     /// The tailnet [`Daemon::read_tailnet`] reads in a test.
     #[cfg(test)]
     pub(crate) test_tailnet: std::sync::Mutex<Option<protocol::tailnet::Tailnet>>,
+    /// Short-lived coalesced cache of `tailscale status --json` so concurrent
+    /// peers refreshes and mail sweeps share one subprocess invocation.
+    /// Revoked/blocked nodes are still applied fresh from SQLite on every call.
+    #[cfg(not(test))]
+    pub(crate) tailnet_cache:
+        tokio::sync::Mutex<Option<(std::time::Instant, Option<protocol::tailnet::Tailnet>)>>,
     /// One gate per session, its read side held across a phone answer's passage
     /// through a Codex run's link. Nothing takes its write side.
     ///
@@ -543,6 +549,8 @@ impl Daemon {
             registration_gates: Mutex::new(HashMap::new()),
             #[cfg(test)]
             test_tailnet: std::sync::Mutex::new(None),
+            #[cfg(not(test))]
+            tailnet_cache: tokio::sync::Mutex::new(None),
             actuation_gates: Mutex::new(HashMap::new()),
             starts: crate::start_session::Starts::default(),
             agents: crate::start_session::KnownAgents::default(),
@@ -3774,6 +3782,9 @@ impl Daemon {
                 return;
             }
         };
+        if watched.is_empty() {
+            return;
+        }
         let attached: HashSet<String> = self
             .inner
             .lock()

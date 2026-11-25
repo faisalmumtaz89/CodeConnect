@@ -463,6 +463,7 @@ impl Daemon {
 
     /// **One sweep**: settle what time and ended runs decide, offer again what no
     /// other computer has taken, and tell senders on other computers what changed.
+    #[cfg(test)]
     pub(crate) async fn sweep_mail_on(self: &Arc<Self>, tailnet: Option<&Tailnet>) {
         if let Err(err) = self
             .db
@@ -481,6 +482,42 @@ impl Daemon {
         }
         if let Some(tailnet) = tailnet {
             self.tell_senders(tailnet).await;
+        }
+    }
+
+    /// Background sweep that avoids spawning `tailscale status --json` unless
+    /// there is actually unsent outbound mail or untold peer status changes.
+    async fn sweep_mail_smart(self: &Arc<Self>) {
+        if let Err(err) = self
+            .db
+            .sweep_mail(protocol::time::now_unix_ms(), LIMITS)
+            .await
+        {
+            crate::log_error!("mail sweep: {err:#}");
+        }
+        let unsent = match self.db.unsent_mail().await {
+            Ok(unsent) => unsent,
+            Err(err) => {
+                crate::log_error!("mail sweep: could not read the outbox: {err:#}");
+                Vec::new()
+            }
+        };
+        let untold = match self.db.untold_mail().await {
+            Ok(untold) => untold,
+            Err(err) => {
+                crate::log_error!("mail: could not read the untold changes: {err:#}");
+                Vec::new()
+            }
+        };
+        if unsent.is_empty() && untold.is_empty() {
+            return;
+        }
+        let tailnet = self.read_tailnet().await;
+        for mail in unsent {
+            self.carry_again(tailnet.as_ref(), &mail).await;
+        }
+        if let Some(tailnet) = tailnet.as_ref() {
+            self.tell_senders_list(tailnet, untold).await;
         }
     }
 
@@ -514,6 +551,10 @@ impl Daemon {
                 return;
             }
         };
+        self.tell_senders_list(tailnet, untold).await;
+    }
+
+    async fn tell_senders_list(&self, tailnet: &Tailnet, untold: Vec<crate::store::UntoldMail>) {
         for change in untold {
             let Ok(Place::Peer { ip, .. }) = tailnet.locate(&change.sender_computer) else {
                 continue;
@@ -1019,13 +1060,34 @@ fn refused(message_id: String, reason: &str) -> MailStatus {
 
 /// **Wake every run with unread mail, then sweep the mail every [`SWEEP_EVERY`]**,
 /// for as long as the daemon runs.
+///
+/// When both `mail` and `mail_sent` are empty, this task sleeps event-driven on
+/// [`crate::store::Store::wait_for_mail`] with zero timer wakeups, zero SQLite
+/// write locks, and zero `tailscale status --json` subprocess spawns.
 pub async fn run_mail_sweeps(daemon: Arc<Daemon>) {
     daemon.wake_all_due().await;
-    let mut ticker = tokio::time::interval(SWEEP_EVERY);
     loop {
-        ticker.tick().await;
-        let tailnet = daemon.read_tailnet().await;
-        daemon.sweep_mail_on(tailnet.as_ref()).await;
+        if !daemon.store.mail_has_rows() {
+            daemon.store.wait_for_mail().await;
+        }
+        match daemon.db.has_mail_activity().await {
+            Ok(false) => {
+                daemon.store.mark_mail_idle();
+                continue;
+            }
+            Ok(true) => {}
+            Err(err) => {
+                crate::log_error!("mail sweep: could not check mail tables: {err:#}");
+                tokio::time::sleep(SWEEP_EVERY).await;
+                continue;
+            }
+        }
+        daemon.sweep_mail_smart().await;
+        if matches!(daemon.db.has_mail_activity().await, Ok(false)) {
+            daemon.store.mark_mail_idle();
+            continue;
+        }
+        tokio::time::sleep(SWEEP_EVERY).await;
     }
 }
 
@@ -1125,16 +1187,28 @@ impl Daemon {
             .clone();
         #[cfg(not(test))]
         {
-            let bin = self.config.tailscale_bin()?;
-            let run = tokio::process::Command::new(bin)
-                .args(["status", "--json"])
-                .kill_on_drop(true)
-                .output();
-            let output = tokio::time::timeout(TAILSCALE_TIMEOUT, run)
-                .await
-                .ok()?
-                .ok()?;
-            Tailnet::parse(&String::from_utf8_lossy(&output.stdout))
+            const TAILNET_CACHE_TTL: Duration = Duration::from_secs(10);
+            let mut cache = self.tailnet_cache.lock().await;
+            if let Some((at, ref cached)) = *cache {
+                if at.elapsed() < TAILNET_CACHE_TTL {
+                    return cached.clone();
+                }
+            }
+            let reading = match self.config.tailscale_bin() {
+                Some(bin) => {
+                    let run = tokio::process::Command::new(bin)
+                        .args(["status", "--json"])
+                        .kill_on_drop(true)
+                        .output();
+                    match tokio::time::timeout(TAILSCALE_TIMEOUT, run).await {
+                        Ok(Ok(output)) => Tailnet::parse(&String::from_utf8_lossy(&output.stdout)),
+                        _ => None,
+                    }
+                }
+                None => None,
+            };
+            *cache = Some((std::time::Instant::now(), reading.clone()));
+            reading
         }
     }
 }
