@@ -3,7 +3,7 @@ import XCTest
 /// An Antigravity run's own commands: its "/" palette and its "…" menu offer Compact and never Clear (agy has no
 /// clear), and Compact's sheet names Antigravity. The recorded live run (`-CC_FIXTURE antigravity`).
 extension RenderCatalog {
-    private static let agyRun = ["-CC_FIXTURE", "antigravity", "-CC_DEEPLINK", "codeconnect://session/01M88F6WB3V8YECRANAJVF4VXC"]
+    private static let agyRun = ["-CC_FIXTURE", "antigravity", "-CC_DEEPLINK", "codeconnect://session/01M89BDTQGTG8HPJQ7KRK60QVR"]
 
     private static func atAgyRun(_ app: XCUIApplication, _ driver: RenderDriver) throws {
         try driver.require(driver.text(containing: "Hello.", in: app), "the Antigravity run")
