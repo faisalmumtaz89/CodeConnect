@@ -126,7 +126,7 @@ struct LaunchSurface: View {
     #if DEBUG
         @SwiftUI.State private var recorded: Double?
 
-        /// Every frame, 30 a second, from `-CC_LAUNCH_RECORD_FROM` until the splash is gone, the window photographed
+        /// Every frame, 30 a second (`-CC_LAUNCH_RECORD_FPS`), from `-CC_LAUNCH_RECORD_FROM` until the splash is gone, the window photographed
         /// into launch-<000…>.png in `-CC_LAUNCH_RECORD`'s folder; then the app quits.
         private func record() async {
             guard let folder = RenderWindow.launchRecord else { return }
@@ -144,7 +144,7 @@ struct LaunchSurface: View {
                     .write(to: URL(fileURLWithPath: folder).appendingPathComponent(name))
                 if LaunchMark.finished(t: t, exitAt: exitAt) || (cuts && exitAt.map { t >= $0 } == true) { break }
                 index += 1
-                t = RenderWindow.launchRecordFrom + Double(index) / 30
+                t = RenderWindow.launchRecordFrom + Double(index) / RenderWindow.launchRecordFPS
             }
             NSApp.terminate(nil)
         }

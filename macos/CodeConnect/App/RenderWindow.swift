@@ -278,6 +278,11 @@
                 ? nil : UserDefaults.standard.double(forKey: "CC_LAUNCH_SETTLE")
         }
         static var launchRecord: String? { UserDefaults.standard.string(forKey: "CC_LAUNCH_RECORD") }
+        /// `-CC_LAUNCH_RECORD_FPS <n>`: the recording's frames a second, 30 unless given (60 steps it by ~16 ms).
+        static var launchRecordFPS: Double {
+            let given = UserDefaults.standard.double(forKey: "CC_LAUNCH_RECORD_FPS")
+            return given > 0 ? given : 30
+        }
         static var launchRecordFrom: Double { UserDefaults.standard.double(forKey: "CC_LAUNCH_RECORD_FROM") }
         /// A render shows the splash only when it asks for it; every other render opens on the app.
         static var showsLaunch: Bool { launchT != nil || launchRecord != nil }
