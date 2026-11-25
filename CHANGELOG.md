@@ -5,6 +5,17 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.24
 
+- On the Mac and Linux, switching accounts no longer loses a session's waiting messages from your other sessions,
+  a message it had taken but not yet started on, or its effort setting; and choosing an account and then the first one
+  again no longer leaves a session without its agent.
+- On the Mac, a new session could wait until another one ended before it started; it now starts at once.
+- On the Mac and Linux, CodeConnect's background service is faster and lighter. Measured on a Mac: the session list
+  answers in about 7 ms instead of 500 ms with a million events stored, it starts in about 50 ms instead of 150 ms, and
+  it uses about 5.5 MB of memory at rest instead of 13 MB.
+- On the Mac, the opening animation's slices leave on their own background; the app appears only once they have gone.
+- On the Mac, a fleet row shows its tool's name again when the name is short: a run waiting on Edit no longer reads as
+  its file path alone.
+
 ## CodeConnect 0.19.23
 
 - On the Mac, the update button is white and reads "Update Available", so a new version isn't missed.
