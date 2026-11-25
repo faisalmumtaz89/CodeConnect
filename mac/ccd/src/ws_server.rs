@@ -406,6 +406,9 @@ where
     // keep answering approvals and typing into the session's TTY, which is the
     // opposite of what the operator just asked for.
     let mut device_id: Option<String> = None;
+    // The owner of the uploads sent on this connection: what no message attached goes when it
+    // closes, however it closes.
+    let connection = UploadOwner::new(&daemon);
     // The Tailscale device this connection's peer is, when it is known: Tailscale's word for the address it came
     // from, else the node its device was last seen from. It is left out of the `peers` frame this connection gets.
     let mut viewer_node: Option<String> = None;
@@ -724,6 +727,7 @@ where
                     &mut history,
                     device_id.as_deref(),
                     answered_on,
+                    connection.id,
                     parsed,
                 )
                 .await?;
@@ -993,6 +997,8 @@ async fn handle_message<S>(
     device_id: Option<&str>,
     // What its answers are recorded as coming from.
     answered_on: AnsweredOn,
+    // Whose uploads (`crate::uploads`) a message here may attach.
+    connection: u64,
     message: ClientMessage,
 ) -> Result<()>
 where
@@ -1357,6 +1363,7 @@ where
             request_id,
             payload_hash,
             submit,
+            attachments,
         } => {
             let result = daemon
                 .send_text(
@@ -1365,6 +1372,8 @@ where
                     request_id.as_deref(),
                     payload_hash.as_deref(),
                     submit,
+                    connection,
+                    &attachments,
                 )
                 .await;
             send(sink, &ServerMessage::SendTextResult { session_id, result }).await?;
@@ -1430,6 +1439,37 @@ where
             )
             .await?;
         }
+        ClientMessage::PutFile {
+            session_id,
+            upload_id,
+            name,
+            size,
+            offset,
+            data,
+        } => {
+            let result = if device_id.is_none() {
+                protocol::ws::PutFileResult::Refused {
+                    reason: "only a paired device may send files".into(),
+                }
+            } else {
+                match daemon.resolve(&session_id).await {
+                    Ok(row) => put_file(
+                        daemon,
+                        connection,
+                        &row.session_uid,
+                        &upload_id,
+                        &name,
+                        size,
+                        offset,
+                        &data,
+                    ),
+                    Err(err) => protocol::ws::PutFileResult::Refused {
+                        reason: format!("{err}"),
+                    },
+                }
+            };
+            send(sink, &ServerMessage::PutFileResult { upload_id, result }).await?;
+        }
         // Say something to a Codex session. Every refusal is a typed `Rejected` naming
         // the reason, so a mutation result is never a silence, and a Claude session is
         // refused by the agent branch inside — the daemon is the one place that knows
@@ -1440,9 +1480,17 @@ where
             request_id,
             text,
             payload_hash,
+            attachments,
         } => {
             let result = daemon
-                .compose(&session_id, &request_id, text, &payload_hash)
+                .compose(
+                    &session_id,
+                    &request_id,
+                    text,
+                    &payload_hash,
+                    connection,
+                    &attachments,
+                )
                 .await;
             send(
                 sink,
@@ -1456,6 +1504,67 @@ where
         }
     }
     Ok(())
+}
+
+/// One `put_file` chunk, from a paired device only, as every frame that changes this computer's
+/// files is: written, or refused with its reason.
+#[allow(clippy::too_many_arguments)]
+fn put_file(
+    daemon: &Daemon,
+    connection: u64,
+    session_uid: &str,
+    upload_id: &str,
+    name: &str,
+    size: u64,
+    offset: u64,
+    data: &str,
+) -> protocol::ws::PutFileResult {
+    use base64::Engine as _;
+    use protocol::ws::PutFileResult;
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+        return PutFileResult::Refused {
+            reason: "a chunk's data is base64".into(),
+        };
+    };
+    match daemon.uploads.put(
+        &crate::uploads::root(),
+        connection,
+        session_uid,
+        upload_id,
+        name,
+        size,
+        offset,
+        &bytes,
+    ) {
+        Ok(received) => PutFileResult::Received { received },
+        Err(reason) => PutFileResult::Refused { reason },
+    }
+}
+
+/// A connection's hold on the uploads sent on it ([`crate::uploads`]): those no message
+/// attached are removed when it is dropped, at the connection's end.
+struct UploadOwner {
+    id: u64,
+    daemon: Arc<Daemon>,
+}
+
+impl UploadOwner {
+    fn new(daemon: &Arc<Daemon>) -> UploadOwner {
+        // From 1: 0 is no connection, which attaches nothing.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        UploadOwner {
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            daemon: Arc::clone(daemon),
+        }
+    }
+}
+
+impl Drop for UploadOwner {
+    fn drop(&mut self) {
+        self.daemon
+            .uploads
+            .close_connection(&crate::uploads::root(), self.id);
+    }
 }
 
 /// Keep a diff inside one WebSocket frame *after* JSON escaping.
@@ -2119,6 +2228,8 @@ pub(crate) fn capabilities(
         claude_interrupt: true,
         // Each agent's accounts: kept and chosen by a paired device, as starting is.
         accounts: paired,
+        // Files for a run's agent: sent by a paired device, as starting is.
+        uploads: paired,
     }
 }
 
@@ -4874,6 +4985,7 @@ mod tests {
                 &mut history,
                 None,
                 AnsweredOn::Iphone,
+                1,
                 ask(request_id),
             )
             .await
@@ -4891,6 +5003,7 @@ mod tests {
             &mut history,
             None,
             AnsweredOn::Iphone,
+            1,
             ClientMessage::DeleteSession {
                 session_uid: uid.clone(),
             },
@@ -4957,6 +5070,7 @@ mod tests {
                 &mut history,
                 None,
                 AnsweredOn::Iphone,
+                1,
                 ClientMessage::History {
                     session_id: uid.clone(),
                     before_seq: 11,
@@ -4977,6 +5091,7 @@ mod tests {
                 &mut other_history,
                 None,
                 AnsweredOn::Iphone,
+                1,
                 ClientMessage::DeleteSession {
                     session_uid: uid.clone(),
                 },

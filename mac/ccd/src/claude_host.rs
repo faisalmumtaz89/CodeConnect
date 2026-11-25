@@ -543,6 +543,15 @@ fn start_options(uid: &str, run: &Run<'_>) -> StartOptions {
             .map(str::to_string),
         effort: None,
         worktree: run.worktree.map(str::to_string),
+        // Its own uploads folder and no other, so a file sent with a message is read without a
+        // card ([`crate::uploads`]). Made now, so it is there for the run's whole life.
+        additional_directories: match crate::uploads::session_folder(&crate::uploads::root(), uid) {
+            Ok(folder) => vec![folder.to_string_lossy().into_owned()],
+            Err(err) => {
+                crate::log_error!("{uid}: could not make its uploads folder: {err}");
+                Vec::new()
+            }
+        },
         mail: McpCommand {
             command: run.codeconnect.to_string_lossy().into_owned(),
             args: protocol::ipc::mail_server_args(uid, &protocol::socket_path()),
@@ -5116,7 +5125,15 @@ mod tests {
     ) -> SendTextResult {
         let hash = protocol::hash::send_text_hash(uid, text, true);
         daemon
-            .send_text(uid, text.to_string(), Some(request_id), Some(&hash), true)
+            .send_text(
+                uid,
+                text.to_string(),
+                Some(request_id),
+                Some(&hash),
+                true,
+                0,
+                &[],
+            )
             .await
     }
 
@@ -5175,6 +5192,57 @@ mod tests {
             }
         }
         assert_eq!(live, [serde_json::json!("and the docs")], "broadcast live");
+        stop(&played.dir);
+    }
+
+    /// **A file sent with a message reaches claude as its path, from the one folder claude was
+    /// given to read** (minor 50). The run starts with its own uploads folder as its additional
+    /// directory and no other; a message attaching a file its connection sent reaches the host
+    /// as the words, then the file's path on a line after "Attached:"; one naming a file this
+    /// computer does not hold is refused, and nothing reaches the host.
+    #[tokio::test]
+    async fn a_file_sent_with_a_message_reaches_claude_as_its_path_in_the_runs_folder() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let root = crate::uploads::root();
+        let ToHost::Start { options, .. } = &played.start else {
+            panic!("not a start");
+        };
+        assert_eq!(
+            options.additional_directories,
+            [root.join(&uid).to_string_lossy().into_owned()]
+        );
+
+        let ids = ["u-unknown".to_string()];
+        let hash = protocol::hash::send_text_hash_with(&uid, "look", true, &ids);
+        let refused = rig
+            .daemon
+            .send_text(&uid, "look".into(), Some("r-0"), Some(&hash), true, 7, &ids)
+            .await;
+        assert!(
+            matches!(refused, SendTextResult::Refused { .. }),
+            "{refused:?}"
+        );
+
+        assert_eq!(
+            rig.daemon
+                .uploads
+                .put(&root, 7, &uid, "u-1", "a.png", 3, 0, b"png"),
+            Ok(3)
+        );
+        let ids = ["u-1".to_string()];
+        let hash = protocol::hash::send_text_hash_with(&uid, "look", true, &ids);
+        let (result, (_, text)) = tokio::join!(
+            rig.daemon
+                .send_text(&uid, "look".into(), Some("r-1"), Some(&hash), true, 7, &ids),
+            host_takes(&mut played, 3, "done")
+        );
+        let path = root.join(&uid).join("u-1").join("a.png");
+        assert_eq!(text, format!("look\n\nAttached:\n{}", path.display()));
+        assert!(matches!(result, SendTextResult::Sent { .. }), "{result:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"png");
+        rig.daemon.uploads.remove_session(&root, &uid);
         stop(&played.dir);
     }
 
@@ -6708,13 +6776,13 @@ mod tests {
         let staged = protocol::hash::send_text_hash(&uid, "half", false);
         refused(
             rig.daemon
-                .send_text(&uid, "half".into(), Some("s"), Some(&staged), false)
+                .send_text(&uid, "half".into(), Some("s"), Some(&staged), false, 0, &[])
                 .await,
         );
         refused(send_as_app(&rig.daemon, &uid, "e", "  ").await);
         refused(
             rig.daemon
-                .send_text(&uid, "no id".into(), None, None, true)
+                .send_text(&uid, "no id".into(), None, None, true, 0, &[])
                 .await,
         );
         assert_eq!(next(&mut played.lines).await, None, "nothing sent");

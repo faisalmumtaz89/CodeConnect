@@ -6552,6 +6552,8 @@ mod tests {
                     "req-nolink-say",
                     "hello".into(),
                     &protocol::hash::compose_hash(&uid, "hello"),
+                    0,
+                    &[],
                 )
                 .await;
             (answered, stopped, said)
@@ -6600,7 +6602,7 @@ mod tests {
         );
         tokio::spawn(async move {
             let hash = protocol::hash::compose_hash(&uid, &text);
-            daemon.compose(&uid, &request_id, text, &hash).await
+            daemon.compose(&uid, &request_id, text, &hash, 0, &[]).await
         })
     }
 
@@ -8212,7 +8214,7 @@ mod tests {
         let hash = protocol::hash::compose_hash(uid, text);
         tokio::time::timeout(
             Duration::from_secs(20),
-            daemon.compose(uid, request_id, text.into(), &hash),
+            daemon.compose(uid, request_id, text.into(), &hash, 0, &[]),
         )
         .await
         .expect("the message was answered at once")

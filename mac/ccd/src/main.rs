@@ -38,6 +38,7 @@ mod state;
 mod store;
 mod switch;
 mod tls;
+mod uploads;
 mod ws_server;
 
 use std::net::{IpAddr, SocketAddr};
