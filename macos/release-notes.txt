@@ -1,1 +1,1 @@
-A message can now carry files: use the paperclip, drop files on the message box, or paste a picture, in a reply or when starting a new agent. Up to 10 files of up to 10 MB each; they upload as you add them, and the agent reads them on the computer its session runs on.
+The update button is now white and reads “Update Available”, so a new version isn’t missed.
