@@ -41,16 +41,18 @@ final class RunAccountTests: XCTestCase {
         for value in sessions { XCTAssertNil(try decoded(value).account, "absent is not known, never Default") }
     }
 
-    /// **Where a move stands** (`switching`), listing by listing across the daemon's recorded switches: waiting while
-    /// the turn ends, moved once the process has ended, gone once the next message starts it; failed while a refused
-    /// start stands.
+    /// **Where a move stands** (`switching`), listing by listing across the daemon's recorded moves: moved while the
+    /// person's message ends the run's process and starts the next, gone once that one is linked; failed while a
+    /// refused start stands, gone once a message has started it.
     func testEachListingSaysWhereTheMoveStands() throws {
         func states(_ resource: String) throws -> [RunSwitching?] {
             let url = try XCTUnwrap(Bundle(for: type(of: self)).url(forResource: resource, withExtension: "json"))
             let frames = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).arrayValue)
             return try frames.compactMap { $0["sessions"]?[0] }.map { try decoded($0).switching }
         }
-        XCTAssertEqual(try states("switch-claude-wire"), [.waiting, .waiting, .moved, .moved, nil])
-        XCTAssertEqual(try states("switch-failed-then-recovered-claude-wire"), [.moved, .failed, .failed, nil])
+        XCTAssertEqual(try states("switch-codex-wire"), [.moved, .moved, nil, nil])
+        XCTAssertEqual(
+            try states("switch-failed-then-recovered-claude-wire"),
+            [.moved, .moved, .failed, .failed, nil, nil, nil, nil, nil])
     }
 }

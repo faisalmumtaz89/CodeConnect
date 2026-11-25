@@ -1,16 +1,21 @@
 [
   {
     "event": {
-      "kind": "link_state",
+      "kind": "session_end",
       "payload": {
-        "link": "detached",
-        "reason": "agent host disconnected"
+        "exit_code": null,
+        "reason": "Switched to B",
+        "switched_to": {
+          "account_id": "01M89G4WMBZCB20HZA6H62N8GC",
+          "label": "B"
+        }
       },
-      "seq": 6,
-      "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-      "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
+      "seq": 7,
+      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
       "source": "daemon",
-      "ts": "2026-11-23T10:30:22.508Z"
+      "source_event_id": "exit:01M89G4WF7VPP746TMY6Y404JA:42483",
+      "ts": "2026-11-25T14:00:57.255Z"
     },
     "type": "event"
   },
@@ -23,13 +28,17 @@
         },
         "agent": "codex",
         "blocked_on": [],
-        "codex_link": "none",
+        "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T10:30:21.928Z",
-        "cwd": "/tmp/ccx3.YQRVKPDYCM/project",
-        "last_seq": 6,
+        "created_at": "2026-11-25T14:00:57.063Z",
+        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
+        "effort": {
+          "seq": 3,
+          "value": "high"
+        },
+        "last_seq": 7,
         "lifecycle": "live",
-        "link": "detached",
+        "link": "attached",
         "menus": {
           "models": [
             {
@@ -185,68 +194,10 @@
           "value": "auto"
         },
         "project_label": "project",
-        "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "switching": "waiting",
-        "updated_at": "2026-11-23T10:30:22.350Z"
-      }
-    ],
-    "type": "sessions"
-  },
-  {
-    "event": {
-      "kind": "session_end",
-      "payload": {
-        "exit_code": null,
-        "reason": "Switched to B",
-        "switched_to": {
-          "account_id": "01M83Z9VY23F99TED973KPH0QE",
-          "label": "B"
-        }
-      },
-      "seq": 7,
-      "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-      "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-      "source": "daemon",
-      "source_event_id": "exit:01M83Z9VF8JMX4SJ351YY2BJ2X:69224",
-      "ts": "2026-11-23T10:30:22.509Z"
-    },
-    "type": "event"
-  },
-  {
-    "sessions": [
-      {
-        "account": {
-          "id": null,
-          "label": "Default"
-        },
-        "agent": "codex",
-        "blocked_on": [],
-        "codex_link": "bound_not_started",
-        "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T10:30:21.928Z",
-        "cwd": "/tmp/ccx3.YQRVKPDYCM/project",
-        "effort": {
-          "seq": 3,
-          "value": "high"
-        },
-        "last_seq": 7,
-        "lifecycle": "live",
-        "link": "detached",
-        "model": {
-          "seq": 3,
-          "value": "gpt-6.1-sol"
-        },
-        "model_label": "GPT-6.1-Sol",
-        "permission_mode": {
-          "seq": 3,
-          "value": "auto"
-        },
-        "project_label": "project",
-        "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
+        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
         "switching": "moved",
-        "updated_at": "2026-11-23T10:30:22.509Z"
+        "updated_at": "2026-11-25T14:00:57.255Z"
       }
     ],
     "type": "sessions"
@@ -262,11 +213,11 @@
         "sandbox": "readOnly"
       },
       "seq": 8,
-      "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-      "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
+      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
       "source": "codex",
-      "source_event_id": "thr-x6:settings:37df953e-f4b9-4c90-b89a-06370b17a08f",
-      "ts": "2026-11-23T10:30:22.680Z"
+      "source_event_id": "thr-x6:settings:924016c4-78e4-420a-aace-96216c522a45",
+      "ts": "2026-11-25T14:00:57.349Z"
     },
     "type": "event"
   },
@@ -279,70 +230,17 @@
         },
         "agent": "codex",
         "blocked_on": [],
-        "codex_link": "none",
+        "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T10:30:21.928Z",
-        "cwd": "/tmp/ccx3.YQRVKPDYCM/project",
+        "created_at": "2026-11-25T14:00:57.063Z",
+        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
+        "effort": {
+          "seq": 3,
+          "value": "high"
+        },
         "last_seq": 9,
         "lifecycle": "live",
-        "link": "detached",
-        "model": {
-          "seq": 8,
-          "value": "gpt-6-luna"
-        },
-        "model_label": "GPT-6 Luna",
-        "permission_mode": {
-          "seq": 8,
-          "value": "read-only"
-        },
-        "project_label": "project",
-        "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "switching": "moved",
-        "updated_at": "2026-11-23T10:30:22.564Z"
-      }
-    ],
-    "type": "sessions"
-  },
-  {
-    "event": {
-      "kind": "notification",
-      "payload": {
-        "account": {
-          "id": "01M83Z9VY23F99TED973KPH0QE",
-          "label": "B"
-        },
-        "from_label": "GPT-6.1-Sol",
-        "from_model": "gpt-6.1-sol",
-        "message": "Now on GPT-6 Luna: GPT-6.1-Sol isn’t in B’s plan.",
-        "notification_type": "model_unavailable",
-        "to_label": "GPT-6 Luna",
-        "to_model": "gpt-6-luna"
-      },
-      "seq": 9,
-      "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-      "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-      "source": "daemon",
-      "ts": "2026-11-23T10:30:22.681Z"
-    },
-    "type": "event"
-  },
-  {
-    "sessions": [
-      {
-        "account": {
-          "id": null,
-          "label": "Default"
-        },
-        "agent": "codex",
-        "blocked_on": [],
-        "codex_link": "none",
-        "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T10:30:21.928Z",
-        "cwd": "/tmp/ccx3.YQRVKPDYCM/project",
-        "last_seq": 9,
-        "lifecycle": "live",
-        "link": "detached",
+        "link": "attached",
         "menus": {
           "models": [
             {
@@ -386,26 +284,34 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "switching": "waiting",
-        "updated_at": "2026-11-23T10:30:22.681Z"
+        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+        "switching": "moved",
+        "updated_at": "2026-11-25T14:00:57.282Z"
       }
     ],
     "type": "sessions"
   },
   {
     "event": {
-      "kind": "session_start",
+      "kind": "notification",
       "payload": {
-        "source": "resume"
+        "account": {
+          "id": "01M89G4WMBZCB20HZA6H62N8GC",
+          "label": "B"
+        },
+        "from_label": "GPT-6.1-Sol",
+        "from_model": "gpt-6.1-sol",
+        "message": "Now on GPT-6 Luna: GPT-6.1-Sol isn’t in B’s plan.",
+        "notification_type": "model_unavailable",
+        "to_label": "GPT-6 Luna",
+        "to_model": "gpt-6-luna"
       },
-      "seq": 10,
-      "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-      "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
+      "seq": 9,
+      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
       "source": "daemon",
-      "source_event_id": "start:01M83Z9VF8JMX4SJ351YY2BJ2X:69284",
-      "ts": "2026-11-23T10:30:22.681Z"
+      "ts": "2026-11-25T14:00:57.350Z"
     },
     "type": "event"
   },
@@ -413,15 +319,19 @@
     "sessions": [
       {
         "account": {
-          "id": "01M83Z9VY23F99TED973KPH0QE",
+          "id": "01M89G4WMBZCB20HZA6H62N8GC",
           "label": "B"
         },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T10:30:21.928Z",
-        "cwd": "/tmp/ccx3.YQRVKPDYCM/project",
+        "created_at": "2026-11-25T14:00:57.063Z",
+        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
+        "effort": {
+          "seq": 3,
+          "value": "high"
+        },
         "last_seq": 11,
         "lifecycle": "live",
         "link": "attached",
@@ -468,9 +378,95 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "updated_at": "2026-11-23T10:30:22.681Z"
+        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+        "switching": "moved",
+        "updated_at": "2026-11-25T14:00:57.350Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  {
+    "event": {
+      "kind": "session_start",
+      "payload": {
+        "source": "resume"
+      },
+      "seq": 10,
+      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+      "source": "daemon",
+      "source_event_id": "start:01M89G4WF7VPP746TMY6Y404JA:42697",
+      "ts": "2026-11-25T14:00:57.350Z"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "account": {
+          "id": "01M89G4WMBZCB20HZA6H62N8GC",
+          "label": "B"
+        },
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "subscribed",
+        "codex_thread_id": "thr-x6",
+        "created_at": "2026-11-25T14:00:57.063Z",
+        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
+        "effort": {
+          "seq": 3,
+          "value": "high"
+        },
+        "last_seq": 11,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "efforts": [],
+              "label": "GPT-6 Luna",
+              "value": "gpt-6-luna"
+            },
+            {
+              "efforts": [],
+              "label": "GPT-5.6 Terra",
+              "value": "gpt-5.6-terra"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Default",
+              "value": "auto"
+            },
+            {
+              "label": "Read Only",
+              "value": "read-only"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Full Access",
+              "value": "full-access"
+            }
+          ],
+          "selected_model": "gpt-6-luna"
+        },
+        "model": {
+          "seq": 8,
+          "value": "gpt-6-luna"
+        },
+        "permission_mode": {
+          "seq": 8,
+          "value": "read-only"
+        },
+        "project_label": "project",
+        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+        "updated_at": "2026-11-25T14:00:57.350Z"
       }
     ],
     "type": "sessions"
@@ -483,10 +479,10 @@
         "reason": "agent host linked"
       },
       "seq": 11,
-      "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-      "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
+      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
       "source": "daemon",
-      "ts": "2026-11-23T10:30:22.682Z"
+      "ts": "2026-11-25T14:00:57.350Z"
     },
     "type": "event"
   },
@@ -494,98 +490,19 @@
     "sessions": [
       {
         "account": {
-          "id": "01M83Z9VY23F99TED973KPH0QE",
+          "id": "01M89G4WMBZCB20HZA6H62N8GC",
           "label": "B"
         },
         "agent": "codex",
         "blocked_on": [],
         "codex_link": "subscribed",
         "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T10:30:21.928Z",
-        "cwd": "/tmp/ccx3.YQRVKPDYCM/project",
-        "last_seq": 11,
-        "lifecycle": "live",
-        "link": "attached",
-        "menus": {
-          "models": [
-            {
-              "efforts": [],
-              "label": "GPT-6 Luna",
-              "value": "gpt-6-luna"
-            },
-            {
-              "efforts": [],
-              "label": "GPT-5.6 Terra",
-              "value": "gpt-5.6-terra"
-            }
-          ],
-          "modes": [
-            {
-              "label": "Default",
-              "value": "auto"
-            },
-            {
-              "label": "Read Only",
-              "value": "read-only"
-            },
-            {
-              "label": "Plan",
-              "value": "plan"
-            },
-            {
-              "confirm": true,
-              "label": "Full Access",
-              "value": "full-access"
-            }
-          ],
-          "selected_model": "gpt-6-luna"
+        "created_at": "2026-11-25T14:00:57.063Z",
+        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
+        "effort": {
+          "seq": 3,
+          "value": "high"
         },
-        "model": {
-          "seq": 8,
-          "value": "gpt-6-luna"
-        },
-        "permission_mode": {
-          "seq": 8,
-          "value": "read-only"
-        },
-        "project_label": "project",
-        "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "updated_at": "2026-11-23T10:30:22.681Z"
-      }
-    ],
-    "type": "sessions"
-  },
-  {
-    "event": {
-      "kind": "user_message",
-      "payload": {
-        "request_id": "say-plan",
-        "text": "go on"
-      },
-      "seq": 12,
-      "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-      "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-      "source": "daemon",
-      "source_event_id": "say:ce73c0de-7fef-83af-8d69-ed2167d4f28f",
-      "ts": "2026-11-23T10:30:22.683Z",
-      "turn_id": "turn-2"
-    },
-    "type": "event"
-  },
-  {
-    "sessions": [
-      {
-        "account": {
-          "id": "01M83Z9VY23F99TED973KPH0QE",
-          "label": "B"
-        },
-        "agent": "codex",
-        "blocked_on": [],
-        "codex_link": "subscribed",
-        "codex_thread_id": "thr-x6",
-        "created_at": "2026-11-23T10:30:21.928Z",
-        "cwd": "/tmp/ccx3.YQRVKPDYCM/project",
         "last_seq": 12,
         "lifecycle": "live",
         "link": "attached",
@@ -632,9 +549,96 @@
           "value": "read-only"
         },
         "project_label": "project",
-        "session_id": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "session_uid": "01M83Z9VF8JMX4SJ351YY2BJ2X",
-        "updated_at": "2026-11-23T10:30:22.681Z"
+        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+        "updated_at": "2026-11-25T14:00:57.350Z"
+      }
+    ],
+    "type": "sessions"
+  },
+  {
+    "event": {
+      "kind": "user_message",
+      "payload": {
+        "request_id": "say-plan",
+        "text": "go on"
+      },
+      "seq": 12,
+      "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+      "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+      "source": "daemon",
+      "source_event_id": "say:a1b84d1b-fb5b-84ea-bb43-1a9e0bb273e2",
+      "ts": "2026-11-25T14:00:57.353Z",
+      "turn_id": "turn-2"
+    },
+    "type": "event"
+  },
+  {
+    "sessions": [
+      {
+        "account": {
+          "id": "01M89G4WMBZCB20HZA6H62N8GC",
+          "label": "B"
+        },
+        "agent": "codex",
+        "blocked_on": [],
+        "codex_link": "subscribed",
+        "codex_thread_id": "thr-x6",
+        "created_at": "2026-11-25T14:00:57.063Z",
+        "cwd": "/tmp/ccx3.6WHK10G1C3/project",
+        "effort": {
+          "seq": 3,
+          "value": "high"
+        },
+        "last_seq": 12,
+        "lifecycle": "live",
+        "link": "attached",
+        "menus": {
+          "models": [
+            {
+              "efforts": [],
+              "label": "GPT-6 Luna",
+              "value": "gpt-6-luna"
+            },
+            {
+              "efforts": [],
+              "label": "GPT-5.6 Terra",
+              "value": "gpt-5.6-terra"
+            }
+          ],
+          "modes": [
+            {
+              "label": "Default",
+              "value": "auto"
+            },
+            {
+              "label": "Read Only",
+              "value": "read-only"
+            },
+            {
+              "label": "Plan",
+              "value": "plan"
+            },
+            {
+              "confirm": true,
+              "label": "Full Access",
+              "value": "full-access"
+            }
+          ],
+          "selected_model": "gpt-6-luna"
+        },
+        "model": {
+          "seq": 8,
+          "value": "gpt-6-luna"
+        },
+        "permission_mode": {
+          "seq": 8,
+          "value": "read-only"
+        },
+        "project_label": "project",
+        "session_id": "01M89G4WF7VPP746TMY6Y404JA",
+        "session_uid": "01M89G4WF7VPP746TMY6Y404JA",
+        "updated_at": "2026-11-25T14:00:57.350Z"
       }
     ],
     "type": "sessions"

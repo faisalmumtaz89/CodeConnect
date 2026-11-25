@@ -75,10 +75,6 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
     ) {
         daemon.account_facts.forget_signed();
     }
-    let chosen = match &message {
-        ClientMessage::ActivateAccount { agent, .. } => Some(agent.clone()),
-        _ => None,
-    };
     let reply = match message {
         ClientMessage::SignInAccount {
             request_id,
@@ -140,11 +136,6 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
     if matches!(reply, ServerMessage::Accounts { .. }) {
         let daemon = Arc::clone(daemon);
         tokio::spawn(async move { refresh_facts(&daemon).await });
-    }
-    // A choice made moves the agent's live runs to it (306 Slice E).
-    if let (Some(agent), ServerMessage::Accounts { .. }) = (chosen, &reply) {
-        let daemon = Arc::clone(daemon);
-        tokio::spawn(async move { crate::switch::begin(&daemon, &agent).await });
     }
     if let (
         true,

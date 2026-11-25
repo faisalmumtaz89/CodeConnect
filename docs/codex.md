@@ -9,11 +9,13 @@ A Codex session on Codex's **Default** account runs as **you**. It uses your own
 — `~/.codex` unless you set that variable — which is where your Codex sign-in lives. A session
 on another Codex account you added in CodeConnect uses that account's own sign-in instead, with
 the rest of your Codex home (its settings, trust, skills and sessions) shared. Choosing another
-account moves each running session to it between turns: once a session is idle its app server
-is ended, and your next message to it starts it again on the same thread with the new sign-in.
-A message queued in Codex itself (`codex queue`) is not kept across that, and a command or
-helper an agent left running in the background is stopped when its session moves. A moved
-session's settings can be changed once your next message has started it. When the new account's
+account stops nothing, and new sessions use it at once. An open session moves to it when you next
+send it a message, if nothing is running in it: its app server is ended, and your message starts it
+again on the same thread with the new sign-in. If something is running (a turn, a command it started
+in its last turn, a message of yours it hasn't answered), that message goes on the old account and
+the session moves at the next one. Its menus and settings stay as they are throughout. A message
+queued in Codex itself (`codex queue`) is not kept across a move, and a Codex background process
+started in an earlier turn, still alive at the first send after a switch, is ended by the move. When the new account's
 plan doesn't offer the model the session was on, it carries on with that plan's default model, one
 line in the conversation says so, and its model menu offers that plan's models.
 

@@ -2,16 +2,16 @@ import XCTest
 
 @testable import CodeConnectKit
 
-/// **A run moved to another account never reads as ended** (decision 306).
+/// **A run moved to another account looks exactly as before** (decision 306; decision 311 v4, minor 51).
 ///
-/// ccd ends the run's process at its idle point and files a `session_end` whose payload carries `switched_to`
-/// (`{"account_id", "label"}`, minor 48); the person's next message starts it again on the new account, which for a
-/// Codex run files the thread's resume start. The conversation draws one quiet row, "Switched to <label>", in place of
-/// "Run ended", and the first start after it draws nothing, however much later it comes; every listing in the window
-/// reads live, so neither app shows the Ended band or loses the reply box.
+/// The person's message moves a quiet run: ccd ends its process and files a `session_end` whose payload carries
+/// `switched_to` (`{"account_id", "label"}`, minor 48), then the message starts it again on the new account, which for
+/// a Codex run files the thread's resume start. The conversation draws nothing for any of it but the message itself;
+/// every listing in the window reads live, linked and with its menus, so neither app shows the Ended band, loses the
+/// reply box or goes read only.
 ///
 /// Pinned to `fixtures/accounts/switch-claude-wire.json` and `switch-codex-wire.json` (copied byte for byte): the
-/// event frames ccd broadcast across a real switch on a stand-in rig, through the next message, each followed by the
+/// event frames ccd broadcast across a real move on a stand-in rig, through the message, each followed by the
 /// `sessions` frame a device listing at that instant read.
 @MainActor
 final class SwitchedRunTimelineTests: XCTestCase {
@@ -50,9 +50,9 @@ final class SwitchedRunTimelineTests: XCTestCase {
         state.timeline.compactMap { if case .notice(let notice) = $0.content { notice } else { nil } }
     }
 
-    /// From the switch's end on, the conversation gains exactly one row besides the person's next message: the quiet
-    /// "Switched to B". The relaunch that message makes, and the link coming back, draw nothing.
-    private func assertOneQuietRow(_ resource: String) async throws {
+    /// From the switch's end on, the conversation gains nothing but the person's message: the end, the relaunch that
+    /// message makes and the link coming back draw nothing.
+    private func assertNothingDrawn(_ resource: String) async throws {
         let all = events(try frames(resource))
         let end = try XCTUnwrap(all.first { $0.kind == .sessionEnd }, "the fixture carries no end")
         XCTAssertNotNil(end.payload["switched_to"], "the end carries no typed switch")
@@ -62,42 +62,31 @@ final class SwitchedRunTimelineTests: XCTestCase {
             drawn.timeline.filter { $0.seq >= end.seq }.map(\.content).filter {
                 if case .userMessage = $0 { false } else { true }
             },
-            [.notice(NoticeItem(kind: .other, symbol: "arrows-clockwise", title: "Switched to B", detail: nil, severity: .info))],
-            "\(resource): the switch draws one quiet row and nothing after it but the next message")
+            [],
+            "\(resource): the switch draws nothing but the message")
         XCTAssertFalse(
             notices(drawn).contains { $0.kind == .sessionEnded || $0.kind == .sessionStart },
             "\(resource): no Run ended, no Run resumed or Run started")
     }
 
-    func testAClaudeSwitchDrawsOneQuietRow() async throws {
-        try await assertOneQuietRow("switch-claude-wire")
+    func testAClaudeSwitchDrawsNothing() async throws {
+        try await assertNothingDrawn("switch-claude-wire")
     }
 
-    func testACodexSwitchDrawsOneQuietRowAndItsResumeNothing() async throws {
-        try await assertOneQuietRow("switch-codex-wire")
+    func testACodexSwitchAndItsResumeDrawNothing() async throws {
+        try await assertNothingDrawn("switch-codex-wire")
     }
 
     /// Every listing in the window reads live, with what the run had drawn by then: never the Ended band, and the reply
     /// box kept.
     func testEveryListingInTheSwitchReadsLive() async throws {
         for resource in ["switch-claude-wire", "switch-codex-wire"] {
-            var seen: [Event] = []
-            var listings = 0
-            for frame in try frames(resource) {
-                switch frame {
-                case .event(let event):
-                    seen.append(event)
-                case .sessions(let sessions):
-                    let summary = try XCTUnwrap(sessions.first)
-                    let shown = await state(seen).shown
-                    let status = FleetStatusRule.status(summary: summary, shown: shown, reviewedSeq: 0)
-                    XCTAssertFalse(
-                        status == .ended || status == .failed, "\(resource) after seq \(seen.last?.seq ?? 0): \(status)")
-                    XCTAssertFalse(summary.takesNoReply, "\(resource) after seq \(seen.last?.seq ?? 0): no reply box")
-                    listings += 1
-                }
+            let read = try await listings(resource)
+            XCTAssertFalse(read.isEmpty, "\(resource) carries no listing")
+            for (summary, status) in read {
+                XCTAssertFalse(status == .ended || status == .failed, "\(resource): \(status)")
+                XCTAssertFalse(summary.takesNoReply, "\(resource): no reply box")
             }
-            XCTAssertGreaterThan(listings, 0, "\(resource) carries no listing")
         }
     }
 
@@ -143,50 +132,37 @@ final class SwitchedRunTimelineTests: XCTestCase {
         XCTAssertFalse(last.status == .ended || last.status == .failed, "recovered, it reads live: \(last.status)")
     }
 
-    /// **End run on a moved run** files an ordinary end after the switch's typed one: "Switched to B", then "Run
-    /// ended"; the moved listing reads live, and the ended one reads ended with no reply box.
-    func testEndRunOnAMovedRunReadsRunEnded() async throws {
+    /// **End run on a run due to move** files an ordinary end: "Run ended"; the ended listing reads ended with no reply
+    /// box.
+    func testEndRunOnADueRunReadsRunEnded() async throws {
         let drawn = await state(events(try frames("switch-then-end-claude-wire")))
-        XCTAssertEqual(notices(drawn).map(\.title), ["Switched to B", "Run ended"])
+        XCTAssertEqual(notices(drawn).map(\.title), ["Run ended"])
         let read = try await listings("switch-then-end-claude-wire")
-        XCTAssertEqual(read.map(\.summary.lifecycle), [.live, .exited])
-        XCTAssertFalse(read.first.map { $0.status == .ended || $0.status == .failed } ?? true, "moved, it reads live")
+        XCTAssertEqual(read.map(\.summary.lifecycle), [.exited])
         XCTAssertEqual(read.last?.status, .ended)
         XCTAssertTrue(read.last?.summary.takesNoReply ?? false, "ended by End run, it takes no reply")
     }
 
-    /// A moved run's listing, the one right after the typed end, carries no menus until its next message starts it,
-    /// so both apps draw the read-only settings line (`hostedReadOnly`), never a live-looking menu.
-    func testAMovedRunsSettingsAreReadOnly() throws {
-        for resource in ["switch-claude-wire", "switch-codex-wire"] {
-            let all = try frames(resource)
-            let end = try XCTUnwrap(all.firstIndex {
-                if case .event(let event) = $0 { event.kind == .sessionEnd } else { false }
-            })
-            guard case .sessions(let sessions) = all[end + 1], let moved = sessions.first else {
-                return XCTFail("\(resource): no listing follows the end")
+    /// A moving run's listings, from the switch's end on, carry its menus throughout, so both apps draw its live
+    /// settings, never the read-only line (`hostedReadOnly`).
+    func testAMovingRunKeepsItsSettings() throws {
+        for resource in ["switch-claude-wire", "switch-codex-wire", "relaunch-plan-default-codex-wire"] {
+            let moving = try frames(resource).compactMap {
+                if case .sessions(let sessions) = $0, let summary = sessions.first, summary.switching == .moved {
+                    summary
+                } else {
+                    nil
+                }
             }
-            XCTAssertNil(moved.menus, "\(resource): a moved run lists no menus")
-            guard case .hostedReadOnly = RunSettings.of(summary: moved) else {
-                return XCTFail("\(resource): a moved run draws a live settings line")
-            }
-        }
-    }
-
-    /// A moved Codex run's read-only line names its model as its menu did (`model_label`), in ordinary type, never by
-    /// its id: `relaunch-plan-default-codex-wire.json`'s moved listings, on gpt-6.1-sol and then on the plan's gpt-6-luna.
-    func testAMovedCodexRunNamesItsModelAsItsMenuDid() throws {
-        let moved = try frames("relaunch-plan-default-codex-wire").compactMap {
-            if case .sessions(let sessions) = $0, let summary = sessions.first, summary.switching == .moved {
-                summary
-            } else {
-                nil
+            XCTAssertFalse(moving.isEmpty, "\(resource) lists the run moving")
+            for summary in moving {
+                XCTAssertNotNil(summary.menus, "\(resource): a moving run lists its menus")
+                XCTAssertNil(summary.modelLabel, "\(resource): named by its menu, not a label")
+                if case .hostedReadOnly = RunSettings.of(summary: summary) {
+                    XCTFail("\(resource): a moving run draws the read-only settings line")
+                }
             }
         }
-        XCTAssertEqual(
-            moved.map { RunSettings.of(summary: $0) },
-            [.hostedReadOnly(model: RunModelName(text: "GPT-6.1-Sol", reported: false)),
-             .hostedReadOnly(model: RunModelName(text: "GPT-6 Luna", reported: false))])
     }
 
     /// **A move onto a plan without the run's model** (decision 316) draws one quiet row from the notice's typed fields,
@@ -210,30 +186,30 @@ final class SwitchedRunTimelineTests: XCTestCase {
         XCTAssertEqual(last?.summary.model?.value, "gpt-6-luna")
     }
 
-    /// **A moved run is answered from its reply box** (decision 306): its next message is what starts it on the new
-    /// account. A moved Codex run's link is detached from its idle end until then, and that is not a lost link: no
-    /// "Observe only" on its reply box, and its fleet row's badge is control. A run still waiting keeps the link's own
-    /// word. From the daemon's `switch-codex-wire.json`: its listing after the typed end (live, detached, moved).
-    func testAMovedRunIsAnsweredNotObserved() async throws {
+    /// **A moving run is answered from its reply box** (decision 306; decision 311 v4): its message is what moves it,
+    /// and while it moves it reads linked (`attached`, a Codex run's `subscribed`): its fleet row's badge is control, its
+    /// message is not blocked, and no "Observe only". From the daemon's `switch-codex-wire.json`: its listing after the
+    /// typed end (live, moving).
+    func testAMovingRunIsAnsweredNotObserved() async throws {
         let capabilities = try JSONDecoder().decode(
             Capabilities.self, from: Data(#"{"can_approve_reliably": true, "codex_compose": true, "supported_agents": ["claude", "codex"]}"#.utf8))
-        var moved: SessionSummary?
+        var moving: SessionSummary?
         for frame in try frames("switch-codex-wire") {
-            if case .sessions(let sessions) = frame, let run = sessions.first, run.switching == .moved { moved = run }
+            if case .sessions(let sessions) = frame, let run = sessions.first, run.switching == .moved { moving = run }
         }
-        let run = try XCTUnwrap(moved, "the recording lists the run as moved")
-        XCTAssertEqual(run.link, .detached, "precondition: a moved Codex run's link is detached")
+        let run = try XCTUnwrap(moving, "the recording lists the run as moving")
+        XCTAssertEqual(run.link, .attached, "a moving run reads linked")
+        XCTAssertEqual(run.codexLink, .subscribed, "a moving Codex run reads subscribed")
         XCTAssertEqual(FleetStatusRule.capability(summary: run, capabilities: capabilities), .control, "the fleet row's badge")
 
         let model = AppModel(
-            cache: EventCache(root: FileManager.default.temporaryDirectory.appendingPathComponent("moved-\(UUID().uuidString)")),
+            cache: EventCache(root: FileManager.default.temporaryDirectory.appendingPathComponent("moving-\(UUID().uuidString)")),
             codexSpentLedger: CodexSpentLedger(defaults: UserDefaults(suiteName: "cc.tests.\(UUID().uuidString)")!))
         model.connection.simulateConnectedForTesting()
-        model.connection.simulateCapabilitiesForTesting(capabilities, minor: 48)
+        model.connection.simulateCapabilitiesForTesting(capabilities, minor: 51)
         model.connection.injectForTesting(.sessions([run]))
         addTeardownBlock { @MainActor in model.scenePhaseChanged(to: .background) }
-        // The send was never blocked: its message is what restarts the run.
-        XCTAssertNil(model.sendBlockedReason(for: run.sessionKey, draft: "go on"), "a moved run's message can be sent")
+        XCTAssertNil(model.sendBlockedReason(for: run.sessionKey, draft: "go on"), "a moving run's message can be sent")
         let note = model.standingNote(for: run.sessionKey, draft: "")
         XCTAssertFalse(note?.text.hasPrefix("Observe only") ?? false, "the standing note: \(note?.text ?? "none")")
     }

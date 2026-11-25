@@ -4,7 +4,8 @@ import XCTest
 
 /// **A switch's rows name an account the way the Accounts page does** (decision 306, ruled 2026-11-23): by its email
 /// when this app's account book knows it, held in memory; else by the label the event carries (no book yet, or an
-/// account since removed). The email never reaches an event, the store or a cache.
+/// account since removed). The email never reaches an event, the store or a cache. A move itself draws no row (decision
+/// 311 v4): only a move that could not start, and one onto a plan without the run's model, name the account.
 ///
 /// From the daemon's own recordings: `switch-codex-wire.json`, `switch-failed-then-recovered-claude-wire.json` and
 /// `relaunch-plan-default-codex-wire.json` (the label "B"), and `accounts-facts-wire.json` (a listing with facts).
@@ -31,15 +32,16 @@ final class AccountNamesTests: XCTestCase {
     func testTheRowsNameTheAccountByTheBooksEmailElseByItsLabel() throws {
         let byEmail: (String?) -> String? = { _ in "work@example.test" }
         let switched = try events("switch-codex-wire")
-        XCTAssertTrue(titles(TimelineBuilder.build(switched, accountName: byEmail)).contains("Switched to work@example.test"))
-        XCTAssertTrue(titles(TimelineBuilder.build(switched)).contains("Switched to B"), "no book: the label")
-        XCTAssertTrue(
-            titles(TimelineBuilder.build(switched, accountName: { _ in nil })).contains("Switched to B"),
-            "an account the book does not know (removed): the label")
+        XCTAssertFalse(
+            titles(TimelineBuilder.build(switched, accountName: byEmail)).contains { $0.hasPrefix("Switched to") },
+            "a move draws no row")
 
         let failed = try events("switch-failed-then-recovered-claude-wire")
         XCTAssertTrue(titles(TimelineBuilder.build(failed, accountName: byEmail)).contains("Couldn’t move to work@example.test"))
-        XCTAssertTrue(titles(TimelineBuilder.build(failed)).contains("Couldn’t move to B"))
+        XCTAssertTrue(titles(TimelineBuilder.build(failed)).contains("Couldn’t move to B"), "no book: the label")
+        XCTAssertTrue(
+            titles(TimelineBuilder.build(failed, accountName: { _ in nil })).contains("Couldn’t move to B"),
+            "an account the book does not know (removed): the label")
 
         let plan = try events("relaunch-plan-default-codex-wire")
         XCTAssertTrue(
@@ -49,12 +51,13 @@ final class AccountNamesTests: XCTestCase {
             titles(TimelineBuilder.build(plan)).contains("Now on GPT-6 Luna: GPT-6.1-Sol isn’t in B’s plan."))
     }
 
-    /// The lookup is asked with the event's own account id: the recorded switch's `switched_to.account_id`.
+    /// The lookup is asked with the event's own account id: the recorded failed move's `switched_to.account_id`.
     func testTheLookupIsAskedWithTheEventsAccountID() throws {
         var asked: [String?] = []
-        _ = TimelineBuilder.build(try events("switch-codex-wire"), accountName: { asked.append($0); return nil })
-        let end = try XCTUnwrap(try events("switch-codex-wire").first { $0.kind == .sessionEnd })
-        XCTAssertEqual(asked, [end.payload["switched_to"]?["account_id"]?.stringValue])
+        let failed = try events("switch-failed-then-recovered-claude-wire")
+        _ = TimelineBuilder.build(failed, accountName: { asked.append($0); return nil })
+        let notice = try XCTUnwrap(failed.first { $0.notificationType == "switch_failed" })
+        XCTAssertEqual(asked, [notice.payload["switched_to"]?["account_id"]?.stringValue])
     }
 
     // MARK: 2, 3. The model: its book answers the lookup, is loaded after a handshake, and redraws on a change
@@ -123,14 +126,14 @@ final class AccountNamesTests: XCTestCase {
 
     /// A change of names redraws a run's rows: the label until the book names the account, then its email.
     func testANewBookRedrawsTheRows() async throws {
-        let all = try events("switch-codex-wire")
+        let all = try events("switch-failed-then-recovered-claude-wire")
         let state = SessionState(sessionKey: try XCTUnwrap(all.first).sessionKey)
         for event in all { state.ingest(event) }
         await state.settleForTesting()
-        XCTAssertTrue(titles(state.timeline).contains("Switched to B"))
+        XCTAssertTrue(titles(state.timeline).contains("Couldn’t move to B"))
         state.accountName = { _ in "work@example.test" }
         state.accountNamesChanged()
-        XCTAssertTrue(titles(state.timeline).contains("Switched to work@example.test"))
+        XCTAssertTrue(titles(state.timeline).contains("Couldn’t move to work@example.test"))
     }
 
     // MARK: 4. Memory only

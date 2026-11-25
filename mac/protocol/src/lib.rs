@@ -849,7 +849,7 @@ pub const PROTOCOL_MISMATCH: &str =
 ///   * `46` — **An ended run names its model as its menu did.**
 ///
 ///     No message changes shape. A [`event::SessionSummary`] of a run CodeConnect started that is sent no
-///     `menus` (it is not live: stopping, ended, or moved by a switch of account) may carry `model_label`,
+///     `menus` (it is not live: stopping, ended, or failed in a switch of account) may carry `model_label`,
 ///     the label of the start's entry for its model, by the rule the apps name a live run's model by, so an
 ///     ended run reads "Opus", not `claude-opus-5-5`. A daemon of 0.19.14 or older sends it for a Claude
 ///     run only, and a daemon below 46 sends none: an app then shows the model as reported.
@@ -869,8 +869,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     listing pushed, with no request id, whenever it changes. To paired devices only, behind
 ///     [`ws::Capabilities::accounts`]. An account is a folder of the computer's own that a start on it is given, its
 ///     agent's credential its own and the rest of the person's home shared; an agent's Default is the agent as it is.
-///     Choosing one moves the agent's running sessions to it: each is ended when idle, its end typed
-///     [`event::SWITCHED_TO`], and its next message starts it on the account active then; it reads live meanwhile,
+///     Choosing one moves the agent's running sessions to it (from minor 51, at each one's next message): its end
+///     typed [`event::SWITCHED_TO`], and the message starts it on the account active then; it reads live meanwhile,
 ///     [`event::SessionSummary::switching`] saying where its move stands, and a start that did not go through files
 ///     [`event::notice::SWITCH_FAILED`]; one on a plan without its model runs on the plan's default, filing
 ///     [`event::notice::MODEL_UNAVAILABLE`], its menu then the plan's. Each run CodeConnect started names the account its process runs on
@@ -900,7 +900,20 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     [`ws::ClientMessage::StartSession`]'s `attachments` move it into the new run's folder before its first message,
 ///     which carries the same path lines. A daemon below 50 answers `put_file` with `bad_request` and advertises no
 ///     `uploads`.
-pub const PROTOCOL_MINOR: u32 = 50;
+///   * `51` — **A switch of account moves a run at its next message.**
+///
+///     No message changes shape. Choosing an account ([`ws::ClientMessage::ActivateAccount`]) stops nothing: each
+///     live run of that agent reads [`event::Switching::Waiting`], due to move, and is otherwise exactly as before,
+///     its `menus` and settings, mail and messages those of a live run. A message the person sends it moves it when it
+///     is certainly quiet (no turn running, no message of theirs unanswered, no card, no mail wake outstanding, and
+///     nothing it started in its last turn that may still run): its process is ended, its end typed
+///     [`event::SWITCHED_TO`], and the message relaunches it on the account active then. Otherwise the message goes
+///     on the account it is on, and the run stays due; one already on the active account is no longer due. While its
+///     process is ended and the next started, a run reads [`event::Switching::Moved`], `live`, `link` attached, a
+///     Codex run's `codex_link` subscribed, and it carries its `menus`; a change or a Stop sent then waits for the
+///     move. A daemon of 48 to 50 ends a run at its first idle point after the choice, and sends a moved run no
+///     `menus`.
+pub const PROTOCOL_MINOR: u32 = 51;
 
 #[cfg(test)]
 mod ledger_tests {

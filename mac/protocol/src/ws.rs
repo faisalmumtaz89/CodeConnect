@@ -467,8 +467,9 @@ pub enum ClientMessage {
     },
     /// **Makes `account_id` the account `agent`'s starts use**, or its Default (the agent as it is on the computer)
     /// for none. An id that is not one of `agent`'s accounts is refused. Each of `agent`'s sessions running then moves
-    /// to it: once idle (its turn over, no card waiting, no message unread by the agent) its process is ended, and its
-    /// next message starts it again on the account active then, in the same session. It reads live meanwhile, with
+    /// to it at the person's next message, when that finds it certainly quiet (its turn over, nothing of the person's
+    /// unanswered, no card waiting): its process is ended and the message starts it again on the account active then,
+    /// in the same session (minor 51). Nothing is stopped by the choice itself. It reads live throughout, with
     /// [`crate::event::SessionSummary::switching`] saying where its move stands. Answered with one
     /// [`ServerMessage::Accounts`].
     ActivateAccount {
@@ -2320,9 +2321,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 50,
             "files for a session's agent (`put_file`, `attachments`, `uploads`) are minor 50"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 51,
+            "a switch of account moving a run at its next message, a moving run's `menus` offered, is minor 51"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 50);
+        assert_eq!(crate::PROTOCOL_MINOR, 51);
     }
 
     /// **The tags, pinned on this side too.**

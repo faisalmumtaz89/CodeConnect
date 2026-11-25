@@ -221,7 +221,7 @@ public enum TimelineBuilder {
     }
 
     /// `accountName` names an account by its id (nil: the agent's Default) as this app's account book knows it, or nil
-    /// when it does not; a switch's rows read it, else the label their event carries.
+    /// when it does not; a failed switch's row reads it, else the label its event carries.
     static func build(_ events: [Event], accountName: (String?) -> String? = { _ in nil }) -> [TimelineItem] {
         guard !events.isEmpty else { return [] }
 
@@ -557,18 +557,12 @@ public enum TimelineBuilder {
                 while case .notice(let notice)? = items.last?.content, notice.kind == .link {
                     items.removeLast()
                 }
-                // A switch of account is no end: the run reads live throughout, so one quiet row names the account,
-                // and its link letting go and coming back is the switch itself.
-                if let label = event.switchedToLabel {
-                    let account = accountName(event.switchedToID) ?? label
+                // A switch of account is no end: the run reads live throughout and nothing is drawn for it; its link
+                // letting go and coming back, and its next process's start, are the switch itself. The person's message
+                // that moved it is its one row.
+                if event.switchedToLabel != nil {
                     switched = true
                     linkWasDown = false
-                    items.append(
-                        event.item(
-                            .notice(
-                                NoticeItem(
-                                    kind: .other, symbol: "arrows-clockwise", title: "Switched to \(account)",
-                                    detail: nil, severity: .info))))
                     break
                 }
                 switched = false

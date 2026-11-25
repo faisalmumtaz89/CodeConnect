@@ -628,8 +628,8 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// no `menus` (it is not live): the label of the entry the run's model is, by the rule `RunSettings.modelName`
     /// names a live run's by. `nil` for any other run, for a model no entry runs, and from an older daemon.
     public let modelLabel: String?
-    /// The account the run's process runs on (minor 48), as recorded at its start or newest relaunch: a moved run names
-    /// the old one until its next message starts it on the new one. `nil` for a run CodeConnect did not start, for an
+    /// The account the run's process runs on (minor 48), as recorded at its start or newest relaunch: a run due to move
+    /// names the old one until a message starts it on the new one. `nil` for a run CodeConnect did not start, for an
     /// account since removed, and from an older daemon: not known, never Default.
     public let account: RunAccount?
     /// A move to another account under way (minor 48): its agent's active account changed and this run has not yet
@@ -811,9 +811,11 @@ public struct RunMenus: Codable, Sendable, Hashable {
 
 /// Where a run's move to another account stands (`SessionSummary.switching`, minor 48).
 public enum RunSwitching: String, Codable, Sendable, Hashable {
-    /// A turn, a card or a message the agent has not read is still going; it moves once idle.
+    /// Due to move: the person's next message moves it if nothing is running in it (minor 51; before, it moved once
+    /// idle).
     case waiting
-    /// Its process ended at an idle point; its next message starts it on the new account.
+    /// A message of the person's is ending its process to start it on the new account (minor 51; before, its process
+    /// had ended at an idle point and its next message started it there).
     case moved
     /// Its start on the new account was refused: it reads as the relaunchable end it is, its own line says why.
     case failed

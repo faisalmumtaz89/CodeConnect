@@ -153,21 +153,12 @@ public struct AccountsRefusal: LocalizedError, Sendable, Equatable {
 }
 
 /// The Accounts page's words for a switch in progress and for a row's quiet second line (design A). A switch is lazy:
-/// each session moves with its next message, and one still in a turn finishes it first.
+/// each open session moves with its next message, once nothing is running in it.
 public enum AccountSwitchWords {
-    /// Under the group while sessions are moving to `target`; nil with none live.
+    /// Under the group while sessions are due to move to `target`, each with its next message; nil with none.
     public static func sentence(to target: String, waiting: Int, moved: Int) -> String? {
-        let total = waiting + moved
-        guard total > 0 else { return nil }
-        let move = total == 1
-            ? "1 session will use \(target) from its next message."
-            : "\(total) sessions will use \(target) from their next message."
-        switch waiting {
-        case 0: return move
-        case 1 where total == 1: return "\(move) It finishes its turn first."
-        case 1: return "\(move) 1 finishes its turn first."
-        default: return "\(move) \(waiting) finish their turn first."
-        }
+        guard waiting + moved > 0 else { return nil }
+        return "Open sessions move to \(target) with their next message."
     }
 
     /// In amber under the group: the sessions that couldn't switch, named when one; nil with none. No account is
@@ -235,8 +226,8 @@ public enum AccountRowAct: Sendable, Hashable {
     }
 }
 
-/// A switch in progress for one agent's sessions on a computer: the account the waiting and moved ones go to (its email
-/// where its agent says it, else its name), how many still finish a turn first, how many move with their next message,
+/// A switch in progress for one agent's sessions on a computer: the account the due and moving ones go to (its email
+/// where its agent says it, else its name), how many are due to move with their next message, how many are moving,
 /// and the ones that couldn't switch, by their folder's name, whatever account they tried.
 public struct AccountSwitch: Equatable, Sendable {
     public let target: String

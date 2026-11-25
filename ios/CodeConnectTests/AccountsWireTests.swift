@@ -368,20 +368,13 @@ final class AccountsWireTests: XCTestCase {
 
     // MARK: The words of a switch in progress (design A)
 
-    /// Sessions move with their next message; those still in a turn finish it first.
-    func testASwitchSaysWhoMovesAndWhoFinishesFirst() {
-        XCTAssertEqual(
-            AccountSwitchWords.sentence(to: "ben@example.com", waiting: 2, moved: 1),
-            "3 sessions will use ben@example.com from their next message. 2 finish their turn first.")
-        XCTAssertEqual(
-            AccountSwitchWords.sentence(to: "ben@example.com", waiting: 0, moved: 4),
-            "4 sessions will use ben@example.com from their next message.")
-        XCTAssertEqual(
-            AccountSwitchWords.sentence(to: "ben@example.com", waiting: 1, moved: 0),
-            "1 session will use ben@example.com from its next message. It finishes its turn first.")
-        XCTAssertEqual(
-            AccountSwitchWords.sentence(to: "ben@example.com", waiting: 0, moved: 1),
-            "1 session will use ben@example.com from its next message.")
+    /// While any session is due to move, one static line: open sessions move with their next message.
+    func testASwitchSaysOpenSessionsMoveWithTheirNextMessage() {
+        for (waiting, moved) in [(2, 1), (0, 4), (1, 0), (0, 1)] {
+            XCTAssertEqual(
+                AccountSwitchWords.sentence(to: "ben@example.com", waiting: waiting, moved: moved),
+                "Open sessions move to ben@example.com with their next message.", "\(waiting) due, \(moved) moving")
+        }
         XCTAssertNil(AccountSwitchWords.sentence(to: "ben@example.com", waiting: 0, moved: 0), "no live session: no sentence")
     }
 
@@ -402,24 +395,22 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertEqual(AccountSwitchWords.notSeparate, "Uses this computer's own Codex sign-in, so it isn't a separate account")
     }
 
-    /// The page's switch reads the sessions' own `switching`, listing by listing, across the daemon's recorded switch:
-    /// waiting while the turn ends, moved once it has, gone once the next message starts it.
+    /// The page's switch reads the sessions' own `switching`, listing by listing, across the daemon's recorded move:
+    /// moving while the person's message ends the run's process and starts the next, gone once that one is linked.
     func testTheSwitchIsCountedFromTheSessionsOwnWord() async throws {
         let (model, _) = try model()
-        let url = try XCTUnwrap(Bundle(for: type(of: self)).url(forResource: "switch-claude-wire", withExtension: "json"))
+        let url = try XCTUnwrap(Bundle(for: type(of: self)).url(forResource: "switch-codex-wire", withExtension: "json"))
         let frames = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).arrayValue)
         func listing(_ index: Int) throws -> ServerMessage {
             try JSONDecoder().decode(ServerMessage.self, from: Data(frames[index].canonicalJSONString.utf8))
         }
         model.connection.injectForTesting(try listing(1))
-        await waitUntil({ model.accountSwitch(for: .claude) != nil }, "the waiting listing to be read")
-        XCTAssertEqual(model.accountSwitch(for: .claude), AccountSwitch(target: "Default", waiting: 1, moved: 0, failed: []))
+        await waitUntil({ model.accountSwitch(for: .codex) != nil }, "the moving listing to be read")
+        XCTAssertEqual(model.accountSwitch(for: .codex), AccountSwitch(target: "Default", waiting: 0, moved: 1, failed: []))
+        XCTAssertEqual(model.accountSwitch(for: .codex)?.sentence, "Open sessions move to Default with their next message.")
         model.connection.injectForTesting(try listing(5))
-        await waitUntil({ model.accountSwitch(for: .claude)?.moved == 1 }, "the moved listing to be read")
-        XCTAssertEqual(model.accountSwitch(for: .claude)?.sentence, "1 session will use Default from its next message.")
-        model.connection.injectForTesting(try listing(9))
-        await waitUntil({ model.accountSwitch(for: .claude) == nil }, "the move to end")
-        XCTAssertNil(model.accountSwitch(for: .codex), "another agent's sessions aren't counted")
+        await waitUntil({ model.accountSwitch(for: .codex) == nil }, "the move to end")
+        XCTAssertNil(model.accountSwitch(for: .claude), "another agent's sessions aren't counted")
     }
 
     /// A failed move is about the session: its line names the session and points to its conversation, never an account.
@@ -432,11 +423,11 @@ final class AccountsWireTests: XCTestCase {
         let book = #"{"type": "accounts", "accounts": [{"agent": "claude", "id": "B1", "label": "B", "signed_in": true, "facts": {"email": "b@example.test", "read_at": "2026-11-23T03:00:00Z"}}], "active": [{"agent": "claude", "account_id": "B1"}], "defaults": []}"#
         model.connection.injectForTesting(try JSONDecoder().decode(ServerMessage.self, from: Data(book.utf8)))
         model.connection.injectForTesting(
-            try JSONDecoder().decode(ServerMessage.self, from: Data(frames[3].canonicalJSONString.utf8)))
+            try JSONDecoder().decode(ServerMessage.self, from: Data(frames[5].canonicalJSONString.utf8)))
         await waitUntil({ model.accountSwitch(for: .claude)?.failure != nil }, "the failed listing to be read")
         XCTAssertEqual(
             model.accountSwitch(for: .claude)?.failure,
-            "cch2.3JSW8N42JT couldn't switch accounts. Its conversation says what to do.")
+            "cch2.6WHK10G1C0 couldn't switch accounts. Its conversation says what to do.")
     }
 
     /// An account signing in is not signed out: the service says `signed_in: false` with `signing_in: true` while the

@@ -542,8 +542,10 @@ pub struct WatchedHost {
 /// ([`Store::begin_relaunch`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveCodexRun {
-    /// Its recorded app-server: for a relaunch, the one that ended.
-    pub host: WatchedHost,
+    pub session_uid: String,
+    /// Its recorded app-server: for a relaunch, the one that ended; none for a run its switch left with no app-server
+    /// recorded ([`Store::fail_codex_starts`]).
+    pub host: Option<WatchedHost>,
     /// The folder it runs in.
     pub cwd: String,
     /// The thread its first message started.
@@ -635,7 +637,11 @@ fn recorded_host_is(conn: &Connection, session_uid: &str, host: &ProcessIdentity
 fn live_codex_run_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveCodexRun> {
     let start: Option<String> = row.get(9)?;
     Ok(LiveCodexRun {
-        host: watched_host_from(row)?,
+        session_uid: row.get(0)?,
+        host: match row.get::<_, Option<i32>>(2)? {
+            Some(_) => Some(watched_host_from(row)?),
+            None => None,
+        },
         cwd: row.get(7)?,
         thread: row.get(8)?,
         trust: start
@@ -648,8 +654,9 @@ fn live_codex_run_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveCodexRun
 /// is `exited`, the last end it filed reads "Stopped: its process ended"
 /// ([`crate::claude_host::PROCESS_ENDED`]), so its app-server ended without ccd stopping it, or "Switched to …"
 /// ([`crate::switch::SWITCHED`]), so ccd stopped it to move it to another account, and
-/// it has a recorded app-server and a thread. A run ended by End run ("Stopped") or a start that
-/// failed is not one. No column says how a run ended; its end's `reason` does.
+/// it has a thread and a recorded app-server, or a switch, whose relaunch a restart may have left with none. A run
+/// ended by End run ("Stopped") or a start that failed is not one. No column says how a run ended; its end's
+/// `reason` does.
 fn relaunchable_in(conn: &Connection, session_uid: &str) -> Result<Option<LiveCodexRun>> {
     let (table, _) = session_tables_for(&AgentKind::Codex);
     Ok(conn
@@ -658,7 +665,8 @@ fn relaunchable_in(conn: &Connection, session_uid: &str) -> Result<Option<LiveCo
                 "SELECT h.session_uid, s.lifecycle, h.host_pid, h.host_start_sec, h.host_start_usec,
                         h.boot_sec, h.boot_usec, s.cwd, s.codex_thread_id, h.start
                    FROM run_hosts AS h JOIN {table} AS s USING(session_uid)
-                  WHERE h.session_uid = ?1 AND s.lifecycle = ?2 AND h.host_pid IS NOT NULL
+                  WHERE h.session_uid = ?1 AND s.lifecycle = ?2
+                    AND (h.host_pid IS NOT NULL OR h.switching IS NOT NULL)
                     AND s.codex_thread_id IS NOT NULL
                     AND EXISTS (SELECT 1 FROM (SELECT json_extract(payload, '$.reason') AS reason FROM events
                                                 WHERE session_uid = ?1 AND kind = ?3
@@ -2396,27 +2404,127 @@ impl Store {
         Ok(newest.as_deref() == Some(EventKind::SessionStart.as_str()))
     }
 
-    /// Whether a message ccd gave the Claude run `session_uid` waits for its answer: nothing has followed its
-    /// newest `user_message` filed by ccd (the person's words, a relaunch's prompt) that answers it, no turn begun
-    /// or ended and no line of claude's own, so claude has it and has not begun the turn that answers it.
-    pub fn message_awaits_turn(&self, session_uid: &str) -> Result<bool> {
+    /// **Whether the run `session_uid` is certainly quiet, by what ccd has filed of it** ([`crate::switch::moves`]):
+    /// a turn of its process has completed and none has begun since; no message of the person's sent it waits to be
+    /// taken or answered (a claim still `applying`, or one filed after its last turn began, which may run as a turn
+    /// of its own); its last turn ran no command, background subagent or (Codex) tool, nor did its process start one
+    /// in the background or schedule a prompt; and no mail wake is outstanding. `sending`, the message being sent
+    /// now, is no message waiting. Anything not known reads not quiet.
+    pub fn certainly_quiet(&self, session_uid: &str, sending: &str) -> Result<bool> {
         let conn = self.read();
-        let newest = conn
+        let codex = conn
             .query_row(
-                "SELECT kind = ?4 AND source = ?5 FROM events
-                  WHERE session_uid = ?1 AND kind IN (?2, ?3, ?4)
-                  ORDER BY seq DESC LIMIT 1",
-                params![
-                    session_uid,
-                    EventKind::SessionStart.as_str(),
-                    EventKind::TurnComplete.as_str(),
-                    EventKind::UserMessage.as_str(),
-                    Source::Daemon.as_str()
-                ],
-                |row| row.get::<_, bool>(0),
+                "SELECT agent FROM all_sessions WHERE session_uid = ?1",
+                params![session_uid],
+                |row| row.get::<_, String>(0),
             )
-            .optional()?;
-        Ok(newest == Some(true))
+            .optional()?
+            .is_some_and(|agent| agent == AgentKind::Codex.as_str());
+        let waiting: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM text_mutations
+                            WHERE session_uid = ?1 AND status = 'applying' AND request_id IS NOT ?3)
+                 OR EXISTS(SELECT 1 FROM mutation_ledger
+                            WHERE session_uid = ?1 AND operation_kind = ?2 AND status = 'applying'
+                              AND client_request_id IS NOT ?3)
+                 OR EXISTS(SELECT 1 FROM mail_wake WHERE session_uid = ?1 AND outstanding = 1)",
+            params![session_uid, OPERATION_COMPOSE, sending],
+            |row| row.get(0),
+        )?;
+        if waiting {
+            return Ok(false);
+        }
+        // What its process has filed: everything since the run's newest end, whose process this one followed.
+        let mut stmt = conn.prepare(
+            "SELECT kind, source, payload FROM events
+              WHERE session_uid = ?1
+                AND seq > COALESCE((SELECT MAX(seq) FROM events WHERE session_uid = ?1 AND kind = ?2), 0)
+              ORDER BY seq",
+        )?;
+        let events = stmt
+            .query_map(
+                params![session_uid, EventKind::SessionEnd.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let kind_at = |i: usize| events[i].0.as_str();
+        let Some(ended) = (0..events.len())
+            .rev()
+            .find(|&i| kind_at(i) == EventKind::TurnComplete.as_str())
+        else {
+            return Ok(false);
+        };
+        // Where its last turn began: a Claude turn's init; a Codex turn's first user message after the turn before,
+        // whose tools are read from that turn's end on.
+        let before = (0..ended)
+            .rev()
+            .find(|&i| kind_at(i) == EventKind::TurnComplete.as_str())
+            .map_or(0, |i| i + 1);
+        let began = if codex {
+            (before..ended).find(|&i| kind_at(i) == EventKind::UserMessage.as_str())
+        } else {
+            (0..ended)
+                .rev()
+                .find(|&i| kind_at(i) == EventKind::SessionStart.as_str())
+        };
+        let Some(began) = began else {
+            return Ok(false);
+        };
+        let turn_start = if codex {
+            EventKind::UserMessage.as_str()
+        } else {
+            EventKind::SessionStart.as_str()
+        };
+        let blocks = |payload: &str| -> Vec<serde_json::Value> {
+            serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|payload| payload["message"]["content"].as_array().cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|block| block["type"] == "tool_use")
+                .collect()
+        };
+        for (i, (kind, source, payload)) in events.iter().enumerate() {
+            let in_last_turn = i > began;
+            let quiet = match kind.as_str() {
+                // A turn begun after the last one ended.
+                kind if i > ended && kind == turn_start => false,
+                // The person's message after the last turn began, which may run as a turn of its own.
+                kind if in_last_turn
+                    && kind == EventKind::UserMessage.as_str()
+                    && (codex || source == Source::Daemon.as_str()) =>
+                {
+                    false
+                }
+                kind if codex
+                    && i >= before
+                    && (kind == EventKind::ToolCall.as_str()
+                        || kind == EventKind::ToolResult.as_str()) =>
+                {
+                    false
+                }
+                kind if kind == EventKind::AgentMessage.as_str() => {
+                    blocks(payload).iter().all(|block| {
+                        !(block["input"]["run_in_background"] == true
+                            || block["name"] == "CronCreate"
+                            || in_last_turn
+                                && ["Bash", "Task", "Agent"]
+                                    .iter()
+                                    .any(|name| block["name"] == *name))
+                    })
+                }
+                _ => true,
+            };
+            if !quiet {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Whether the Codex run `session_uid` is in a turn: its newest user message, the
@@ -2585,29 +2693,66 @@ impl Store {
     }
 
     /// Every `starting` hosted Claude run with no recorded host becomes `failed`: the ccd
-    /// that began it died before it recorded a host, so no `start` was ever sent. Only
-    /// before this ccd starts any run of its own. The number of runs failed.
+    /// that began it died before it recorded a host, so no `start` was ever sent; one its switch was relaunching
+    /// goes back to `exited`, still switching, for its next message. Only before this ccd starts any run of its own.
+    /// The number of runs failed or put back.
     pub fn fail_unhosted_starts(&self) -> Result<usize> {
         let (table, _) = session_tables_for(&AgentKind::Claude);
         Ok(self.write().execute(
             &format!(
-                "UPDATE {table} SET lifecycle = ?1, updated_at = ?2
+                "UPDATE {table} SET updated_at = ?2,
+                        lifecycle = CASE WHEN session_uid IN
+                                         (SELECT session_uid FROM run_hosts WHERE switching IS NOT NULL)
+                                    THEN ?4 ELSE ?1 END
                   WHERE lifecycle = ?3 AND session_uid IN
                         (SELECT session_uid FROM run_hosts WHERE host_pid IS NULL)"
             ),
             params![
                 lifecycle_str(Lifecycle::Failed),
                 protocol::time::now_rfc3339(),
-                lifecycle_str(Lifecycle::Starting)
+                lifecycle_str(Lifecycle::Starting),
+                lifecycle_str(Lifecycle::Exited)
             ],
         )?)
     }
 
+    /// A restarted ccd's moves (306): a run whose process its switch was ending is due again, its process left to the
+    /// liveness watch, and the message that was moving a run that has not started again since is released, so its
+    /// retry relaunches it. Only before this ccd starts any run of its own, once [`Store::fail_unhosted_starts`] has
+    /// put a relaunch that never got a host back to `exited`.
+    pub fn recover_moves(&self) -> Result<()> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM text_mutations WHERE status = 'applying' AND session_uid IN
+                    (SELECT h.session_uid FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
+                      WHERE h.switching = ?1 AND s.lifecycle IN (?2, ?3))",
+            params![
+                Store::SWITCH_MOVED,
+                lifecycle_str(Lifecycle::Live),
+                lifecycle_str(Lifecycle::Exited)
+            ],
+        )?;
+        tx.execute(
+            "UPDATE run_hosts SET switching = ?2 WHERE switching = ?1 AND session_uid IN
+                    (SELECT session_uid FROM all_sessions WHERE lifecycle = ?3)",
+            params![
+                Store::SWITCH_MOVED,
+                Store::SWITCH_WAITING,
+                lifecycle_str(Lifecycle::Live)
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Every `starting` Codex run ccd hosts becomes `failed`: a restarted ccd never goes on
-    /// with a start that a ccd before it began. The number of runs failed, and the recorded
-    /// app-server of each that has one, for the ladder. Only before this ccd starts any run
-    /// of its own.
-    pub fn fail_codex_starts(&self) -> Result<(usize, Vec<WatchedHost>)> {
+    /// with a start that a ccd before it began; one its switch was relaunching goes back to `exited`, still
+    /// switching, for its next message. The number of runs failed or put back, the recorded app-server of each that
+    /// has one, for the ladder, and each switching run with none recorded, whose launch only its `as.pid` names. Only
+    /// before this ccd starts any run of its own.
+    #[allow(clippy::type_complexity)]
+    pub fn fail_codex_starts(&self) -> Result<(usize, Vec<WatchedHost>, Vec<String>)> {
         let (table, _) = session_tables_for(&AgentKind::Codex);
         let mut conn = self.write();
         let tx = conn.transaction()?;
@@ -2623,19 +2768,32 @@ impl Store {
                 watched_host_from,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let unrecorded = tx
+            .prepare(&format!(
+                "SELECT h.session_uid FROM run_hosts AS h JOIN {table} AS s USING(session_uid)
+                  WHERE s.lifecycle = ?1 AND h.host_pid IS NULL AND h.switching IS NOT NULL"
+            ))?
+            .query_map(params![lifecycle_str(Lifecycle::Starting)], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let failed = tx.execute(
             &format!(
-                "UPDATE {table} SET lifecycle = ?1, updated_at = ?2
+                "UPDATE {table} SET updated_at = ?2,
+                        lifecycle = CASE WHEN session_uid IN
+                                         (SELECT session_uid FROM run_hosts WHERE switching IS NOT NULL)
+                                    THEN ?4 ELSE ?1 END
                   WHERE lifecycle = ?3 AND session_uid IN (SELECT session_uid FROM run_hosts)"
             ),
             params![
                 lifecycle_str(Lifecycle::Failed),
                 protocol::time::now_rfc3339(),
-                lifecycle_str(Lifecycle::Starting)
+                lifecycle_str(Lifecycle::Starting),
+                lifecycle_str(Lifecycle::Exited)
             ],
         )?;
         tx.commit()?;
-        Ok((failed, hosts))
+        Ok((failed, hosts, unrecorded))
     }
 
     /// Every `live` Codex run ccd hosts with a recorded app-server and a thread: what a
@@ -2744,8 +2902,9 @@ impl Store {
     }
 
     /// A hosted run's start whose host was found gone, failed in one transaction: `starting` →
-    /// `failed`, only while it is still `starting` and `host`, the host the caller found gone,
-    /// is still the one recorded for it. Whether it moved.
+    /// `failed`, or `exited` for a relaunch by its switch, which its next message relaunches again; only while it is
+    /// still `starting` and `host`, the host the caller found gone, is still the one recorded for it. Whether it
+    /// moved.
     pub fn fail_hosted_start(&self, session_uid: &str, host: &ProcessIdentity) -> Result<bool> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2757,14 +2916,18 @@ impl Store {
         for table in SESSION_TABLES {
             moved += tx.execute(
                 &format!(
-                    "UPDATE {table} SET lifecycle = ?2, updated_at = ?3
+                    "UPDATE {table} SET updated_at = ?3,
+                            lifecycle = CASE WHEN session_uid IN
+                                             (SELECT session_uid FROM run_hosts WHERE switching IS NOT NULL)
+                                        THEN ?5 ELSE ?2 END
                       WHERE session_uid = ?1 AND lifecycle = ?4"
                 ),
                 params![
                     session_uid,
                     lifecycle_str(Lifecycle::Failed),
                     now,
-                    lifecycle_str(Lifecycle::Starting)
+                    lifecycle_str(Lifecycle::Starting),
+                    lifecycle_str(Lifecycle::Exited)
                 ],
             )?;
         }
@@ -2984,8 +3147,9 @@ impl Store {
             .optional()?)
     }
 
-    /// Makes `id` the account `agent`'s starts use, or its Default for `None`. False, and nothing changed, for an id
-    /// that is not one of `agent`'s accounts. The runs going are moved to it by [`crate::switch`], not here.
+    /// Makes `id` the account `agent`'s starts use, or its Default for `None`, and marks `agent`'s live runs due to
+    /// move to it ([`crate::switch`]), in one transaction. False, and nothing changed, for an id that is not one of
+    /// `agent`'s accounts.
     pub fn activate_account(&self, agent: &str, id: Option<&str>) -> Result<bool> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -3015,6 +3179,14 @@ impl Store {
                 )?;
             }
         }
+        // Its live runs are due to move to it, each at its next message ([`crate::switch::moves`]); a run already
+        // moving goes on moving, and starts on the account active then.
+        tx.execute(
+            "UPDATE run_hosts SET switching = ?2
+              WHERE switching IS NOT ?3 AND session_uid IN
+                    (SELECT session_uid FROM all_sessions WHERE agent = ?1 AND lifecycle = 'live')",
+            params![agent, Store::SWITCH_WAITING, Store::SWITCH_MOVED],
+        )?;
         tx.commit()?;
         Ok(true)
     }
@@ -3042,33 +3214,11 @@ impl Store {
         Ok(removed)
     }
 
-    /// A switch's states ([`Store::switch_state`]): waiting for the run's idle point; ended there by the switch, its
-    /// next message to start it on the new account; that start not gone through.
+    /// A switch's states ([`Store::switch_state`]): due, to move at the run's next message; its process being ended
+    /// by that message, which then starts it on the new account; that start not gone through.
     pub const SWITCH_WAITING: i64 = 1;
     pub const SWITCH_FAILED: i64 = 2;
     pub const SWITCH_MOVED: i64 = 3;
-
-    /// Marks every live run of `agent` as switching to its agent's active account; the uids marked. A run already
-    /// moved, its process being stopped, is left moved: its next message starts it on the account active then.
-    pub fn mark_switching(&self, agent: &str) -> Result<Vec<String>> {
-        let conn = self.write();
-        let mut stmt = conn.prepare(
-            "SELECT h.session_uid FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
-              WHERE s.agent = ?1 AND s.lifecycle = 'live' AND h.switching IS NOT ?2",
-        )?;
-        let uids = stmt
-            .query_map(params![agent, Store::SWITCH_MOVED], |row| {
-                row.get::<_, String>(0)
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for uid in &uids {
-            conn.execute(
-                "UPDATE run_hosts SET switching = 1 WHERE session_uid = ?1",
-                params![uid],
-            )?;
-        }
-        Ok(uids)
-    }
 
     /// Where the run `session_uid`'s switch of account stands: [`Store::SWITCH_WAITING`],
     /// [`Store::SWITCH_MOVED`], [`Store::SWITCH_FAILED`], or `None`.
@@ -3235,6 +3385,17 @@ impl Store {
         let Some(lifecycle) = row else {
             return Ok(DeleteOutcome::NotFound);
         };
+        // A run with a switch reads live until its next message has started it.
+        let switching: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_hosts WHERE session_uid = ?1 AND switching IS NOT NULL)",
+            params![session_uid],
+            |row| row.get(0),
+        )?;
+        if switching {
+            return Ok(DeleteOutcome::NotExited {
+                lifecycle: lifecycle_str(Lifecycle::Live).to_string(),
+            });
+        }
         let ended = lifecycle == lifecycle_str(Lifecycle::Exited)
             || lifecycle == lifecycle_str(Lifecycle::Failed);
         if !ended {
@@ -3359,6 +3520,8 @@ impl Store {
                     AND NOT EXISTS(SELECT 1 FROM all_sessions AS b
                                     WHERE b.session_uid = a.session_uid
                                       AND b.lifecycle NOT IN (?1, ?2))
+                    AND NOT EXISTS(SELECT 1 FROM run_hosts AS h
+                                    WHERE h.session_uid = a.session_uid AND h.switching IS NOT NULL)
                   ORDER BY created_at ASC, session_uid ASC",
             )?;
             let ended = params![
@@ -10883,6 +11046,53 @@ mod tests {
             DeleteOutcome::Deleted { .. }
         ));
         assert_eq!(store.hosted_run_for_request("req-1").unwrap(), None);
+    }
+
+    /// **A run with a switch of account is neither deleted nor pruned** (306, decision 311 v4; gate 9): it reads live
+    /// to every device until its next message has started it.
+    #[test]
+    fn a_run_with_a_switch_is_neither_deleted_nor_pruned() {
+        let (store, _path) = temp_store();
+        let moving = begun(&store, "AA", "req-1");
+        store.set_lifecycle(&moving.uid, Lifecycle::Exited).unwrap();
+        store
+            .set_switch_state(&moving.uid, Some(Store::SWITCH_MOVED))
+            .unwrap();
+        assert_eq!(store.prune_exited_sessions(&[], false).unwrap(), []);
+        assert!(matches!(
+            store.delete_exited_session(&moving.uid).unwrap(),
+            DeleteOutcome::NotExited { .. }
+        ));
+        store.set_switch_state(&moving.uid, None).unwrap();
+        assert_eq!(store.prune_exited_sessions(&[], false).unwrap().len(), 1);
+    }
+
+    /// **A switch's relaunch a restart finds unfinished goes back to ended, still switching** (306, decision 311 v4;
+    /// gate 8): one with no host recorded, and one whose host was found gone, are `exited`, for their next message,
+    /// not `failed`; any other start is failed as before.
+    #[test]
+    fn a_switchs_relaunch_left_unfinished_goes_back_to_ended() {
+        let (store, _path) = temp_store();
+        let unhosted = begun(&store, "AA", "req-1");
+        let hosted = begun(&store, "AB", "req-2");
+        let other = begun(&store, "AC", "req-3");
+        for run in [&unhosted, &hosted] {
+            store
+                .set_switch_state(&run.uid, Some(Store::SWITCH_MOVED))
+                .unwrap();
+        }
+        store.record_host(&hosted.uid, &HOST, None).unwrap();
+        assert!(store.fail_hosted_start(&hosted.uid, &HOST).unwrap());
+        assert_eq!(store.fail_unhosted_starts().unwrap(), 2);
+        let lifecycle = |run: &SessionKey| store.get_session(&run.uid).unwrap().unwrap().lifecycle;
+        assert_eq!(
+            (lifecycle(&unhosted), lifecycle(&hosted), lifecycle(&other)),
+            (Lifecycle::Exited, Lifecycle::Exited, Lifecycle::Failed)
+        );
+        assert_eq!(
+            store.switch_state(&unhosted.uid).unwrap(),
+            Some(Store::SWITCH_MOVED)
+        );
     }
 
     #[test]

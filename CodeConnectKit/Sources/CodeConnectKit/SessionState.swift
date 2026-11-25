@@ -433,7 +433,13 @@ public final class SessionState {
         let turns = codexTurns()
         return Shown(
             drawnThrough: drawnThrough, lastPromptSeq: lastPromptSeq,
-            lastActivityAt: events.last(where: { $0.kind != .linkState && $0.kind != .other("codex_settings") })?.date,
+            // A switch of account's end and the daemon's start of the run on the new account are no activity: the
+            // person's message that moved it is.
+            lastActivityAt: events.last(where: { event in
+                event.kind != .linkState && event.kind != .other("codex_settings")
+                    && !(event.kind == .sessionEnd && event.switchedToLabel != nil)
+                    && !(event.kind == .sessionStart && event.source == .daemon)
+            })?.date,
             gap: gap,
             windowStart: windowStart, headTruncated: headTruncated,
             loadingPage: pageRequest != nil,
