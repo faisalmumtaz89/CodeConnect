@@ -1731,25 +1731,17 @@ impl Store {
     /// fact, newest first, stopped at the first event that decides it.
     ///
     /// Each read is narrowed in SQL to the rows that can decide its fact under
-    /// [`protocol::facts`] — a `session_start` or a user line for the model, a
-    /// hook, Claude's permission-mode line or an SDK run's init for the mode, a
-    /// notification or a user line for the effort, and a Codex run's settings
-    /// ([`protocol::facts::CODEX_SETTINGS`]) for each — so a long run costs those rows
-    /// down to the deciding one, not its whole log.
+    /// [`protocol::facts`] — a `session_start` or a user line for the model and its
+    /// receipt (one walk for both), a hook, Claude's permission-mode line or an SDK run's
+    /// init for the mode, a notification or a user line for the effort, and a Codex run's
+    /// settings ([`protocol::facts::CODEX_SETTINGS`]) for each — so a long run costs those
+    /// rows down to the deciding one, not its whole log.
     pub fn session_facts(&self, session_uid: &str) -> Result<protocol::facts::SessionFacts> {
         let conn = self.read();
+        let (model, model_receipt) = newest_model_and_receipt(&conn, session_uid)?;
         Ok(protocol::facts::SessionFacts {
-            model: newest_decided(
-                &conn,
-                session_uid,
-                "kind IN (?2, ?3, ?4)",
-                &[
-                    EventKind::SessionStart.as_str(),
-                    EventKind::UserMessage.as_str(),
-                    protocol::facts::CODEX_SETTINGS,
-                ],
-                protocol::facts::model_fact,
-            )?,
+            model,
+            model_receipt,
             permission_mode: newest_decided(
                 &conn,
                 session_uid,
@@ -2352,21 +2344,6 @@ impl Store {
             &[protocol::facts::CODEX_SETTINGS],
             |event| Some(event.payload.clone()),
         )
-    }
-
-    /// The model claude's newest receipt of a model change names for the run `session_uid`
-    /// (its `Set model to …` line, as [`protocol::facts::model_fact`] reads it), whatever the
-    /// inits filed since; `None` when it has none.
-    pub fn newest_model_receipt(&self, session_uid: &str) -> Result<Option<String>> {
-        let conn = self.read();
-        Ok(newest_decided(
-            &conn,
-            session_uid,
-            "kind = ?2",
-            &[EventKind::UserMessage.as_str()],
-            protocol::facts::model_fact,
-        )?
-        .map(|fact| fact.value))
     }
 
     /// Keep `models` (`{"models": [...]}`) as the Codex run `session_uid`'s models, where a
@@ -7309,6 +7286,46 @@ fn newest_decided<T>(
     Ok(None)
 }
 
+/// The run `session_uid`'s model and its newest receipt of a model change
+/// ([`protocol::facts::SessionFacts::model_receipt`]), in one walk newest first over the rows
+/// that can decide either. It ends once both are found, or at a Codex run's settings: a Codex run
+/// has no receipt, and its settings decide its model.
+fn newest_model_and_receipt(
+    conn: &Connection,
+    session_uid: &str,
+) -> Result<(Option<protocol::event::Fact>, Option<protocol::event::Fact>)> {
+    let mut stmt = conn.prepare(
+        "SELECT seq, session_id, ts, kind, payload, source, source_event_id, turn_id, item_id
+           FROM events
+          WHERE session_uid = ?1 AND kind IN (?2, ?3, ?4)
+          ORDER BY seq DESC",
+    )?;
+    let mut rows = stmt.query(params![
+        session_uid,
+        EventKind::SessionStart.as_str(),
+        EventKind::UserMessage.as_str(),
+        protocol::facts::CODEX_SETTINGS,
+    ])?;
+    let (mut model, mut receipt) = (None, None);
+    while let Some(row) = rows.next()? {
+        let event = event_from_row(session_uid, row)?;
+        let Some(fact) = protocol::facts::model_fact(&event) else {
+            continue;
+        };
+        let codex = event.kind != EventKind::UserMessage && event.kind != EventKind::SessionStart;
+        if receipt.is_none() && event.kind == EventKind::UserMessage {
+            receipt = Some(fact.clone());
+        }
+        if model.is_none() {
+            model = Some(fact);
+        }
+        if receipt.is_some() || codex {
+            break;
+        }
+    }
+    Ok((model, receipt))
+}
+
 /// One event, from a row selected as `seq, session_id, ts, kind, payload, source,
 /// source_event_id, turn_id, item_id`.
 fn event_from_row(session_uid: &str, row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
@@ -10403,6 +10420,73 @@ mod tests {
         let read = store.session_facts(&session.uid).unwrap();
         assert_eq!(read.ended_with, None, "the second process named none");
         assert_eq!(read, live);
+    }
+
+    /// **A run's newest model receipt is read back after a restart as it was folded live**: the
+    /// newest `Set model to …` or `Kept model as …` line claude gave, colour codes and all, whatever
+    /// inits and other messages were filed since; and its model and effort with it, read from local
+    /// commands' output only, never from a user's own words that look like one.
+    #[test]
+    fn a_runs_model_receipt_is_read_back_as_it_was_folded() {
+        let (store, _path) = temp_store();
+        let session = key("AA", "cc-1");
+        begin(&store, &session);
+        let said = |content: &str| {
+            let mut message = pending(&session, EventKind::UserMessage, None);
+            message.payload = json!({"message": {"role": "user", "content": content}});
+            message
+        };
+        let init = |model: &str| {
+            let mut start = pending(&session, EventKind::SessionStart, None);
+            start.payload = json!({"model": model});
+            start
+        };
+        let mut live = protocol::facts::SessionFacts::default();
+        let mut receipts = Vec::new();
+        for event in [
+            said("hello"),
+            init("claude-opus-5-5"),
+            said("<local-command-stdout>\u{1b}[31mSet model to\u{1b}[0m sonnet</local-command-stdout>"),
+            said("thanks"),
+            init("claude-sonnet-5-5"),
+            said("<local-command-caveat>Caveat: Set model to opus</local-command-caveat>"),
+            said("<local-command-stdout>Kept model as opus</local-command-stdout>"),
+            said("<local-command-stdout>Set effort level to low (this session only)</local-command-stdout>"),
+            init("claude-opus-5-5"),
+            said("Set effort level to high and Set model to haiku, please"),
+            said("go on"),
+        ] {
+            live.observe(&store.append_event(&event).unwrap().unwrap());
+            let read = store.session_facts(&session.uid).unwrap();
+            assert_eq!(read, live);
+            receipts.push(read.model_receipt.map(|fact| fact.value));
+        }
+        let sonnet = Some("sonnet".to_string());
+        let opus = Some("opus".to_string());
+        assert_eq!(
+            receipts,
+            [
+                None,
+                None,
+                sonnet.clone(),
+                sonnet.clone(),
+                sonnet.clone(),
+                sonnet,
+                opus.clone(),
+                opus.clone(),
+                opus.clone(),
+                opus.clone(),
+                opus
+            ]
+        );
+        let read = store.session_facts(&session.uid).unwrap();
+        assert_eq!(
+            (
+                read.model.map(|fact| fact.value),
+                read.effort.map(|fact| fact.value)
+            ),
+            (Some("claude-opus-5-5".into()), Some("low".into()))
+        );
     }
 
     /// **A Codex run's settings are read back after a restart as they were folded live**: its

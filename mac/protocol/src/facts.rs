@@ -46,6 +46,9 @@ fn codex_settings(event: &Event) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionFacts {
     pub model: Option<Fact>,
+    /// The newest receipt of a model change claude gave the run (its `Set model to …` line, a
+    /// `user_message` [`model_fact`] reads), whatever was filed since; it outlives the run's end.
+    pub model_receipt: Option<Fact>,
     pub permission_mode: Option<Fact>,
     pub effort: Option<Fact>,
     /// The seq of the run's newest `session_end`, 0 before one. `effort` is the live
@@ -67,6 +70,14 @@ impl SessionFacts {
     /// The live path folds each run's events in the order they are filed, which never does that.
     pub fn observe(&mut self, event: &Event) {
         if let Some(fact) = model_fact(event) {
+            if event.kind == EventKind::UserMessage
+                && self
+                    .model_receipt
+                    .as_ref()
+                    .is_none_or(|held| held.seq < fact.seq)
+            {
+                self.model_receipt = Some(fact.clone());
+            }
             if self.model.as_ref().is_none_or(|held| held.seq < fact.seq) {
                 self.model = Some(fact);
             }
