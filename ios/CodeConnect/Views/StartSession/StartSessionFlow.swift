@@ -695,7 +695,7 @@ struct StartStepsSheet: View {
                         }
                         // A file over a limit holds the start: the tray says why.
                         CCButton("Start", size: .lg, fullWidth: true) { start(project, agent) }
-                            .disabled(files.filesBlockedReason != nil)
+                            .disabled(filesBlocked != nil)
                             .accessibilityIdentifier("start-go")
                     }
                 }
@@ -707,9 +707,23 @@ struct StartStepsSheet: View {
     private var fileTray: some View {
         if !files.files.isEmpty {
             AttachmentTray(
-                files: files.files, reason: files.filesBlockedReason,
+                files: files.files, reason: filesBlocked,
                 onRemove: { files.removeFile($0) }, onRetry: { _ in })
         }
+    }
+
+    /// Why the files hold Start, on the chosen computer.
+    private var filesBlocked: String? {
+        Self.filesHoldStart(
+            files: files.files, reason: files.filesBlockedReason, takesUploads: context.takesUploads,
+            machine: context.machineName)
+    }
+
+    /// A file over a limit, in its own words; else files for a computer that takes none, as the Mac says it.
+    static func filesHoldStart(files: [Attachment], reason: String?, takesUploads: Bool, machine: String) -> String? {
+        if let reason { return reason }
+        if !files.isEmpty, !takesUploads { return "\(machine) can’t take files." }
+        return nil
     }
 
     private func messagePill(_ project: StartProject, _ agent: StartAgent) -> some View {
@@ -723,7 +737,7 @@ struct StartStepsSheet: View {
     }
 
     private func start(_ project: StartProject, _ agent: StartAgent) {
-        guard files.filesBlockedReason == nil else { return }
+        guard filesBlocked == nil else { return }
         onStarted(
             context.start(
                 project, place: place, agent: agent, model: pick(agent)?.model, prompt: message, files: files.files))

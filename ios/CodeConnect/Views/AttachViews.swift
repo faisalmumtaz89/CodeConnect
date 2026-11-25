@@ -59,10 +59,14 @@ struct AttachMenu: View {
         }
     }
 
+    /// A photo that can't be had (one kept only in iCloud, say) is still a tile: refused, with the reason.
     private func addPhoto(_ item: PhotosPickerItem) async {
-        guard let data = try? await item.loadTransferable(type: Data.self),
-              let photo = PhotoExport.prepare(data, types: item.supportedContentTypes)
-        else { return }
+        guard let data = try? await item.loadTransferable(type: Data.self), let photo = PhotoExport.prepare(data)
+        else {
+            // Its size is unknown; one byte keeps it out of the "empty" refusal so the read's own reason is said.
+            take("photo", 1) { throw PhotoExport.Unreadable() }
+            return
+        }
         take(photo.name, photo.data.count) { photo.data }
     }
 
@@ -76,13 +80,17 @@ struct AttachMenu: View {
     }
 }
 
-/// **A photo as it goes to the agent**: PNG, GIF and JPEG as the library holds them; anything else (HEIC, which an
-/// agent's tools may not read) as JPEG. Nil when the bytes are no image.
+/// **A photo as it goes to the agent**, by what its bytes are: PNG, JPEG, GIF and WebP as the library holds them;
+/// anything else (HEIC, which an agent's tools may not read) as JPEG. Nil when the bytes are no image.
 enum PhotoExport {
-    static func prepare(_ data: Data, types: [UTType]) -> (data: Data, name: String)? {
-        if types.contains(where: { $0.conforms(to: .png) }) { return (data, "image.png") }
-        if types.contains(where: { $0.conforms(to: .gif) }) { return (data, "image.gif") }
-        if types.contains(where: { $0.conforms(to: .jpeg) }) { return (data, "photo.jpg") }
+    struct Unreadable: LocalizedError {
+        var errorDescription: String? { "the library didn’t hand it over (is it only in iCloud?)" }
+    }
+
+    static func prepare(_ data: Data) -> (data: Data, name: String)? {
+        if let kind = Attachment.imageExtension(data) {
+            return (data, kind == "jpg" ? "photo.jpg" : "image.\(kind)")
+        }
         guard let jpeg = UIImage(data: data)?.jpegData(compressionQuality: 0.85) else { return nil }
         return (jpeg, "photo.jpg")
     }
