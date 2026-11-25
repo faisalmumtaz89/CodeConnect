@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.25
+
 ## CodeConnect 0.19.24
 
 - On the Mac and Linux, switching accounts no longer loses a session's waiting messages from your other sessions,
