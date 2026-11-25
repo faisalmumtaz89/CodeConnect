@@ -125,6 +125,25 @@ final class RenderPass: XCTestCase {
 
     func testRendersTheUploadsAtAX5() throws { try render(at: .ax5, RenderCatalog.uploads + RenderCatalog.startFiles) }
 
+    /// Each onboarding step's caps title, scrolled until the whole title is on screen: at AX5 a title wraps at its
+    /// words, never inside one.
+    private static let onboardingTitles = [
+        "Make sure your iPhone can reach your computer", "Install CodeConnect on your computer", "Pair this iPhone",
+        "Start an agent",
+    ].enumerated().map { step, title in
+        RenderScenario(
+            name: "onboarding-title-\(step + 1)", purpose: "step \(step + 1)'s title, whole", arguments: [],
+            reach: { app, driver in
+                try driver.require(app.buttons["pairing-sample-mode"], "the first screen")
+                try driver.scrollUntil(app, "step \(step + 1)'s title whole on screen") {
+                    let label = app.staticTexts.matching(NSPredicate(format: "label == %@", title)).firstMatch
+                    return label.exists && app.windows.firstMatch.frame.contains(label.frame)
+                }
+            })
+    }
+
+    func testRendersTheOnboardingTitlesAtAX5() throws { try render(at: .ax5, Self.onboardingTitles) }
+
     // MARK: - The pass
 
     private func render(at size: Size, _ scenarios: [RenderScenario] = RenderCatalog.all) throws {
