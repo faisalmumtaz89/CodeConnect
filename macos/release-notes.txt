@@ -1,1 +1,1 @@
-An update is now one quiet button at the right end of the title bar: Update, then Downloading…, then Restart to Update, which installs the new version and opens it. The update window is gone, and Check for Updates… drives the same button and says nothing when CodeConnect is up to date.
+A message can now carry files: use the paperclip, drop files on the message box, or paste a picture, in a reply or when starting a new agent. Up to 10 files of up to 10 MB each; they upload as you add them, and the agent reads them on the computer its session runs on.
