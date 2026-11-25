@@ -1,16 +1,16 @@
 // The stand-in agy a test gives an Antigravity run as its agy (rig.ts writeAgy), run on the built host as Bun. It
 // speaks `agy acp`'s Agent Client Protocol over stdio as the CLI's own changelog and the ACP schema describe it: it
-// answers `initialize` with its script's protocol version, advertising session/resume unless its script says
-// `resume: false`, `session/new` with a session after a notification of its commands (which the host must hold until
-// the start's outcome) and `session/resume`, each with agy 1.5.15's settings: its models (effort baked into each id),
-// modes and configOptions (model family, the family's thought levels, mode). `session/set_config_option` sets one of
-// those, `session/set_mode` the mode, each followed by a `config_option_update` (and `current_mode_update`); a value
-// agy does not offer is refused, the model `no-such-model` as "agy has no model no-such-model". At each `session/prompt` it writes its reply in
-// two chunks, a tool call, then asks permission for it with allow_once and reject_once options; once answered it ends
-// the tool as the answer says, writes one more chunk and answers the prompt `end_turn`. A request answered
-// `cancelled` ends the prompt `cancelled`, unless its script says `quiet_on_cancel`. With `leave_child` it starts a child
-// that outlives it. It records its argv, its folder and every line it read; its input's end
-// ends it.
+// answers `initialize` with its script's protocol version, advertising session/resume unless its script says `resume:
+// false`, `session/new` with a session after a notification of its commands (which the host must hold until the start's
+// outcome) and `session/resume`, each with agy 1.5.15's settings: its models (effort baked into each id), modes and
+// configOptions (model family, the family's thought levels, mode). `session/set_config_option` sets one of those and
+// `session/set_mode` the mode, each followed by a `config_option_update` (and `current_mode_update`); a value agy does
+// not offer is refused, the model `no-such-model` as "agy has no model no-such-model". `session/close` is answered with
+// nothing. At each `session/prompt` it writes its reply in two chunks, a tool call, then asks permission for it with
+// allow_once and reject_once options; once answered it ends the tool as the answer says, writes one more chunk and
+// answers the prompt `end_turn`. A request answered `cancelled` ends the prompt `cancelled`, unless its script says
+// `quiet_on_cancel`. With `leave_child` it starts a child that outlives it. It records its argv, its folder and every
+// line it read; its input's end ends it.
 //
 //   stub-agy.ts <script.json> acp
 import { appendFileSync, readFileSync } from 'node:fs';
@@ -40,12 +40,20 @@ const families: Record<string, string[]> = {
   'gemini-pro-orchestrator': [],
   'gemini-pro-orchestrator-neon': [],
 };
+// Each family's name, as agy 1.5.15 names it.
+const familyNames: Record<string, string> = {
+  'gemini-4-neon': 'Gemini 4 Neon',
+  'gemini-3.8-flash': 'Gemini 3.8 Flash',
+  'gpt-oss-120b-medium': 'GPT-OSS 120B (Medium)',
+  'gemini-pro-orchestrator': 'Orchestrator (Carbon)',
+  'gemini-pro-orchestrator-neon': 'Orchestrator (Neon)',
+};
 const modes = ['default', 'accept-edits', 'auto', 'plan'];
 const names: Record<string, string> = { default: 'Default', 'accept-edits': 'Accept edits', auto: 'Auto', plan: 'Plan' };
 const settings = { model: 'gemini-4-neon', effort: 'high', mode: 'default' };
 const configOptions = () => [
   { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: settings.model,
-    options: Object.keys(families).map((value) => ({ value, name: `Name of ${value}` })) },
+    options: Object.keys(families).map((value) => ({ value, name: familyNames[value] })) },
   { id: 'thought_level', name: 'Thinking Level', category: 'thought_level', type: 'select', currentValue: settings.effort,
     options: families[settings.model]!.map((value) => ({ value, name: value })) },
   { id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: settings.mode,
@@ -95,6 +103,8 @@ for await (const text of createInterface({ input: process.stdin })) {
       update(sessionId, { sessionUpdate: 'config_option_update', configOptions: configOptions() });
       write({ id: message.id, result: {} });
     }
+  } else if (message.method === 'session/close') {
+    write({ id: message.id, result: {} });
   } else if (message.method === 'session/resume') {
     write({ id: message.id, result: opening(message.params.sessionId) });
   } else if (message.method === 'session/new') {
