@@ -681,6 +681,8 @@ where
                         | ClientMessage::AddAccount { .. }
                         | ClientMessage::ActivateAccount { .. }
                         | ClientMessage::SignInAccount { .. }
+                        | ClientMessage::SignInAgent { .. }
+                        | ClientMessage::SignOutAgent { .. }
                         | ClientMessage::RemoveAccount { .. }
                 ) {
                     if device_id.is_none() {
@@ -696,6 +698,8 @@ where
                             | ClientMessage::AddAccount { .. }
                             | ClientMessage::ActivateAccount { .. }
                             | ClientMessage::SignInAccount { .. }
+                            | ClientMessage::SignInAgent { .. }
+                            | ClientMessage::SignOutAgent { .. }
                             | ClientMessage::RemoveAccount { .. }
                     ) {
                         accounts_pushed = Some(daemon.accounts_tx.subscribe());
@@ -1033,6 +1037,8 @@ where
         | ClientMessage::AddAccount { .. }
         | ClientMessage::ActivateAccount { .. }
         | ClientMessage::SignInAccount { .. }
+        | ClientMessage::SignInAgent { .. }
+        | ClientMessage::SignOutAgent { .. }
         | ClientMessage::RemoveAccount { .. }
         | ClientMessage::GetMachineStats => {}
         ClientMessage::RegisterPush {

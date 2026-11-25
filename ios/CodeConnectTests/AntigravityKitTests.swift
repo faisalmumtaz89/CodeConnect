@@ -150,6 +150,42 @@ final class AntigravityKitTests: XCTestCase {
             RunSettings.of(summary: ended), .hostedReadOnly(model: RunModelName(text: "Gemini 4 Neon", reported: false)))
     }
 
+    /// Antigravity's sign-in as a computer lists it (`fixtures/accounts/antigravity-sign-in-wire.json`, what ccd's
+    /// `antigravity_sign_in_frames` emits), read from the source file.
+    private func signInBook(_ key: String) throws -> AccountBook {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: repoRoot.appendingPathComponent("fixtures/accounts/antigravity-sign-in-wire.json"))
+        let frame = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: data)[key], key)
+        guard case .accounts(_, let book) = try JSONDecoder().decode(
+            ServerMessage.self, from: Data(frame.canonicalJSONString.utf8))
+        else { throw XCTSkip("\(key) is not an accounts frame") }
+        return book
+    }
+
+    /// Antigravity's one row says its plan exactly as agy names it ("Google AI Pro" here), "Signed in" when agy names
+    /// none, and nothing of its own while it is signed out or signing in (the row says those); its "…" offers Sign Out…
+    /// signed in, Sign In… signed out, and nothing while a sign-in is going.
+    func testAntigravitysRowSaysItsSignInAndItsPlanAsAgyNamesIt() throws {
+        let line: (AccountBook) -> String? = { book in
+            book.agentSignIn(for: .antigravity)?.line(plan: book.defaultFacts(for: .antigravity)?.plan)
+        }
+        let pro = try signInBook("signed_in_pro")
+        XCTAssertEqual(line(pro), "Signed in · Google AI Pro")
+        XCTAssertEqual(pro.agentSignIn(for: .antigravity)?.acts, [.signOut])
+        XCTAssertEqual(line(try signInBook("signed_in_no_tier")), "Signed in")
+        let out = try signInBook("signed_out")
+        XCTAssertNil(line(out))
+        XCTAssertEqual(out.agentSignIn(for: .antigravity)?.signedOut, true)
+        XCTAssertEqual(out.agentSignIn(for: .antigravity)?.acts, [.signIn])
+        let going = try signInBook("signing_in")
+        XCTAssertNil(line(going))
+        XCTAssertEqual(going.agentSignIn(for: .antigravity)?.signingIn, true)
+        XCTAssertEqual(going.agentSignIn(for: .antigravity)?.acts, [])
+        XCTAssertEqual(AccountRowAct.signIn.title, "Sign In…")
+        XCTAssertEqual(AccountRowAct.signOut.title, "Sign Out…")
+    }
+
     /// Stop follows the hosted rule, and its sentences name Antigravity.
     func testAnAntigravityTurnIsStoppedAsAHostedOne() {
         XCTAssertNil(

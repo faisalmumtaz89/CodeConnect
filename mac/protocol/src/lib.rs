@@ -888,7 +888,14 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     carried since its first, so an app reads one pair for either agent. A turn with no call of its own (`/compact`,
 ///     `/clear`, a command's) carries neither, nor does a turn whose daemon restarted during it, and a daemon below
 ///     49 sends neither for Claude.
-pub const PROTOCOL_MINOR: u32 = 49;
+///   * `50` — **Antigravity signs in and out from an app.**
+///
+///     [`ws::ClientMessage::SignInAgent`] and [`ws::ClientMessage::SignOutAgent`] sign an agent that keeps one sign-in
+///     and no accounts of CodeConnect's (Antigravity) in, with its own sign-in in a browser on the computer, and out;
+///     the accounts listing carries its sign-in as [`ws::AgentSignIn`] (`agent_sign_ins`) and its plan, in agy's own
+///     words, as its Default's facts. Any other agent is refused `bad_request`. A daemon below 50 answers the two
+///     frames as undecodable and sends no `agent_sign_ins`, so an app offers them only from 50.
+pub const PROTOCOL_MINOR: u32 = 50;
 
 #[cfg(test)]
 mod ledger_tests {

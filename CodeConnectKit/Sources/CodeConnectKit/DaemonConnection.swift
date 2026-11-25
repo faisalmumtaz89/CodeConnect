@@ -1144,6 +1144,17 @@ public final class DaemonConnection {
         try await accountsRequest { .signInAccount(requestID: $0, accountID: accountID) }
     }
 
+    /// Starts `agent`'s own sign-in in a browser on the computer (minor 50, Antigravity); every account, its sign-in
+    /// going. Its end comes in a pushed listing.
+    public func signInAgent(_ agent: String) async throws -> AccountBook {
+        try await accountsRequest { .signInAgent(requestID: $0, agent: agent) }
+    }
+
+    /// Signs `agent` out of the computer (minor 50, Antigravity).
+    public func signOutAgent(_ agent: String) async throws -> AccountBook {
+        try await accountsRequest { .signOutAgent(requestID: $0, agent: agent) }
+    }
+
     /// One accounts request at a time: a change is never sent while another is still unanswered.
     private func accountsRequest(_ message: (String) -> ClientMessage) async throws -> AccountBook {
         if accountsWaiters.values.contains(where: { $0.contains { $0.continuation != nil } }) {

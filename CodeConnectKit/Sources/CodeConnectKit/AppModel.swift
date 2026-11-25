@@ -1338,6 +1338,29 @@ public final class AppModel {
         await accountsRequest { try await $0.signInAccount(accountID: accountID) }
     }
 
+    /// This computer signs an agent in and out with its own sign-in (minor 50: Antigravity's); one before it would
+    /// answer those requests as undecodable, so none is offered there.
+    public var signsAgentsIn: Bool {
+        #if DEBUG
+            if fixtureAccountBook != nil { return true }
+        #endif
+        return keepsAccounts && connection.profile.protocolMinor >= 50
+    }
+
+    /// Starts `agent`'s own sign-in in a browser on the computer; true once the computer has it going.
+    @discardableResult
+    public func signInAgent(_ agent: StartAgent) async -> Bool {
+        guard signsAgentsIn else { return false }
+        return await accountsRequest { try await $0.signInAgent(agent.rawValue) }
+    }
+
+    /// Signs `agent` out of the computer; true once it has.
+    @discardableResult
+    public func signOutAgent(_ agent: StartAgent) async -> Bool {
+        guard signsAgentsIn else { return false }
+        return await accountsRequest { try await $0.signOutAgent(agent.rawValue) }
+    }
+
     private func accountsRequest(_ ask: (DaemonConnection) async throws -> AccountBook) async -> Bool {
         guard keepsAccounts, !accountsBusy else { return false }
         accountsProblem = nil

@@ -278,7 +278,9 @@ pub(crate) fn request_id(message: &protocol::ws::ClientMessage) -> String {
     match message {
         ClientMessage::ListAccounts { request_id }
         | ClientMessage::AddAccount { request_id, .. }
-        | ClientMessage::ActivateAccount { request_id, .. } => request_id.clone(),
+        | ClientMessage::ActivateAccount { request_id, .. }
+        | ClientMessage::SignInAgent { request_id, .. }
+        | ClientMessage::SignOutAgent { request_id, .. } => request_id.clone(),
         _ => unreachable!("only the account frames are answered here"),
     }
 }
@@ -331,6 +333,7 @@ pub(crate) fn listing(
             .collect(),
         active,
         defaults: Vec::new(),
+        agent_sign_ins: Vec::new(),
     }
 }
 
@@ -462,6 +465,15 @@ impl Facts {
     }
 
     /// What is held for `key`, its facts and its sign-in, goes (its sign-in changed, or it was removed).
+    /// Whether the agent whose Default is `key` (Antigravity's: it keeps one sign-in and no accounts of ours) is
+    /// signed in, as it just said: the listing's [`protocol::ws::AgentSignIn`] for it.
+    pub(crate) fn keep_agent_signed(&self, key: &str, signed_in: Option<bool>) {
+        self.signed
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), (signed_in, false));
+    }
+
     pub(crate) fn forget(&self, key: &str) {
         self.known.lock().unwrap().remove(key);
         self.signed.lock().unwrap().remove(key);
@@ -498,7 +510,10 @@ impl Facts {
         mut reply: protocol::ws::ServerMessage,
     ) -> protocol::ws::ServerMessage {
         let protocol::ws::ServerMessage::Accounts {
-            accounts, defaults, ..
+            accounts,
+            defaults,
+            agent_sign_ins,
+            ..
         } = &mut reply
         else {
             return reply;
@@ -511,7 +526,7 @@ impl Facts {
             }
             account.facts = known.get(&account.id).and_then(|(facts, _)| facts.clone());
         }
-        for agent in [AgentKind::Codex, AgentKind::Claude] {
+        for agent in [AgentKind::Codex, AgentKind::Claude, AgentKind::Antigravity] {
             let default = known
                 .get(&default_key(&agent))
                 .and_then(|(facts, _)| facts.clone());
@@ -533,8 +548,32 @@ impl Facts {
                 defaults.push(protocol::ws::DefaultAccount { agent, facts });
             }
         }
+        // Antigravity's one sign-in, as last read, beside the one a sign-in going marked.
+        let key = default_key(&AgentKind::Antigravity);
+        if let Some(&(signed_in, _)) = signed.get(&key) {
+            sign_in_of(agent_sign_ins, AgentKind::Antigravity).signed_in = signed_in;
+        }
         reply
     }
+}
+
+/// `agent`'s entry among `sign_ins`, added when it has none.
+fn sign_in_of(
+    sign_ins: &mut Vec<protocol::ws::AgentSignIn>,
+    agent: AgentKind,
+) -> &mut protocol::ws::AgentSignIn {
+    let at = match sign_ins.iter().position(|entry| entry.agent == agent) {
+        Some(at) => at,
+        None => {
+            sign_ins.push(protocol::ws::AgentSignIn {
+                agent,
+                signed_in: None,
+                signing_in: false,
+            });
+            sign_ins.len() - 1
+        }
+    };
+    &mut sign_ins[at]
 }
 
 /// What Claude Code at `claude` says of the account whose folder `account` gives (its Default, the person's own,
@@ -890,6 +929,150 @@ pub(crate) async fn sign_in(
     (reply, Some(running))
 }
 
+/// Signs Antigravity in with agy's own sign-in, agy at `agy` (`agent`, any other refused): `authenticate` with Google's
+/// personal sign-in, for which agy opens the browser on this computer and listens for Google's answer itself. Answers
+/// at once: the listing, Antigravity `signing_in`. It takes the computer's one sign-in slot, under Antigravity's
+/// Default's key, as an account's sign-in does ([`sign_in`]); it ends when agy answers (whether it signed in or not),
+/// after `wait`, or when a newer sign-in replaces it, and then agy is ended and `on_end` called, which pushes the list.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn sign_in_agent(
+    store: &crate::store::Store,
+    sign_ins: &Arc<SignIns>,
+    on_end: impl FnOnce() + Send + 'static,
+    environment: &HashMap<OsString, OsString>,
+    agent: AgentKind,
+    agy: Option<&Path>,
+    request_id: String,
+    wait: std::time::Duration,
+) -> (
+    protocol::ws::ServerMessage,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    if agent != AgentKind::Antigravity {
+        return (refused(request_id, NO_SIGN_IN_OF_ITS_OWN.into()), None);
+    }
+    let Some(agy) = agy else {
+        return (refused(request_id, AGY_MISSING.into()), None);
+    };
+    let Some(mut signing) = crate::start_session::Agy::start(environment, agy) else {
+        return (
+            unavailable(
+                request_id,
+                "start the sign-in",
+                anyhow::anyhow!("agy did not start"),
+            ),
+            None,
+        );
+    };
+    let (end, ended) = tokio::sync::oneshot::channel::<tokio::sync::oneshot::Sender<()>>();
+    let mine = sign_ins
+        .count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some((_, _, earlier)) =
+        sign_ins
+            .going
+            .lock()
+            .unwrap()
+            .replace((mine, default_key(&agent), end))
+    {
+        let _ = earlier.send(tokio::sync::oneshot::channel().0);
+    }
+    let reply = sign_ins.marked(listing(store, Some(request_id)));
+    let running = {
+        let sign_ins = Arc::clone(sign_ins);
+        tokio::spawn(async move {
+            let mut told = None;
+            {
+                let signed = async {
+                    signing
+                        .call(
+                            "initialize",
+                            serde_json::json!({"protocolVersion": 1, "clientCapabilities": {}}),
+                        )
+                        .await?;
+                    signing
+                        .call(
+                            "authenticate",
+                            serde_json::json!({"methodId": "oauth-personal"}),
+                        )
+                        .await
+                };
+                tokio::select! {
+                    _ = signed => {}
+                    ending = ended => told = ending.ok(),
+                    _ = tokio::time::sleep(wait) => {}
+                }
+            }
+            signing.end().await;
+            sign_ins.forget(mine);
+            if let Some(told) = told {
+                let _ = told.send(());
+            }
+            on_end();
+        })
+    };
+    (reply, Some(running))
+}
+
+/// Signs Antigravity out of this computer, agy at `agy` (`agent`, any other refused): agy's own `logout`. The listing,
+/// or refused `accounts_unavailable` with agy's words when it could not, or when it did not answer within
+/// [`LOGOUT_WAIT`].
+pub(crate) async fn sign_out_agent(
+    store: &crate::store::Store,
+    environment: &HashMap<OsString, OsString>,
+    agent: AgentKind,
+    agy: Option<&Path>,
+    request_id: String,
+) -> protocol::ws::ServerMessage {
+    if agent != AgentKind::Antigravity {
+        return refused(request_id, NO_SIGN_IN_OF_ITS_OWN.into());
+    }
+    let Some(agy) = agy else {
+        return refused(request_id, AGY_MISSING.into());
+    };
+    let Some(mut signing) = crate::start_session::Agy::start(environment, agy) else {
+        return unavailable(
+            request_id,
+            "sign Antigravity out",
+            anyhow::anyhow!("agy did not start"),
+        );
+    };
+    let said = tokio::time::timeout(LOGOUT_WAIT, async {
+        signing
+            .call(
+                "initialize",
+                serde_json::json!({"protocolVersion": 1, "clientCapabilities": {}}),
+            )
+            .await?;
+        signing.call("logout", serde_json::json!({})).await
+    })
+    .await;
+    signing.end().await;
+    match said {
+        Ok(Some(reply)) if reply.get("error").is_none() => listing(store, Some(request_id)),
+        Ok(Some(reply)) => refused_as(
+            request_id,
+            "accounts_unavailable",
+            format!(
+                "Antigravity couldn't sign out: {}",
+                reply["error"]["message"].as_str().unwrap_or("agy refused")
+            ),
+        ),
+        _ => refused_as(
+            request_id,
+            "accounts_unavailable",
+            "Antigravity didn't answer, so it may still be signed in.".into(),
+        ),
+    }
+}
+
+/// Why a sign-in or sign-out of an agent's own is refused for an agent that keeps accounts of CodeConnect's instead.
+const NO_SIGN_IN_OF_ITS_OWN: &str =
+    "This agent signs in through its accounts on this computer, not on its own.";
+
+/// Why Antigravity's sign-in or sign-out is refused when no agy is found.
+const AGY_MISSING: &str = "Antigravity isn't installed on this computer.";
+
 impl SignIns {
     /// The sign-in numbered `mine` is over: it is no longer the one going.
     fn forget(&self, mine: u64) {
@@ -910,11 +1093,20 @@ impl SignIns {
             .unwrap()
             .as_ref()
             .map(|(_, account, _)| account.clone());
-        if let (protocol::ws::ServerMessage::Accounts { accounts, .. }, Some(going)) =
-            (&mut reply, going)
+        if let (
+            protocol::ws::ServerMessage::Accounts {
+                accounts,
+                agent_sign_ins,
+                ..
+            },
+            Some(going),
+        ) = (&mut reply, going)
         {
             for account in accounts.iter_mut().filter(|account| account.id == going) {
                 account.signing_in = true;
+            }
+            if going == default_key(&AgentKind::Antigravity) {
+                sign_in_of(agent_sign_ins, AgentKind::Antigravity).signing_in = true;
             }
         }
         reply
@@ -1768,6 +1960,277 @@ pub(crate) mod tests {
                 .join(&a.id),
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A stand-in `agy` in `root` answering `agy acp` as agy 1.5.15 does for a sign-in: `authenticate` signs it in
+    /// (a file `signed`; with a file `hang`, only after 30 s), `logout` out; `session/new` signed in answers a
+    /// session with a model option and, when a file `tier` names one, `_meta.antigravity.tier.name`; signed out,
+    /// "Authentication required". Every line it reads goes to `asks`.
+    fn stand_in_agy(root: &Path) -> std::path::PathBuf {
+        let d = root.display();
+        let reply = |body: &str| format!(r#"printf '{{"jsonrpc":"2.0","id":%s,{body}}}\n' "$id""#);
+        let script = format!(
+            r#"#!/bin/sh
+d='{d}'
+while read -r line; do
+  printf '%s\n' "$line" >> "$d/asks"
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) {init} ;;
+    *'"authenticate"'*) [ -e "$d/hang" ] && sleep 30; : > "$d/signed"; {empty} ;;
+    *'"logout"'*) rm -f "$d/signed"; {empty} ;;
+    *'"session/close"'*) {empty} ;;
+    *'"session/new"'*)
+      if [ ! -e "$d/signed" ]; then {refused}
+      elif [ -e "$d/tier" ]; then printf '{{"jsonrpc":"2.0","id":%s,"result":{{"sessionId":"s","configOptions":[{{"category":"model","options":[]}}],"_meta":{{"antigravity":{{"tier":{{"name":"%s"}}}}}}}}}}\n' "$id" "$(cat "$d/tier")"
+      else {opened}
+      fi ;;
+  esac
+done
+"#,
+            init = reply(r#""result":{"protocolVersion":1}"#),
+            empty = reply(r#""result":{}"#),
+            refused = reply(r#""error":{"code":-32000,"message":"Authentication required"}"#),
+            opened = reply(
+                r#""result":{"sessionId":"s","configOptions":[{"category":"model","options":[]}]}"#
+            ),
+        );
+        let agy = root.join("agy");
+        std::fs::write(&agy, script).unwrap();
+        std::fs::set_permissions(&agy, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        agy
+    }
+
+    /// **Antigravity signs in and out with agy's own sign-in, and its plan is agy's tier, as agy names it** (S2):
+    /// signed out, a sign-in runs agy's `authenticate` with Google's personal sign-in, answered at once with the
+    /// listing marking it signing in, and pushes the list when agy answers; agy then offers a start signed in, its
+    /// plan the tier agy names ("Google AI Pro" here, never a name of ours), or none when agy names none. A
+    /// sign-out runs agy's `logout`, after which it is signed out. A sign-in agy never finishes ends at its bound,
+    /// signed out. Either is refused for an agent with accounts of its own, and with no agy found.
+    #[tokio::test]
+    async fn antigravity_signs_in_and_out_and_its_plan_is_agys_tier() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-agysign.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let agy = stand_in_agy(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.clone().into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-agysign");
+        let _db = store.temp_db();
+        let sign_ins = Arc::new(super::SignIns::default());
+        let known = crate::start_session::KnownAgents::default();
+        let offered = || async {
+            known.forget(&protocol::agent::AgentKind::Antigravity);
+            crate::start_session::agy_offer(&known, &environment, &agy)
+                .await
+                .expect("agy answered")
+        };
+        assert_eq!(offered().await.signed_in, Some(false));
+
+        let (changed, heard) = std::sync::mpsc::channel::<()>();
+        let (reply, running) = super::sign_in_agent(
+            &store,
+            &sign_ins,
+            move || {
+                let _ = changed.send(());
+            },
+            &environment,
+            protocol::agent::AgentKind::Antigravity,
+            Some(&agy),
+            "g1".into(),
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(
+            serde_json::to_value(&reply).unwrap()["agent_sign_ins"],
+            serde_json::json!([{"agent": "antigravity", "signing_in": true}])
+        );
+        running.unwrap().await.unwrap();
+        assert!(
+            heard.try_recv().is_ok(),
+            "the list is pushed when agy answers"
+        );
+        let asks = std::fs::read_to_string(root.join("asks")).unwrap();
+        assert!(
+            asks.contains(r#""method":"authenticate","params":{"methodId":"oauth-personal"}"#),
+            "{asks}"
+        );
+        let signed = offered().await;
+        assert_eq!(
+            (signed.signed_in, signed.tier.as_deref()),
+            (Some(true), None)
+        );
+        assert_eq!(
+            crate::start_session::agy_default_facts(&signed).map(|facts| facts.plan),
+            Some(None),
+            "no tier named: signed in, no plan"
+        );
+        std::fs::write(root.join("tier"), "Google AI Pro").unwrap();
+        let pro = offered().await;
+        assert_eq!(
+            crate::start_session::agy_default_facts(&pro).and_then(|facts| facts.plan),
+            Some("Google AI Pro".to_string())
+        );
+        // As the listing carries it.
+        let facts = super::Facts::default();
+        let key = super::default_key(&protocol::agent::AgentKind::Antigravity);
+        facts.keep_agent_signed(&key, pro.signed_in);
+        facts.read(&key, crate::start_session::agy_default_facts(&pro));
+        let told = serde_json::to_value(facts.told(super::listing(&store, None))).unwrap();
+        assert_eq!(
+            (
+                &told["defaults"][0]["agent"],
+                &told["defaults"][0]["facts"]["plan"]
+            ),
+            (
+                &serde_json::json!("antigravity"),
+                &serde_json::json!("Google AI Pro")
+            )
+        );
+        assert_eq!(
+            told["agent_sign_ins"],
+            serde_json::json!([{"agent": "antigravity", "signed_in": true}])
+        );
+
+        let out = super::sign_out_agent(
+            &store,
+            &environment,
+            protocol::agent::AgentKind::Antigravity,
+            Some(&agy),
+            "g2".into(),
+        )
+        .await;
+        assert!(
+            matches!(out, protocol::ws::ServerMessage::Accounts { .. }),
+            "{out:?}"
+        );
+        assert_eq!(
+            offered().await.signed_in,
+            Some(false),
+            "signed out by agy's logout"
+        );
+
+        std::fs::write(root.join("hang"), "").unwrap();
+        let (_, late) = super::sign_in_agent(
+            &store,
+            &sign_ins,
+            || {},
+            &environment,
+            protocol::agent::AgentKind::Antigravity,
+            Some(&agy),
+            "g3".into(),
+            std::time::Duration::from_millis(500),
+        )
+        .await;
+        late.unwrap().await.unwrap();
+        assert_eq!(
+            offered().await.signed_in,
+            Some(false),
+            "a sign-in agy never finished ends at its bound, signed out"
+        );
+
+        let refusal = |reply: protocol::ws::ServerMessage| match reply {
+            protocol::ws::ServerMessage::AccountsRefused { code, message, .. } => (code, message),
+            other => panic!("not refused: {other:?}"),
+        };
+        let claude = super::sign_in_agent(
+            &store,
+            &sign_ins,
+            || {},
+            &environment,
+            protocol::agent::AgentKind::Claude,
+            Some(&agy),
+            "g4".into(),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .0;
+        assert_eq!(refusal(claude).0, "bad_request");
+        let missing = super::sign_out_agent(
+            &store,
+            &environment,
+            protocol::agent::AgentKind::Antigravity,
+            None,
+            "g5".into(),
+        )
+        .await;
+        assert_eq!(
+            refusal(missing),
+            (
+                "bad_request".to_string(),
+                "Antigravity isn't installed on this computer.".to_string()
+            )
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Antigravity's sign-in as each listing carries it (S2), built as ccd builds one (its sign-in slot's mark, then
+    /// what is held): signed in with agy's tier "Google AI Pro", signed in with no tier named, signed out, and signing
+    /// in. Its read time is fixed, so the frames are the same at every build.
+    fn antigravity_sign_in_frames() -> serde_json::Value {
+        let store = crate::store::Store::open_temp("ccd-agy-frames");
+        let _db = store.temp_db();
+        let key = super::default_key(&protocol::agent::AgentKind::Antigravity);
+        let frame = |signed_in: Option<bool>, plan: Option<&str>, going: bool| {
+            let facts = super::Facts::default();
+            facts.keep_agent_signed(&key, signed_in);
+            facts.read(
+                &key,
+                (signed_in == Some(true)).then(|| protocol::ws::AccountFacts {
+                    email: None,
+                    plan: plan.map(str::to_string),
+                    windows: Vec::new(),
+                    limits_available: None,
+                    read_at: "2026-11-25T12:00:00.000Z".into(),
+                }),
+            );
+            let sign_ins = super::SignIns::default();
+            if going {
+                *sign_ins.going.lock().unwrap() =
+                    Some((0, key.clone(), tokio::sync::oneshot::channel().0));
+            }
+            serde_json::to_value(facts.told(sign_ins.marked(super::listing(&store, None)))).unwrap()
+        };
+        serde_json::json!({
+            "signed_in_pro": frame(Some(true), Some("Google AI Pro"), false),
+            "signed_in_no_tier": frame(Some(true), None, false),
+            "signed_out": frame(Some(false), None, false),
+            "signing_in": frame(Some(false), None, true),
+        })
+    }
+
+    /// **The Antigravity sign-in frames the apps are tested and rendered with are what this build emits**
+    /// (`fixtures/accounts/antigravity-sign-in-wire.json`).
+    #[test]
+    fn the_antigravity_sign_in_wire_fixture_is_what_this_build_emits() {
+        let recorded: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/accounts/antigravity-sign-in-wire.json"
+        ))
+        .unwrap();
+        assert_eq!(recorded, antigravity_sign_in_frames());
+    }
+
+    /// Rewrite `fixtures/accounts/antigravity-sign-in-wire.json` with what this build emits.
+    #[test]
+    #[ignore = "generator, not a gate"]
+    fn regenerate_the_antigravity_sign_in_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&antigravity_sign_in_frames()).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/accounts/antigravity-sign-in-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
     }
 
     /// **A sign-in not finished ends, and a new one replaces the one going** (306 Slice B, B3): a login that waits past

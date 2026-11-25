@@ -111,11 +111,12 @@
         /// (`panel: …; control: …; window: …`).
         static var openRunMenu: String? { UserDefaults.standard.string(forKey: "CC_RUN_MENU") }
         /// `-CC_ACCOUNT_MENU <account id>`: that account's row on Settings › Accounts, drawn as under the pointer
-        /// (`-CC_HOVER settings.accounts.<agent>.<id>`), opens its "…"'s menu a moment later, as a click does.
+        /// (`-CC_HOVER settings.accounts.<agent>.<id>`), opens its "…"'s menu a moment later, as a click does; an agent's
+        /// Default by `default:<agent>`.
         static var openAccountMenu: String? { UserDefaults.standard.string(forKey: "CC_ACCOUNT_MENU") }
         /// `-CC_LIST_END YES`: the run list opens scrolled to its end.
         static var listAtEnd: Bool { UserDefaults.standard.bool(forKey: "CC_LIST_END") }
-        /// `-CC_CONFIRM endRun|endNote|remove|removeNote|clear|mode|computer|device|batch|batchRun`: that ask or notice is up at launch,
+        /// `-CC_CONFIRM endRun|endNote|remove|removeNote|clear|mode|computer|device|batch|batchRun|signOut`: that ask or notice is up at launch,
         /// about the first run listed, the open run (`-CC_OPEN`), the last computer, or the first device Settings lists.
         static var confirm: String? { UserDefaults.standard.string(forKey: "CC_CONFIRM") }
         /// `-CC_SELECT all|<n>`: the Ended runs open choosing, with all or the first `n` removable runs chosen; with

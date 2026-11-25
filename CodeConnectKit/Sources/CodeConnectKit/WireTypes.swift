@@ -2114,6 +2114,11 @@ public enum ClientMessage: Sendable {
     /// Removes `accountID` after its agent's own sign-out. Answered `accounts`, or `accounts_refused`
     /// (`accounts_in_use` while a session runs on it, `accounts_unavailable` when it could not be signed out).
     case removeAccount(requestID: String, accountID: String)
+    /// Signs `agent` in with its own sign-in in a browser on the computer (minor 50, Antigravity only). Answered at once
+    /// with `accounts`, its sign-in `signing_in`; its end comes in a pushed `accounts`.
+    case signInAgent(requestID: String, agent: String)
+    /// Signs `agent` out of the computer (minor 50, Antigravity only). Answered `accounts`, or `accounts_refused`.
+    case signOutAgent(requestID: String, agent: String)
     /// One folder's repository: its checkouts and free branches. Minor 29,
     /// sent only when `Capabilities.startsInWorktrees`.
     case getProjectGit(path: String)
@@ -2331,6 +2336,14 @@ extension ClientMessage: Encodable {
             try c.encode("remove_account", forKey: .type)
             try c.encode(requestID, forKey: .requestID)
             try c.encode(accountID, forKey: .accountID)
+        case .signInAgent(let requestID, let agent):
+            try c.encode("sign_in_agent", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(agent, forKey: .agent)
+        case .signOutAgent(let requestID, let agent):
+            try c.encode("sign_out_agent", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(agent, forKey: .agent)
         case .getProjectGit(let path):
             try c.encode("get_project_git", forKey: .type)
             try c.encode(path, forKey: .path)
@@ -2663,6 +2676,7 @@ extension ServerMessage: Decodable {
         case accounts
         case active
         case defaults
+        case agentSignIns = "agent_sign_ins"
     }
 
     public init(from decoder: Decoder) throws {
@@ -2760,7 +2774,8 @@ extension ServerMessage: Decodable {
                 book: AccountBook(
                     accounts: try c.decode([AgentAccount].self, forKey: .accounts),
                     active: try c.decode([ActiveAccount].self, forKey: .active),
-                    defaults: try c.decodeIfPresent([DefaultAccount].self, forKey: .defaults) ?? []))
+                    defaults: try c.decodeIfPresent([DefaultAccount].self, forKey: .defaults) ?? [],
+                    agentSignIns: try c.decodeIfPresent([AgentSignIn].self, forKey: .agentSignIns) ?? []))
         case "accounts_refused":
             self = .accountsRefused(
                 requestID: try c.decode(String.self, forKey: .requestID),

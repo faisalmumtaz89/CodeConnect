@@ -104,6 +104,39 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             .await
             .0
         }
+        // Antigravity's one sign-in: what it said of itself, and its offer to a start, are its old sign-in's.
+        ClientMessage::SignInAgent { request_id, agent } => {
+            let agy = agy_path(&environment, daemon.config.agy_bin.as_deref()).await;
+            let ended = Arc::clone(daemon);
+            crate::accounts::sign_in_agent(
+                &daemon.store,
+                &daemon.sign_ins,
+                move || {
+                    forget_agent_sign_in(&ended);
+                    tokio::spawn(async move { refresh_facts(&ended).await });
+                },
+                &environment,
+                agent,
+                agy.as_deref(),
+                request_id,
+                crate::accounts::SIGN_IN_WAIT,
+            )
+            .await
+            .0
+        }
+        ClientMessage::SignOutAgent { request_id, agent } => {
+            let agy = agy_path(&environment, daemon.config.agy_bin.as_deref()).await;
+            let reply = crate::accounts::sign_out_agent(
+                &daemon.store,
+                &environment,
+                agent,
+                agy.as_deref(),
+                request_id,
+            )
+            .await;
+            forget_agent_sign_in(daemon);
+            reply
+        }
         ClientMessage::RemoveAccount {
             request_id,
             account_id,
@@ -152,6 +185,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             accounts,
             active,
             defaults,
+            agent_sign_ins,
             ..
         },
     ) = (changes, &reply)
@@ -161,9 +195,19 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             accounts: accounts.clone(),
             active: active.clone(),
             defaults: defaults.clone(),
+            agent_sign_ins: agent_sign_ins.clone(),
         });
     }
     reply
+}
+
+/// Antigravity's sign-in has changed (signed in, out, or a sign-in ended): what it said of itself and what it offers a
+/// start are forgotten, so both are read again.
+fn forget_agent_sign_in(daemon: &Arc<Daemon>) {
+    daemon
+        .account_facts
+        .forget(&crate::accounts::default_key(&AgentKind::Antigravity));
+    daemon.agents.forget(&AgentKind::Antigravity);
 }
 
 /// The accounts listing, with what is held, pushed to every connection that reads accounts.
@@ -203,7 +247,11 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
     let Ok(accounts) = daemon.store.accounts() else {
         return;
     };
-    let mut wanted: Vec<(String, AgentKind, Option<crate::store::Account>)> = Vec::new();
+    let mut wanted: Vec<(String, AgentKind, Option<crate::store::Account>)> = vec![(
+        crate::accounts::default_key(&AgentKind::Antigravity),
+        AgentKind::Antigravity,
+        None,
+    )];
     for agent in [AgentKind::Codex, AgentKind::Claude] {
         wanted.push((crate::accounts::default_key(&agent), agent.clone(), None));
         for account in accounts
@@ -222,6 +270,7 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
     let environment = phone_environment();
     let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
     let claude = claude_path(&environment, daemon.config.claude_bin.as_deref()).await;
+    let agy = agy_path(&environment, daemon.config.agy_bin.as_deref()).await;
     if let Some(asked) = signed {
         let agents = crate::accounts::Agents {
             codex: codex.as_deref(),
@@ -240,8 +289,24 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
         .iter()
         .filter(|(key, _, _)| claimed.contains(key))
         .map(|(key, agent, account)| {
-            let (environment, root, codex, claude) = (&environment, &root, &codex, &claude);
+            let (environment, root, codex, claude, agy) =
+                (&environment, &root, &codex, &claude, &agy);
             async move {
+                // Antigravity's one sign-in: what agy offers a start (kept while it is signed in, so no new run of
+                // agy), its plan its tier's name as agy gives it.
+                if *agent == AgentKind::Antigravity {
+                    let offer = match agy {
+                        Some(agy) => agy_offer(&daemon.agents, environment, agy).await,
+                        None => None,
+                    };
+                    if let Some(offer) = &offer {
+                        daemon.account_facts.keep_agent_signed(key, offer.signed_in);
+                    }
+                    daemon
+                        .account_facts
+                        .read(key, offer.as_ref().and_then(agy_default_facts));
+                    return;
+                }
                 let home = match account {
                     Some(account) => {
                         match crate::accounts::AccountEnv::for_account(root, account) {
@@ -319,6 +384,8 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
         | ClientMessage::AddAccount { .. }
         | ClientMessage::ActivateAccount { .. }
         | ClientMessage::SignInAccount { .. }
+        | ClientMessage::SignInAgent { .. }
+        | ClientMessage::SignOutAgent { .. }
         | ClientMessage::RemoveAccount { .. } => accounts_answer(daemon, message).await,
         ClientMessage::GetProjectGit { path } => project_git(daemon, path).await,
         // Off the async workers: a read can wait on macOS asking the user.
@@ -514,6 +581,12 @@ impl KnownAgents {
             .get(&offer_key(agent, account))
             .filter(|(at, _)| at == version)
             .map(|(_, offer)| offer.clone())
+    }
+
+    /// What `agent` offered is forgotten, so the next list asks it again: its sign-in has changed.
+    pub(crate) fn forget(&self, agent: &AgentKind) {
+        let mut offers = self.offers.lock().unwrap_or_else(|p| p.into_inner());
+        offers.remove(&offer_key(agent, None));
     }
 
     fn keep(
@@ -1782,9 +1855,12 @@ async fn claude_models(
 
 /// What an agent offers a start: the models it lists, and whether it is signed in.
 #[derive(Debug, Clone, Default, PartialEq)]
-struct Offer {
+pub(crate) struct Offer {
     models: Vec<AgentModel>,
-    signed_in: Option<bool>,
+    pub(crate) signed_in: Option<bool>,
+    /// Antigravity's plan, as agy names it (`_meta.antigravity.tier.name`); none for any other agent, and when agy
+    /// names none.
+    pub(crate) tier: Option<String>,
     /// Codex's own entries for those models, as `model/list` gives them, their efforts
     /// among them: what a Codex run started on this answer keeps for its settings menu
     /// ([`crate::codex_host::Run::models`]). Empty for Claude.
@@ -1939,6 +2015,77 @@ async fn ask(
     offer
 }
 
+/// What Antigravity's Default says of itself, from what agy offers a start: signed in, its plan is agy's tier's name
+/// exactly as agy gives it (none when agy names none); signed out or not known, nothing.
+pub(crate) fn agy_default_facts(offer: &Offer) -> Option<protocol::ws::AccountFacts> {
+    (offer.signed_in == Some(true)).then(|| protocol::ws::AccountFacts {
+        email: None,
+        plan: offer.tier.clone(),
+        windows: Vec::new(),
+        limits_available: None,
+        read_at: protocol::time::now_rfc3339(),
+    })
+}
+
+/// One `agy acp` ccd talks to itself (the start box's ask, a sign-in, a sign-out), started as an agent is
+/// ([`agent_command`], the user's environment, in the home folder, its own process group), its stderr dropped. Its
+/// calls are numbered from 1; a call's answer is agy's reply to it, its notifications and anything else skipped.
+pub(crate) struct Agy {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    next: u64,
+}
+
+impl Agy {
+    pub(crate) fn start(environment: &HashMap<OsString, OsString>, agy: &Path) -> Option<Agy> {
+        let mut command = agent_command(environment, None, &[agy.as_os_str(), OsStr::new("acp")]);
+        command
+            .current_dir(home_in(environment))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().ok()?;
+        let stdin = child.stdin.take()?;
+        let lines = BufReader::new(child.stdout.take()?).lines();
+        Some(Agy {
+            child,
+            stdin,
+            lines,
+            next: 1,
+        })
+    }
+
+    /// agy's reply to `method` with `params` (its `result` or its `error`); none when agy ended first.
+    pub(crate) async fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let id = self.next;
+        self.next += 1;
+        let line =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        self.stdin
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .ok()?;
+        loop {
+            let line = self.lines.next_line().await.ok()??;
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                if value["id"] == id && value.get("method").is_none() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+
+    /// agy ended, with what it started ([`end_agent`]).
+    pub(crate) async fn end(mut self) {
+        end_agent(&mut self.child).await;
+    }
+}
+
 /// What the agy at `agy` offers a start: the model families its settings name, and whether it is signed in. agy has
 /// no list of its own over ACP, so it is asked by opening one session with no prompt (`session/new`, which a signed-out
 /// agy refuses with "Authentication required") and closing it at once (`session/close`): agy 1.5.15 lists such a
@@ -1946,7 +2093,7 @@ async fn ask(
 /// agy's folder. Asking starts agy and reaches Google, so a
 /// signed-in answer is kept for that binary (its size and time: agy names no version); a signed-out one is asked
 /// again at each list, as nothing cheaper says when it is signed in. None when agy answered neither way in time.
-async fn agy_offer(
+pub(crate) async fn agy_offer(
     known: &KnownAgents,
     environment: &HashMap<OsString, OsString>,
     agy: &Path,
@@ -1957,50 +2104,21 @@ async fn agy_offer(
     if let Some(kept) = known.offered(&AgentKind::Antigravity, None, &version) {
         return Some(kept);
     }
-    let mut command = agent_command(environment, None, &[agy.as_os_str(), OsStr::new("acp")]);
     let home = home_in(environment);
-    command
-        .current_dir(&home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = command.spawn().ok()?;
+    let mut asking = Agy::start(environment, agy)?;
     let asked = async {
-        let mut stdin = child.stdin.take()?;
-        let mut lines = BufReader::new(child.stdout.take()?).lines();
-        let call = |id: u64, method: &str, params: serde_json::Value| {
-            let line =
-                serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-            format!("{line}\n")
-        };
-        // agy's reply to the call numbered `id`; its notifications, and what the user's shell prints, are skipped.
-        async fn reply(
-            lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
-            id: u64,
-        ) -> Option<serde_json::Value> {
-            loop {
-                let line = lines.next_line().await.ok()??;
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if value["id"] == id && value.get("method").is_none() {
-                        return Some(value);
-                    }
-                }
-            }
-        }
-        let initialize = call(
-            1,
-            "initialize",
-            serde_json::json!({"protocolVersion": 1, "clientCapabilities": {}}),
-        );
-        stdin.write_all(initialize.as_bytes()).await.ok()?;
-        reply(&mut lines, 1).await?;
-        let new = call(
-            2,
-            "session/new",
-            serde_json::json!({"cwd": home, "mcpServers": []}),
-        );
-        stdin.write_all(new.as_bytes()).await.ok()?;
-        let opened = reply(&mut lines, 2).await?;
+        asking
+            .call(
+                "initialize",
+                serde_json::json!({"protocolVersion": 1, "clientCapabilities": {}}),
+            )
+            .await?;
+        let opened = asking
+            .call(
+                "session/new",
+                serde_json::json!({"cwd": home, "mcpServers": []}),
+            )
+            .await?;
         if opened["error"]["message"] == "Authentication required" {
             return Some(Offer {
                 signed_in: Some(false),
@@ -2008,13 +2126,9 @@ async fn agy_offer(
             });
         }
         let session = opened["result"]["sessionId"].as_str()?;
-        let close = call(
-            3,
-            "session/close",
-            serde_json::json!({"sessionId": session}),
-        );
-        stdin.write_all(close.as_bytes()).await.ok()?;
-        reply(&mut lines, 3).await?;
+        asking
+            .call("session/close", serde_json::json!({"sessionId": session}))
+            .await?;
         let models = opened["result"]["configOptions"]
             .as_array()?
             .iter()
@@ -2033,13 +2147,16 @@ async fn agy_offer(
             models,
             signed_in: Some(true),
             menu: Vec::new(),
+            tier: opened["result"]["_meta"]["antigravity"]["tier"]["name"]
+                .as_str()
+                .map(str::to_string),
         })
     };
     let offer = tokio::time::timeout(PROBE_TIMEOUT, asked)
         .await
         .ok()
         .flatten();
-    end_agent(&mut child).await;
+    asking.end().await;
     if offer
         .as_ref()
         .is_some_and(|offer| offer.signed_in == Some(true))
@@ -2086,6 +2203,7 @@ fn offer_from(agent: &AgentKind, said: &[serde_json::Value]) -> Option<Offer> {
                     .collect(),
                 signed_in: None,
                 menu: Vec::new(),
+                tier: None,
             })
         }
         _ => {
@@ -2110,6 +2228,7 @@ fn offer_from(agent: &AgentKind, said: &[serde_json::Value]) -> Option<Offer> {
                         !account["account"].is_null() || account["requiresOpenaiAuth"] == false
                     }),
                 menu: listed.into_iter().cloned().collect(),
+                tier: None,
             })
         }
     }
