@@ -111,9 +111,18 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             crate::accounts::sign_in_agent(
                 &daemon.store,
                 &daemon.sign_ins,
-                move || {
-                    forget_agent_sign_in(&ended);
-                    tokio::spawn(async move { refresh_facts(&ended).await });
+                // What agy said is the sign-in the list carries at once; with no answer of agy's, it is read again.
+                move |said| {
+                    ended.agents.forget(&AgentKind::Antigravity);
+                    let known = said.is_some();
+                    crate::accounts::keep_antigravity(&ended.account_facts, said);
+                    tokio::spawn(async move {
+                        if known {
+                            push_accounts(&ended).await
+                        } else {
+                            refresh_facts(&ended).await
+                        }
+                    });
                 },
                 &environment,
                 agent,
@@ -128,13 +137,20 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             let agy = agy_path(&environment, daemon.config.agy_bin.as_deref()).await;
             let reply = crate::accounts::sign_out_agent(
                 &daemon.store,
+                &daemon.account_facts,
                 &environment,
                 agent,
                 agy.as_deref(),
                 request_id,
             )
             .await;
-            forget_agent_sign_in(daemon);
+            daemon.agents.forget(&AgentKind::Antigravity);
+            // Refused, agy's sign-in is not known: read again.
+            if !matches!(reply, ServerMessage::Accounts { .. }) {
+                daemon
+                    .account_facts
+                    .forget(&crate::accounts::default_key(&AgentKind::Antigravity));
+            }
             reply
         }
         ClientMessage::RemoveAccount {
@@ -199,15 +215,6 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
         });
     }
     reply
-}
-
-/// Antigravity's sign-in has changed (signed in, out, or a sign-in ended): what it said of itself and what it offers a
-/// start are forgotten, so both are read again.
-fn forget_agent_sign_in(daemon: &Arc<Daemon>) {
-    daemon
-        .account_facts
-        .forget(&crate::accounts::default_key(&AgentKind::Antigravity));
-    daemon.agents.forget(&AgentKind::Antigravity);
 }
 
 /// The accounts listing, with what is held, pushed to every connection that reads accounts.
