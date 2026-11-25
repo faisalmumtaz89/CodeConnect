@@ -13,10 +13,12 @@
 //! when a message comes only loses its mark, so choosing again, or choosing back, is never a lock.
 //!
 //! The decision and the send are one step under the run's move gate ([`crate::state::Daemon::move_gate`]): a
-//! second message, a mail wake, a settings change or a Stop waits for it. Accepted misses: a message queued inside
-//! Codex itself (`codex queue`) does not survive the app-server's end; a command or helper an agent left running
-//! in the background in an earlier turn is stopped when its session moves (ccd sees no background shell,
-//! background subagent or Codex terminal beyond the last turn).
+//! second message, a mail wake, a settings change or a Stop waits for it. A Claude run moves once its old host is
+//! gone: what that host's group still holds (a job, server or watcher claude left running in an earlier turn) runs
+//! on, kept with the run until End run or a delete stops it. Accepted misses: a message queued inside Codex itself
+//! (`codex queue`) does not survive the app-server's end; a Codex command or helper left running in the background
+//! in an earlier turn is stopped when its session moves; and a Claude background job started before a move finishes
+//! on its own, but its notice reaches no one.
 
 use std::sync::Arc;
 
@@ -114,7 +116,8 @@ pub(crate) async fn settle(daemon: &Daemon, uid: &str, doubt: bool) {
 const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Whether the run `uid`, its process stopped by its switch, has ended by `deadline`: its row `exited` and its
-/// recorded host or app-server gone with no member left in its group, as a message's relaunch requires.
+/// recorded host or app-server gone, by its birth. What else its group holds runs on, kept with the run by the
+/// relaunch ([`crate::claude_host::stop_left_group`]).
 pub(crate) async fn ended_for_move(
     daemon: &Daemon,
     uid: &str,
@@ -125,7 +128,6 @@ pub(crate) async fn ended_for_move(
             if watch.lifecycle == protocol::event::Lifecycle::Exited
                 && protocol::proc_identity::liveness(&watch.host)
                     == protocol::proc_identity::Liveness::Gone
-                && !protocol::proc_identity::group_has_members(watch.host.pid)
             {
                 return true;
             }

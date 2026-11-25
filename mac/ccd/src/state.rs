@@ -4879,9 +4879,14 @@ impl Daemon {
             }
         }
         let uid = session_uid.to_string();
+        // What a move left running beside the run goes with it.
+        let left = self.db.left_group(uid.clone()).await.ok().flatten();
         let outcome = self.db.delete_exited_session(uid).await?;
         Ok(match outcome {
             crate::store::DeleteOutcome::Deleted { events } => {
+                if let Some((old, boot)) = left {
+                    tokio::spawn(crate::claude_host::stop_group(old, boot));
+                }
                 crate::log_info!("deleted session {session_uid} and {events} event(s) on request");
                 // Nothing left to ring about, and stale latches must not leak
                 // onto a future run.

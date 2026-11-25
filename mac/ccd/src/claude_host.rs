@@ -1263,6 +1263,27 @@ pub(crate) async fn stop_group(host: ProcessIdentity, boot: BootIdentity) -> Lad
     Ladder::Done
 }
 
+/// The process group a move left running beside the run `uid`, its gone leader `old` recorded in `boot`
+/// ([`crate::store::Store::keep_left_group`]): the ladder, as on a dead host's group, then forgotten unless the
+/// ladder was deferred.
+pub(crate) async fn stop_left_group(
+    daemon: &Daemon,
+    uid: &str,
+    old: ProcessIdentity,
+    boot: BootIdentity,
+) {
+    match stop_group(old, boot).await {
+        Ladder::Deferred => return,
+        Ladder::Refused(why) => {
+            crate::log_info!("{uid}: what its move left was not signalled: {why}")
+        }
+        Ladder::Done => {}
+    }
+    if let Err(err) = daemon.db.clear_left_group(uid.to_string(), old).await {
+        crate::log_error!("{uid}: could not forget what its move left: {err:#}");
+    }
+}
+
 /// One SIGTERM to the process group `host` leads, under the warrant, if it has members:
 /// the graceful first step of ending a Codex run, whose app-server drains and exits.
 /// Whether it was sent.
@@ -1385,6 +1406,16 @@ pub(crate) async fn stop_run(daemon: &Arc<Daemon>, uid: &str) -> StopRunResult {
             return refuse("This computer could not read the run.");
         }
     };
+    // End run ends what a move left running beside the run, too.
+    if matches!(
+        lifecycle,
+        Lifecycle::Live | Lifecycle::Stopping | Lifecycle::Exited | Lifecycle::Failed
+    ) {
+        if let Ok(Some((old, boot))) = daemon.db.left_group(uid.to_string()).await {
+            let (daemon, uid) = (Arc::clone(daemon), uid.to_string());
+            tokio::spawn(async move { stop_left_group(&daemon, &uid, old, boot).await });
+        }
+    }
     match lifecycle {
         Lifecycle::Live => {}
         Lifecycle::Stopping => return StopRunResult::Stopping,
@@ -2044,7 +2075,8 @@ pub(crate) const STILL_ENDING: &str =
 /// ([`crate::store::Store::claude_relaunch`]); every other ended run refuses it, as before.
 /// Never at ccd start. Before anything is launched, the warrant: the run's old host is gone
 /// and its group has no member, unless it was recorded in an earlier boot, whose numbers mean
-/// nothing now; then a start's own checks. The start line resumes claude's session in the
+/// nothing now; a move's old group may keep members, which run on, kept with the run ([`stop_left_group`]); then a
+/// start's own checks. The start line resumes claude's session in the
 /// folder claude ran in, with the run's model as its menu marks it chosen
 /// ([`Daemon::selected_model`]), else the start's; the kept folder answer, lowered when the
 /// folder has since been answered not trusted; the mode the run was in when it is one an app
@@ -2086,15 +2118,30 @@ async fn relaunch(
             return refuse_relaunch(daemon, uid, request_id, not_running).await;
         }
     };
+    // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
+    let switching = crate::switch::switched(daemon, uid).await;
     if let Some(old) = &old {
         let earlier_boot = matches!(
             (old.boot, protocol::proc_identity::boot_identity()),
             (Some(then), Some(now)) if then != now
         );
-        if !earlier_boot
-            && (liveness(&old.host) != Liveness::Gone || group_has_members(old.host.pid))
-        {
+        if !earlier_boot && liveness(&old.host) != Liveness::Gone {
             return refuse_relaunch(daemon, uid, request_id, STILL_ENDING).await;
+        }
+        // A move goes on once the old host is gone: what it left in its group (a server, a watcher, a background job)
+        // runs on, kept with the run so End run or a delete stops it ([`stop_left_group`]).
+        if !earlier_boot && group_has_members(old.host.pid) {
+            let kept = match (switching, old.boot) {
+                (true, Some(boot)) => daemon
+                    .db
+                    .keep_left_group(uid.to_string(), old.host, boot)
+                    .await
+                    .is_ok(),
+                _ => false,
+            };
+            if !kept {
+                return refuse_relaunch(daemon, uid, request_id, STILL_ENDING).await;
+            }
         }
     }
     let environment = crate::start_session::phone_environment();
@@ -2127,8 +2174,6 @@ async fn relaunch(
         };
         Ok::<_, String>((ready.path, host_bin, codeconnect, kept))
     };
-    // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
-    let switching = crate::switch::switched(daemon, uid).await;
     let (claude, host_bin, codeconnect, kept) = match checked.await {
         Ok(checked) => checked,
         Err(why) => {
@@ -13909,6 +13954,146 @@ mod tests {
         let after = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
         assert_eq!(after, before);
         stop(&played.dir);
+    }
+
+    /// A quiet run on A whose host's group also holds a child of its own, as a job claude left running does, moved to
+    /// B by the person's message `go on`: its old host stops and is gone, the child left. The send's answer, the run,
+    /// the child by its birth, and the relaunched host's side.
+    async fn moved_beside_a_child(
+        rig: &mut Rig,
+    ) -> (SendTextResult, String, ProcessIdentity, Played) {
+        let b = on_a_with_b(rig);
+        let host = stub_host_with_child(rig);
+        let mut played = live_run_on(rig, &host).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        turn_ends(&mut played, 4).await;
+        choose(&rig.daemon, Some(&b)).await;
+        let pid = pid_in(&played.dir, "child.pid");
+        let child = ProcessIdentity {
+            pid,
+            birth: read_birth_identity(pid).unwrap(),
+        };
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+                let read = next(&mut played.lines).await;
+                assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+                let old = pid_in(&played.dir, "stub.pid");
+                stop(&played.dir);
+                gone(old).await;
+                let Played {
+                    dir, lines, write, ..
+                } = played;
+                drop((lines, write));
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        (sent, uid, child, relaunched)
+    }
+
+    /// Whether the process `child` is gone, by its birth, within `within`.
+    async fn gone_by_birth(child: &ProcessIdentity, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if liveness(child) == Liveness::Gone {
+                return true;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        false
+    }
+
+    /// **A move goes on beside what the old host's group still holds** (306, G1): a quiet run on A whose old host left a
+    /// child in its group moves to B with the person's message, once that host is gone; the child runs on.
+    #[tokio::test]
+    async fn a_move_goes_on_beside_what_the_old_group_holds() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (sent, _, child, relaunched) = moved_beside_a_child(&mut rig).await;
+        let alive = liveness(&child);
+        // SAFETY: kill(2) of the stand-in's own child, by the pid it recorded.
+        unsafe { libc::kill(child.pid, libc::SIGKILL) };
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(alive, Liveness::Alive, "the child runs on");
+    }
+
+    /// **What a move left running is stopped with the run** (306, G1): the child a moved run's old group still held is
+    /// recorded with the run, and End run stops it; so does deleting the run once it has ended; and End run stops it
+    /// after ccd restarts.
+    #[tokio::test]
+    async fn what_a_move_left_running_is_stopped_with_the_run() {
+        let _env = crate::ProcessEnvRead::take();
+        for case in ["end run", "delete", "restart"] {
+            let mut rig = relaunch_rig();
+            let (sent, uid, child, mut relaunched) = moved_beside_a_child(&mut rig).await;
+            let dir = relaunched.dir.clone();
+            assert!(
+                matches!(sent, SendTextResult::Sent { .. }),
+                "{case}: {sent:?}"
+            );
+            match case {
+                "end run" => {
+                    rig.daemon.stop_run(&uid).await;
+                }
+                "delete" => {
+                    say(
+                        &mut relaunched.write,
+                        serde_json::json!({"type": "exited", "seq": 3, "code": 0}),
+                    )
+                    .await;
+                    assert_eq!(
+                        next(&mut relaunched.lines).await,
+                        Some(ToHost::Ack { seq: 3 })
+                    );
+                    assert!(matches!(
+                        rig.daemon.delete_exited_session(&uid).await.unwrap(),
+                        protocol::ws::DeleteSessionResult::Deleted { .. }
+                    ));
+                }
+                _ => {
+                    let claude = rig.root.join("bin").join("claude");
+                    let host = rig.root.join("stub-host");
+                    drop(relaunched);
+                    let (restarted, mut lines, mut write) =
+                        restarted_as(&rig, &dir, relauncher(&rig.root, &claude, &host)).await;
+                    assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 2 }));
+                    say(
+                        &mut write,
+                        serde_json::json!({"type": "state", "seq": 3, "pending": []}),
+                    )
+                    .await;
+                    assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 3 }));
+                    restarted.stop_run(&uid).await;
+                }
+            }
+            let stopped = gone_by_birth(&child, Duration::from_secs(15)).await;
+            // SAFETY: kill(2) of the stand-in's own child, by the pid it recorded, if it is still that child.
+            if liveness(&child) == Liveness::Alive {
+                unsafe { libc::kill(child.pid, libc::SIGKILL) };
+            }
+            stop(&dir);
+            assert!(stopped, "{case}: what the move left is stopped");
+        }
     }
 
     /// **Mail reaches a run its move has ended and not yet started again** (306, G11): it reads live, so mail sent it

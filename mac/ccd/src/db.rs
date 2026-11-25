@@ -290,6 +290,37 @@ impl Db {
             .await
     }
 
+    pub async fn keep_left_group(
+        &self,
+        session_uid: String,
+        old: protocol::proc_identity::ProcessIdentity,
+        boot: protocol::proc_identity::BootIdentity,
+    ) -> Result<()> {
+        self.run(move |store| store.keep_left_group(&session_uid, &old, boot))
+            .await
+    }
+
+    pub async fn left_group(
+        &self,
+        session_uid: String,
+    ) -> Result<
+        Option<(
+            protocol::proc_identity::ProcessIdentity,
+            protocol::proc_identity::BootIdentity,
+        )>,
+    > {
+        self.run(move |store| store.left_group(&session_uid)).await
+    }
+
+    pub async fn clear_left_group(
+        &self,
+        session_uid: String,
+        old: protocol::proc_identity::ProcessIdentity,
+    ) -> Result<()> {
+        self.run(move |store| store.clear_left_group(&session_uid, &old))
+            .await
+    }
+
     pub async fn recover_moves(&self) -> Result<()> {
         self.run(|store| store.recover_moves()).await
     }
