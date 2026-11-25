@@ -579,11 +579,22 @@ async fn check_agents(
     .await
 }
 
+/// Maximum number of completed `start_session` outcomes retained in memory for
+/// retry deduplication. In-flight starts are never evicted; older completed
+/// starts remain idempotent via SQLite's `run_hosts.start_request_id` lookup.
+const MAX_COMPLETED_STARTS: usize = 256;
+
+#[derive(Default)]
+struct StartsState {
+    entries: HashMap<String, watch::Receiver<Option<StartSessionResult>>>,
+    completed: std::collections::VecDeque<String>,
+}
+
 /// Starts already asked for, by `request_id`: in memory, so a repeat on this
 /// connection or after a reconnect gets the first outcome and starts nothing.
 /// A daemon restart forgets them.
 #[derive(Default)]
-pub struct Starts(Mutex<HashMap<String, watch::Receiver<Option<StartSessionResult>>>>);
+pub struct Starts(Mutex<StartsState>);
 
 impl Starts {
     /// The outcome for `request_id`: `launch`'s, run once however often it is asked.
@@ -597,17 +608,32 @@ impl Starts {
                 .0
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match asked.get(request_id) {
+            match asked.entries.get(request_id) {
                 Some(outcome) => (None, outcome.clone()),
                 None => {
                     let (first, outcome) = watch::channel(None);
-                    asked.insert(request_id.to_string(), outcome.clone());
+                    asked.entries.insert(request_id.to_string(), outcome.clone());
                     (Some(first), outcome)
                 }
             }
         };
         if let Some(first) = first {
             first.send_replace(Some(launch.await));
+            let mut asked = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            asked.completed.push_back(request_id.to_string());
+            while asked.completed.len() > MAX_COMPLETED_STARTS {
+                if let Some(evicted) = asked.completed.pop_front() {
+                    asked.entries.remove(&evicted);
+                }
+            }
+            if asked.entries.capacity() > MAX_COMPLETED_STARTS * 4
+                && asked.entries.len() <= MAX_COMPLETED_STARTS
+            {
+                asked.entries.shrink_to_fit();
+            }
         }
         let result = match outcome.wait_for(Option::is_some).await {
             Ok(result) => result.clone().expect("waited until there is one"),
@@ -617,6 +643,15 @@ impl Starts {
             ),
         };
         result
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entries
+            .len()
     }
 }
 
@@ -5999,5 +6034,61 @@ esac"#;
             })
             .unwrap(),
         })
+    }
+
+    #[tokio::test]
+    async fn starts_bounds_completed_entries_and_preserves_in_flight() {
+        let starts = Arc::new(Starts::default());
+        let gate = Arc::new(tokio::sync::Notify::new());
+
+        // Hold one start in flight while completing > MAX_COMPLETED_STARTS other starts.
+        let s_inflight = Arc::clone(&starts);
+        let g_inflight = Arc::clone(&gate);
+        let inflight_task = tokio::spawn(async move {
+            s_inflight
+                .once("inflight-req", async move {
+                    g_inflight.notified().await;
+                    failed(StartFailure::LaunchFailed, "done-inflight".into())
+                })
+                .await
+        });
+
+        // Give the spawned task a tick to register "inflight-req".
+        tokio::task::yield_now().await;
+
+        let total = MAX_COMPLETED_STARTS + 64;
+        for i in 0..total {
+            let id = format!("req-{i}");
+            let res = starts
+                .once(&id, async move {
+                    failed(StartFailure::LaunchFailed, format!("detail-{i}"))
+                })
+                .await;
+            assert!(matches!(res, StartSessionResult::Failed { .. }));
+        }
+
+        // Only the 1 in-flight entry + MAX_COMPLETED_STARTS recent completed entries remain.
+        assert_eq!(starts.len(), MAX_COMPLETED_STARTS + 1);
+
+        // Recent completed entry is still cached (launch closure does not run).
+        let latest_id = format!("req-{}", total - 1);
+        let cached = starts
+            .once(&latest_id, async {
+                panic!("recent request_id should return cached result without re-running");
+            })
+            .await;
+        assert_eq!(
+            cached,
+            failed(StartFailure::LaunchFailed, format!("detail-{}", total - 1))
+        );
+
+        // Complete the in-flight request and verify the entry cap is restored.
+        gate.notify_one();
+        let inflight_res = inflight_task.await.unwrap();
+        assert_eq!(
+            inflight_res,
+            failed(StartFailure::LaunchFailed, "done-inflight".into())
+        );
+        assert_eq!(starts.len(), MAX_COMPLETED_STARTS);
     }
 }

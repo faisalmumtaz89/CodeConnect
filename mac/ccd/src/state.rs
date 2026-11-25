@@ -351,6 +351,14 @@ struct Inner {
     pairing_failures: std::collections::VecDeque<i64>,
 }
 
+/// Release excess hash table buckets after session deletions/pruning when a
+/// long-lived daemon drops far below its historical session high-water mark.
+fn shrink_map_if_sparse<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
+    if map.capacity() > 64 && map.capacity() > map.len().saturating_mul(4) {
+        map.shrink_to_fit();
+    }
+}
+
 /// Takes a Codex raise's card back out of `pending` unless the raise disarms it
 /// — on a refused commit, or when the raise is dropped at any await before it
 /// completes. It removes the entry only while it is still the one this raise
@@ -4757,6 +4765,11 @@ impl Daemon {
                 // Nothing left to ring about, and stale latches must not leak
                 // onto a future run.
                 self.push_gate.evict_session(session_uid);
+                let mut inner = self.inner.lock().await;
+                inner.session_facts.remove(session_uid);
+                inner.tree_facts.remove(session_uid);
+                shrink_map_if_sparse(&mut inner.session_facts);
+                shrink_map_if_sparse(&mut inner.tree_facts);
                 protocol::ws::DeleteSessionResult::Deleted { events }
             }
             // The store's word for it, carried through rather than flattened.
@@ -4805,10 +4818,15 @@ impl Daemon {
                 .collect()
         };
         let removed = self.db.prune_exited_sessions(protect, dry_run).await?;
-        if !dry_run {
+        if !dry_run && !removed.is_empty() {
+            let mut inner = self.inner.lock().await;
             for row in &removed {
                 self.push_gate.evict_session(&row.session_uid);
+                inner.session_facts.remove(&row.session_uid);
+                inner.tree_facts.remove(&row.session_uid);
             }
+            shrink_map_if_sparse(&mut inner.session_facts);
+            shrink_map_if_sparse(&mut inner.tree_facts);
         }
         if !removed.is_empty() && !dry_run {
             crate::log_info!(
@@ -13085,5 +13103,58 @@ mod tests {
             );
             writer.execute_batch("COMMIT").unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn delete_and_prune_evict_in_memory_session_and_tree_facts() {
+        let daemon = test_daemon();
+        let uid_del = "01KYZ5E56X0D1RT7ZVRYK1ZEA1";
+        let uid_prune = "01KYZ5E56X0D1RT7ZVRYK1ZEA2";
+        let uid_live = "01KYZ5E56X0D1RT7ZVRYK1ZEA3";
+        seed_session(&daemon, uid_del, "cc-del", Lifecycle::Exited);
+        seed_session(&daemon, uid_prune, "cc-prune", Lifecycle::Failed);
+        seed_session(&daemon, uid_live, "cc-live", Lifecycle::Live);
+
+        {
+            let mut inner = daemon.inner.lock().await;
+            for uid in [uid_del, uid_prune, uid_live] {
+                inner
+                    .session_facts
+                    .insert(uid.to_string(), protocol::facts::SessionFacts::default());
+                inner
+                    .tree_facts
+                    .insert(uid.to_string(), crate::git::TreeFacts::default());
+            }
+        }
+
+        assert_eq!(
+            daemon.delete_exited_session(uid_del).await.unwrap(),
+            protocol::ws::DeleteSessionResult::Deleted { events: 0 }
+        );
+        {
+            let inner = daemon.inner.lock().await;
+            assert!(!inner.session_facts.contains_key(uid_del));
+            assert!(!inner.tree_facts.contains_key(uid_del));
+            assert!(inner.session_facts.contains_key(uid_prune));
+            assert!(inner.session_facts.contains_key(uid_live));
+        }
+
+        // Dry run must NOT evict in-memory facts.
+        let dry = daemon.prune_ended_sessions(true).await.unwrap();
+        assert_eq!(dry.len(), 1);
+        assert!(daemon
+            .inner
+            .lock()
+            .await
+            .session_facts
+            .contains_key(uid_prune));
+
+        let pruned = daemon.prune_ended_sessions(false).await.unwrap();
+        assert_eq!(pruned.len(), 1);
+        let inner = daemon.inner.lock().await;
+        assert!(!inner.session_facts.contains_key(uid_prune));
+        assert!(!inner.tree_facts.contains_key(uid_prune));
+        assert!(inner.session_facts.contains_key(uid_live));
+        assert!(inner.tree_facts.contains_key(uid_live));
     }
 }

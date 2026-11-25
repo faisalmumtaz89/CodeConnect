@@ -100,7 +100,7 @@ Status values: `todo` | `done` | `rejected` | `proposal` (requires user approval
   2. Bound `Starts` (`start_session.rs:586`) to completed entries using a small bounded ring/LRU (e.g., retain all in-flight starts + last `256` completed request IDs, since SQLite `run_hosts.start_request_id` already backs durable idempotency for older retries — verify with `start_session` tests!).
 - **Expected gain:** Eliminates monotonic memory growth over days/weeks of session churn; contributes to ~0 MiB/hr soak slope.
 - **Risk:** Low (covered by new unit tests for `delete_session`, `prune_ended_sessions`, and `Starts` bounding).
-- **Status:** `todo`
+- **Status:** `done` (F7: evicted `session_facts`/`tree_facts` on delete & prune, bounded `Starts` to 256 completed entries; `soak` settled/Peak `10.72/19.03 -> 7.59/8.51 MiB`, start->end `6.95 -> 6.85 MiB`)
 
 ### F8. Eager outbound TLS root CA loading at startup (`relay_sender` & `apns_sender`)
 - **Location:** `mac/ccd/src/relay_sender.rs:116-134`; `mac/ccd/src/apns_sender.rs:59-66`; `mac/ccd/src/tls.rs:81-92`

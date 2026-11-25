@@ -99,3 +99,18 @@ Each entry corresponds to one logical commit on `perf/baseline-and-optimizations
   - `large_payloads` settled / Peak RSS: `6.84 / 18.84 MiB` (baseline `8.84 / 19.52 MiB`) -> **`5.94 / 13.81 MiB`** (**-32.8% / -29.3%** vs baseline; **-5.03 MiB peak** vs F5!)
   - `burst` settled / Peak RSS: `9.26 / 11.37 MiB` (baseline `10.17 / 12.16 MiB`) -> **`7.14 / 9.36 MiB`** (**-22.9% / -17.7%** vs F5; **-29.8% / -23.0%** vs baseline), throughput `1,302.1 ev/s`, `approval_rtt_p95` `53.45 -> 34.66 ms`
   - `reconnect_churn` settled / Peak RSS: `8.33 / 8.70 MiB` (F4; baseline `8.85 / 10.64 MiB`) -> **`6.38 / 6.63 MiB`** (**-27.9% / -37.7%** vs baseline), `cycle_p50/p95` `6.04 / 7.26 ms`
+
+---
+
+## F7 — Evict `session_facts` / `tree_facts` on delete & prune, and bound `start_session::Starts`
+
+- **Files:** `mac/ccd/src/state.rs`, `mac/ccd/src/start_session.rs`
+- **Change:**
+  - Evicted `session_facts` and `tree_facts` in `Daemon::delete_exited_session` (on `Deleted`) and `Daemon::prune_ended_sessions` (on non-dry-run removals), shrinking either map when capacity exceeds `max(64, 4 * len)`.
+  - Bounded completed entries in `start_session::Starts` to `MAX_COMPLETED_STARTS = 256` (FIFO eviction of completed `request_id`s only; in-flight starts are never evicted; older completed runs remain idempotent via SQLite `run_hosts.start_request_id`).
+  - Added unit tests `delete_and_prune_evict_in_memory_session_and_tree_facts` and `starts_bounds_completed_entries_and_preserves_in_flight`.
+- **Before vs After (`x86_64-unknown-linux-musl`, soak verification vs baseline soak):**
+  - `soak` settled / Peak RSS: `10.72 / 19.03 MiB` -> **`7.59 / 8.51 MiB`** (**-29.2% / -55.3%**)
+  - `soak` RSS start -> end (180 s, 8,248 events, 870 approvals): **`6.95 -> 6.85 MiB`** (net **-0.10 MiB**; baseline grew monotonically `7.70 -> 9.11 MiB` -> `10.72 MiB` settled)
+  - `soak` CPU: `6.91%` -> **`5.57%`** (**-19.4%**)
+  - `soak` `relay_p50 / p95 / max`: `3.66 / 84.82 / 2,537.6 ms` -> **`2.31 / 58.68 / 321.9 ms`** (**-36.9% / -30.8% / -87.3%**)
