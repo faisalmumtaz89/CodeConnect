@@ -119,7 +119,17 @@ final class RenderPass: XCTestCase {
     func testRendersTheUsageAtAX5() throws { try render(at: .ax5, Self.usage) }
 
     /// The first-run screens: what a computer needs, as onboarding says it.
-    private static let onboarding = RenderCatalog.all.filter { $0.name.hasPrefix("onboarding") }
+    private static let onboarding = RenderCatalog.all.filter { $0.name.hasPrefix("onboarding") } + [
+        RenderScenario(
+            name: "onboarding-agents", purpose: "the install step's last sentence, the agents a computer needs, on screen",
+            arguments: [],
+            reach: { app, driver in
+                try driver.require(app.buttons["pairing-sample-mode"], "the first screen")
+                try driver.scrollUntil(app, "the agents sentence on screen") {
+                    driver.element(containing: "Antigravity", in: app).isHittable
+                }
+            }),
+    ]
 
     func testRendersTheOnboardingAtLarge() throws { try render(at: .large, Self.onboarding) }
 
