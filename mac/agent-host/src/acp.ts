@@ -8,7 +8,8 @@
 // and `done` at once, and sent once the one before has its reply, so prompts never overlap. An `interrupt` of the
 // running turn answers its open requests `cancelled`, withdrawing their cards, cancels the session's prompt and drops
 // the prompts queued after it; once the prompt's reply comes, its outcome is `done` with the reply's stopReason and the
-// uuids dropped. A permission request is held by its JSON-RPC id and sent as `permission`; ccd's answer picks the
+// uuids dropped. A permission request is held by its JSON-RPC id (its card named by the start's uuid and that id)
+// and sent as `permission`; ccd's answer picks the
 // request's own allow_once or reject_once option, and `done` follows once it is written to agy. `stop` answers every
 // request still open `cancelled`, withdrawing its card, cancels the session's prompt and ends agy's input; agy's end
 // is `exited`. Settings are refused: a later slice.
@@ -62,8 +63,10 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
     }
     if (message.method === 'session/request_permission' && message.id !== undefined) {
       const update = message.params?.toolCall ?? {};
+      // agy numbers its requests from 1 in each process, so a card is named by this host's start too: a relaunched
+      // run's requests never take its earlier cards' names.
       const request: PermissionRequest = {
-        tool_use_id: String(message.id),
+        tool_use_id: `${start.uuid}/${message.id}`,
         tool_name: String(update.title ?? update.kind ?? 'tool'),
         input: (update.rawInput ?? {}) as Json,
         options: (message.params?.options ?? []) as Json,

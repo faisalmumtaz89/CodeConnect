@@ -2275,7 +2275,7 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         }
     };
     let Some(claude_path) = claude.to_str() else {
-        let reason = "This session could not start again (claude's path is not text); nothing \
+        let reason = "This session could not start again (its agent's path is not text); nothing \
                       was sent.";
         return refuse_relaunch(daemon, uid, request_id, reason).await;
     };
@@ -2374,7 +2374,9 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
             return refuse_relaunch(daemon, uid, request_id, &reason).await;
         }
     };
-    let lost = "The session is starting again; the message may or may not have reached Claude.";
+    let agent = agent_named(daemon, uid).await;
+    let lost =
+        format!("The session is starting again; the message may or may not have reached {agent}.");
     match tokio::time::timeout_at(deadline, begun).await {
         Ok(Ok(Ok(()))) => SendTextResult::Sent {
             matched: text.to_string(),
@@ -2383,15 +2385,11 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         // link that ended first leaves it starting, for the watch.
         Ok(Ok(Err(detail))) => match daemon.db.hosted_link(uid.to_string()).await {
             Ok(Some(linked)) if linked.lifecycle == Lifecycle::Exited => SendTextResult::Refused {
-                reason: format!("Claude did not start again ({detail}); nothing was sent."),
+                reason: format!("{agent} did not start again ({detail}); nothing was sent."),
             },
-            _ => SendTextResult::Indeterminate {
-                reason: lost.into(),
-            },
+            _ => SendTextResult::Indeterminate { reason: lost },
         },
-        Ok(Err(_)) | Err(_) => SendTextResult::Indeterminate {
-            reason: lost.into(),
-        },
+        Ok(Err(_)) | Err(_) => SendTextResult::Indeterminate { reason: lost },
     }
 }
 

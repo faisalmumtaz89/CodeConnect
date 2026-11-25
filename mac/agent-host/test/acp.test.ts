@@ -52,7 +52,7 @@ test('a start initializes agy at version 1, opens a session in the folder with t
   expect(types.indexOf('outcome')).toBeLessThan(types.indexOf('acp'));
   expect(updates(ccd)).toStrictEqual(['available_commands_update', 'agent_message_chunk', 'agent_message_chunk', 'tool_call']);
   expect(permission.request).toMatchObject({
-    tool_use_id: '101',
+    tool_use_id: `${antigravityStart.uuid}/101`,
     tool_name: 'cat NOTE.txt',
     input: { command: 'cat NOTE.txt' },
   });
@@ -71,7 +71,7 @@ test('Allow answers with the request\'s own allow_once option; the turn goes on 
   });
   expect(updates(ccd).slice(-3)).toStrictEqual(['tool_call_update', 'agent_message_chunk', 'reply']);
   // A second answer to the same request finds it closed.
-  ccd.send({ type: 'answer', uuid: 'c-again', tool_use_id: '101', decision: { behavior: 'allow' } });
+  ccd.send({ type: 'answer', uuid: 'c-again', tool_use_id: `${antigravityStart.uuid}/101`, decision: { behavior: 'allow' } });
   expect(await ccd.line('the refusal', (line) => line.uuid === 'c-again')).toMatchObject({ status: 'refused' });
 }, 15_000);
 
@@ -84,7 +84,7 @@ test('Deny answers with reject_once; a say is done at once and is the next promp
     type: 'answer', uuid: 'c-deny', tool_use_id: permission.request.tool_use_id,
     decision: { behavior: 'deny', message: 'Not now' },
   });
-  await ccd.line('the second permission request', (line) => line.type === 'permission' && line.request.tool_use_id === '102');
+  await ccd.line('the second permission request', (line) => line.type === 'permission' && line.request.tool_use_id === `${antigravityStart.uuid}/102`);
   const lines = stdin(dir);
   expect(lines.find((message) => message.id === 101 && message.method === undefined).result).toStrictEqual({
     outcome: { outcome: 'selected', optionId: 'reject-once' },
@@ -116,7 +116,7 @@ test('an interrupt of the running turn cancels it, drops the prompts queued afte
   });
   expect(lines.find((message) => message.method === 'session/cancel').params).toStrictEqual({ sessionId: 'sess-1' });
   // Its card is withdrawn, so ccd closes it.
-  expect(ccd.lines.find((line) => line.type === 'withdrawn')).toMatchObject({ tool_use_id: '101' });
+  expect(ccd.lines.find((line) => line.type === 'withdrawn')).toMatchObject({ tool_use_id: `${antigravityStart.uuid}/101` });
   // The queued say never reached agy.
   await Bun.sleep(300);
   expect(stdin(dir).filter((message) => message.method === 'session/prompt')).toHaveLength(1);
@@ -127,7 +127,7 @@ test('stop answers an open request cancelled, cancels the session and ends agy; 
   await ccd.line('the permission request', (line) => line.type === 'permission');
   ccd.send({ type: 'stop', uuid: 'c-stop' });
   await ccd.line('the run\'s end', (line) => line.type === 'exited');
-  expect(ccd.lines.find((line) => line.type === 'withdrawn')).toMatchObject({ tool_use_id: '101' });
+  expect(ccd.lines.find((line) => line.type === 'withdrawn')).toMatchObject({ tool_use_id: `${antigravityStart.uuid}/101` });
   const lines = stdin(dir);
   expect(lines.find((message) => message.id === 101 && message.method === undefined).result).toStrictEqual({
     outcome: { outcome: 'cancelled' },
