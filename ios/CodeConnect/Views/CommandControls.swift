@@ -115,6 +115,9 @@ struct CompactSheet: View {
     @State private var baselineSeq: UInt64 = 0
 
     private var receipts: SessionState.Receipts? { model.receipts(for: sessionKey) }
+    /// The run's agent: its words in the sheet, and what answers a compact (Claude's own signal; Antigravity's
+    /// turn's end).
+    private var agent: AgentKind { model.shownSummary(for: sessionKey)?.agent ?? .claude }
 
     /// See `CommandPhase.busy`.
     private var busy: Bool { phase.busy }
@@ -124,7 +127,7 @@ struct CompactSheet: View {
             VStack(spacing: 0) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: CC.space.md) {
-                        Text(CompactPrompt.explanation())
+                        Text(CompactPrompt.explanation(for: agent))
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -141,7 +144,7 @@ struct CompactSheet: View {
                         CCCard(contentColumn: false) {
                             CCField(
                                 label: CompactPrompt.fieldLabel, text: $instructions,
-                                placeholder: CompactPrompt.placeholder(),
+                                placeholder: CompactPrompt.placeholder(for: agent),
                                 submitLabel: .done, labelOnContentColumn: false,
                                 onSubmit: { apply() })
                         }
@@ -161,11 +164,12 @@ struct CompactSheet: View {
         .onAppear {
             if instructions.isEmpty, !prefill.isEmpty { instructions = prefill }
         }
-        // The sequence, not the fact: a fact alone cannot say whether it is news.
-        .onChange(of: receipts?.compactSeq) { _, _ in
+        // The sequence, not the fact: a fact alone cannot say whether it is news. A compact is answered by the
+        // agent's own signal, or, for Antigravity, by the turn's end.
+        .onChange(of: [receipts?.compactSeq ?? 0, receipts?.turnEndSeq ?? 0]) { _, _ in
             guard case .waiting(let request, _) = phase,
                 let settled = model.receiptPhase(
-                    for: .compact(instructions: request), in: sessionKey, after: baselineSeq)
+                    for: .compact(instructions: request), in: sessionKey, after: baselineSeq, agent: agent)
             else { return }
             timeoutTask?.cancel()
             withAnimation(CC.motion.small) { phase = settled }
@@ -183,7 +187,7 @@ struct CompactSheet: View {
 
     @ViewBuilder
     private var statusSlot: some View {
-        if let sent, let status = model.commandStatus(sent, phase) {
+        if let sent, let status = model.commandStatus(sent, phase, agent: agent) {
             compactStatusLine(status.text, tone: status.tone.ccTone)
         }
     }
@@ -208,7 +212,7 @@ struct CompactSheet: View {
                 instructions: command.request, to: sessionKey)
             if attempt.landed { onLanded() }
             phase = command.phase(after: attempt)
-                ?? model.receiptPhase(for: command, in: sessionKey, after: baselineSeq)
+                ?? model.receiptPhase(for: command, in: sessionKey, after: baselineSeq, agent: agent)
                 ?? .waiting(request: command.request, quietly: false)
             if case .waiting(_, quietly: false) = phase { armQuietFlip(command) }
         }

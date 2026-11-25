@@ -118,6 +118,9 @@ final class RenderPass: XCTestCase {
 
     func testRendersTheUsageAtAX5() throws { try render(at: .ax5, Self.usage) }
 
+    /// An Antigravity run's own commands: no Clear, and Compact in its words.
+    func testRendersAntigravityCommandsAtLarge() throws { try render(at: .large, RenderCatalog.antigravityCommands) }
+
     /// The first-run screens: what a computer needs, as onboarding says it.
     private static let onboarding = RenderCatalog.all.filter { $0.name.hasPrefix("onboarding") }
 

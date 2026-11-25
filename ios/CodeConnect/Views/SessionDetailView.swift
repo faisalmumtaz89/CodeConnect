@@ -1225,19 +1225,24 @@ struct SessionDetailView: View {
             } label: {
                 Label("Changes", image: "plus-minus")
             }
-            // A Claude run started from the app takes Claude Code's own
-            // Compact and Clear, as the Mac's reply box offers them.
-            if case .hostedLive = model.runSettings(for: key), summary?.agent == .claude {
+            // A Claude or Antigravity run started from the app takes its agent's
+            // own Compact, and Claude's its Clear, as the Mac's reply box offers
+            // them: agy has no clear.
+            if case .hostedLive = model.runSettings(for: key), let agent = summary?.agent,
+                agent == .claude || agent == .antigravity
+            {
                 Button {
                     compactSheetPrefill = ""
                     showCompactSheet = true
                 } label: {
                     Label("Compact…", image: "arrows-in")
                 }
-                Button {
-                    showClearConfirm = true
-                } label: {
-                    Label("Clear…", image: "eraser")
+                if agent == .claude {
+                    Button {
+                        showClearConfirm = true
+                    } label: {
+                        Label("Clear…", image: "eraser")
+                    }
                 }
             }
             if !model.sampleFleetActive {
@@ -1410,7 +1415,7 @@ struct SessionDetailView: View {
         // is just a message that happens to start with a slash, and it goes
         // through `compose` like any other.
         guard summary?.isCodex != true else { return nil }
-        return SlashPalette.content(for: composeText)
+        return SlashPalette.content(for: composeText, agent: summary?.agent ?? .claude)
     }
 
     /// One place to show a compose outcome that did not go through `send()` —
