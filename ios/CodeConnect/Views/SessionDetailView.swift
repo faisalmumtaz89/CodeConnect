@@ -2042,6 +2042,9 @@ private struct SessionComposeBar: View {
     /// so the finger that just ended a recording cannot also fire the send.
     @State private var stoppedAt: Date?
 
+    /// What goes with the next reply, in order (Kit's tray).
+    private var files: [Attachment] { model.files(for: key) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: CC.space.xs) {
             // The reason goes *above* the composer and is visible text, not
@@ -2049,6 +2052,12 @@ private struct SessionComposeBar: View {
             // highest-traffic control.
             standingNote
             byteCounter
+            if !files.isEmpty {
+                AttachmentTray(
+                    files: files,
+                    onRemove: { model.removeFile($0, from: key) },
+                    onRetry: { model.retryFile($0, in: key) })
+            }
             composer
         }
         .padding(.horizontal, CC.space.md)
@@ -2091,7 +2100,7 @@ private struct SessionComposeBar: View {
         }
         // 12pt, not 16: the disc's 8pt inset took 4pt from the trailing side,
         // and the text keeps the width it wraps at.
-        .padding(.leading, CC.space.sm)
+        .padding(.leading, model.canUpload(key) ? CC.size.hitTarget + CC.space.xxs : CC.space.sm)
         .padding(
             .trailing,
             dictation.isRecording
@@ -2117,6 +2126,12 @@ private struct SessionComposeBar: View {
             // 4pt round the 44pt frame puts the 36pt disc 8pt inside the
             // pill's bottom and trailing edges.
             .padding(CC.space.xxs)
+        }
+        // `+` at the leading edge, where the computer takes files: the circle's 4pt inset, mirrored.
+        .overlay(alignment: .bottomLeading) {
+            if model.canUpload(key) {
+                AttachMenu(key: key, room: Attachment.maxCount - files.count).padding(CC.space.xxs)
+            }
         }
         .background { CCPillSurface() }
         // The sort priority above ranks within the pill alone.
@@ -2176,7 +2191,9 @@ private struct SessionComposeBar: View {
         // While a turn runs the circle stops it, by Kit's one rule (`stopUnavailable`), unless a typed message can be
         // sent now, since the field's Return is a new line; a message that must wait (the note says why) keeps Stop.
         let canStop = model.stopUnavailable(for: key) == nil
-        if !text.isEmpty, !canStop || model.sendBlockedReason(for: key, draft: text) == nil { return .send }
+        // Files alone are a whole message.
+        let hasMessage = !text.isEmpty || !files.isEmpty
+        if hasMessage, !canStop || model.sendBlockedReason(for: key, draft: text) == nil { return .send }
         return canStop ? .stopTurn : .dictate
     }
 
@@ -2207,7 +2224,7 @@ private struct SessionComposeBar: View {
             stoppedAt = .now
         case .send:
             if let stoppedAt, Date.now.timeIntervalSince(stoppedAt) < 0.3 { return }
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty else {
                 return
             }
             // Deliberately silent: Send fires dozens of times a day, and the
