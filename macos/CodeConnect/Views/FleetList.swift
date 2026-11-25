@@ -728,14 +728,21 @@ struct RunMore: View {
 
 }
 
-/// A row's words given less room than a short word shows nothing, never a sliver of a letter beside the name.
+/// A row's words given less room than a short word shows nothing, never a sliver of a letter beside the name. Only
+/// words cut to that room: a short word shown whole ("Edit") is shown.
 private struct DropsWhenNarrow: ViewModifier {
     @State private var width: CGFloat = .infinity
+    /// The words' own width, uncut.
+    @State private var whole: CGFloat = 0
 
     func body(content: Content) -> some View {
         content
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
-            .opacity(width < 28 ? 0 : 1)
+            .background {
+                content.fixedSize().hidden()
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { whole = $0 }
+            }
+            .opacity(width < 28 && width < whole - 0.5 ? 0 : 1)
     }
 }
 

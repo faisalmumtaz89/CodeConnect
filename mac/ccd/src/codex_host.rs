@@ -111,6 +111,9 @@ pub(crate) struct Run<'a> {
     pub account: Option<&'a crate::accounts::AccountEnv>,
     /// The person's folder answer, as the start resolved it: the trust list's level.
     pub trust: Trust,
+    /// Uploads sent for the start, moved into the run's folder once it is named, before its
+    /// first message: their paths are that message's last lines.
+    pub attachments: crate::uploads::Pending<'a>,
 }
 
 /// What the run's task needs for the first message, owned: it outlives the start.
@@ -152,6 +155,18 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
             Ok(names) => names,
             Err(err) => return failed(format!("could not name the run: {err}")),
         };
+    // As a Claude run's: the start's uploads become the run's before its row, or nothing.
+    let prompt = match daemon
+        .uploads
+        .adopt(&crate::uploads::root(), run.attachments, &uid)
+    {
+        Ok(paths) => crate::uploads::attached(run.prompt.to_string(), &paths),
+        Err(why) => return failed(why),
+    };
+    let run = Run {
+        prompt: &prompt,
+        ..run
+    };
     let now = protocol::time::now_rfc3339();
     let row = SessionRow {
         session_uid: uid.clone(),
@@ -2177,10 +2192,10 @@ pub(crate) const NO_ROLLOUT_AFTER_A_MESSAGE: &str =
 /// leaves to the thread) and the resume's thread `config`. It is recorded as the run's only
 /// while the run has had no message, so nothing is lost; its settings filed, and the run put
 /// back in Plan when `kept` was in Plan, as a resume puts it back. Any other run's thread with
-/// no rollout stays an error, as every other failed resume is. The effort the run ended with is
-/// not given (an accepted miss): `thread/start` has no effort in any recording here, so a run set
-/// to an effort, whose app-server ended before its first message, starts its new thread at Codex's
-/// default, which the run then reads.
+/// no rollout stays an error, as every other failed resume is. `thread/start` takes no effort, so
+/// the effort `kept` names is given again by one `thread/settings/update`, as an app's change is
+/// ([`change_settings`]), so the new thread runs at the effort the run reads; its settings are then
+/// Codex's report of that change, not the start's answer.
 async fn new_thread(
     daemon: &Arc<Daemon>,
     client: &Client,
@@ -2224,6 +2239,23 @@ async fn new_thread(
     run.thread = thread;
     let mut adapter = CodexAdapter::new(SessionKey::new(&uid, &uid));
     let settings = adapter.settings_answered(&run.thread, &started);
+    let effort = kept
+        .as_ref()
+        .and_then(|kept| kept["effort"].as_str())
+        .filter(|effort| started["reasoningEffort"].as_str() != Some(*effort));
+    if let Some(effort) = effort {
+        let now = adapter.settings().or(kept.as_ref()).cloned();
+        let setting = crate::claude_host::Setting::Model {
+            model: None,
+            effort: Some(effort.to_string()),
+        };
+        match change_settings(client, &run.thread, &mut adapter, now, false, &setting).await {
+            SettingResult::Applied { .. } => {}
+            SettingResult::Refused { reason } | SettingResult::Indeterminate { reason } => {
+                return Err(format!("its effort was not set again: {reason}"))
+            }
+        }
+    }
     let now = adapter.settings().or(kept.as_ref()).cloned();
     if !keep_plan(
         client,
@@ -2235,6 +2267,7 @@ async fn new_thread(
         false,
     )
     .await?
+        && effort.is_none()
     {
         file(daemon, &uid, settings).await;
     }
@@ -2493,6 +2526,7 @@ async fn launch_again(
         environment: &environment,
         account,
         trust: run.trust,
+        attachments: crate::uploads::Pending::default(),
     };
     let deadline = Instant::now() + crate::start_session::START_TIMEOUT;
     // A run moved by a switch of account keeps its mode (decision 308).
@@ -3325,7 +3359,51 @@ mod tests {
             environment: &rig.environment,
             account: None,
             trust: Trust::NotTrusted,
+            attachments: crate::uploads::Pending::default(),
         }
+    }
+
+    /// **A Codex start that cannot take its files starts nothing** (minor 50): no codex is
+    /// launched, no run is recorded, and the file it could take stays pending.
+    #[tokio::test]
+    async fn a_codex_start_that_cannot_take_its_files_launches_nothing() {
+        let rig = rig();
+        let root = crate::uploads::root();
+        let pending = crate::uploads::PENDING;
+        assert_eq!(
+            rig.daemon
+                .uploads
+                .put(&root, 11, pending, "c-1", "a.txt", 1, 0, b"a"),
+            Ok(1)
+        );
+        let codex = stand_in(&rig, "");
+        let ids = ["c-1".to_string(), "c-none".to_string()];
+        let result = start(
+            &rig.daemon,
+            Run {
+                attachments: crate::uploads::Pending {
+                    connection: 11,
+                    ids: &ids,
+                },
+                ..run(&rig, "req-files", &codex)
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, StartSessionResult::Failed { .. }),
+            "{result:?}"
+        );
+        assert_eq!(launches(&rig), 0);
+        assert!(rig
+            .daemon
+            .db
+            .hosted_run_for_request("req-files".into())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(root.join(pending).join("c-1").join("a.txt").exists());
+        rig.daemon.uploads.close_connection(&root, 11);
+        assert!(!root.join(pending).join("c-1").exists());
     }
 
     fn launches(rig: &Rig) -> usize {
@@ -6552,6 +6630,8 @@ mod tests {
                     "req-nolink-say",
                     "hello".into(),
                     &protocol::hash::compose_hash(&uid, "hello"),
+                    0,
+                    &[],
                 )
                 .await;
             (answered, stopped, said)
@@ -6600,7 +6680,7 @@ mod tests {
         );
         tokio::spawn(async move {
             let hash = protocol::hash::compose_hash(&uid, &text);
-            daemon.compose(&uid, &request_id, text, &hash).await
+            daemon.compose(&uid, &request_id, text, &hash, 0, &[]).await
         })
     }
 
@@ -8212,7 +8292,7 @@ mod tests {
         let hash = protocol::hash::compose_hash(uid, text);
         tokio::time::timeout(
             Duration::from_secs(20),
-            daemon.compose(uid, request_id, text.into(), &hash),
+            daemon.compose(uid, request_id, text.into(), &hash, 0, &[]),
         )
         .await
         .expect("the message was answered at once")
@@ -8897,6 +8977,163 @@ mod tests {
             "in the person's words"
         );
         drop(ws);
+    }
+
+    /// **A switched Codex run with no message yet runs at the effort it shows** (306 S8): a run started with no
+    /// message, set to High, moved to B; its next message's resume finds no rollout, so it gets a new thread, and
+    /// `thread/start` takes no effort: High is given again before the message's turn, and the run reads High.
+    #[tokio::test]
+    async fn a_switched_codex_run_on_a_new_thread_is_given_its_effort_again() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        rig.daemon = relauncher(&rig);
+        let codex = stand_in(&rig, "exec sleep 30");
+        let mut script = whole_start();
+        script.retain(|(method, _)| *method != "turn/start");
+        let mut started = START_SETTINGS.clone();
+        started["model"] = "gpt-6.1-sol".into();
+        started["thread"] = json!({"id": "thr-x6"});
+        script[2].1 = json!({ "result": started });
+        let models = recorded_models();
+        let quiet = Run {
+            prompt: "",
+            models: &models,
+            model: Some("gpt-6.1-sol"),
+            ..run(&rig, "req-r3", &codex)
+        };
+        let (result, (_, mut ws)) =
+            tokio::join!(start(&rig.daemon, quiet), play_app_server(&rig, script));
+        let uid = started_uid(&result);
+        row_once(&rig, &uid, Lifecycle::Live).await;
+        link_attached(&rig.daemon, &uid).await;
+        let (set, _) = changed(
+            &rig,
+            &mut ws,
+            &uid,
+            crate::claude_host::Setting::Model {
+                model: None,
+                effort: Some("high".into()),
+            },
+        )
+        .await;
+        assert!(matches!(set, SettingResult::Applied { .. }), "{set:?}");
+        tell(
+            &mut ws,
+            &settings_report(
+                "gpt-6.1-sol",
+                "high",
+                "on-request",
+                "workspaceWrite",
+                "default",
+            ),
+        )
+        .await;
+        let effort_shown =
+            |summary: protocol::event::SessionSummary| summary.effort.map(|fact| fact.value);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while effort_shown(summary_of(&rig.daemon, &uid).await).as_deref() != Some("high") {
+            assert!(Instant::now() < deadline, "High was never reported");
+            tokio::time::sleep(POLL).await;
+        }
+
+        let leader = rig
+            .daemon
+            .db
+            .watched_host(uid.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .host
+            .pid;
+        let b = rig.daemon.store.add_account("codex", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("codex", Some(&b.id))
+            .unwrap());
+        crate::switch::begin(&rig.daemon, &AgentKind::Codex).await;
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while alive(leader) {
+            assert!(Instant::now() < deadline, "its app-server was not ended");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        drop(ws);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while summary_of(&rig.daemon, &uid).await.switching
+            != Some(protocol::event::Switching::Moved)
+        {
+            assert!(Instant::now() < deadline, "never moved");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let said = saying(&rig.daemon, &uid, "say-r3", "go on");
+        let dir = run_folder(&rig).await;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while launches(&rig) < 2 {
+            assert!(Instant::now() < deadline, "codex was not launched again");
+            tokio::time::sleep(POLL).await;
+        }
+        let listener = UnixListener::bind(dir.join("as.sock")).unwrap();
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let init = asked(&mut ws, "initialize").await;
+        answer(&mut ws, &init, json!({"userAgent": "stand-in"})).await;
+        let skills = asked(&mut ws, "skills/list").await;
+        answer(&mut ws, &skills, json!({"data": []})).await;
+        let resume = asked(&mut ws, "thread/resume").await;
+        tell(
+            &mut ws,
+            &json!({"id": resume["id"], "error": {"code": -32600,
+                    "message": "no rollout found for thread id thr-x6"}}),
+        )
+        .await;
+        let thread_start = asked(&mut ws, "thread/start").await;
+        let mut fresh = START_SETTINGS.clone();
+        fresh["model"] = "gpt-6.1-sol".into();
+        fresh["thread"] = json!({"id": "thr-fresh"});
+        answer(&mut ws, &thread_start, fresh).await;
+        // What ccd asks the new thread next, before the message's turn.
+        let asked_next = loop {
+            let frame = next_frame(&mut ws).await.expect("ccd hung up");
+            if frame.get("id").is_some() && frame.get("method").is_some() {
+                break frame;
+            }
+        };
+        assert_eq!(
+            (
+                asked_next["method"].as_str(),
+                asked_next["params"]["effort"].as_str()
+            ),
+            (Some("thread/settings/update"), Some("high")),
+            "the relaunch gives Codex the effort the run shows: {asked_next}"
+        );
+        answer(&mut ws, &asked_next, json!({})).await;
+        let mut report = settings_report(
+            "gpt-6.1-sol",
+            "high",
+            "on-request",
+            "workspaceWrite",
+            "default",
+        );
+        report["params"]["threadId"] = json!("thr-fresh");
+        tell(&mut ws, &report).await;
+        let turn = asked(&mut ws, "turn/start").await;
+        answer(&mut ws, &turn, json!({"turn": {"id": "turn-1"}})).await;
+        let said = said.await.unwrap();
+        assert!(
+            matches!(said, protocol::ws::ComposeResult::Started { .. }),
+            "{said:?}"
+        );
+        assert_eq!(
+            effort_shown(summary_of(&rig.daemon, &uid).await).as_deref(),
+            Some("high"),
+            "it reads the effort it runs at"
+        );
+        drop(ws);
+        end_run(&rig, &uid).await;
     }
 
     /// **A run moved to an account whose plan lacks its model resumes on that plan's default** (306; terminal's real

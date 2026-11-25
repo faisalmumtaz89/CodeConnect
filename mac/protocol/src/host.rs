@@ -41,7 +41,9 @@ pub struct HostFile {
     pub host_pid: i32,
 }
 
-/// A line ccd sends the host.
+/// A line ccd sends the host. `Start` is the large one and goes once per run, a line at a time, so its size costs
+/// nothing worth an indirection at every place that builds or reads one.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToHost {
@@ -133,6 +135,11 @@ pub struct StartOptions {
     /// A new worktree for claude to make and start in, as `claude --worktree <name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// Folders claude may read beside its own (`additionalDirectories`, `--add-dir`): the run's
+    /// uploads folder (minor 50), so a file sent with a message is read without a card. A host
+    /// that predates it ignores it, and such a file asks first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_directories: Vec<String>,
     /// CodeConnect's mail server, run by Claude as a stdio MCP server.
     pub mail: McpCommand,
 }
@@ -386,6 +393,9 @@ mod tests {
                     model: None,
                     effort: None,
                     worktree: Some("feature-x".into()),
+                    additional_directories: vec![
+                        "/Users/person/.codeconnect/uploads/01ABCDEFGHJKMNPQRSTVWXYZ00".into(),
+                    ],
                     mail: mail(),
                 },
                 prompt: "fix the tests".into(),
@@ -402,6 +412,7 @@ mod tests {
                     model: Some("opus".into()),
                     effort: Some("high".into()),
                     worktree: None,
+                    additional_directories: Vec::new(),
                     mail: mail(),
                 },
                 prompt: "and the docs".into(),
@@ -418,6 +429,7 @@ mod tests {
                     model: None,
                     effort: None,
                     worktree: None,
+                    additional_directories: Vec::new(),
                     mail: mail(),
                 },
                 prompt: "fix the tests".into(),

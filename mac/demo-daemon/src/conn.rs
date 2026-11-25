@@ -280,7 +280,8 @@ where
         | ClientMessage::SignInAccount { .. }
         | ClientMessage::SignInAgent { .. }
         | ClientMessage::SignOutAgent { .. }
-        | ClientMessage::RemoveAccount { .. } => {
+        | ClientMessage::RemoveAccount { .. }
+        | ClientMessage::PutFile { .. } => {
             send(
                 sink,
                 &ServerMessage::Error {
@@ -392,12 +393,14 @@ where
             );
             send(sink, &ServerMessage::AnswerResult { request_id, result }).await?;
         }
+        // `uploads` is not advertised, so a message attaches nothing.
         ClientMessage::SendText {
             session_id,
             text,
             request_id,
             payload_hash,
             submit,
+            ..
         } => {
             let result = fleet.send_text(
                 &session_id,
@@ -547,6 +550,7 @@ fn capabilities() -> Capabilities {
         stop_run: false,
         claude_interrupt: false,
         accounts: false,
+        uploads: false,
     }
 }
 

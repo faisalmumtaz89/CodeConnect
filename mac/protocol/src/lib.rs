@@ -888,14 +888,27 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     carried since its first, so an app reads one pair for either agent. A turn with no call of its own (`/compact`,
 ///     `/clear`, a command's) carries neither, nor does a turn whose daemon restarted during it, and a daemon below
 ///     49 sends neither for Claude.
-///   * `50` — **Antigravity signs in and out from an app.**
+///   * `50` — **Files for a session's agent.**
+///
+///     [`ws::ClientMessage::PutFile`] sends a file in chunks, each answered with a
+///     [`ws::ServerMessage::PutFileResult`], to paired devices only, behind [`ws::Capabilities::uploads`]. It lands
+///     under `~/.codeconnect/uploads/<session_uid>/<upload_id>/<name>`, owner-only. `send_text` and `compose` take
+///     `attachments`, upload ids in order, at most [`ws::MAX_ATTACHMENTS`], hashed after the text only when there are
+///     any; each reaches the agent as its absolute path on a line after "Attached:", and a Claude run is started
+///     and resumed with its own uploads folder as an additional directory, so it reads them without asking. The
+///     daemon bounds a file at [`ws::MAX_UPLOAD_BYTES`] and a chunk at [`ws::MAX_UPLOAD_CHUNK_BYTES`]. A `put_file`
+///     without `session_id` is for a start: held under `uploads/.pending/`, its connection's alone, and
+///     [`ws::ClientMessage::StartSession`]'s `attachments` move it into the new run's folder before its first message,
+///     which carries the same path lines. A daemon below 50 answers `put_file` with `bad_request` and advertises no
+///     `uploads`.
+///   * `51` — **Antigravity signs in and out from an app.**
 ///
 ///     [`ws::ClientMessage::SignInAgent`] and [`ws::ClientMessage::SignOutAgent`] sign an agent that keeps one sign-in
 ///     and no accounts of CodeConnect's (Antigravity) in, with its own sign-in in a browser on the computer, and out;
 ///     the accounts listing carries its sign-in as [`ws::AgentSignIn`] (`agent_sign_ins`) and its plan, in agy's own
-///     words, as its Default's facts. Any other agent is refused `bad_request`. A daemon below 50 answers the two
-///     frames as undecodable and sends no `agent_sign_ins`, so an app offers them only from 50.
-pub const PROTOCOL_MINOR: u32 = 50;
+///     words, as its Default's facts. Any other agent is refused `bad_request`. A daemon below 51 answers the two
+///     frames as undecodable and sends no `agent_sign_ins`, so an app offers them only from 51.
+pub const PROTOCOL_MINOR: u32 = 51;
 
 #[cfg(test)]
 mod ledger_tests {
@@ -1085,7 +1098,8 @@ fn is_test_label(label: &str) -> bool {
 }
 
 /// Root of all CodeConnect state. `CODECONNECT_HOME` exists so tests never
-/// touch the real `~/.codeconnect`.
+/// touch the real `~/.codeconnect`: `mac/.cargo/config.toml` sets it to
+/// `target/test-home` for every process cargo runs, unless it is already set.
 ///
 /// **Absolute whenever the cwd can be read**, and that is the whole point
 /// of the wrapper. Both sources here can be relative — `CODECONNECT_HOME` is

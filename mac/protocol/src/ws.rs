@@ -30,6 +30,16 @@ pub const MAX_SEND_TEXT_BYTES: usize = 8 * 1024;
 /// match the sibling operation so a phone has one answer to "how long may this be".
 pub const MAX_COMPOSE_BYTES: usize = 8 * 1024;
 
+/// Ceiling on one uploaded file ([`ClientMessage::PutFile`]).
+pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Ceiling on one [`ClientMessage::PutFile`] chunk, decoded: its base64 stays well under
+/// [`MAX_CLIENT_MESSAGE_BYTES`].
+pub const MAX_UPLOAD_CHUNK_BYTES: usize = 512 * 1024;
+
+/// The most uploads one `send_text` or `compose` attaches.
+pub const MAX_ATTACHMENTS: usize = 10;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -195,6 +205,11 @@ pub enum ClientMessage {
         payload_hash: Option<String>,
         #[serde(default = "default_true")]
         submit: bool,
+        /// Uploads ([`ClientMessage::PutFile`]) this message carries, in order, at most
+        /// [`MAX_ATTACHMENTS`] (minor 50). Each reaches the agent as its absolute path on a line
+        /// after the text. Absent means none, and the hash is then exactly a minor-49 one.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     /// "What has this agent actually changed?" — answered from git, not from
     /// the event log, because the log knows about edits that were later undone
@@ -324,8 +339,40 @@ pub enum ClientMessage {
         request_id: String,
         /// What to say. Bounded by [`MAX_COMPOSE_BYTES`].
         text: String,
-        /// [`crate::hash::compose_hash`] over `session_id`, `text`.
+        /// [`crate::hash::compose_hash`] over `session_id`, `text`, and the attachments when
+        /// there are any ([`crate::hash::compose_hash_with`]).
         payload_hash: String,
+        /// Uploads this message carries, as [`ClientMessage::SendText`]'s (minor 50).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
+    },
+
+    /// **One chunk of a file for a session's agent** (minor 50, [`Capabilities::uploads`]),
+    /// answered with a [`ServerMessage::PutFileResult`]. The first chunk names the file and
+    /// its size and binds the upload to this connection and to the session's run; each next
+    /// chunk starts where the last answer's `received` says. At exactly `size` the file is
+    /// complete, under `~/.codeconnect/uploads/<session_uid>/<upload_id>/<name>`, and a
+    /// `send_text` or `compose` on this connection may attach it. Without `session_id` it is
+    /// for a run not started yet: held under `~/.codeconnect/uploads/.pending/<upload_id>/`,
+    /// bound to this connection alone, for a [`ClientMessage::StartSession`] on it to attach.
+    /// One that nothing attached is removed when the connection closes, or when ccd starts
+    /// again. A refused chunk ends the upload for the client: it sends the file again under a
+    /// new id, from offset 0.
+    PutFile {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// The client's id for this upload: one path component, no separators, not
+        /// starting with a dot.
+        upload_id: String,
+        /// The file's name as the agent will see it: the same rule as `upload_id`, at most
+        /// 255 bytes.
+        name: String,
+        /// The whole file's bytes, at most [`MAX_UPLOAD_BYTES`]; fixed by the first chunk.
+        size: u64,
+        /// Where this chunk starts: the bytes received so far.
+        offset: u64,
+        /// The chunk, base64, at most [`MAX_UPLOAD_CHUNK_BYTES`] decoded.
+        data: String,
     },
 
     /// **The folders sessions have run in on this computer** (minor 28,
@@ -362,6 +409,15 @@ pub enum ClientMessage {
     /// [`StartSessionResult::NeedsTrust`] and runs nothing; the app asks, then sends
     /// a new start, with a new `request_id`, carrying the answer. An answer given is
     /// kept for the folder, replacing any earlier one.
+    ///
+    /// `attachments` (minor 50, `uploads`) are this connection's uploads sent without a
+    /// `session_id`, in order, at most [`MAX_ATTACHMENTS`]. Once the run is named, before its
+    /// first message is written, they move into its uploads folder, and the first message
+    /// carries each as its absolute path on a line after "Attached:"; with no words, those
+    /// lines are the first message. A start that cannot take one of them takes none and
+    /// starts nothing; they stay this connection's. The start has no payload hash: its
+    /// `request_id` alone makes it idempotent, as above, and the attachments are the first
+    /// answer's.
     StartSession {
         request_id: String,
         path: String,
@@ -374,6 +430,8 @@ pub enum ClientMessage {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trust: Option<crate::host::Trust>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     /// **Every folder's answer to "trust this folder?"**, answered with one
     /// [`ServerMessage::FolderTrust`] carrying the same `request_id`.
@@ -438,7 +496,7 @@ pub enum ClientMessage {
         request_id: String,
         account_id: String,
     },
-    /// **Signs `agent` in with its own sign-in, on this computer** (minor 50): Antigravity's, which keeps one sign-in
+    /// **Signs `agent` in with its own sign-in, on this computer** (minor 51): Antigravity's, which keeps one sign-in
     /// and no accounts of CodeConnect's; agy opens Google's sign-in in a browser here. Answered at once with one
     /// [`ServerMessage::Accounts`] whose [`AgentSignIn`] for it is `signing_in`; when the sign-in ends (finished in the
     /// browser, replaced by a newer sign-in, or after ten minutes) the list is pushed with its sign-in as it then is.
@@ -448,7 +506,7 @@ pub enum ClientMessage {
         request_id: String,
         agent: crate::agent::AgentKind,
     },
-    /// **Signs `agent` out of this computer** (minor 50): Antigravity's own logout. Answered with one
+    /// **Signs `agent` out of this computer** (minor 51): Antigravity's own logout. Answered with one
     /// [`ServerMessage::Accounts`], or [`ServerMessage::AccountsRefused`] when agy could not sign out. Any other agent
     /// is refused `bad_request`.
     SignOutAgent {
@@ -640,6 +698,11 @@ pub enum ServerMessage {
         request_id: String,
         result: ComposeResult,
     },
+    /// The outcome of one [`ClientMessage::PutFile`] chunk (minor 50).
+    PutFileResult {
+        upload_id: String,
+        result: PutFileResult,
+    },
 
     /// The answer to [`ClientMessage::ListProjects`]: most recently used first.
     /// `agents` says which agents this computer can start, for every project. An
@@ -677,7 +740,7 @@ pub enum ServerMessage {
         /// Each agent's Default with what it says of it, once read; omitted when none is.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         defaults: Vec<DefaultAccount>,
-        /// The sign-in of each agent that keeps one and no accounts of CodeConnect's (minor 50: Antigravity), as
+        /// The sign-in of each agent that keeps one and no accounts of CodeConnect's (minor 51: Antigravity), as
         /// last read; omitted when none is.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         agent_sign_ins: Vec<AgentSignIn>,
@@ -1010,7 +1073,7 @@ pub struct DefaultAccount {
     pub facts: AccountFacts,
 }
 
-/// The sign-in of an agent that keeps one and no accounts of CodeConnect's (minor 50: Antigravity's), its plan in
+/// The sign-in of an agent that keeps one and no accounts of CodeConnect's (minor 51: Antigravity's), its plan in
 /// [`ServerMessage::Accounts`]' `defaults`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSignIn {
@@ -1077,6 +1140,19 @@ pub enum InterruptResult {
     /// Issued, outcome unknown — the daemon was killed between claiming the
     /// interrupt and observing the turn terminate. Never retried automatically.
     Indeterminate { reason: String },
+}
+
+/// What became of one [`ClientMessage::PutFile`] chunk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PutFileResult {
+    /// Written. `received` is the bytes held so far: the next chunk's `offset`, or the
+    /// file's `size` once it is complete.
+    Received { received: u64 },
+    /// Refused; the client sends the file again under a new id. Nothing is kept of an upload a
+    /// bound refused, and one this connection leaves unattached goes when it closes. The reason
+    /// is human text.
+    Refused { reason: String },
 }
 
 /// What became of a [`ClientMessage::Compose`].
@@ -1325,6 +1401,12 @@ pub struct Capabilities {
     /// advertised.
     #[serde(default)]
     pub accounts: bool,
+    /// **This daemon takes files for a session's agent** ([`ClientMessage::PutFile`] and the
+    /// `attachments` of [`ClientMessage::SendText`] and [`ClientMessage::Compose`], minor 50),
+    /// to paired devices only. Absent decodes `false`: an older daemon answers `put_file` with
+    /// `bad_request`, so a client sends neither unless this is advertised.
+    #[serde(default)]
+    pub uploads: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -2271,11 +2353,15 @@ mod tests {
         );
         const _: () = assert!(
             crate::PROTOCOL_MINOR >= 50,
-            "Antigravity's sign-in from an app (`sign_in_agent`, `sign_out_agent`, `agent_sign_ins`) is minor 50"
+            "files for a session's agent (`put_file`, `attachments`, `uploads`) are minor 50"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 51,
+            "Antigravity's sign-in from an app (`sign_in_agent`, `sign_out_agent`, `agent_sign_ins`) is minor 51"
         );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 50);
+        assert_eq!(crate::PROTOCOL_MINOR, 51);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2607,6 +2693,79 @@ mod tests {
         );
     }
 
+    /// **A file's chunk and a message's attachments, as an app sends them** (minor 50): a
+    /// `send_text` or `compose` attaching nothing is written exactly as before.
+    #[test]
+    fn a_put_file_chunk_and_attachments_read_as_sent() {
+        let chunk: ClientMessage = serde_json::from_str(
+            r#"{"type":"put_file","session_id":"cc-1","upload_id":"01UP","name":"a.png",
+                "size":5,"offset":0,"data":"YWJj"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            chunk,
+            ClientMessage::PutFile {
+                size: 5,
+                offset: 0,
+                ..
+            }
+        ));
+        // A file for a start names no session, and a start attaches it.
+        let pending: ClientMessage = serde_json::from_str(
+            r#"{"type":"put_file","upload_id":"01UR","name":"b.txt","size":1,"offset":0,
+                "data":"Yg=="}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            pending,
+            ClientMessage::PutFile {
+                session_id: None,
+                ..
+            }
+        ));
+        let start: ClientMessage = serde_json::from_str(
+            r#"{"type":"start_session","request_id":"r1","path":"/p","agent":"claude",
+                "attachments":["01UR"]}"#,
+        )
+        .unwrap();
+        match start {
+            ClientMessage::StartSession { attachments, .. } => assert_eq!(attachments, ["01UR"]),
+            other => panic!("wrong message: {other:?}"),
+        }
+        let compose: ClientMessage = serde_json::from_str(
+            r#"{"type":"compose","session_id":"cc-1","request_id":"c-1","text":"",
+                "payload_hash":"h","attachments":["01UP","01UQ"]}"#,
+        )
+        .unwrap();
+        match compose {
+            ClientMessage::Compose { attachments, .. } => {
+                assert_eq!(attachments, ["01UP", "01UQ"])
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
+        let plain = ClientMessage::Compose {
+            session_id: "cc-1".into(),
+            request_id: "c-1".into(),
+            text: "hi".into(),
+            payload_hash: "h".into(),
+            attachments: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::json!({"type": "compose", "session_id": "cc-1", "request_id": "c-1",
+                               "text": "hi", "payload_hash": "h"})
+        );
+        assert_eq!(
+            serde_json::to_value(ServerMessage::PutFileResult {
+                upload_id: "01UP".into(),
+                result: PutFileResult::Received { received: 3 },
+            })
+            .unwrap(),
+            serde_json::json!({"type": "put_file_result", "upload_id": "01UP",
+                               "result": {"status": "received", "received": 3}})
+        );
+    }
+
     #[test]
     fn an_idempotent_send_text_round_trips_with_its_identity() {
         let hash = crate::hash::send_text_hash("cc-1", "hi", true);
@@ -2616,6 +2775,7 @@ mod tests {
             request_id: Some("st-1".into()),
             payload_hash: Some(hash.clone()),
             submit: true,
+            attachments: Vec::new(),
         };
         let encoded = serde_json::to_string(&msg).unwrap();
         match serde_json::from_str::<ClientMessage>(&encoded).unwrap() {
@@ -2806,6 +2966,7 @@ mod tests {
             stop_run: true,
             claude_interrupt: true,
             accounts: true,
+            uploads: true,
         }
     }
 
@@ -3342,7 +3503,7 @@ mod tests {
             serde_json::to_value(&pushed).unwrap(),
             serde_json::json!({"type": "accounts", "accounts": [], "active": []})
         );
-        // Antigravity's own sign-in and sign-out (minor 50) name its agent; its sign-in state rides the listing.
+        // Antigravity's own sign-in and sign-out (minor 51) name its agent; its sign-in state rides the listing.
         round_trip_client(
             ClientMessage::SignInAgent {
                 request_id: "a9".into(),
@@ -3435,6 +3596,7 @@ mod tests {
                 worktree: None,
                 model: None,
                 trust: Some(crate::host::Trust::NotTrusted),
+                attachments: Vec::new(),
             },
             serde_json::json!({"type": "start_session", "request_id": "r1",
                 "path": "/Users/me/src/app", "agent": "claude",
@@ -3449,6 +3611,7 @@ mod tests {
                 worktree: None,
                 model: None,
                 trust: None,
+                attachments: Vec::new(),
             },
             serde_json::json!({"type": "start_session", "request_id": "r2",
                 "path": "/srv/x", "agent": "codex"}),
@@ -3605,6 +3768,7 @@ mod tests {
                 worktree: None,
                 model: Some("claude-fable-5-1[1m]".into()),
                 trust: None,
+                attachments: Vec::new(),
             },
             serde_json::json!({"type": "start_session", "request_id": "r3",
                 "path": "/Users/me/src/app", "agent": "claude",
@@ -3702,6 +3866,7 @@ mod tests {
                     worktree: Some(worktree),
                     model: None,
                     trust: None,
+                    attachments: Vec::new(),
                 },
                 serde_json::json!({"type": "start_session", "request_id": "r1",
                     "path": "/Users/me/src/app", "agent": "claude", "worktree": expected}),

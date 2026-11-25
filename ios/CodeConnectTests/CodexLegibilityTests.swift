@@ -132,7 +132,7 @@ final class CodexSlashPolicyTests: XCTestCase {
         }
         await fulfillment(of: [left], timeout: 2)
 
-        guard case .compose(_, _, let text, _) = sent.first else {
+        guard case .compose(_, _, let text, _, _) = sent.first else {
             return XCTFail("expected exactly one compose, got \(sent)")
         }
         XCTAssertEqual(

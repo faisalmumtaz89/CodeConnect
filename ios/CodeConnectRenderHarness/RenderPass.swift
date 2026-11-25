@@ -118,6 +118,13 @@ final class RenderPass: XCTestCase {
 
     func testRendersTheUsageAtAX5() throws { try render(at: .ax5, Self.usage) }
 
+    /// Files with a reply.
+    func testRendersTheUploadsAtLarge() throws {
+        try render(at: .large, RenderCatalog.uploads + RenderCatalog.startFiles)
+    }
+
+    func testRendersTheUploadsAtAX5() throws { try render(at: .ax5, RenderCatalog.uploads + RenderCatalog.startFiles) }
+
     /// An Antigravity run's own commands: no Clear, and Compact in its words.
     func testRendersAntigravityCommandsAtLarge() throws { try render(at: .large, RenderCatalog.antigravityCommands) }
 

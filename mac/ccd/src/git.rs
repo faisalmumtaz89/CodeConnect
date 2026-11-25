@@ -55,18 +55,19 @@ pub fn git_bin(configured: Option<&str>) -> Option<PathBuf> {
 fn shim_has_git() -> bool {
     static HAS_GIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *HAS_GIT.get_or_init(|| {
-        std::process::Command::new("/usr/bin/xcode-select")
-            .arg("-p")
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .is_some_and(|out| {
-                Path::new(String::from_utf8_lossy(&out.stdout).trim())
-                    .join("usr/bin/git")
-                    .is_file()
-            })
+        crate::spawn::output_std(
+            std::process::Command::new("/usr/bin/xcode-select")
+                .arg("-p")
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .ok()
+        .filter(|out| out.status.success())
+        .is_some_and(|out| {
+            Path::new(String::from_utf8_lossy(&out.stdout).trim())
+                .join("usr/bin/git")
+                .is_file()
+        })
     })
 }
 
@@ -539,8 +540,7 @@ async fn run(
         // not leave a git process reading the disk on the operator's behalf.
         .kill_on_drop(true);
 
-    let mut child = command
-        .spawn()
+    let mut child = crate::spawn::spawn(&mut command)
         .with_context(|| format!("running git {}", args.join(" ")))?;
     // Each pipe is *moved* into its own task, and this is load-bearing rather
     // than stylistic. Reading them in sequence deadlocks the moment git fills

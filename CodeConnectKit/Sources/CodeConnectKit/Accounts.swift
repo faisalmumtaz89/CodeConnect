@@ -99,7 +99,7 @@ public struct DefaultAccount: Decodable, Hashable, Sendable {
     public let facts: AccountFacts
 }
 
-/// The sign-in of an agent that keeps one and no accounts of CodeConnect's (Antigravity's, minor 50), as the computer
+/// The sign-in of an agent that keeps one and no accounts of CodeConnect's (Antigravity's, minor 51), as the computer
 /// last read it: its plan is its Default's facts'.
 public struct AgentSignIn: Decodable, Hashable, Sendable {
     public let agent: String
@@ -160,7 +160,7 @@ public struct AccountBook: Hashable, Sendable {
     public let active: [ActiveAccount]
     /// What each agent's Default says of itself, where the computer has read it.
     public let defaults: [DefaultAccount]
-    /// The sign-in of each agent that keeps one and no accounts (minor 50: Antigravity).
+    /// The sign-in of each agent that keeps one and no accounts (minor 51: Antigravity).
     public let agentSignIns: [AgentSignIn]
 
     public init(

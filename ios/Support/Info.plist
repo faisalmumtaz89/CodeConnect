@@ -68,7 +68,7 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>CodeConnect uses the camera only to read the pairing code your computer shows. Nothing is recorded or sent anywhere.</string>
+	<string>CodeConnect uses the camera to read the pairing code your computer shows, and to take a photo you choose to send to an agent on your computer. Nothing else is recorded or sent.</string>
 	<!-- Deep-link target: `codeconnect://deck` and
 	     `codeconnect://session/<id>`. A URL can name a particular run or card; a
 	     tapped notification cannot, and does not try — it carries no identifier

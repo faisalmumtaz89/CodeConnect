@@ -35,7 +35,7 @@ final class FolderTrustWireTests: XCTestCase {
         /// Each start sent, by request id, with the answer it carried.
         var starts: [(requestID: String, trust: FolderTrust?)] {
             sent.compactMap {
-                guard case .startSession(let id, _, _, _, _, _, let trust) = $0 else { return nil }
+                guard case .startSession(let id, _, _, _, _, _, let trust, _) = $0 else { return nil }
                 return (id, trust)
             }
         }

@@ -1731,82 +1731,36 @@ impl Store {
         Ok(events)
     }
 
-    /// A run's facts as of the newest event that decided each: one read per
-    /// fact, newest first, stopped at the first event that decides it.
-    ///
-    /// Each read is narrowed in SQL to the rows that can decide its fact under
-    /// [`protocol::facts`] — a `session_start` or a user line for the model, a
-    /// hook, Claude's permission-mode line or an SDK run's init for the mode, a
-    /// notification or a user line for the effort, and a Codex or an Antigravity run's settings
-    /// ([`protocol::facts::CODEX_SETTINGS`], [`protocol::facts::ACP_SETTINGS`]) for each — so a long run costs those rows
-    /// down to the deciding one, not its whole log.
+    /// A run's facts, rebuilt as the live path keeps them: every event that can decide one, oldest
+    /// first, folded by [`protocol::facts::SessionFacts::observe`]. One read of the run, narrowed in
+    /// SQL to those events under [`protocol::facts`] — a `session_start`, a user line, a Codex or an
+    /// Antigravity run's settings ([`protocol::facts::CODEX_SETTINGS`], [`protocol::facts::ACP_SETTINGS`]), Claude's permission-mode line, a notification,
+    /// a `session_end`, or any hook's — so the facts a restart reads back are the ones the live fold
+    /// would hold, by the same rule.
     pub fn session_facts(&self, session_uid: &str) -> Result<protocol::facts::SessionFacts> {
         let conn = self.read();
-        Ok(protocol::facts::SessionFacts {
-            model: newest_decided(
-                &conn,
-                session_uid,
-                "kind IN (?2, ?3, ?4, ?5)",
-                &[
-                    EventKind::SessionStart.as_str(),
-                    EventKind::UserMessage.as_str(),
-                    protocol::facts::CODEX_SETTINGS,
-                    protocol::facts::ACP_SETTINGS,
-                ],
-                protocol::facts::model_fact,
-            )?,
-            permission_mode: newest_decided(
-                &conn,
-                session_uid,
-                "(kind IN (?2, ?6, ?7) OR source = ?3 OR (kind = ?4 AND source = ?5))",
-                &[
-                    protocol::facts::TRANSCRIPT_PERMISSION_MODE,
-                    Source::Hook.as_str(),
-                    EventKind::SessionStart.as_str(),
-                    Source::Sdk.as_str(),
-                    protocol::facts::CODEX_SETTINGS,
-                    protocol::facts::ACP_SETTINGS,
-                ],
-                protocol::facts::permission_mode_fact,
-            )?,
-            // An effort is the ended process's own ([`protocol::facts::SessionFacts::ended`]).
-            effort: newest_decided(
-                &conn,
-                session_uid,
-                "kind IN (?2, ?3, ?4, ?6) AND seq > COALESCE((SELECT MAX(seq) FROM events
-                                                       WHERE session_uid = ?1 AND kind = ?5), 0)",
-                &[
-                    EventKind::Notification.as_str(),
-                    EventKind::UserMessage.as_str(),
-                    protocol::facts::CODEX_SETTINGS,
-                    EventKind::SessionEnd.as_str(),
-                    protocol::facts::ACP_SETTINGS,
-                ],
-                protocol::facts::effort_fact,
-            )?,
-            ended: conn.query_row(
-                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1 AND kind = ?2",
-                params![session_uid, EventKind::SessionEnd.as_str()],
-                |row| row.get::<_, i64>(0),
-            )? as u64,
-            // The effort the newest end's process held: decided before that end and after the end before it.
-            ended_with: newest_decided(
-                &conn,
-                session_uid,
-                "kind IN (?2, ?3, ?4, ?6)
-                 AND seq < (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1 AND kind = ?5)
-                 AND seq > (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1 AND kind = ?5
-                              AND seq < (SELECT MAX(seq) FROM events WHERE session_uid = ?1 AND kind = ?5))",
-                &[
-                    EventKind::Notification.as_str(),
-                    EventKind::UserMessage.as_str(),
-                    protocol::facts::CODEX_SETTINGS,
-                    EventKind::SessionEnd.as_str(),
-                    protocol::facts::ACP_SETTINGS,
-                ],
-                protocol::facts::effort_fact,
-            )?,
-        })
+        let mut stmt = conn.prepare_cached(
+            "SELECT seq, session_id, ts, kind, payload, source, source_event_id, turn_id, item_id
+               FROM events
+              WHERE session_uid = ?1 AND (kind IN (?2, ?3, ?4, ?5, ?6, ?7, ?9) OR source = ?8)
+              ORDER BY seq ASC",
+        )?;
+        let mut rows = stmt.query(params![
+            session_uid,
+            EventKind::SessionStart.as_str(),
+            EventKind::UserMessage.as_str(),
+            protocol::facts::CODEX_SETTINGS,
+            protocol::facts::TRANSCRIPT_PERMISSION_MODE,
+            EventKind::Notification.as_str(),
+            EventKind::SessionEnd.as_str(),
+            Source::Hook.as_str(),
+            protocol::facts::ACP_SETTINGS,
+        ])?;
+        let mut facts = protocol::facts::SessionFacts::default();
+        while let Some(row) = rows.next()? {
+            facts.observe(&event_from_row(session_uid, row)?);
+        }
+        Ok(facts)
     }
 
     pub fn get_session(&self, session_uid: &str) -> Result<Option<SessionRow>> {
@@ -2359,21 +2313,6 @@ impl Store {
         )
     }
 
-    /// The model claude's newest receipt of a model change names for the run `session_uid`
-    /// (its `Set model to …` line, as [`protocol::facts::model_fact`] reads it), whatever the
-    /// inits filed since; `None` when it has none.
-    pub fn newest_model_receipt(&self, session_uid: &str) -> Result<Option<String>> {
-        let conn = self.read();
-        Ok(newest_decided(
-            &conn,
-            session_uid,
-            "kind = ?2",
-            &[EventKind::UserMessage.as_str()],
-            protocol::facts::model_fact,
-        )?
-        .map(|fact| fact.value))
-    }
-
     /// Keep `models` (`{"models": [...]}`) as the Codex run `session_uid`'s models, where a
     /// Claude run's start's answer keeps its own ([`Store::hosted_models`] reads either).
     pub fn keep_hosted_models(&self, session_uid: &str, models: &serde_json::Value) -> Result<()> {
@@ -2441,6 +2380,29 @@ impl Store {
             )
             .optional()?;
         Ok(newest.as_deref() == Some(EventKind::SessionStart.as_str()))
+    }
+
+    /// Whether a message ccd gave the Claude run `session_uid` waits for its answer: nothing has followed its
+    /// newest `user_message` filed by ccd (the person's words, a relaunch's prompt) that answers it, no turn begun
+    /// or ended and no line of claude's own, so claude has it and has not begun the turn that answers it.
+    pub fn message_awaits_turn(&self, session_uid: &str) -> Result<bool> {
+        let conn = self.read();
+        let newest = conn
+            .query_row(
+                "SELECT kind = ?4 AND source = ?5 FROM events
+                  WHERE session_uid = ?1 AND kind IN (?2, ?3, ?4)
+                  ORDER BY seq DESC LIMIT 1",
+                params![
+                    session_uid,
+                    EventKind::SessionStart.as_str(),
+                    EventKind::TurnComplete.as_str(),
+                    EventKind::UserMessage.as_str(),
+                    Source::Daemon.as_str()
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?;
+        Ok(newest == Some(true))
     }
 
     /// Whether the Codex run `session_uid` is in a turn: its newest user message, the
@@ -3072,15 +3034,18 @@ impl Store {
     pub const SWITCH_FAILED: i64 = 2;
     pub const SWITCH_MOVED: i64 = 3;
 
-    /// Marks every live run of `agent` as switching to its agent's active account; the uids marked.
+    /// Marks every live run of `agent` as switching to its agent's active account; the uids marked. A run already
+    /// moved, its process being stopped, is left moved: its next message starts it on the account active then.
     pub fn mark_switching(&self, agent: &str) -> Result<Vec<String>> {
         let conn = self.write();
         let mut stmt = conn.prepare(
             "SELECT h.session_uid FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
-              WHERE s.agent = ?1 AND s.lifecycle = 'live'",
+              WHERE s.agent = ?1 AND s.lifecycle = 'live' AND h.switching IS NOT ?2",
         )?;
         let uids = stmt
-            .query_map(params![agent], |row| row.get::<_, String>(0))?
+            .query_map(params![agent, Store::SWITCH_MOVED], |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for uid in &uids {
             conn.execute(
@@ -5102,7 +5067,8 @@ impl Store {
     }
 
     /// **Settle what time and ended sessions decide:** unread messages past their
-    /// expiry are expired, those for a run that has ended are ended, a sent
+    /// expiry are expired, those for a run that has ended are ended (a run its switch of
+    /// account ended keeps its waiting mail for its next process until it is ended for good), a sent
     /// message no computer took within the unread time is expired, one taken whose
     /// answer never came is expired once the receiver's unread time for it has
     /// surely run out, and settled rows older than [`MailLimits::settled_ms`] are
@@ -5119,7 +5085,9 @@ impl Store {
         settle_mail(
             &tx,
             "state IN ('waiting', 'offered')
-             AND session_uid IN (SELECT session_uid FROM all_sessions WHERE lifecycle = ?1)",
+             AND session_uid IN (SELECT session_uid FROM all_sessions WHERE lifecycle = ?1)
+             AND NOT (state = 'waiting'
+                      AND session_uid IN (SELECT session_uid FROM run_hosts WHERE switching IS NOT NULL))",
             params![lifecycle_str(Lifecycle::Exited)],
             "ended",
         )?;
@@ -5145,13 +5113,16 @@ impl Store {
         Ok(())
     }
 
-    /// A run ended: its unread messages are ended now.
+    /// A run ended: its unread messages are ended now. A run its switch of account ended goes on under its uid, so
+    /// what waits for it is kept for its next process while its switch stands, moved or failed.
     pub fn end_mail(&self, session_uid: &str) -> Result<usize> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let ended = settle_mail(
             &tx,
-            "session_uid = ?1 AND state IN ('waiting', 'offered')",
+            "session_uid = ?1 AND state IN ('waiting', 'offered')
+             AND NOT (state = 'waiting'
+                      AND session_uid IN (SELECT session_uid FROM run_hosts WHERE switching IS NOT NULL))",
             params![session_uid],
             "ended",
         )?;
@@ -10396,6 +10367,73 @@ mod tests {
         let read = store.session_facts(&session.uid).unwrap();
         assert_eq!(read.ended_with, None, "the second process named none");
         assert_eq!(read, live);
+    }
+
+    /// **A run's newest model receipt is read back after a restart as it was folded live**: the
+    /// newest `Set model to …` or `Kept model as …` line claude gave, colour codes and all, whatever
+    /// inits and other messages were filed since; and its model and effort with it, read from local
+    /// commands' output only, never from a user's own words that look like one.
+    #[test]
+    fn a_runs_model_receipt_is_read_back_as_it_was_folded() {
+        let (store, _path) = temp_store();
+        let session = key("AA", "cc-1");
+        begin(&store, &session);
+        let said = |content: &str| {
+            let mut message = pending(&session, EventKind::UserMessage, None);
+            message.payload = json!({"message": {"role": "user", "content": content}});
+            message
+        };
+        let init = |model: &str| {
+            let mut start = pending(&session, EventKind::SessionStart, None);
+            start.payload = json!({"model": model});
+            start
+        };
+        let mut live = protocol::facts::SessionFacts::default();
+        let mut receipts = Vec::new();
+        for event in [
+            said("hello"),
+            init("claude-opus-5-5"),
+            said("<local-command-stdout>\u{1b}[31mSet model to\u{1b}[0m sonnet</local-command-stdout>"),
+            said("thanks"),
+            init("claude-sonnet-5-5"),
+            said("<local-command-caveat>Caveat: Set model to opus</local-command-caveat>"),
+            said("<local-command-stdout>Kept model as opus</local-command-stdout>"),
+            said("<local-command-stdout>Set effort level to low (this session only)</local-command-stdout>"),
+            init("claude-opus-5-5"),
+            said("Set effort level to high and Set model to haiku, please"),
+            said("go on"),
+        ] {
+            live.observe(&store.append_event(&event).unwrap().unwrap());
+            let read = store.session_facts(&session.uid).unwrap();
+            assert_eq!(read, live);
+            receipts.push(read.model_receipt.map(|fact| fact.value));
+        }
+        let sonnet = Some("sonnet".to_string());
+        let opus = Some("opus".to_string());
+        assert_eq!(
+            receipts,
+            [
+                None,
+                None,
+                sonnet.clone(),
+                sonnet.clone(),
+                sonnet.clone(),
+                sonnet,
+                opus.clone(),
+                opus.clone(),
+                opus.clone(),
+                opus.clone(),
+                opus
+            ]
+        );
+        let read = store.session_facts(&session.uid).unwrap();
+        assert_eq!(
+            (
+                read.model.map(|fact| fact.value),
+                read.effort.map(|fact| fact.value)
+            ),
+            (Some("claude-opus-5-5".into()), Some("low".into()))
+        );
     }
 
     /// **A Codex run's settings are read back after a restart as they were folded live**: its

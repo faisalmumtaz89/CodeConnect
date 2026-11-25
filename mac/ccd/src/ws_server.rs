@@ -406,6 +406,9 @@ where
     // keep answering approvals and typing into the session's TTY, which is the
     // opposite of what the operator just asked for.
     let mut device_id: Option<String> = None;
+    // The owner of the uploads sent on this connection: what no message attached goes when it
+    // closes, however it closes.
+    let connection = UploadOwner::new(&daemon);
     // The Tailscale device this connection's peer is, when it is known: Tailscale's word for the address it came
     // from, else the node its device was last seen from. It is left out of the `peers` frame this connection gets.
     let mut viewer_node: Option<String> = None;
@@ -706,6 +709,7 @@ where
                     }
                     let daemon = daemon.clone();
                     let replies = replies_tx.clone();
+                    let connection = connection.id;
                     tokio::spawn(async move {
                         match parsed {
                             ClientMessage::ListProjects => {
@@ -713,7 +717,7 @@ where
                             }
                             parsed => {
                                 let _ = replies
-                                    .send(crate::start_session::answer(&daemon, parsed).await);
+                                    .send(crate::start_session::answer(&daemon, connection, parsed).await);
                             }
                         }
                     });
@@ -728,6 +732,7 @@ where
                     &mut history,
                     device_id.as_deref(),
                     answered_on,
+                    connection.id,
                     parsed,
                 )
                 .await?;
@@ -997,6 +1002,8 @@ async fn handle_message<S>(
     device_id: Option<&str>,
     // What its answers are recorded as coming from.
     answered_on: AnsweredOn,
+    // Whose uploads (`crate::uploads`) a message here may attach.
+    connection: u64,
     message: ClientMessage,
 ) -> Result<()>
 where
@@ -1363,6 +1370,7 @@ where
             request_id,
             payload_hash,
             submit,
+            attachments,
         } => {
             let result = daemon
                 .send_text(
@@ -1371,6 +1379,8 @@ where
                     request_id.as_deref(),
                     payload_hash.as_deref(),
                     submit,
+                    connection,
+                    &attachments,
                 )
                 .await;
             send(sink, &ServerMessage::SendTextResult { session_id, result }).await?;
@@ -1436,6 +1446,40 @@ where
             )
             .await?;
         }
+        ClientMessage::PutFile {
+            session_id,
+            upload_id,
+            name,
+            size,
+            offset,
+            data,
+        } => {
+            // A file for a run names its session; one for a start names none, and is held
+            // pending, this connection's alone, until a start takes it.
+            let session_uid = match (device_id, session_id) {
+                (None, _) => Err("only a paired device may send files".to_string()),
+                (Some(_), None) => Ok(crate::uploads::PENDING.to_string()),
+                (Some(_), Some(session_id)) => daemon
+                    .resolve(&session_id)
+                    .await
+                    .map(|row| row.session_uid)
+                    .map_err(|err| format!("{err}")),
+            };
+            let result = match session_uid {
+                Ok(session_uid) => put_file(
+                    daemon,
+                    connection,
+                    &session_uid,
+                    &upload_id,
+                    &name,
+                    size,
+                    offset,
+                    &data,
+                ),
+                Err(reason) => protocol::ws::PutFileResult::Refused { reason },
+            };
+            send(sink, &ServerMessage::PutFileResult { upload_id, result }).await?;
+        }
         // Say something to a Codex session. Every refusal is a typed `Rejected` naming
         // the reason, so a mutation result is never a silence, and a Claude session is
         // refused by the agent branch inside — the daemon is the one place that knows
@@ -1446,9 +1490,17 @@ where
             request_id,
             text,
             payload_hash,
+            attachments,
         } => {
             let result = daemon
-                .compose(&session_id, &request_id, text, &payload_hash)
+                .compose(
+                    &session_id,
+                    &request_id,
+                    text,
+                    &payload_hash,
+                    connection,
+                    &attachments,
+                )
                 .await;
             send(
                 sink,
@@ -1462,6 +1514,67 @@ where
         }
     }
     Ok(())
+}
+
+/// One `put_file` chunk, from a paired device only, as every frame that changes this computer's
+/// files is: written, or refused with its reason.
+#[allow(clippy::too_many_arguments)]
+fn put_file(
+    daemon: &Daemon,
+    connection: u64,
+    session_uid: &str,
+    upload_id: &str,
+    name: &str,
+    size: u64,
+    offset: u64,
+    data: &str,
+) -> protocol::ws::PutFileResult {
+    use base64::Engine as _;
+    use protocol::ws::PutFileResult;
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+        return PutFileResult::Refused {
+            reason: "a chunk's data is base64".into(),
+        };
+    };
+    match daemon.uploads.put(
+        &crate::uploads::root(),
+        connection,
+        session_uid,
+        upload_id,
+        name,
+        size,
+        offset,
+        &bytes,
+    ) {
+        Ok(received) => PutFileResult::Received { received },
+        Err(reason) => PutFileResult::Refused { reason },
+    }
+}
+
+/// A connection's hold on the uploads sent on it ([`crate::uploads`]): those no message
+/// attached are removed when it is dropped, at the connection's end.
+struct UploadOwner {
+    id: u64,
+    daemon: Arc<Daemon>,
+}
+
+impl UploadOwner {
+    fn new(daemon: &Arc<Daemon>) -> UploadOwner {
+        // From 1: 0 is no connection, which attaches nothing.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        UploadOwner {
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            daemon: Arc::clone(daemon),
+        }
+    }
+}
+
+impl Drop for UploadOwner {
+    fn drop(&mut self) {
+        self.daemon
+            .uploads
+            .close_connection(&crate::uploads::root(), self.id);
+    }
 }
 
 /// Keep a diff inside one WebSocket frame *after* JSON escaping.
@@ -2125,6 +2238,8 @@ pub(crate) fn capabilities(
         claude_interrupt: true,
         // Each agent's accounts: kept and chosen by a paired device, as starting is.
         accounts: paired,
+        // Files for a run's agent: sent by a paired device, as starting is.
+        uploads: paired,
     }
 }
 
@@ -4880,6 +4995,7 @@ mod tests {
                 &mut history,
                 None,
                 AnsweredOn::Iphone,
+                1,
                 ask(request_id),
             )
             .await
@@ -4897,6 +5013,7 @@ mod tests {
             &mut history,
             None,
             AnsweredOn::Iphone,
+            1,
             ClientMessage::DeleteSession {
                 session_uid: uid.clone(),
             },
@@ -4963,6 +5080,7 @@ mod tests {
                 &mut history,
                 None,
                 AnsweredOn::Iphone,
+                1,
                 ClientMessage::History {
                     session_id: uid.clone(),
                     before_seq: 11,
@@ -4983,6 +5101,7 @@ mod tests {
                 &mut other_history,
                 None,
                 AnsweredOn::Iphone,
+                1,
                 ClientMessage::DeleteSession {
                     session_uid: uid.clone(),
                 },
@@ -5820,6 +5939,7 @@ mod tests {
                 worktree: None,
                 model: None,
                 trust: None,
+                attachments: Vec::new(),
             })
             .unwrap(),
             "start_session_unlisted_started": reply(protocol::ws::StartSessionResult::Started {
@@ -5967,6 +6087,7 @@ mod tests {
                 worktree: Some(worktree),
                 model: None,
                 trust: None,
+                attachments: Vec::new(),
             })
             .unwrap()
         };
@@ -6143,6 +6264,7 @@ mod tests {
                 worktree: None,
                 model: None,
                 trust: None,
+                attachments: Vec::new(),
             })
             .unwrap(),
             "projects": projects,
@@ -6603,6 +6725,7 @@ mod tests {
                     worktree: None,
                     model: None,
                     trust: None,
+                    attachments: Vec::new(),
                 })
                 .unwrap(),
             )
@@ -7030,6 +7153,54 @@ mod tests {
         );
         crate::switch::window::keep(&frames, "accounts-answer-then-push-wire.json");
         let _ = std::fs::remove_dir_all(&agents);
+    }
+
+    /// **A file sent from the start box is held pending, for a paired device only, until its
+    /// connection closes** (minor 50): a `put_file` naming no session lands under `.pending`,
+    /// the bootstrap token is refused, and closing the phone's connection removes what no start
+    /// took.
+    #[tokio::test]
+    async fn a_start_box_file_is_held_pending_until_its_connection_closes() {
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let chunk = |id: &str| {
+            Message::Text(
+                serde_json::json!({"type": "put_file", "upload_id": id, "name": "a.txt",
+                                   "size": 1, "offset": 0, "data": "YQ=="})
+                .to_string(),
+            )
+        };
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(ack["capabilities"]["uploads"], false, "{ack}");
+        bootstrap.send(chunk("pend-b")).await.unwrap();
+        let reply = next_json(&mut bootstrap).await.unwrap();
+        assert_eq!(reply["result"]["status"], "refused", "{reply}");
+
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["uploads"], true, "{ack}");
+        phone.send(chunk("pend-p")).await.unwrap();
+        let reply = next_json(&mut phone).await.unwrap();
+        assert_eq!(
+            reply["result"],
+            serde_json::json!({"status": "received", "received": 1}),
+            "{reply}"
+        );
+        let file = crate::uploads::root()
+            .join(crate::uploads::PENDING)
+            .join("pend-p")
+            .join("a.txt");
+        assert_eq!(std::fs::read(&file).unwrap(), b"a");
+        drop(phone);
+        let mut gone = false;
+        for _ in 0..100 {
+            if !file.exists() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(gone, "the closed connection's pending file was removed");
     }
 
     /// **Accounts are kept and chosen by a paired device only** (minor 48): advertised to it and not to the bootstrap

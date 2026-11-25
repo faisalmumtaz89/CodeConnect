@@ -249,6 +249,13 @@
 
         /// `-CC_OPEN <key>`: the run with this key opens beside the list.
         static var opened: String? { UserDefaults.standard.string(forKey: "CC_OPEN") }
+        /// `-CC_ATTACH_FILES <path>,<path>`: the reply box of the run `-CC_OPEN` opened, or the start form, takes these
+        /// files once its computer takes files, as if chosen with the paperclip (the file panel is a window a test launch
+        /// never opens). A run opened later, as a start's own, takes none.
+        static var attachedFiles: [URL] {
+            (UserDefaults.standard.string(forKey: "CC_ATTACH_FILES") ?? "").split(separator: ",")
+                .map { URL(fileURLWithPath: String($0)) }
+        }
         /// `-CC_SESSION_TAB changes`: the opened run shows its Changes.
         static var sessionTab: SessionTab? {
             UserDefaults.standard.string(forKey: "CC_SESSION_TAB") == "changes" ? .changes : nil
@@ -272,6 +279,11 @@
                 ? nil : UserDefaults.standard.double(forKey: "CC_LAUNCH_SETTLE")
         }
         static var launchRecord: String? { UserDefaults.standard.string(forKey: "CC_LAUNCH_RECORD") }
+        /// `-CC_LAUNCH_RECORD_FPS <n>`: the recording's frames a second, 30 unless given (60 steps it by ~16 ms).
+        static var launchRecordFPS: Double {
+            let given = UserDefaults.standard.double(forKey: "CC_LAUNCH_RECORD_FPS")
+            return given > 0 ? given : 30
+        }
         static var launchRecordFrom: Double { UserDefaults.standard.double(forKey: "CC_LAUNCH_RECORD_FROM") }
         /// A render shows the splash only when it asks for it; every other render opens on the app.
         static var showsLaunch: Bool { launchT != nil || launchRecord != nil }

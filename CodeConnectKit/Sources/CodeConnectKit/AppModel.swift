@@ -364,7 +364,10 @@ public final class AppModel {
         self.codexSpentLedger = codexSpentLedger
         self.pushRegistrar = pushRegistrar
         // A figure from a link that is gone is not current.
-        connection.onDisconnected = { [weak self] in self?.machineStats = nil }
+        connection.onDisconnected = { [weak self] in
+            self?.machineStats = nil
+            self?.filesLostWithLink()
+        }
 
         connection.onMessage = { [weak self] message in self?.handle(message) }
         connection.onConnected = { [weak self] in
@@ -854,7 +857,10 @@ public final class AppModel {
                     connection?.injectForTesting(
                         .interruptResult(
                             sessionID: session, requestID: requestID, result: result))
-                case .compose(let session, let requestID, _, _):
+                case .putFile(_, let uploadID, _, let size, _, _):
+                    // A fixture computer takes every file whole (`-CC_FIXTURE_UPLOADS`).
+                    connection?.injectForTesting(.putFileResult(uploadID: uploadID, result: .received(size)))
+                case .compose(let session, let requestID, _, _, _):
                     guard let result = CodexFixtures.composeResult(state) else { return }
                     connection?.injectForTesting(
                         .composeResult(
@@ -1338,13 +1344,13 @@ public final class AppModel {
         await accountsRequest { try await $0.signInAccount(accountID: accountID) }
     }
 
-    /// This computer signs an agent in and out with its own sign-in (minor 50: Antigravity's); one before it would
+    /// This computer signs an agent in and out with its own sign-in (minor 51: Antigravity's); one before it would
     /// answer those requests as undecodable, so none is offered there.
     public var signsAgentsIn: Bool {
         #if DEBUG
             if fixtureAccountBook != nil { return true }
         #endif
-        return keepsAccounts && connection.profile.protocolMinor >= 50
+        return keepsAccounts && connection.profile.protocolMinor >= 51
     }
 
     /// Starts `agent`'s own sign-in in a browser on the computer; true once the computer has it going.
@@ -1478,13 +1484,14 @@ public final class AppModel {
     /// `start_session_result` under the returned request id. `trust` is the
     /// person's answer to "trust this folder?", sent with the start and with every
     /// resend of it.
+    /// `files` go with the first message: every send of the start uploads them first, under new ids, for no session.
     public func startSession(
         _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, model: String? = nil, prompt: String,
-        trust: FolderTrust? = nil
+        trust: FolderTrust? = nil, files: [Attachment] = []
     ) -> String {
         let requestID = starter.start(
             project: project, place: place, agent: agent, model: model, prompt: prompt, trust: trust,
-            machineName: machineName ?? HostDevice.current.computer("this computer"))
+            machineName: machineName ?? HostDevice.current.computer("this computer"), files: files)
         #if DEBUG
             if fixturesActive {
                 answerFixtureStart(requestID)
@@ -1508,20 +1515,30 @@ public final class AppModel {
     }
 
     /// One send of one start. A send that fails, or a link that drops before
-    /// the answer, is sent again by the next handshake under the same id.
+    /// the answer, is sent again by the next handshake under the same id. One
+    /// send of a start at a time: a start with files spends a while sending them,
+    /// and a handshake in that while leaves it to the send under way.
     private func sendStart(_ requestID: String) {
         Task {
             // The one send-eligibility check, where the send happens. A start
             // answered or retry-stopped between this being scheduled and here is
             // not sent — the first send and every reconnect resend alike.
-            guard let start = starter.starts[requestID], start.outcome == nil, !start.retryStopped
+            guard let start = starter.starts[requestID], start.outcome == nil, !start.retryStopped,
+                !startsSending.contains(requestID)
             else { return }
+            startsSending.insert(requestID)
+            defer { startsSending.remove(requestID) }
+            guard let ids = await sendStartFiles(requestID) else { return }
             try? await connection.send(
                 .startSession(
                     requestID: requestID, path: start.project.path, agent: start.agent.rawValue,
-                    prompt: start.prompt, worktree: start.place, model: start.model, trust: start.trust))
+                    prompt: start.prompt, worktree: start.place, model: start.model, trust: start.trust,
+                    attachments: ids))
         }
     }
+
+    /// Starts being sent now (`sendStart`).
+    private var startsSending: Set<String> = []
 
     /// True while the sample fleet is on screen.
     ///
@@ -2240,6 +2257,9 @@ public final class AppModel {
         shownSessions[key]?.drafts
     }
 
+    /// Every listed run's drafts.
+    var shownDrafts: [RunDrafts] { shownSessions.values.map(\.drafts) }
+
     /// The reader has seen this run through what is drawn.
     public func markReviewed(_ key: String) {
         shownSessions[key]?.markReviewed()
@@ -2409,7 +2429,7 @@ public final class AppModel {
 
     private func handle(_ message: ServerMessage) {
         switch message {
-        case .deleteSessionResult:
+        case .deleteSessionResult, .putFileResult:
             // Nothing to do here. `removeSession` awaits the reply itself and does
             // the local clean-up, because only it knows which row asked.
             break
@@ -3549,7 +3569,10 @@ public final class AppModel {
 
     /// **Say something to this Codex session.**
     @discardableResult
-    public func composeToCodex(sessionKey key: String, text: String) async -> ComposeResult? {
+    /// `files`: the run's tray goes with it, every file once all have arrived (the reply box's send); no other caller
+    /// carries files.
+    public func composeToCodex(sessionKey key: String, text: String, files withFiles: Bool = false) async -> ComposeResult? {
+        let files = withFiles ? arrivedFileIDs(key) : []
         let controls = codexControls(for: key)
         guard let summary = summary(for: key) else {
             controls.composeNotSent("This run is not in the fleet.")
@@ -3569,7 +3592,7 @@ public final class AppModel {
         // byte count in the app's own words rather than after a round trip, and
         // the connection's copy of the check is the one that guarantees no frame
         // leaves regardless of which caller forgot.
-        if let blocked = ComposeDraft(text: text).blockedReason {
+        if let blocked = ComposeDraft(text: text, files: files.count).blockedReason {
             controls.composeNotSent(blocked)
             return nil
         }
@@ -3577,7 +3600,7 @@ public final class AppModel {
             controls.composeNotSent(Self.noUidSentence)
             return nil
         }
-        let hash = CodexHash.compose(sessionRef: reference, text: text)
+        let hash = CodexHash.compose(sessionRef: reference, text: text, attachments: files)
 
         // **The same words are never said twice** once their outcome is
         // unknown. Editing them makes a different message, which is a different
@@ -3592,8 +3615,12 @@ public final class AppModel {
         controls.beginCompose()
         do {
             let result = try await connection.compose(
-                session: reference, requestID: requestID, text: text, payloadHash: hash)
+                session: reference, requestID: requestID, text: text, payloadHash: hash, attachments: files)
             controls.settleCompose(result, material: hash)
+            switch result {
+            case .started, .steered, .duplicate: filesSent(files, from: key)
+            default: break
+            }
             states[key]?.codexTurnsChanged()
             return result
         } catch let refusal as DaemonConnection.CodexRefusal {
@@ -3991,7 +4018,8 @@ public final class AppModel {
     /// wherever there is one, because a name resolves to whichever run holds it
     /// *now* — and sending to the wrong agent is not a mistake that can be
     /// taken back.
-    public func send(text: String, to key: String, submit: Bool = true) async -> ComposeAttempt {
+    /// `files`: the run's tray goes with it (the reply box's send); no other caller carries files.
+    public func send(text: String, to key: String, submit: Bool = true, files: Bool = false) async -> ComposeAttempt {
         // A Codex run has no Claude slash vocabulary and refuses `send_text` by name; a message to it — a
         // diff comment, or any other caller here — goes through the Codex compose path instead, its outcome
         // in the caller's own banner and any refusal in the app's own words, never ccd's raw sentence.
@@ -4017,7 +4045,7 @@ public final class AppModel {
         case .passThrough:
             break
         }
-        return await sendUnchecked(text: text, to: key, submit: submit)
+        return await sendUnchecked(text: text, to: key, submit: submit, files: files ? arrivedFileIDs(key) : [])
     }
 
     /// The native adapters' own injections — the ONLY paths that may carry
@@ -4033,7 +4061,7 @@ public final class AppModel {
         await sendUnchecked(text: "/clear", to: key, submit: true)
     }
 
-    private func sendUnchecked(text: String, to key: String, submit: Bool) async -> ComposeAttempt {
+    private func sendUnchecked(text: String, to key: String, submit: Bool, files: [String] = []) async -> ComposeAttempt {
         // Every typed-text route funnels through here — the compose bar, the
         // Compact sheet, `/clear` — so this is where the sample
         // fleet is answered once, in its own vocabulary, rather than per
@@ -4045,7 +4073,7 @@ public final class AppModel {
             return .failed("These agents are not real. Pair with \(HostDevice.current.computer("your computer")) to talk to your own.")
         }
         let trimmed = Self.normalizedSendText(text)
-        guard !trimmed.isEmpty else { return .failed("Nothing to send.") }
+        guard !trimmed.isEmpty || !files.isEmpty else { return .failed("Nothing to send.") }
         guard connection.capabilities?.sendText != false else {
             return .failed("\(HostDevice.current.computer("The computer"))’s CodeConnect can’t take typed text.")
         }
@@ -4060,17 +4088,18 @@ public final class AppModel {
         // (same session, text, and submit flag) reuses the original id on
         // purpose: that is the retry the ledger exists to recognise, and the
         // daemon replays the settled outcome instead of typing again.
-        let mutation = SendMutationKey(key: key, text: trimmed, submit: submit)
+        let mutation = SendMutationKey(key: key, text: trimmed, submit: submit, files: files)
         let requestID = pendingSendIdentities[mutation] ?? UUID().uuidString.lowercased()
         let payloadHash = SendTextIdentity.payloadHash(
-            session: key, text: trimmed, submit: submit)
+            session: key, text: trimmed, submit: submit, attachments: files)
         do {
             let result = try await connection.sendText(
                 session: key, text: trimmed, submit: submit,
-                requestID: requestID, payloadHash: payloadHash)
+                requestID: requestID, payloadHash: payloadHash, attachments: files)
             switch result {
             case .sent(let matched):
                 pendingSendIdentities[mutation] = nil
+                filesSent(files, from: key)
                 return .sent(matched: matched)
             case .refused(let reason):
                 // A refusal promises nothing was typed, so the next attempt
@@ -4079,6 +4108,7 @@ public final class AppModel {
                 return .refused(reason)
             case .duplicate(_, let appliedAt):
                 pendingSendIdentities[mutation] = nil
+                filesSent(files, from: key)
                 return .alreadyApplied(appliedAt: appliedAt)
             case .indeterminate(let reason):
                 retainIdentityIfListed(mutation, requestID)
@@ -4110,7 +4140,7 @@ public final class AppModel {
     /// outcome is unknown, so sending it again is a retry and not a second typing.
     public func holdsSendIdentity(text: String, to key: String) -> Bool {
         let trimmed = Self.normalizedSendText(text)
-        return pendingSendIdentities[SendMutationKey(key: key, text: trimmed, submit: true)] != nil
+        return pendingSendIdentities[SendMutationKey(key: key, text: trimmed, submit: true, files: arrivedFileIDs(key))] != nil
     }
 
     /// Drops one unanswered send's identity (its exact session, trimmed text and
@@ -4120,7 +4150,7 @@ public final class AppModel {
     /// draft just left.
     func dropSendIdentity(text: String, to key: String) {
         let trimmed = Self.normalizedSendText(text)
-        pendingSendIdentities[SendMutationKey(key: key, text: trimmed, submit: true)] = nil
+        pendingSendIdentities[SendMutationKey(key: key, text: trimmed, submit: true, files: arrivedFileIDs(key))] = nil
     }
 
     /// Drops the retry identity of the send a Stop cancelled, found by its `request_id`
@@ -4150,6 +4180,8 @@ public final class AppModel {
         let key: String
         let text: String
         let submit: Bool
+        /// The upload ids it carried: the same words with other files are another send.
+        var files: [String] = []
     }
     private var pendingSendIdentities: [SendMutationKey: String] = [:]
 

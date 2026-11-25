@@ -33,9 +33,12 @@ public final class StartDraft {
         public let agent: StartAgent
         public let model: String?
         public let message: String
+        /// The draft's files, by their tiles' ids: other files are another ask.
+        public let files: [String]
 
         public init(
-            computerID: String, folderPath: String, place: StartPlace, agent: StartAgent, model: String?, message: String
+            computerID: String, folderPath: String, place: StartPlace, agent: StartAgent, model: String?, message: String,
+            files: [String] = []
         ) {
             self.computerID = computerID
             self.folderPath = folderPath
@@ -43,6 +46,7 @@ public final class StartDraft {
             self.agent = agent
             self.model = model
             self.message = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.files = files
         }
     }
 
@@ -71,12 +75,32 @@ public final class StartDraft {
     /// The computer chosen, by id; nil leaves it to the form (the one used last).
     public var computerID: String?
     public var message = ""
+    /// The files going with the first message, in order. They go to the computer with the start, and again with every
+    /// send of it (`AppModel.startSession`): a start's files are spent once it is sent.
+    public private(set) var files: [Attachment] = []
     public private(set) var sent: Sent?
     public private(set) var choices: [String: Choices] = [:]
     /// New Agent asked for the first message to have the keyboard, and the form has not given it yet.
     public private(set) var wantsKeyboard = false
 
     public init() {}
+
+    /// Adds a file to the first message, refused on its name and size alone when over a limit (`read` is then never
+    /// called).
+    public func attach(name: String, size: Int, read: () throws -> Data) {
+        var file = Attachment.taking(name: name, size: size, count: files.count, read: read)
+        // Nothing is sent until Start: a file within the limits waits as one that arrived.
+        if case .uploading = file.state { file.state = .arrived }
+        files.append(file)
+    }
+
+    public func removeFile(_ id: String) { files.removeAll { $0.id == id } }
+
+    /// Why the files hold the start back: a file over a limit, in its own words.
+    public var filesBlockedReason: String? {
+        for file in files { if case .refused(let reason) = file.state { return reason } }
+        return nil
+    }
 
     public func choices(on computer: String) -> Choices { choices[computer] ?? Choices() }
 
@@ -138,7 +162,8 @@ public final class StartDraft {
         sent = nil
     }
 
-    /// The started run is open: the message and the place it started in are spent; the folder and model stay chosen.
+    /// The started run is open: the message, its files and the place it started in are spent; the folder and model stay
+    /// chosen.
     public func didOpen() {
         if let sent {
             edit(on: sent.ask.computerID) {
@@ -147,6 +172,7 @@ public final class StartDraft {
             }
         }
         message = ""
+        files = []
         sent = nil
     }
 

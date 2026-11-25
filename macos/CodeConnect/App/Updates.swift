@@ -19,7 +19,7 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
 
         var title: String {
             switch self {
-            case .available: "Update"
+            case .available: "Update Available"
             case .downloading: "Downloading…"
             case .ready, .installing: "Restart to Update"
             }
@@ -141,9 +141,9 @@ final class Updates: NSObject, SPUUserDriver, SPUUpdaterDelegate {
     func showUpdateInFocus() { NSApp.activate() }
 }
 
-/// The update's one control, at the title bar's trailing end, shown only while there is an update: a quiet capsule, the
-/// raised surface under a hairline with its word in the primary text, dimmed and disabled while Sparkle works on what it
-/// was pressed for.
+/// The update's one control, at the title bar's trailing end, shown only while there is an update: a white capsule (the
+/// lit Send's white) with its words in the window's dark, so it is not missed; dimmed and disabled while Sparkle works on
+/// what it was pressed for. The window is always dark, so the white stands on a dark bar.
 struct UpdateButton: View {
     let state: Updates.State
     let press: () -> Void
@@ -154,11 +154,10 @@ struct UpdateButton: View {
         Button(action: press) {
             Text(state.title)
                 .font(Theme.ui(12, .medium))
-                .foregroundStyle(Theme.text)
+                .foregroundStyle(Theme.window)
                 .padding(.horizontal, 10)
                 .frame(height: Self.height)
-                .background(Theme.raised, in: Capsule())
-                .overlay(Capsule().strokeBorder(Theme.hairline))
+                .background(InputBoxSubmit.lit, in: Capsule())
         }
         .buttonStyle(.hover(radius: Self.height / 2, over: true, id: "update.button"))
         .disabled(state.working)

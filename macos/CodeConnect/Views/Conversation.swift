@@ -168,16 +168,19 @@ private struct WaitingLine: View {
     }
 }
 
-/// What you said: one raised block, a slash command in the code face; under it, when a Stop cancelled the send, the
-/// composer's own note shape saying so.
+/// What you said: one raised block, a slash command in the code face, and the files it carried as tiles under it (read
+/// back from its text, Kit's `AttachedFiles`); under them, when a Stop cancelled the send, the composer's own note shape
+/// saying so.
 private struct Prompt: View {
     let text: String
     let isCommand: Bool
     let notSent: Bool
 
     var body: some View {
+        let sent = AttachedFiles.split(text)
         VStack(alignment: .leading, spacing: 6) {
-            block
+            if !sent.words.isEmpty { block(sent.words) }
+            if !sent.paths.isEmpty { SentFiles(paths: sent.paths) }
             if notSent {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.amber).accessibilityHidden(true)
@@ -188,7 +191,7 @@ private struct Prompt: View {
         }
     }
 
-    private var block: some View {
+    private func block(_ text: String) -> some View {
         Text(text)
             .font(isCommand ? Theme.mono(12.5) : Theme.ui(13))
             .foregroundStyle(Theme.text)

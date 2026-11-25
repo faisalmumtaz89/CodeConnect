@@ -198,6 +198,8 @@ pub struct Daemon {
     actuation_gates: Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
     /// The phone's session starts, by request id.
     pub(crate) starts: crate::start_session::Starts,
+    /// Files sent for runs' agents, by upload id ([`crate::uploads`]).
+    pub(crate) uploads: crate::uploads::Uploads,
     /// Which agents could start, as last checked.
     pub(crate) agents: crate::start_session::KnownAgents,
     /// The account sign-in this computer is running, if any ([`crate::accounts::sign_in`]).
@@ -537,6 +539,7 @@ impl Daemon {
             test_tailnet: std::sync::Mutex::new(None),
             actuation_gates: Mutex::new(HashMap::new()),
             starts: crate::start_session::Starts::default(),
+            uploads: crate::uploads::Uploads::default(),
             agents: crate::start_session::KnownAgents::default(),
             sign_ins: Arc::default(),
             account_facts: crate::accounts::Facts::default(),
@@ -1173,8 +1176,10 @@ impl Daemon {
     ///
     /// The phone is for when the owner is away. After the grace, a ring on a Mac
     /// that has had keyboard or mouse input within [`crate::presence::RING_IDLE`]
-    /// waits, reading the idle time every [`crate::presence::POLL`], and rings the
-    /// first time the Mac has been left that long. While it waits it asks once a
+    /// waits, reading the idle time again when the Mac could first count as left
+    /// ([`crate::presence::until_away`]), at least [`crate::presence::POLL`] and at most a
+    /// second later, and rings the first time the Mac has been left that long. While it
+    /// waits it asks once a
     /// second whether it still matters — the ticket, the card, both in memory —
     /// and ends if not; before it goes it asks everything, the database
     /// included, so what rings is still true when it rings. The hold lives in this task alone, as the gate lives in
@@ -1184,7 +1189,9 @@ impl Daemon {
     /// at the Mac, three 5 s windows. Re-checking everything each poll cost 1.1–1.7
     /// % of a core for 10 held rings and 15.7–18.5 % for 100; reading only the
     /// idle time each poll costs 0.06 % and 0.15–0.30 %, plus the HID read itself,
-    /// 10.5 µs (20,000 reads): about 0.01 % of a core per held ring.
+    /// 10.5 µs (20,000 reads): about 0.01 % of a core per held ring. Reading it only when the Mac
+    /// could first count as left takes a held ring's daemon from about 21 context switches a second
+    /// to about 3 (release build, someone at the Mac, four 60 s windows each).
     ///
     /// # The grace is also a best-effort CANCELLATION window, and it is not
     /// coordinated with anything
@@ -1231,7 +1238,7 @@ impl Daemon {
                 // idle time that cannot be read rings, as it did before this
                 // check existed: a read that fails for good must not silence
                 // every notification for good.
-                if crate::presence::at_the_mac(crate::presence::RING_IDLE).unwrap_or(false) {
+                if let Some(left) = crate::presence::until_away(crate::presence::RING_IDLE) {
                     if looked.is_none_or(|at| at.elapsed() >= LOOK) {
                         if looked.is_none() {
                             crate::log_debug!(
@@ -1255,7 +1262,9 @@ impl Daemon {
                         }
                         looked = Some(tokio::time::Instant::now());
                     }
-                    tokio::time::sleep(crate::presence::POLL).await;
+                    // Nobody can count as gone before `left`; whether the ring still matters is
+                    // asked once a `LOOK`.
+                    tokio::time::sleep(left.clamp(crate::presence::POLL, LOOK)).await;
                     continue;
                 }
                 // **The run still has to exist.** The ticket catches a session
@@ -2540,12 +2549,18 @@ impl Daemon {
     ///
     /// Only the connection knows whether a turn is running, and knowing it a moment
     /// earlier than the write is not knowing it.
+    ///
+    /// `attachments` are `connection`'s uploads (minor 50): claimed before the words go, and
+    /// carried as their path lines after them ([`crate::uploads`]).
+    #[allow(clippy::too_many_arguments)]
     pub async fn compose(
         self: &Arc<Self>,
         session_ref: &str,
         request_id: &str,
         text: String,
         payload_hash: &str,
+        connection: u64,
+        attachments: &[String],
     ) -> protocol::ws::ComposeResult {
         use protocol::ws::ComposeResult;
 
@@ -2593,8 +2608,9 @@ impl Daemon {
         // 2. **The words themselves.** Bounded for `send_text`'s reason read across: a
         //    megabyte put into a model's mouth is not a message. Empty is refused because
         //    there is nothing to say and the app-server's own refusal for it is a shape
-        //    this daemon would then have to explain.
-        if text.is_empty() {
+        //    this daemon would then have to explain. Attachments alone are not empty: their
+        //    path lines are the words.
+        if text.is_empty() && attachments.is_empty() {
             return refuse(crate::codex_refusals::COMPOSE_EMPTY.into());
         }
         if text.len() > protocol::ws::MAX_COMPOSE_BYTES {
@@ -2608,14 +2624,35 @@ impl Daemon {
         //    note applies verbatim. It catches a request whose parts were corrupted in
         //    transit and nothing else. What authorizes the words is that the phone is
         //    paired and the run is this Mac's.
-        if protocol::hash::compose_hash(session_ref, &text) != payload_hash {
+        if protocol::hash::compose_hash_with(session_ref, &text, attachments) != payload_hash {
             return refuse(crate::codex_refusals::COMPOSE_STALE_HASH.into());
         }
         // **Normalised over the RUN, not over the reference the caller used.** A phone may
         // name one run by its uid on one tap and by its name on the next; storing the
         // caller's own hash would make those two spellings different material under one
         // id, which the ledger would call a conflict.
-        let claimed_hash = protocol::hash::compose_hash(&row.session_uid, &text);
+        let claimed_hash = protocol::hash::compose_hash_with(&row.session_uid, &text, attachments);
+        // The files are the message's from here, before anything is said. A message the ledger
+        // already holds claimed them when it was first sent, and is answered from its record
+        // below, after a restart too.
+        let recorded = matches!(
+            self.db
+                .mutation_status(
+                    crate::store::OPERATION_COMPOSE,
+                    row.session_uid.clone(),
+                    request_id.to_string(),
+                )
+                .await,
+            Ok(Some(_))
+        );
+        let text = if recorded {
+            text
+        } else {
+            match self.claim_uploads(connection, &row.session_uid, attachments, text) {
+                Ok(text) => text,
+                Err(reason) => return refuse(reason),
+            }
+        };
 
         // **A run started on the engine is spoken to through its own link**, which claims the
         // message, sends it and settles it on Codex's evidence ([`crate::codex_host`]). With
@@ -3188,6 +3225,9 @@ impl Daemon {
     /// A mutation with an identity, so a phone on a flaky link can retry the same
     /// message without it arriving twice. The body is **bounded**: a megabyte is not
     /// a message.
+    ///
+    /// `attachments` are `connection`'s uploads (minor 50), as [`Daemon::compose`] takes them.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_text(
         self: &Arc<Self>,
         session_ref: &str,
@@ -3195,6 +3235,8 @@ impl Daemon {
         request_id: Option<&str>,
         payload_hash: Option<&str>,
         submit: bool,
+        connection: u64,
+        attachments: &[String],
     ) -> SendTextResult {
         if text.len() > protocol::ws::MAX_SEND_TEXT_BYTES {
             return SendTextResult::Refused {
@@ -3232,7 +3274,8 @@ impl Daemon {
         // happily suppress a completely different takeover.
         let identity = match (request_id, payload_hash) {
             (Some(request_id), Some(given)) => {
-                let expected = protocol::hash::send_text_hash(session_ref, &text, submit);
+                let expected =
+                    protocol::hash::send_text_hash_with(session_ref, &text, submit, attachments);
                 if !constant_time_eq(given.as_bytes(), expected.as_bytes()) {
                     return SendTextResult::Refused {
                         reason: "payload_hash does not match the text, session and submit flag \
@@ -3256,6 +3299,24 @@ impl Daemon {
         // no other run has anything to deliver it.
         match self.db.hosted_link(session_uid.clone()).await {
             Ok(Some(linked)) => {
+                // The files are the message's from here, before anything is said. A message the
+                // ledger already holds claimed them when it was first sent, and is answered from
+                // its record, after a restart too.
+                let recorded = match &identity {
+                    Some((request_id, _)) => matches!(
+                        self.db.send_request_ids(session_uid.clone()).await,
+                        Ok(ids) if ids.contains(request_id)
+                    ),
+                    None => false,
+                };
+                let text = if recorded {
+                    text
+                } else {
+                    match self.claim_uploads(connection, &session_uid, attachments, text) {
+                        Ok(text) => text,
+                        Err(reason) => return SendTextResult::Refused { reason },
+                    }
+                };
                 crate::claude_host::send_text(
                     self,
                     &session_uid,
@@ -3278,6 +3339,27 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    /// `text` with `attachments`' paths, once `connection` has handed them to this message
+    /// ([`crate::uploads::Uploads::claim`]); why not, with nothing attached.
+    fn claim_uploads(
+        &self,
+        connection: u64,
+        session_uid: &str,
+        attachments: &[String],
+        text: String,
+    ) -> std::result::Result<String, String> {
+        if attachments.is_empty() {
+            return Ok(text);
+        }
+        let paths = self.uploads.claim(
+            &crate::uploads::root(),
+            connection,
+            session_uid,
+            attachments,
+        )?;
+        Ok(crate::uploads::attached(text, &paths))
     }
 
     /// Which slash commands this session's Claude Code has: for a run CodeConnect
@@ -3450,13 +3532,13 @@ impl Daemon {
             }
         }
         // A live run CodeConnect started offers its settings: a Claude run's from its start's
-        // answer, with the one its model fact names marked (its newest receipt read for that
-        // here); a Codex run's from its start's check and the model it started on, and an Antigravity
-        // run's from its start's outcome, each with its model fact marked as it is.
+        // answer, with the one its model fact names marked (its newest receipt, kept in its
+        // facts, read for that); a Codex run's from its start's check and the model it started
+        // on, and an Antigravity run's from its start's outcome, each with its model fact marked as it is.
         let mut menus: HashMap<String, protocol::event::RunMenus> = HashMap::new();
         // Every Claude run CodeConnect started keeps its start's models, ended or not: its model
         // fact is named by the chosen entry's id, never by claude's receipt of a change.
-        let mut choosing: Vec<(String, Vec<serde_json::Value>, Option<String>)> = Vec::new();
+        let mut choosing: Vec<(String, Vec<serde_json::Value>)> = Vec::new();
         let mut codex_menus: Vec<String> = Vec::new();
         // A Codex run that is not live keeps its menu only to name its model by.
         let mut codex_ended: Vec<(String, protocol::event::RunMenus)> = Vec::new();
@@ -3470,11 +3552,7 @@ impl Daemon {
                     if live {
                         menus.insert(row.session_uid.clone(), crate::claude_host::menus(&models));
                     }
-                    let receipt = self
-                        .db
-                        .newest_model_receipt(row.session_uid.clone())
-                        .await?;
-                    choosing.push((row.session_uid.clone(), models, receipt));
+                    choosing.push((row.session_uid.clone(), models));
                 }
                 protocol::agent::AgentKind::Codex if live => {
                     menus.insert(row.session_uid.clone(), crate::codex_host::menus(&models));
@@ -3509,14 +3587,15 @@ impl Daemon {
         let inner = self.inner.lock().await;
         let mut model_ids: HashMap<String, String> = HashMap::new();
         let mut model_labels: HashMap<String, String> = HashMap::new();
-        for (uid, models, receipt) in &choosing {
-            let fact = inner
-                .session_facts
-                .get(uid)
-                .and_then(|facts| facts.model.as_ref());
-            let Some(fact) = fact else { continue };
-            let chosen =
-                crate::claude_host::selected_model(models, &fact.value, receipt.as_deref());
+        for (uid, models) in &choosing {
+            let Some(facts) = inner.session_facts.get(uid) else {
+                continue;
+            };
+            let Some(fact) = facts.model.as_ref() else {
+                continue;
+            };
+            let receipt = facts.model_receipt.as_ref().map(|fact| fact.value.as_str());
+            let chosen = crate::claude_host::selected_model(models, &fact.value, receipt);
             if let Some(id) = chosen
                 .as_deref()
                 .and_then(|value| crate::claude_host::entry_model_id(models, value))
@@ -4207,15 +4286,15 @@ impl Daemon {
         let Some(models) = self.db.hosted_models(uid.to_string()).await? else {
             return Ok(None);
         };
-        let receipt = self.db.newest_model_receipt(uid.to_string()).await?;
         let inner = self.inner.lock().await;
-        Ok(inner
-            .session_facts
-            .get(uid)
-            .and_then(|facts| facts.model.as_ref())
-            .and_then(|fact| {
-                crate::claude_host::selected_model(&models, &fact.value, receipt.as_deref())
-            }))
+        let Some(facts) = inner.session_facts.get(uid) else {
+            return Ok(None);
+        };
+        let receipt = facts.model_receipt.as_ref().map(|fact| fact.value.as_str());
+        Ok(facts
+            .model
+            .as_ref()
+            .and_then(|fact| crate::claude_host::selected_model(&models, &fact.value, receipt)))
     }
 
     /// Commit one of a hosted run's card lines with its cursor ([`Db::commit_host_card`])
@@ -4812,6 +4891,8 @@ impl Daemon {
                 // Nothing left to ring about, and stale latches must not leak
                 // onto a future run.
                 self.push_gate.evict_session(session_uid);
+                self.uploads
+                    .remove_session(&crate::uploads::root(), session_uid);
                 protocol::ws::DeleteSessionResult::Deleted { events }
             }
             // The store's word for it, carried through rather than flattened.
@@ -4863,6 +4944,8 @@ impl Daemon {
         if !dry_run {
             for row in &removed {
                 self.push_gate.evict_session(&row.session_uid);
+                self.uploads
+                    .remove_session(&crate::uploads::root(), &row.session_uid);
             }
         }
         if !removed.is_empty() && !dry_run {
@@ -7729,6 +7812,37 @@ mod tests {
         );
     }
 
+    /// **A removed run's files go with it**, whether one run is deleted or ended runs are
+    /// pruned (minor 50); a run that is not removed keeps its own.
+    #[tokio::test]
+    async fn a_removed_runs_uploads_go_with_it() {
+        let daemon = test_daemon();
+        let root = crate::uploads::root();
+        let pruned = "01K1B3XQ8ZC0DE5FGH7JKMNPR2";
+        let kept = "01K1B3XQ8ZC0DE5FGH7JKMNKP3";
+        let deleted = "01K1B3XQ8ZC0DE5FGH7JKMNDT5";
+        seed_session(&daemon, deleted, "cc-1", Lifecycle::Exited);
+        seed_session(&daemon, pruned, "cc-2", Lifecycle::Exited);
+        seed_session(&daemon, kept, "cc-3", Lifecycle::Live);
+        // An upload's id is the device's, one per file whatever the run.
+        for (uid, id) in [(deleted, "u-d"), (pruned, "u-p"), (kept, "u-k")] {
+            assert_eq!(
+                daemon.uploads.put(&root, 1, uid, id, "a", 1, 0, b"a"),
+                Ok(1)
+            );
+        }
+        let outcome = daemon.delete_exited_session(deleted).await.unwrap();
+        assert!(matches!(
+            outcome,
+            protocol::ws::DeleteSessionResult::Deleted { .. }
+        ));
+        assert!(!root.join(deleted).exists());
+        daemon.prune_ended_sessions(false).await.unwrap();
+        assert!(!root.join(pruned).exists());
+        assert!(root.join(kept).join("u-k").join("a").exists());
+        daemon.uploads.remove_session(&root, kept);
+    }
+
     /// **A push admitted for a run that is already gone never rings.**
     ///
     /// The ticket catches an eviction that lands *after* admission. It cannot
@@ -8244,6 +8358,31 @@ mod tests {
         );
     }
 
+    /// **A held ring reads the Mac's idle time about once a second, not ten times.** Idle time
+    /// only grows as time passes, so a ring held for someone who used the Mac a moment ago cannot
+    /// go for two minutes; reading it every 100 ms woke the daemon ten times a second for as long as
+    /// they worked. Held for three seconds, it reads at most a few times.
+    #[tokio::test]
+    async fn a_held_ring_reads_the_idle_time_about_once_a_second() {
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(Duration::ZERO));
+        raise_ring(&daemon, Ring::ClaudeApproval).await;
+        let before = crate::presence::idle_reads();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let reads = crate::presence::idle_reads() - before;
+        assert_eq!(rung(&capture), vec![], "held while someone is at the Mac");
+        assert!(
+            reads < 10,
+            "{reads} reads of the idle time in three held seconds"
+        );
+        crate::presence::set_idle(Some(AWAY));
+        assert_eq!(
+            rung_after(&capture, 1).await,
+            vec![crate::apns::PushKind::Approval],
+            "and it rings once they have left"
+        );
+    }
+
     /// **A doorbell counted earlier is never posted after one counted later.**
     ///
     /// Every doorbell shares one collapse slot and a device's queue keeps the one
@@ -8367,7 +8506,9 @@ mod tests {
     async fn a_held_ring_that_stopped_mattering_never_rings() {
         async fn leave_and_listen(capture: &CaptureSender, case: &str) {
             crate::presence::set_idle(Some(AWAY));
-            tokio::time::sleep(crate::presence::POLL * 5).await;
+            // Longer than the held ring's longest wait, a second, so a ring that still mattered
+            // would have gone.
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
             assert_eq!(rung(capture), vec![], "{case}");
         }
 
@@ -9144,6 +9285,8 @@ mod tests {
                 Some("st-1"),
                 Some(&honest),
                 true,
+                0,
+                &[],
             )
             .await;
         assert!(
@@ -9153,7 +9296,7 @@ mod tests {
 
         // An id with no hash cannot say what it is a retry *of*.
         let unbound = daemon
-            .send_text(uid, "hi".to_string(), Some("st-2"), None, true)
+            .send_text(uid, "hi".to_string(), Some("st-2"), None, true, 0, &[])
             .await;
         assert!(
             matches!(unbound, SendTextResult::Refused { .. }),
@@ -9168,7 +9311,7 @@ mod tests {
         seed_session(&daemon, uid, "cc-1", Lifecycle::Live);
 
         let huge = "x".repeat(protocol::ws::MAX_SEND_TEXT_BYTES + 1);
-        let refused = daemon.send_text(uid, huge, None, None, true).await;
+        let refused = daemon.send_text(uid, huge, None, None, true, 0, &[]).await;
         assert!(
             matches!(&refused, SendTextResult::Refused { reason } if reason.contains("ceiling")),
             "{refused:?}"
@@ -10161,7 +10304,15 @@ mod tests {
         let text = "deploy";
         let hash = protocol::hash::send_text_hash(uid, text, true);
         let result = daemon
-            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+            .send_text(
+                uid,
+                text.to_string(),
+                Some("st-1"),
+                Some(&hash),
+                true,
+                0,
+                &[],
+            )
             .await;
 
         // **The reason is asserted, and it is the load-bearing assertion.**
@@ -11319,6 +11470,8 @@ mod tests {
                 "c-1",
                 text.clone(),
                 &protocol::hash::compose_hash(claude, &text),
+                0,
+                &[],
             )
             .await;
         let protocol::ws::ComposeResult::Rejected { reason } = &refused else {
@@ -11333,7 +11486,7 @@ mod tests {
         // And the Codex session refuses the Claude takeover, which is the same statement
         // read from the other end.
         let typed = daemon
-            .send_text(codex, "hello".into(), None, None, true)
+            .send_text(codex, "hello".into(), None, None, true, 0, &[])
             .await;
         let protocol::ws::SendTextResult::Refused { reason } = &typed else {
             panic!("a Codex session is not typed into: {typed:?}")
@@ -11352,6 +11505,8 @@ mod tests {
                 "c-2",
                 text.clone(),
                 &protocol::hash::compose_hash(codex, &text),
+                0,
+                &[],
             )
             .await;
         assert_eq!(
@@ -11374,7 +11529,7 @@ mod tests {
         // The checksum, and the ceiling. Both are refusals about the request rather than
         // about the session, and both are taken before the link is even consulted.
         let bad_hash = daemon
-            .compose(codex, "c-3", text.clone(), "not-the-hash")
+            .compose(codex, "c-3", text.clone(), "not-the-hash", 0, &[])
             .await;
         assert!(matches!(
             bad_hash,
@@ -11387,6 +11542,8 @@ mod tests {
                 "c-4",
                 huge.clone(),
                 &protocol::hash::compose_hash(codex, &huge),
+                0,
+                &[],
             )
             .await;
         let protocol::ws::ComposeResult::Rejected { reason } = &too_long else {
@@ -11400,12 +11557,77 @@ mod tests {
                 "c-5",
                 String::new(),
                 &protocol::hash::compose_hash(codex, ""),
+                0,
+                &[],
             )
             .await;
         assert!(matches!(
             empty,
             protocol::ws::ComposeResult::Rejected { .. }
         ));
+    }
+
+    /// **A Codex message's attachments are claimed before anything is said** (minor 50). Files
+    /// alone are not an empty message; a file this computer does not hold, or another
+    /// connection's, refuses the message before the link is looked for, and a refused message
+    /// leaves the ledger empty.
+    #[tokio::test]
+    async fn a_codex_message_claims_its_files_before_it_is_sent() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let codex = "01K1B3XQ8ZC0DE5FGH7JKMNCP4";
+        seed_codex_session(&daemon, codex, "cc-1");
+        let root = crate::uploads::root();
+        let compose = |id: &'static str, connection: u64, ids: Vec<String>| {
+            let daemon = Arc::clone(&daemon);
+            async move {
+                let hash = protocol::hash::compose_hash_with(codex, "", &ids);
+                daemon
+                    .compose(codex, id, String::new(), &hash, connection, &ids)
+                    .await
+            }
+        };
+
+        let unknown = compose("c-1", 3, vec!["u-none".into()]).await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &unknown else {
+            panic!("{unknown:?}")
+        };
+        assert!(reason.contains("u-none"), "{reason}");
+
+        assert_eq!(
+            daemon
+                .uploads
+                .put(&root, 3, codex, "u-1", "a.txt", 1, 0, b"a"),
+            Ok(1)
+        );
+        let theirs = compose("c-2", 4, vec!["u-1".into()]).await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &theirs else {
+            panic!("{theirs:?}")
+        };
+        assert!(reason.contains("another connection"), "{reason}");
+
+        // Its own file, with no words: past the claim, to the link this run does not have.
+        let own = compose("c-3", 3, vec!["u-1".into()]).await;
+        assert_eq!(
+            own,
+            protocol::ws::ComposeResult::Rejected {
+                reason: crate::codex_refusals::ENGINE_NO_CONNECTION.into()
+            }
+        );
+        for id in ["c-1", "c-2", "c-3"] {
+            assert_eq!(
+                store
+                    .mutation_status(crate::store::OPERATION_COMPOSE, codex, id)
+                    .unwrap(),
+                None,
+                "{id}"
+            );
+        }
+        // Claimed: the connection's close leaves it, the run's removal takes it.
+        daemon.uploads.close_connection(&root, 3);
+        assert!(root.join(codex).join("u-1").join("a.txt").exists());
+        daemon.uploads.remove_session(&root, codex);
+        assert!(!root.join(codex).exists());
     }
 
     /// **A finished compose is replayed while the link is gone, and the link's absence is
@@ -11460,7 +11682,9 @@ mod tests {
 
         // The baseline the fix has to preserve: nothing recorded, so the link is all there
         // is to say.
-        let cold = daemon.compose(uid, "say-0", said.clone(), &hash).await;
+        let cold = daemon
+            .compose(uid, "say-0", said.clone(), &hash, 0, &[])
+            .await;
         assert_eq!(
             cold,
             protocol::ws::ComposeResult::Rejected {
@@ -11481,13 +11705,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            daemon.compose(uid, "say-1", said.clone(), &hash).await,
+            daemon
+                .compose(uid, "say-1", said.clone(), &hash, 0, &[])
+                .await,
             protocol::ws::ComposeResult::Duplicate {
                 turn_id: "turn-1".into(),
                 started: true,
             },
             "the record names the turn these words began, and the dead link does not \
              change that"
+        );
+
+        // A message that landed with a file, asked again by a daemon whose uploads hold none of
+        // it, as after a restart: the record answers, not the missing file.
+        let files = vec!["u-sent".to_string()];
+        let with_files = protocol::hash::compose_hash_with(uid, &said, &files);
+        claim("say-9", &with_files);
+        store
+            .settle_mutation(
+                crate::store::OPERATION_COMPOSE,
+                uid,
+                "say-9",
+                &crate::store::compose_outcome(crate::store::COMPOSE_ROUTE_START, "turn-9"),
+                &now,
+            )
+            .unwrap();
+        assert_eq!(
+            daemon
+                .compose(uid, "say-9", said.clone(), &with_files, 0, &files)
+                .await,
+            protocol::ws::ComposeResult::Duplicate {
+                turn_id: "turn-9".into(),
+                started: true,
+            }
         );
 
         // The same id, different words. Not a duplicate — two mutations under one key.
@@ -11498,6 +11748,8 @@ mod tests {
                 "say-1",
                 other.clone(),
                 &protocol::hash::compose_hash(uid, &other),
+                0,
+                &[],
             )
             .await;
         let protocol::ws::ComposeResult::Rejected { reason } = &conflict else {
@@ -11510,7 +11762,9 @@ mod tests {
         store
             .settle_mutation_indeterminate(crate::store::OPERATION_COMPOSE, uid, "say-2", &now)
             .unwrap();
-        let unknown = daemon.compose(uid, "say-2", said.clone(), &hash).await;
+        let unknown = daemon
+            .compose(uid, "say-2", said.clone(), &hash, 0, &[])
+            .await;
         let protocol::ws::ComposeResult::Indeterminate { reason } = &unknown else {
             panic!("an unprovable compose is never re-sent: {unknown:?}")
         };
@@ -11518,7 +11772,9 @@ mod tests {
 
         // An `applying` claim with no link: sent, and never sent again.
         claim("say-3", &hash);
-        let in_flight = daemon.compose(uid, "say-3", said.clone(), &hash).await;
+        let in_flight = daemon
+            .compose(uid, "say-3", said.clone(), &hash, 0, &[])
+            .await;
         let protocol::ws::ComposeResult::Indeterminate { reason } = &in_flight else {
             panic!("an unsettled claim is not sent again: {in_flight:?}")
         };

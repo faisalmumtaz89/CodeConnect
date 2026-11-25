@@ -7,6 +7,9 @@
 //! piece of session state either lives in SQLite or is re-derived when ccd
 //! attaches again.
 
+// Tests start their stand-ins directly; every start ccd itself makes goes through `spawn`.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod accounts;
 mod apns;
 mod apns_sender;
@@ -33,11 +36,13 @@ mod push_queue;
 mod question;
 mod relay_sender;
 mod secret;
+mod spawn;
 mod start_session;
 mod state;
 mod store;
 mod switch;
 mod tls;
+mod uploads;
 mod ws_server;
 
 use std::net::{IpAddr, SocketAddr};
@@ -51,8 +56,22 @@ use crate::state::{Daemon, Endpoint};
 use crate::store::Store;
 use protocol::config::Config;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Most workers ccd runs async tasks on. Its sockets and timers need few; database, file and
+/// process work runs on the blocking pool. Tokio's default of one worker per core parked 28 idle
+/// threads on a 28-core Mac.
+const MAX_WORKERS: usize = 4;
+
+fn main() -> Result<()> {
+    let workers = std::thread::available_parallelism().map_or(1, |cores| cores.get());
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers.min(MAX_WORKERS))
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     log::init_from_env();
     if std::env::args().any(|arg| arg == "--version") {
         println!(
@@ -111,11 +130,10 @@ async fn main() -> Result<()> {
     // running process (that is the whole point of recording it), so the hash
     // must be of what was actually loaded, as close to exec as we get.
     if let Ok(exe) = std::env::current_exe() {
-        if let Ok(bytes) = std::fs::read(&exe) {
-            let _ = daemon.exe_identity.set((
-                exe.to_string_lossy().to_string(),
-                protocol::hash::sha256_hex(&bytes),
-            ));
+        if let Ok(sha) = protocol::hash::sha256_file_hex(&exe) {
+            let _ = daemon
+                .exe_identity
+                .set((exe.to_string_lossy().to_string(), sha));
         }
     }
 
@@ -158,6 +176,9 @@ async fn main() -> Result<()> {
     // The hosts of Claude runs outlive ccd: each one still running is attached again, in a
     // task started before the listeners.
     daemon.recover_hosted_runs(&protocol::root_dir()).await;
+    // Before a phone can send one: the start box's uploads the last process held for its
+    // connections.
+    uploads::remove_pending(&uploads::root());
 
     let socket_path = protocol::socket_path();
     let ipc = tokio::spawn(ipc_server::serve(Arc::clone(&daemon), socket_path.clone()));
@@ -1490,10 +1511,9 @@ async fn tailnet_addresses(config: &Config) -> Vec<IpAddr> {
         if !candidate.exists() {
             continue;
         }
-        let run = tokio::process::Command::new(&candidate)
-            .arg("ip")
-            .kill_on_drop(true)
-            .output();
+        let mut command = tokio::process::Command::new(&candidate);
+        command.arg("ip").kill_on_drop(true);
+        let run = crate::spawn::output(&mut command);
         let output = match tokio::time::timeout_at(deadline, run).await {
             Ok(Ok(output)) => output,
             Ok(Err(_)) => continue,
@@ -1532,10 +1552,9 @@ fn held_here(ip: IpAddr) -> bool {
 /// tailnet connection to this node's address on to `127.0.0.1` on the same port.
 async fn userspace_tailnet_address(config: &Config) -> Option<IpAddr> {
     let bin = config.tailscale_bin()?;
-    let run = tokio::process::Command::new(bin)
-        .args(["status", "--json"])
-        .kill_on_drop(true)
-        .output();
+    let mut command = tokio::process::Command::new(bin);
+    command.args(["status", "--json"]).kill_on_drop(true);
+    let run = crate::spawn::output(&mut command);
     let output = tokio::time::timeout(TAILSCALE_PROBE_TIMEOUT, run)
         .await
         .ok()?
@@ -2187,11 +2206,24 @@ mod tests {
     }
 
     #[test]
+    fn the_suite_never_resolves_the_real_codeconnect_folder() {
+        // `mac/.cargo/config.toml` sets CODECONNECT_HOME for every process cargo runs.
+        let _env = crate::ProcessEnvRead::take();
+        let real = protocol::home_dir().join(".codeconnect");
+        let root = protocol::root_dir();
+        assert!(
+            !root.starts_with(&real),
+            "the tests resolve {}",
+            root.display()
+        );
+    }
+
+    #[test]
     fn the_boundary_covers_every_path_the_daemon_writes() {
         // `state_paths` derives from an explicit root so it can be tested; this
         // is what keeps that derivation in step with the protocol crate's own
         // idea of where things live. Both sides read `root_dir()`, which follows
-        // HOME when CODECONNECT_HOME is unset (as on CI), so they read it under
+        // HOME when CODECONNECT_HOME is unset, so they read it under
         // the process-environment read guard: no FakeHome moves HOME in between.
         let _env = crate::ProcessEnvRead::take();
         let root = protocol::root_dir();
@@ -2494,8 +2526,8 @@ mod tests {
         // one asserted it outright, which left an operator whose `ws_bind` is
         // their own tailnet address being told it was public by one line and
         // unverifiable by the next. The advice and the expected text each resolve
-        // `tls_dir()`, which follows HOME when CODECONNECT_HOME is unset (as on
-        // CI), so both are read under the process-environment read guard.
+        // `tls_dir()`, which follows HOME when CODECONNECT_HOME is unset, so both
+        // are read under the process-environment read guard.
         let _env = crate::ProcessEnvRead::take();
         let mut config = config_with(Some("100.64.12.34"));
         config.ws_allow_plaintext = true;

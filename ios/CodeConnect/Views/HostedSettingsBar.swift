@@ -26,7 +26,13 @@ struct HostedSettingsBar: View {
 
     /// The sheet's calls are refused while a card waits or the run is starting; the empty draft keeps a long Codex
     /// draft's own ceiling — a send concern, not a settings one — out of this check.
-    private var blocked: Bool { model.sendBlockedReason(for: key, draft: "") != nil }
+    private var blocked: Bool { Self.isHeld(model, key) }
+
+    /// Files on their way, or one that failed, hold the message, not the run: its model and effort stay open, as on
+    /// the Mac.
+    static func isHeld(_ model: AppModel, _ key: String) -> Bool {
+        model.sendBlockedReason(for: key, draft: "", files: false) != nil
+    }
     /// The effort in use, by Kit's one rule.
     private var effort: String? { model.shownSummary(for: key).flatMap(RunSettings.effortName) }
 

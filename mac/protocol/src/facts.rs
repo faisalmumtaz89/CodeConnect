@@ -57,11 +57,16 @@ fn settings_report(event: &Event) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionFacts {
     pub model: Option<Fact>,
+    /// The newest receipt of a model change claude gave the run (its `Set model to …` line, a
+    /// `user_message` [`model_fact`] reads), whatever was filed since; it outlives the run's end.
+    pub model_receipt: Option<Fact>,
     pub permission_mode: Option<Fact>,
     pub effort: Option<Fact>,
     /// The seq of the run's newest `session_end`, 0 before one. `effort` is the live
     /// process's own: an effort decided before the end is not the next process's until that
-    /// process is given it (a relaunch gives it, as [`Self::ended_with`]) and says so.
+    /// process is given it (a relaunch gives it, as [`Self::ended_with`]) and says so. A switch
+    /// of account's end ([`crate::event::SWITCHED_TO`]) is the exception: its relaunch gives the
+    /// next process the effort with no word of it, so the effort is kept through that end.
     pub ended: u64,
     /// The effort the run's process held when its newest end came: what the ended run shows. None when that process
     /// named none. Kept only by an in-order fold, as the live path folds; an effort folded after its end is left out.
@@ -76,6 +81,14 @@ impl SessionFacts {
     /// The live path folds each run's events in the order they are filed, which never does that.
     pub fn observe(&mut self, event: &Event) {
         if let Some(fact) = model_fact(event) {
+            if event.kind == EventKind::UserMessage
+                && self
+                    .model_receipt
+                    .as_ref()
+                    .is_none_or(|held| held.seq < fact.seq)
+            {
+                self.model_receipt = Some(fact.clone());
+            }
             if self.model.as_ref().is_none_or(|held| held.seq < fact.seq) {
                 self.model = Some(fact);
             }
@@ -97,7 +110,11 @@ impl SessionFacts {
                 .as_ref()
                 .is_some_and(|held| held.seq < self.ended)
             {
-                self.ended_with = self.effort.take();
+                self.ended_with = if event.payload.get(crate::event::SWITCHED_TO).is_some() {
+                    self.effort.clone()
+                } else {
+                    self.effort.take()
+                };
             }
         }
         if let Some(fact) = effort_fact(event) {

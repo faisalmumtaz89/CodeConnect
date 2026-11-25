@@ -147,6 +147,8 @@ struct FleetView: View {
     /// The start's first message, typed and not sent: held here, above the sheet, so closing the sheet keeps it. A
     /// sent start takes it; a start handed back unsent gives it back to an empty box, as the Mac's `StartDraft` does.
     @State private var startMessage = ""
+    /// The files going with it, held beside it (Kit's `StartDraft`; the flow uses its files). A sent start takes them.
+    @State private var startFiles = StartDraft()
     /// Every paired computer that can start a session.
     private var startContexts: [StartContext] { machines.startContexts }
 
@@ -424,7 +426,8 @@ struct FleetView: View {
         list
             .sheet(isPresented: $startOpen, onDismiss: openStarted) {
                 StartStepsSheet(
-                    contexts: startContexts, message: $startMessage, seed: startSeed, onStarted: started,
+                    contexts: startContexts, message: $startMessage, files: startFiles, seed: startSeed,
+                    onStarted: started,
                     onClose: { startOpen = false })
                 .ccConfirmationHost()
                 .ccTallSheet()
@@ -1024,6 +1027,7 @@ struct FleetView: View {
         startedRequest = nil
         // The sent start took its first message; cleared once the sheet is gone, so it never blanks on the way out.
         startMessage = ""
+        startFiles = StartDraft()
         path = [SessionRoute(key: "start-\(id)", startRequestID: id)]
     }
 

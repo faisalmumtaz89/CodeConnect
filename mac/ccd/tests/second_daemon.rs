@@ -3,6 +3,9 @@
 //! Real processes, because what is at stake is what survives one of them
 //! exiting. Every daemon here runs in a home of its own ([`common::Home`]).
 
+// A test starts the daemons it tests; only ccd's own starts go through its `spawn`.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::os::unix::net::UnixStream;

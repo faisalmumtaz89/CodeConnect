@@ -3,6 +3,42 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.25
+
+- On the Mac and Linux, CodeConnect's background service starts much faster with a long history: with a million
+  events stored, in about 0.9 s instead of 3.0 s on a Mac and 0.55 s instead of 2.0 s on Linux. At rest it runs
+  5 threads instead of 29 on a Mac and 9 on Linux.
+- On the Mac, a phone notification held back while you are at the Mac no longer wakes it ten times a second.
+
+## CodeConnect 0.19.24
+
+- On the Mac and Linux, switching accounts no longer loses a session's waiting messages from your other sessions,
+  a message it had taken but not yet started on, or its effort setting; and choosing an account and then the first one
+  again no longer leaves a session without its agent.
+- On the Mac, a new session could wait until another one ended before it started; it now starts at once.
+- On the Mac and Linux, CodeConnect's background service is faster and lighter. Measured on a Mac: the session list
+  answers in about 7 ms instead of 500 ms with a million events stored, it starts in about 50 ms instead of 150 ms, and
+  it uses about 5.5 MB of memory at rest instead of 13 MB.
+- On the Mac, the opening animation's slices leave on their own background; the app appears only once they have gone.
+- On the Mac, a fleet row shows its tool's name again when the name is short: a run waiting on Edit no longer reads as
+  its file path alone.
+
+## CodeConnect 0.19.23
+
+- On the Mac, the update button is white and reads "Update Available", so a new version isn't missed.
+
+## CodeConnect 0.19.22
+
+- On the Mac, a message can carry files: the paperclip in the reply box and in the new-agent box opens a file panel,
+  and you can also drop files on the box or paste a picture into it. Each file shows as a tile with ×, starts
+  uploading as soon as it is added, and the message waits until every file has arrived. The iPhone app's next
+  version adds the same.
+- A message carries up to 10 files of up to 10 MB each. A file over a limit says why on its tile and is never sent;
+  one that didn't arrive can be retried or removed. A sent message shows its files as tiles under its words.
+- On the Mac and Linux, the agent gets each file as its path on the session's computer, on a line after
+  "Attached:". A Claude session may read its own uploads folder and nothing more.
+- Files need CodeConnect 0.19.22 on the computer; with an older one, the paperclip doesn't appear.
+
 ## CodeConnect 0.19.21
 
 - On the Mac, an update is one quiet button at the right end of the title bar: "Update" when a new version is out,

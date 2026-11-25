@@ -23,10 +23,13 @@ public struct StartContext {
 
     public func start(
         _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, model choice: String? = nil,
-        prompt: String, trust: FolderTrust? = nil
+        prompt: String, trust: FolderTrust? = nil, files: [Attachment] = []
     ) -> String {
-        model.startSession(project, place: place, agent: agent, model: choice, prompt: prompt, trust: trust)
+        model.startSession(project, place: place, agent: agent, model: choice, prompt: prompt, trust: trust, files: files)
     }
+
+    /// This computer takes files with a start's first message (`uploads`).
+    public var takesUploads: Bool { model.connection.capabilities?.takesUploads == true }
 
     /// A start this computer was sent and its sender stopped retrying, sent again under its own id.
     public func resume(_ requestID: String) { model.resumeStart(requestID) }

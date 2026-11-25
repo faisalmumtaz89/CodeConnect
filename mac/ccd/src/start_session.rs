@@ -370,7 +370,11 @@ const AGENTS: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Codex, AgentKind::
 /// The answer to a `get_project_git`, `list_folder`, `create_folder`,
 /// `start_session` or one of the folder-trust frames. A `list_projects` is answered
 /// by [`list_projects`].
-pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessage {
+pub async fn answer(
+    daemon: &Arc<Daemon>,
+    connection: u64,
+    message: ClientMessage,
+) -> ServerMessage {
     match message {
         ClientMessage::ListFolderTrust { request_id } => folder_trust(daemon, request_id).await,
         ClientMessage::SetFolderTrust {
@@ -440,8 +444,14 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             worktree,
             model,
             trust,
+            attachments,
         } => {
             let state_dir = protocol::root_dir();
+            // This connection's uploads for the run, moved into its folder once it is named.
+            let attachments = crate::uploads::Pending {
+                connection,
+                ids: &attachments,
+            };
             // One environment per start: the check and the run it starts read the
             // same login shell, since `auth status` turns on variables alone.
             let environment = phone_environment();
@@ -480,6 +490,7 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                         &environment,
                         account.as_ref(),
                         trust,
+                        attachments,
                     );
                     daemon.starts.once(&request_id, start).await
                 }
@@ -496,6 +507,7 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                         &environment,
                         account.as_ref(),
                         trust,
+                        attachments,
                     );
                     daemon.starts.once(&request_id, start).await
                 }
@@ -513,6 +525,7 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
                         &environment,
                         account.as_ref(),
                         trust,
+                        attachments,
                     );
                     daemon.starts.once(&request_id, start).await
                 }
@@ -757,6 +770,7 @@ async fn codex_start(
     environment: &HashMap<OsString, OsString>,
     account: Option<&crate::accounts::AccountEnv>,
     trust: Option<Trust>,
+    attachments: crate::uploads::Pending<'_>,
 ) -> StartSessionResult {
     if let Some(answer) = existing_run(&daemon.db, request_id).await {
         return answer;
@@ -822,6 +836,7 @@ async fn codex_start(
             environment,
             account,
             trust,
+            attachments,
         },
     )
     .await
@@ -948,6 +963,7 @@ async fn hosted_start(
     environment: &HashMap<OsString, OsString>,
     account: Option<&crate::accounts::AccountEnv>,
     trust: Option<Trust>,
+    attachments: crate::uploads::Pending<'_>,
 ) -> StartSessionResult {
     if let Some(answer) = existing_run(&daemon.db, request_id).await {
         return answer;
@@ -1054,6 +1070,7 @@ async fn hosted_start(
             codeconnect: &codeconnect,
             environment,
             account,
+            attachments,
         },
     )
     .await
@@ -1268,7 +1285,7 @@ async fn add_worktree(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    match tokio::time::timeout(START_TIMEOUT, command.output()).await {
+    match tokio::time::timeout(START_TIMEOUT, crate::spawn::output(&mut command)).await {
         Ok(Ok(output)) if output.status.success() => Ok(()),
         Ok(Ok(output)) => Err(last_line(&output.stderr)
             .unwrap_or_else(|| format!("git worktree add ended ({})", output.status))),
@@ -1995,7 +2012,7 @@ async fn ask(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = command.spawn().ok()?;
+    let mut child = crate::spawn::spawn(&mut command).ok()?;
     let asked = async {
         let mut stdin = child.stdin.take()?;
         stdin.write_all(asking.as_bytes()).await.ok()?;
@@ -2055,7 +2072,7 @@ impl Agy {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = command.spawn().ok()?;
+        let mut child = crate::spawn::spawn(&mut command).ok()?;
         let stdin = child.stdin.take()?;
         let lines = BufReader::new(child.stdout.take()?).lines();
         Some(Agy {
@@ -2380,7 +2397,7 @@ pub(crate) async fn agent_output(
         }
         bytes
     }
-    let mut child = command.spawn().ok()?;
+    let mut child = crate::spawn::spawn(&mut command).ok()?;
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
     let ran = tokio::time::timeout(wait, async {
         let (stdout, stderr) = tokio::join!(all(stdout), all(stderr));
@@ -2432,7 +2449,7 @@ pub(crate) fn spawn_detached(
             Ok(())
         });
     }
-    command.spawn()
+    crate::spawn::spawn(&mut command)
 }
 
 /// Wait for `child` while this daemon lives, so it is never left a zombie; after it,
@@ -2524,6 +2541,17 @@ pub(crate) fn phone_environment() -> HashMap<OsString, OsString> {
         std::fs::create_dir_all(&home).unwrap();
         environment.insert("HOME".into(), home.into_os_string());
     }
+    // Nor the person's own Codex or Claude folder, when their shell names one: an agent
+    // started here finds its folder in that home instead.
+    #[cfg(test)]
+    for name in ["CODEX_HOME", "CLAUDE_CONFIG_DIR"] {
+        if !environment
+            .get(OsStr::new(name))
+            .is_some_and(|dir| under_temporary(Path::new(dir)))
+        {
+            environment.remove(OsStr::new(name));
+        }
+    }
     environment
 }
 
@@ -2570,13 +2598,14 @@ fn phone_environment_from(
 /// `None` when `launchctl` cannot say.
 #[cfg(target_os = "macos")]
 fn session_environment(own: &HashMap<OsString, OsString>) -> Option<HashMap<OsString, OsString>> {
-    let output = std::process::Command::new("/bin/launchctl")
-        .args(["getenv", "PATH"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
+    let output = crate::spawn::output_std(
+        std::process::Command::new("/bin/launchctl")
+            .args(["getenv", "PATH"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .ok()
+    .filter(|output| output.status.success())?;
     let set = String::from_utf8_lossy(&output.stdout)
         .trim_end_matches('\n')
         .to_string();
@@ -2602,21 +2631,22 @@ fn session_environment(_own: &HashMap<OsString, OsString>) -> Option<HashMap<OsS
     let busctl = ["/usr/bin/busctl", "/bin/busctl"]
         .iter()
         .find(|path| Path::new(path).is_file())?;
-    let output = std::process::Command::new(busctl)
-        .args([
-            "--user",
-            "--json=short",
-            "get-property",
-            "org.freedesktop.systemd1",
-            "/org/freedesktop/systemd1",
-            "org.freedesktop.systemd1.Manager",
-            "Environment",
-        ])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
+    let output = crate::spawn::output_std(
+        std::process::Command::new(busctl)
+            .args([
+                "--user",
+                "--json=short",
+                "get-property",
+                "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1",
+                "org.freedesktop.systemd1.Manager",
+                "Environment",
+            ])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .ok()
+    .filter(|output| output.status.success())?;
     let property: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
     property["data"]
         .as_array()?
@@ -2834,6 +2864,7 @@ mod tests {
                         &self.env,
                         None,
                         trust,
+                        crate::uploads::Pending::default(),
                     )
                     .await
                 }
@@ -2851,6 +2882,7 @@ mod tests {
                         &self.env,
                         None,
                         trust,
+                        crate::uploads::Pending::default(),
                     )
                     .await
                 }
@@ -3089,6 +3121,7 @@ mod tests {
             &environment,
             None,
             Some(Trust::Trusted),
+            crate::uploads::Pending::default(),
         )
         .await;
         let run = daemon
@@ -3151,6 +3184,7 @@ mod tests {
                     environment,
                     None,
                     trust,
+                    crate::uploads::Pending::default(),
                 )
                 .await;
                 let run = daemon
@@ -3418,6 +3452,7 @@ mod tests {
             &environment,
             None,
             Some(trust),
+            crate::uploads::Pending::default(),
         )
         .await;
         let StartSessionResult::Started { session_uid, .. } = &started else {
@@ -3552,7 +3587,7 @@ mod tests {
             let hash = protocol::hash::send_text_hash(&g3.uid, &text, true);
             let sent = g3
                 .daemon
-                .send_text(&g3.uid, text, Some("g3t-2"), Some(&hash), true)
+                .send_text(&g3.uid, text, Some("g3t-2"), Some(&hash), true, 0, &[])
                 .await;
             let mut ran = false;
             for _ in 0..300 {
@@ -3662,6 +3697,7 @@ mod tests {
             &environment,
             None,
             Some(Trust::Trusted),
+            crate::uploads::Pending::default(),
         )
         .await;
         let row = daemon
@@ -3714,6 +3750,7 @@ mod tests {
                 &environment,
                 None,
                 trust,
+                crate::uploads::Pending::default(),
             )
         };
         let asked = start("req-ask", None).await;
@@ -3774,6 +3811,7 @@ mod tests {
             &environment,
             None,
             Some(Trust::Trusted),
+            crate::uploads::Pending::default(),
         )
         .await;
         let worktrees = git(&project, &["worktree", "list", "--porcelain"]);
@@ -3826,6 +3864,7 @@ mod tests {
             &environment,
             None,
             Some(Trust::Trusted),
+            crate::uploads::Pending::default(),
         )
         .await;
         let run = daemon
@@ -4316,6 +4355,7 @@ mod tests {
             &rig.env,
             None,
             Some(Trust::Trusted),
+            crate::uploads::Pending::default(),
         )
         .await;
         assert_eq!(
@@ -4784,10 +4824,11 @@ mod tests {
     }
 
     /// The root has a listing of its own, and with no path the home folder is
-    /// listed (`answer` fills it in): the phone starts there.
+    /// listed (`answer` fills it in): the phone starts there. The home is a fake
+    /// one: a test lists none of the person's folders.
     #[test]
     fn the_root_and_the_home_folder_list() {
-        let _env = crate::ProcessEnvRead::take();
+        let _home = crate::legacy_credentials::test_support::FakeHome::new("browse");
         let (path, contents) = list_folder("/", false);
         assert_eq!(path, "/");
         assert!(!listed(contents).0.is_empty());
@@ -6363,6 +6404,7 @@ esac"#;
                 worktree: None,
                 model: None,
                 trust,
+                attachments: Vec::new(),
             })
             .unwrap()
         };
@@ -6473,8 +6515,108 @@ esac"#;
                 worktree: None,
                 model: Some("haiku".into()),
                 trust: None,
+                attachments: Vec::new(),
             })
             .unwrap(),
         })
+    }
+
+    /// **A launch is never held up by another one.** On macOS a pipe ccd gives a child is made in
+    /// two steps, and a child another thread starts between them keeps it open: a host started then
+    /// held a probe's or another host's spawn until that host ended. For 20 seconds, six starters
+    /// launch hosts that live 0.6 seconds (at most 45 alive each, reaped as they end) and three run
+    /// probes; every launch is timed, and none may take 0.4 seconds. Linux makes its pipes in one
+    /// step ([`crate::spawn`]), so there this holds with or without the lock.
+    ///
+    /// Run it on purpose and alone, never inside a parallel suite, where load rather than this
+    /// defect decides its timings; it keeps at most 270 hosts alive. The race is rare, so one green
+    /// run proves little: the evidence is red in some of several runs without the lock and green in
+    /// all of several with it.
+    /// `cargo test -p ccd --bin ccd -- --ignored --exact start_session::tests::a_launch_is_never_held_up_by_another`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "starts hundreds of processes for 20 s and times launches: run alone, on purpose"]
+    async fn a_launch_is_never_held_up_by_another() {
+        let root = std::env::temp_dir().join(format!(
+            "ccs-spawns.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let environment: HashMap<OsString, OsString> = [
+            ("HOME", root.as_os_str()),
+            ("SHELL", OsStr::new("/bin/sh")),
+            ("PATH", OsStr::new("/usr/bin:/bin")),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.into(), value.into()))
+        .collect();
+        let environment = Arc::new(environment);
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        let hosts: Vec<_> = (0..6)
+            .map(|n| {
+                let (environment, root) = (Arc::clone(&environment), root.clone());
+                let log = std::fs::File::create(root.join(format!("host-{n}.log"))).unwrap();
+                tokio::task::spawn_blocking(move || {
+                    let mut alive: Vec<tokio::process::Child> = Vec::new();
+                    let mut slowest = Duration::ZERO;
+                    while std::time::Instant::now() < until {
+                        alive.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+                        if alive.len() >= 45 {
+                            std::thread::sleep(Duration::from_millis(1));
+                            continue;
+                        }
+                        let host = [OsStr::new("/bin/sleep"), OsStr::new("0.6")];
+                        let began = std::time::Instant::now();
+                        let child = spawn_detached(
+                            &environment,
+                            None,
+                            &host,
+                            &root,
+                            "host",
+                            log.try_clone().unwrap(),
+                        )
+                        .unwrap();
+                        slowest = slowest.max(began.elapsed());
+                        alive.push(child);
+                    }
+                    for mut child in alive {
+                        let _ = child.start_kill();
+                        let _ = child.try_wait();
+                    }
+                    slowest
+                })
+            })
+            .collect();
+        let probes: Vec<_> = (0..3)
+            .map(|_| {
+                let environment = Arc::clone(&environment);
+                tokio::spawn(async move {
+                    let mut slowest = Duration::ZERO;
+                    while std::time::Instant::now() < until {
+                        let began = std::time::Instant::now();
+                        let probe = [OsStr::new("/usr/bin/true")];
+                        assert!(probe_output(&environment, None, &probe).await.is_some());
+                        slowest = slowest.max(began.elapsed());
+                    }
+                    slowest
+                })
+            })
+            .collect();
+        let mut host_slowest = Duration::ZERO;
+        for host in hosts {
+            host_slowest = host_slowest.max(host.await.unwrap());
+        }
+        let mut probe_slowest = Duration::ZERO;
+        for probe in probes {
+            probe_slowest = probe_slowest.max(probe.await.unwrap());
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(
+            host_slowest < Duration::from_millis(400),
+            "a host's launch took {host_slowest:?}: held by a child started beside it"
+        );
+        assert!(
+            probe_slowest < Duration::from_millis(400),
+            "a probe took {probe_slowest:?}: held by a child started beside it"
+        );
     }
 }

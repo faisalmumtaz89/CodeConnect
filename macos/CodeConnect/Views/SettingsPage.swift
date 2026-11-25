@@ -450,7 +450,7 @@ private struct AccountSettings: View {
     }
 }
 
-/// An agent that keeps one sign-in of its own and no accounts here (Antigravity, minor 50), drawn as an accounts group
+/// An agent that keeps one sign-in of its own and no accounts here (Antigravity, minor 51), drawn as an accounts group
 /// with its Default alone: "Signed in · <plan>" (its plan as the agent names it), "Signed in", "Signed out", signing in,
 /// or "As set up on this Mac" before the Mac has said. Its "…" holds Sign In… signed out and Sign Out… signed in; the
 /// sign-out is confirmed. No account is added or chosen here.

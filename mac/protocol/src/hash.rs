@@ -16,6 +16,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex_of(sha256_bytes(bytes))
 }
 
+/// [`sha256_hex`] of a file's bytes, read through a small buffer rather than whole: an
+/// executable is megabytes, and reading it whole only to hash it raised a process's peak memory
+/// by its size.
+pub fn sha256_file_hex(path: &std::path::Path) -> std::io::Result<String> {
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut std::fs::File::open(path)?, &mut hasher)?;
+    Ok(hex_of(hasher.finalize().into()))
+}
+
 /// The one hex encoder. Lowercase, fixed width, no separators — the single
 /// spelling every digest in this codebase has, so two equal digests can never
 /// compare unequal as text.
@@ -63,8 +72,24 @@ pub fn approval_payload_hash(tool_name: &str, tool_input: &serde_json::Value) ->
 /// material — and an ambiguity in a hash that authorises typing is a way to
 /// make one mutation answer for another.
 pub fn send_text_hash(session_ref: &str, text: &str, submit: bool) -> String {
+    send_text_hash_with(session_ref, text, submit, &[])
+}
+
+/// [`send_text_hash`] for a message that attaches uploads (minor 50): the ids, in order, are
+/// further fields of the same material, so a message attaching none hashes exactly as before
+/// and a retry cannot attach other files under the same id.
+pub fn send_text_hash_with(
+    session_ref: &str,
+    text: &str,
+    submit: bool,
+    attachments: &[String],
+) -> String {
     let mut material = String::from("codeconnect.send_text.v1");
-    for field in [session_ref, if submit { "submit" } else { "stage" }, text] {
+    let fixed = [session_ref, if submit { "submit" } else { "stage" }, text];
+    for field in fixed
+        .into_iter()
+        .chain(attachments.iter().map(String::as_str))
+    {
         material.push('\n');
         material.push_str(&field.len().to_string());
         material.push(':');
@@ -139,8 +164,17 @@ pub fn interrupt_hash(session_ref: &str, turn_id: &str) -> String {
 /// material, which is where a replay reads them from; this hash is what binds an id to the
 /// words.
 pub fn compose_hash(session_ref: &str, text: &str) -> String {
+    compose_hash_with(session_ref, text, &[])
+}
+
+/// [`compose_hash`] for a message that attaches uploads, as [`send_text_hash_with`] is.
+pub fn compose_hash_with(session_ref: &str, text: &str, attachments: &[String]) -> String {
     let mut material = String::from("codeconnect.compose.v1");
-    for field in [session_ref, text] {
+    let fixed = [session_ref, text];
+    for field in fixed
+        .into_iter()
+        .chain(attachments.iter().map(String::as_str))
+    {
         material.push('\n');
         material.push_str(&field.len().to_string());
         material.push(':');
@@ -153,6 +187,25 @@ pub fn compose_hash(session_ref: &str, text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// **A file hashes as its bytes do**, whatever its size: empty, inside one read, and across
+    /// many.
+    #[test]
+    fn a_file_hashes_as_its_bytes() {
+        let dir = std::env::temp_dir().join(format!("cc-file-hash-{}", crate::uid::new().unwrap()));
+        std::fs::create_dir(&dir).unwrap();
+        for size in [0, 100, 3 * 1024 * 1024 + 7] {
+            let bytes: Vec<u8> = (0..size).map(|n| (n * 31 % 251) as u8).collect();
+            let path = dir.join(format!("{size}.bin"));
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                sha256_file_hex(&path).unwrap(),
+                sha256_hex(&bytes),
+                "{size} bytes"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn known_vector() {
@@ -243,6 +296,41 @@ mod tests {
         assert_ne!(
             send_text_hash("cc-1", "true\nx", true),
             send_text_hash("cc-1\ntrue", "x", true)
+        );
+    }
+
+    /// **A message attaching nothing hashes exactly as a minor-49 one** (the values are that
+    /// build's), and attachments are bound in order: other files, or the same in another
+    /// order, are another message.
+    #[test]
+    fn attachments_bind_in_order_and_none_leaves_the_hash_as_it_was() {
+        assert_eq!(
+            send_text_hash_with("cc-1", "look", true, &[]),
+            "164da7901a086ecdb87c002eae6b63408738d330b84ccba7f345cafd0b386c57"
+        );
+        assert_eq!(
+            compose_hash_with("cc-1", "look", &[]),
+            "688d7743d5b103572930859255089830f3ac02e1a340987c4e8d8cb4b7592996"
+        );
+        let [a, b] = ["u1".to_string(), "u2".to_string()];
+        let both = send_text_hash_with("cc-1", "look", true, &[a.clone(), b.clone()]);
+        assert_ne!(both, send_text_hash("cc-1", "look", true));
+        assert_ne!(
+            both,
+            send_text_hash_with("cc-1", "look", true, &[b.clone(), a.clone()])
+        );
+        assert_ne!(
+            both,
+            send_text_hash_with("cc-1", "look", true, std::slice::from_ref(&a))
+        );
+        assert_ne!(
+            compose_hash_with("cc-1", "look", std::slice::from_ref(&a)),
+            compose_hash("cc-1", "look")
+        );
+        // An id is its own field: it cannot be moved into the text.
+        assert_ne!(
+            compose_hash_with("cc-1", "look", &[a]),
+            compose_hash("cc-1", "look\n2:u1")
         );
     }
 }
