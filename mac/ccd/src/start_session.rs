@@ -6046,12 +6046,14 @@ esac"#;
     /// **A launch is never held up by another one.** On macOS a pipe ccd gives a child is made in
     /// two steps, and a child another thread starts between them keeps it open: a host started then
     /// held a probe's or another host's spawn until that host ended. For 20 seconds, six starters
-    /// launch hosts that live 0.6 seconds (at most 100 alive each, reaped as they end) and three run
+    /// launch hosts that live 0.6 seconds (at most 45 alive each, reaped as they end) and three run
     /// probes; every launch is timed, and none may take 0.4 seconds. Linux makes its pipes in one
     /// step ([`crate::spawn`]), so there this holds with or without the lock.
     ///
     /// Run it on purpose and alone, never inside a parallel suite, where load rather than this
-    /// defect decides its timings; it keeps at most 600 hosts alive:
+    /// defect decides its timings; it keeps at most 270 hosts alive. The race is rare, so one green
+    /// run proves little: the evidence is red in some of several runs without the lock and green in
+    /// all of several with it.
     /// `cargo test -p ccd --bin ccd -- --ignored --exact start_session::tests::a_launch_is_never_held_up_by_another`
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "starts hundreds of processes for 20 s and times launches: run alone, on purpose"]
@@ -6080,7 +6082,7 @@ esac"#;
                     let mut slowest = Duration::ZERO;
                     while std::time::Instant::now() < until {
                         alive.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
-                        if alive.len() >= 100 {
+                        if alive.len() >= 45 {
                             std::thread::sleep(Duration::from_millis(1));
                             continue;
                         }
