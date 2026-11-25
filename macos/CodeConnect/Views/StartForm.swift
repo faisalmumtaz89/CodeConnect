@@ -215,6 +215,10 @@ struct StartForm: View {
                         try? await Task.sleep(for: .milliseconds(200))
                     }
                 }
+                if !RenderWindow.attachedFiles.isEmpty {
+                    for _ in 0..<100 where context?.takesUploads != true { try? await Task.sleep(for: .milliseconds(100)) }
+                    FileIntake.add(RenderWindow.attachedFiles, draft.attach)
+                }
                 guard RenderWindow.startSends else { return }
                 for _ in 0..<150 where blocked != nil { try? await Task.sleep(for: .milliseconds(200)) }
                 start()
