@@ -512,7 +512,7 @@ pub struct SessionSummary {
     pub effort: Option<Fact>,
     /// What an app may set this run to (minor 39): a live Claude run CodeConnect started,
     /// once its start is answered, or a live Codex one (minor 43), and one its switch of account is moving
-    /// ([`Switching::Moved`], minor 51). Omitted for any other run, before then, once it has ended, and from an
+    /// ([`Switching::Moved`], minor 52). Omitted for any other run, before then, once it has ended, and from an
     /// older daemon; a client offers the model, effort and mode controls only where it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menus: Option<RunMenus>,
@@ -566,10 +566,10 @@ pub struct RunAccount {
 #[serde(rename_all = "snake_case")]
 pub enum Switching {
     /// Due to move: the person's next message moves it if it is certainly quiet, and otherwise goes on the account
-    /// it is on (minor 51). A daemon below 51 moves it at its first idle point instead.
+    /// it is on (minor 52). A daemon below 52 moves it at its first idle point instead.
     Waiting,
     /// A message of the person's is ending its process to start it on the new account with that message (minor
-    /// 51); below 51, its process ended at an idle point and its next message starts it on the new account.
+    /// 52); below 52, its process ended at an idle point and its next message starts it on the new account.
     Moved,
     /// Its start on the new account did not go through (that account signed out, a refusal): it reads as the
     /// relaunchable end it is, its own line says why, and the person's attention is needed.

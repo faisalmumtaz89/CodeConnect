@@ -2,7 +2,7 @@ import XCTest
 
 @testable import CodeConnectKit
 
-/// **A run moved to another account looks exactly as before** (decision 306; decision 311 v4, minor 51).
+/// **A run moved to another account looks exactly as before** (decision 306; decision 311 v4, minor 52).
 ///
 /// The person's message moves a quiet run: ccd ends its process and files a `session_end` whose payload carries
 /// `switched_to` (`{"account_id", "label"}`, minor 48), then the message starts it again on the new account, which files
@@ -238,7 +238,7 @@ final class SwitchedRunTimelineTests: XCTestCase {
             cache: EventCache(root: FileManager.default.temporaryDirectory.appendingPathComponent("moving-\(UUID().uuidString)")),
             codexSpentLedger: CodexSpentLedger(defaults: UserDefaults(suiteName: "cc.tests.\(UUID().uuidString)")!))
         model.connection.simulateConnectedForTesting()
-        model.connection.simulateCapabilitiesForTesting(capabilities, minor: 51)
+        model.connection.simulateCapabilitiesForTesting(capabilities, minor: 52)
         model.connection.injectForTesting(.sessions([run]))
         addTeardownBlock { @MainActor in model.scenePhaseChanged(to: .background) }
         XCTAssertNil(model.sendBlockedReason(for: run.sessionKey, draft: "go on"), "a moving run's message can be sent")

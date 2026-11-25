@@ -469,7 +469,7 @@ pub enum ClientMessage {
     /// for none. An id that is not one of `agent`'s accounts is refused. Each of `agent`'s sessions running then moves
     /// to it at the person's next message, when that finds it certainly quiet (its turn over, nothing of the person's
     /// unanswered, no card waiting): its process is ended and the message starts it again on the account active then,
-    /// in the same session (minor 51). Nothing is stopped by the choice itself. It reads live throughout, with
+    /// in the same session (minor 52). Nothing is stopped by the choice itself. It reads live throughout, with
     /// [`crate::event::SessionSummary::switching`] saying where its move stands. Answered with one
     /// [`ServerMessage::Accounts`].
     ActivateAccount {
@@ -2360,9 +2360,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 51,
             "Antigravity's sign-in from an app (`sign_in_agent`, `sign_out_agent`, `agent_sign_ins`) is minor 51"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 52,
+            "a switch of account moving a run at its next message, a moving run's `menus` offered, is minor 52"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 51);
+        assert_eq!(crate::PROTOCOL_MINOR, 52);
     }
 
     /// **The tags, pinned on this side too.**

@@ -10834,7 +10834,7 @@ mod tests {
     /// carries `menus` and no `model_label`; ended, or failed in a switch, it carries no `menus`, and `model_label` is
     /// the name its model's entry had (Codex's `displayName`). A model whose entry has no name of its own (one Codex
     /// started on that its check did not list) carries none, and the apps show the id. One its switch ended, with no
-    /// message moving it, reads as ended too: its `menus` are offered only while a message moves it (minor 51).
+    /// message moving it, reads as ended too: its `menus` are offered only while a message moves it (minor 52).
     #[tokio::test]
     async fn a_codex_run_not_live_names_its_model_as_its_menu_did() {
         let _env = crate::ProcessEnvRead::take();

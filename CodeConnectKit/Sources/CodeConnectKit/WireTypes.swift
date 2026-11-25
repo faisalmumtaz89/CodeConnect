@@ -832,10 +832,10 @@ public struct RunMenus: Codable, Sendable, Hashable {
 
 /// Where a run's move to another account stands (`SessionSummary.switching`, minor 48).
 public enum RunSwitching: String, Codable, Sendable, Hashable {
-    /// Due to move: the person's next message moves it if nothing is running in it (minor 51; before, it moved once
+    /// Due to move: the person's next message moves it if nothing is running in it (minor 52; before, it moved once
     /// idle).
     case waiting
-    /// A message of the person's is ending its process to start it on the new account (minor 51; before, its process
+    /// A message of the person's is ending its process to start it on the new account (minor 52; before, its process
     /// had ended at an idle point and its next message started it there).
     case moved
     /// Its start on the new account was refused: it reads as the relaunchable end it is, its own line says why.
