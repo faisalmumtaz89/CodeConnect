@@ -962,6 +962,20 @@ a reconnect after ccd's own restart and a relaunch read those, so **a change Cod
 turn ran and had not yet reported when ccd restarted or Codex was started again is not kept**: the
 run comes back with the settings Codex last reported. Measured on Codex 0.170.0, a change to
 Plan or Read Only made while a turn ran was reported and filed within 4 ms of the app sending it.
+An Antigravity run takes the same `set_model` and `set_mode`, with agy's own settings. Its
+`menus` are agy's model families (its `model` option: Gemini 4 Neon, Gemini 3.8 Flash and the
+rest), each with the efforts agy runs it at (the last part of agy's own model ids for it,
+`gemini-4-neon-high`), and agy's four modes, "Default", "Accept edits", "Auto" and "Plan", none
+marked `confirm`: none lets agy work without asking (Auto still asks before an irreversible
+action). The host reads them from agy's answer to the session's opening and hands them to ccd on
+the start's outcome; the start box lists the same families, from a session ccd opens with no
+prompt and closes at once (agy keeps it in no history), kept while agy is signed in, and an agy
+that answers "Authentication required" is listed as not signed in. A model goes to agy as
+`session/set_config_option` (`model`), an effort as its `thought_level`, a mode as
+`session/set_mode`, answered `applied`, or `refused` with agy's words. The run's model, effort
+and mode are what agy names: its answer to the session's opening and each
+`config_option_update` and `current_mode_update`, filed as `acp_settings`. A relaunch resumes
+the session with the effort and mode the run ended with, agy's own modes included.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;

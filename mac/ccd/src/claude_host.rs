@@ -1647,6 +1647,26 @@ pub(crate) fn menus(models: &[serde_json::Value]) -> RunMenus {
     }
 }
 
+/// An Antigravity run's menus, from its start's outcome: its model families (`models`, in Claude's shape, read as
+/// [`menus`] reads Claude's) and agy's own `modes` (`{value, label}`), none of which asks nothing, so none is marked
+/// `confirm` (decision 214).
+pub(crate) fn acp_menus(models: &[serde_json::Value], modes: &[serde_json::Value]) -> RunMenus {
+    RunMenus {
+        modes: modes
+            .iter()
+            .filter_map(|mode| {
+                let value = mode["value"].as_str()?.to_string();
+                Some(MenuMode {
+                    label: mode["label"].as_str().unwrap_or(&value).to_string(),
+                    value,
+                    confirm: false,
+                })
+            })
+            .collect(),
+        ..menus(models)
+    }
+}
+
 /// The model id the entry `value` of `models` (the start's answer) runs: its `resolvedModel`, or
 /// the value itself when claude gives none. None when no entry has that value.
 pub(crate) fn entry_model_id(models: &[serde_json::Value], value: &str) -> Option<String> {
@@ -1765,6 +1785,8 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
     let refused = |reason: &str| SettingResult::Refused {
         reason: reason.to_string(),
     };
+    let agent = agent_named(daemon, uid).await;
+    let antigravity = agent == "Antigravity";
     let parts: Vec<(Option<String>, Option<String>, Option<String>)> =
         match setting {
             Setting::Model {
@@ -1776,6 +1798,8 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
                 .into_iter()
                 .chain(effort.map(|effort| (None, Some(effort), None)))
                 .collect(),
+            // An Antigravity run's modes are agy's, checked with its menus below.
+            Setting::Mode { mode, .. } if antigravity => vec![(None, None, Some(mode))],
             Setting::Mode { mode, confirmed } => {
                 match MODES.iter().find(|(value, _, _)| *value == mode) {
                     None => return refused(
@@ -1802,6 +1826,13 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
         }
     }
     let menus = match daemon.db.hosted_models(uid.to_string()).await {
+        Ok(Some(models)) if antigravity => match daemon.db.hosted_modes(uid.to_string()).await {
+            Ok(modes) => acp_menus(&models, &modes),
+            Err(err) => {
+                crate::log_error!("{uid}: could not read its modes: {err:#}");
+                return refused("This computer could not read the session.");
+            }
+        },
         Ok(Some(models)) => menus(&models),
         Ok(None) => return refused("This session isn’t running, so nothing was changed."),
         Err(err) => {
@@ -1809,14 +1840,14 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
             return refused("This computer could not read the session.");
         }
     };
-    for (model, effort, _) in &parts {
+    for (model, effort, mode) in &parts {
         if model
             .as_ref()
             .is_some_and(|model| !menus.models.iter().any(|offered| &offered.value == model))
         {
-            return refused(
-                "Claude doesn’t offer that model in this session; nothing was changed.",
-            );
+            return refused(&format!(
+                "{agent} doesn’t offer that model in this session; nothing was changed."
+            ));
         }
         if effort.as_ref().is_some_and(|effort| {
             !menus
@@ -1824,8 +1855,16 @@ pub(crate) async fn set_setting(daemon: &Daemon, uid: &str, setting: Setting) ->
                 .iter()
                 .any(|offered| offered.efforts.contains(effort))
         }) {
+            return refused(&format!(
+                "{agent} doesn’t offer that effort in this session; nothing was changed."
+            ));
+        }
+        if mode
+            .as_ref()
+            .is_some_and(|mode| !menus.modes.iter().any(|offered| &offered.value == mode))
+        {
             return refused(
-                "Claude doesn’t offer that effort in this session; nothing was changed.",
+                "That permission mode isn’t offered in this session; nothing was changed.",
             );
         }
     }
@@ -2298,7 +2337,12 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
     // effort.
     let (mode, effort) = match daemon.db.session_facts(uid.to_string()).await {
         Ok(facts) => (
-            relaunch_mode(facts.permission_mode.map(|fact| fact.value), switching),
+            // None of agy's modes asks nothing (decision 214): an Antigravity run keeps the one it was in.
+            if kept.agent == AgentKind::Antigravity {
+                facts.permission_mode.map(|fact| fact.value)
+            } else {
+                relaunch_mode(facts.permission_mode.map(|fact| fact.value), switching)
+            },
             facts.ended_with.map(|fact| fact.value),
         ),
         Err(err) => {
@@ -3650,8 +3694,30 @@ mod tests {
         stop(&dir);
     }
 
+    /// What an Antigravity host's start outcome carries (acp.ts `menus`): agy's model families, each with its efforts,
+    /// and its modes.
+    fn agy_menus() -> serde_json::Value {
+        serde_json::json!({"commands": [], "account": {},
+            "models": [
+                {"value": "gemini-4-neon", "displayName": "Gemini 4 Neon",
+                 "supportedEffortLevels": ["high", "xhigh", "medium", "low"]},
+                {"value": "gemini-3.8-flash", "displayName": "Gemini 3.8 Flash",
+                 "supportedEffortLevels": ["high", "medium", "low"]}
+            ],
+            "modes": [{"value": "default", "label": "Default"}, {"value": "accept-edits", "label": "Accept edits"},
+                      {"value": "auto", "label": "Auto"}, {"value": "plan", "label": "Plan"}]})
+    }
+
+    /// agy's settings line (`acp`, message `seq`): its session's opening reply, naming the current values.
+    fn agy_settings(seq: u64, model: &str, effort: &str, mode: &str) -> serde_json::Value {
+        let option = |id: &str, value: &str| serde_json::json!({"id": id, "category": id, "currentValue": value});
+        serde_json::json!({"type": "acp", "seq": seq, "message": {"jsonrpc": "2.0", "id": 2, "result": {
+            "sessionId": "sess-7", "configOptions": [option("model", model), option("thought_level", effort),
+                                                      option("mode", mode)]}}})
+    }
+
     /// A live Antigravity run on a stand-in host: its uid, and the host's side, its start's
-    /// outcome `done` (message 2) acknowledged.
+    /// outcome `done` (message 2, with agy's menus) acknowledged.
     async fn antigravity_run(rig: &Rig) -> (String, Played) {
         let host = stub_host(rig, HOST_PROTOCOL_VERSION, None);
         let cwd = rig.root.to_str().unwrap().to_string();
@@ -3670,7 +3736,8 @@ mod tests {
                 let uuid = played.start_uuid();
                 say(
                     &mut played.write,
-                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid, "status": "done"}),
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid, "status": "done",
+                                       "initialize": agy_menus()}),
                 )
                 .await;
                 assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
@@ -3678,6 +3745,135 @@ mod tests {
             }
         );
         (started_uid(&result), played)
+    }
+
+    /// **An Antigravity run's settings are agy's own** (S1): a live run's menus are its model families with their
+    /// efforts and its four modes, none asking for a confirmation; its model, effort and mode are what agy's settings
+    /// lines name, the model marked chosen. A change is checked against those menus: a mode of agy's reaches the
+    /// host and applies; Claude's Bypass permissions and a model agy does not offer are refused, naming Antigravity.
+    /// Once the run has ended its model is named by its family's name.
+    #[tokio::test]
+    async fn an_antigravity_runs_settings_are_agys_own() {
+        let rig = rig();
+        let (uid, mut played) = antigravity_run(&rig).await;
+        say(
+            &mut played.write,
+            agy_settings(3, "gemini-4-neon", "high", "default"),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let now = summary(&rig.daemon, &uid).await;
+        let model = |value: &str, label: &str, efforts: &[&str]| MenuModel {
+            value: value.into(),
+            label: label.into(),
+            detail: None,
+            resolved_model: None,
+            default_effort: None,
+            efforts: efforts.iter().map(|effort| effort.to_string()).collect(),
+        };
+        assert_eq!(
+            now.menus,
+            Some(RunMenus {
+                models: vec![
+                    model(
+                        "gemini-4-neon",
+                        "Gemini 4 Neon",
+                        &["high", "xhigh", "medium", "low"]
+                    ),
+                    model(
+                        "gemini-3.8-flash",
+                        "Gemini 3.8 Flash",
+                        &["high", "medium", "low"]
+                    ),
+                ],
+                modes: [
+                    ("default", "Default"),
+                    ("accept-edits", "Accept edits"),
+                    ("auto", "Auto"),
+                    ("plan", "Plan")
+                ]
+                .map(|(value, label)| MenuMode {
+                    value: value.into(),
+                    label: label.into(),
+                    confirm: false,
+                })
+                .to_vec(),
+                selected_model: Some("gemini-4-neon".into()),
+            })
+        );
+        let value = |fact: Option<protocol::event::Fact>| fact.map(|fact| fact.value);
+        assert_eq!(
+            (
+                value(now.model),
+                value(now.effort),
+                value(now.permission_mode)
+            ),
+            (
+                Some("gemini-4-neon".into()),
+                Some("high".into()),
+                Some("default".into())
+            )
+        );
+        let (applied, line) = tokio::join!(
+            rig.daemon.set_setting(
+                &uid,
+                Setting::Mode {
+                    mode: "accept-edits".into(),
+                    confirmed: false
+                }
+            ),
+            host_answers_setting(&mut played, 4, "done", None)
+        );
+        assert_eq!(
+            line,
+            ToHost::SetMode {
+                uuid: String::new(),
+                mode: "accept-edits".into()
+            }
+        );
+        assert!(
+            matches!(applied, SettingResult::Applied { .. }),
+            "{applied:?}"
+        );
+        for (setting, reason) in [
+            (
+                Setting::Mode {
+                    mode: "bypassPermissions".into(),
+                    confirmed: true,
+                },
+                "That permission mode isn’t offered in this session; nothing was changed.",
+            ),
+            (
+                set_model(Some("sonnet"), None),
+                "Antigravity doesn’t offer that model in this session; nothing was changed.",
+            ),
+            (
+                set_model(None, Some("max")),
+                "Antigravity doesn’t offer that effort in this session; nothing was changed.",
+            ),
+        ] {
+            assert_eq!(refusal(rig.daemon.set_setting(&uid, setting).await), reason);
+        }
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let ended = async {
+            loop {
+                let ended = summary(&rig.daemon, &uid).await;
+                if ended.menus.is_none() {
+                    break ended;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        };
+        let ended = tokio::time::timeout(Duration::from_secs(5), ended)
+            .await
+            .expect("the run ends");
+        assert_eq!(ended.model_label.as_deref(), Some("Gemini 4 Neon"));
+        stop(&played.dir);
     }
 
     /// An Antigravity run is a hosted run: its start names its agent and its agy, its row is
@@ -12366,7 +12562,8 @@ mod tests {
     /// session, and the new host's `start` names the agent, the agy a start finds (config
     /// `agy_bin`) and that session to resume, with the message as its prompt. The session is
     /// never offered to the apps as Claude Code's (no `claude_session_id`, which they resume
-    /// with `claude --resume`). The relaunched host numbers its lines from 1 again, and its
+    /// with `claude --resume`). It goes on with the model, effort and mode it ended with, agy's own mode
+    /// included. The relaunched host numbers its lines from 1 again, and its
     /// reply and its turn's end are filed beside the first host's, not taken for them.
     #[tokio::test]
     async fn a_message_relaunches_an_antigravity_run_resuming_its_session() {
@@ -12401,19 +12598,24 @@ mod tests {
         )
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
-        say(
-            &mut played.write,
-            serde_json::json!({"type": "acp", "seq": 4, "turn": turn, "message": {
-                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
-        )
-        .await;
+        // The settings the run ends with, agy's mode one Claude has none of.
+        let mut settings = agy_settings(4, "gemini-3.8-flash", "low", "accept-edits");
+        settings["turn"] = turn.clone().into();
+        say(&mut played.write, settings).await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
         say(
             &mut played.write,
-            serde_json::json!({"type": "exited", "seq": 5, "code": 1}),
+            serde_json::json!({"type": "acp", "seq": 5, "turn": turn, "message": {
+                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
         )
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 6, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 6 }));
         let old = pid_in(&played.dir, "stub.pid");
         stop(&played.dir);
         gone(old).await;
@@ -12442,6 +12644,15 @@ mod tests {
                 assert_eq!(options.agent, AgentKind::Antigravity);
                 assert_eq!(options.claude_path, agy.display().to_string());
                 assert_eq!(options.resume.as_deref(), Some("sess-7"));
+                assert_eq!(
+                    (
+                        options.model.as_deref(),
+                        options.effort.as_deref(),
+                        options.permission_mode.as_deref()
+                    ),
+                    (Some("gemini-3.8-flash"), Some("low"), Some("accept-edits")),
+                    "the run goes on with the settings it ended with"
+                );
                 assert_eq!(prompt, "carry on");
                 say(
                     &mut relaunched.write,

@@ -77,6 +77,8 @@ export interface InitializeAnswer {
   models: Json[];
   account: Account;
   claude_code_version?: string;
+  /** An Antigravity run's modes, as agy's `mode` option offers them. */
+  modes?: { value: string; label: string }[];
 }
 
 /** A line the host sends ccd. Each carries its sequence number and is kept until ccd acknowledges it. */

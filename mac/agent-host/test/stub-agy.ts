@@ -2,8 +2,10 @@
 // speaks `agy acp`'s Agent Client Protocol over stdio as the CLI's own changelog and the ACP schema describe it: it
 // answers `initialize` with its script's protocol version, advertising session/resume unless its script says
 // `resume: false`, `session/new` with a session after a notification of its commands (which the host must hold until
-// the start's outcome), `session/resume` with an empty result, and `session/set_model` with one, unless the model is
-// `no-such-model`, which it refuses. At each `session/prompt` it writes its reply in
+// the start's outcome) and `session/resume`, each with agy 1.5.15's settings: its models (effort baked into each id),
+// modes and configOptions (model family, the family's thought levels, mode). `session/set_config_option` sets one of
+// those, `session/set_mode` the mode, each followed by a `config_option_update` (and `current_mode_update`); a value
+// agy does not offer is refused, the model `no-such-model` as "agy has no model no-such-model". At each `session/prompt` it writes its reply in
 // two chunks, a tool call, then asks permission for it with allow_once and reject_once options; once answered it ends
 // the tool as the answer says, writes one more chunk and answers the prompt `end_turn`. A request answered
 // `cancelled` ends the prompt `cancelled`, unless its script says `quiet_on_cancel`. With `leave_child` it starts a child
@@ -29,6 +31,36 @@ if (script.leave_child) {
   child.unref();
   record({ child: child.pid });
 }
+// The session's settings, and what agy 1.5.15 offers (cut down): families whose levels are their ids' last part, a
+// family that is one id (gpt-oss-120b-medium) and one whose id begins with another's (gemini-pro-orchestrator-neon).
+const families: Record<string, string[]> = {
+  'gemini-4-neon': ['high', 'xhigh', 'medium', 'low'],
+  'gemini-3.8-flash': ['high', 'medium', 'low'],
+  'gpt-oss-120b-medium': [],
+  'gemini-pro-orchestrator': [],
+  'gemini-pro-orchestrator-neon': [],
+};
+const modes = ['default', 'accept-edits', 'auto', 'plan'];
+const names: Record<string, string> = { default: 'Default', 'accept-edits': 'Accept edits', auto: 'Auto', plan: 'Plan' };
+const settings = { model: 'gemini-4-neon', effort: 'high', mode: 'default' };
+const configOptions = () => [
+  { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: settings.model,
+    options: Object.keys(families).map((value) => ({ value, name: `Name of ${value}` })) },
+  { id: 'thought_level', name: 'Thinking Level', category: 'thought_level', type: 'select', currentValue: settings.effort,
+    options: families[settings.model]!.map((value) => ({ value, name: value })) },
+  { id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: settings.mode,
+    options: modes.map((value) => ({ value, name: names[value] })) },
+];
+const opening = (sessionId: string) => ({
+  sessionId,
+  models: {
+    availableModels: Object.entries(families).flatMap(([family, levels]) =>
+      levels.length === 0 ? [{ modelId: family }] : levels.map((level) => ({ modelId: `${family}-${level}` }))),
+    currentModelId: `${settings.model}-${settings.effort}`,
+  },
+  modes: { currentModeId: settings.mode, availableModes: modes.map((id) => ({ id, name: names[id] })) },
+  configOptions: configOptions(),
+});
 // The prompt waiting on a permission request, by the request's id.
 const waiting = new Map<number, { sessionId: string; promptId: number }>();
 let asked = 100;
@@ -41,17 +73,33 @@ for await (const text of createInterface({ input: process.stdin })) {
       id: message.id,
       result: { protocolVersion: script.version ?? 1, agentCapabilities: { loadSession: true, sessionCapabilities } },
     });
-  } else if (message.method === 'session/set_model') {
-    if (message.params.modelId === 'no-such-model') {
-      write({ id: message.id, error: { code: -32602, message: 'agy has no model no-such-model' } });
+  } else if (message.method === 'session/set_config_option') {
+    const { sessionId, configId, value } = message.params;
+    const key = ({ model: 'model', thought_level: 'effort', mode: 'mode' } as const)[configId as string];
+    const offered = key === 'model' ? Object.keys(families) : key === 'effort' ? families[settings.model] : modes;
+    if (key === undefined || !offered!.includes(value)) {
+      write({ id: message.id, error: { code: -32602, message: `agy has no ${configId} ${value}` } });
     } else {
+      settings[key] = value;
+      if (key === 'model' && !families[value]!.includes(settings.effort)) settings.effort = families[value]![0] ?? '';
+      update(sessionId, { sessionUpdate: 'config_option_update', configOptions: configOptions() });
+      write({ id: message.id, result: { configOptions: configOptions() } });
+    }
+  } else if (message.method === 'session/set_mode') {
+    const { sessionId, modeId } = message.params;
+    if (!modes.includes(modeId)) {
+      write({ id: message.id, error: { code: -32602, message: `agy has no mode ${modeId}` } });
+    } else {
+      settings.mode = modeId;
+      update(sessionId, { sessionUpdate: 'current_mode_update', currentModeId: modeId });
+      update(sessionId, { sessionUpdate: 'config_option_update', configOptions: configOptions() });
       write({ id: message.id, result: {} });
     }
   } else if (message.method === 'session/resume') {
-    write({ id: message.id, result: {} });
+    write({ id: message.id, result: opening(message.params.sessionId) });
   } else if (message.method === 'session/new') {
     update('sess-1', { sessionUpdate: 'available_commands_update', availableCommands: [] });
-    write({ id: message.id, result: { sessionId: 'sess-1' } });
+    write({ id: message.id, result: opening('sess-1') });
   } else if (message.method === 'session/prompt') {
     const sessionId = message.params.sessionId;
     chunk(sessionId, 'Hel');

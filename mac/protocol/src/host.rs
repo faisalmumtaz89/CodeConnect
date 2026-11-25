@@ -261,7 +261,7 @@ pub enum OutcomeStatus {
     Refused,
 }
 
-/// The SDK's initialize answer, as far as ccd keeps it.
+/// The SDK's initialize answer, as far as ccd keeps it, or an Antigravity run's menus in its shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InitializeAnswer {
     /// The SDK's command list, as it gives it but for the claude.ai connectors' commands
@@ -274,6 +274,10 @@ pub struct InitializeAnswer {
     /// The version of the claude that answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_version: Option<String>,
+    /// An Antigravity run's modes, as agy's `mode` option offers them (`{value, label}`); its models are agy's model
+    /// families in Claude's shape (`value`, `displayName`, `supportedEffortLevels`). Empty for Claude.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<Value>,
 }
 
 /// Of the account, only which provider Claude uses. Every other key the SDK gives (the
@@ -506,6 +510,7 @@ mod tests {
                         api_provider: Some("firstParty".into()),
                     },
                     claude_code_version: Some("2.1.322".into()),
+                    modes: Vec::new(),
                 }),
                 cancelled: None,
                 terminal_reason: None,

@@ -6,8 +6,9 @@
 //! into one event ([`joined`]) when something else arrives. Everything else is filed in
 //! the shapes the apps already draw: a tool call and its result as a hook's are
 //! (`tool_use_id`, `tool_name`, `tool_input`; the name its ACP kind's word), its result's outcome as `status` and
-//! `aggregated_output`, and the prompt's reply as the turn's end. Updates the timeline does
-//! not draw (plans, commands, modes, usage) file nothing.
+//! `aggregated_output`, and the prompt's reply as the turn's end. The session's settings, as its opening's reply
+//! (which the host forwards too) and each `config_option_update` and `current_mode_update` name them, are filed as
+//! the run's settings ([`ACP_SETTINGS`]). Updates the timeline does not draw (plans, commands, usage) file nothing.
 //!
 //! Event ids are stable across a replay and unique to the host that sent them: each begins
 //! with `run`, the uuid of the start that host was started with (a relaunch's is its own), as
@@ -19,6 +20,7 @@
 use serde_json::{json, Value};
 
 use crate::event::{EventKind, PendingEvent, SessionKey, Source};
+use crate::facts::ACP_SETTINGS;
 
 /// What one forwarded message is.
 #[derive(Debug)]
@@ -75,6 +77,30 @@ pub fn read(
                 }));
                 Read::Events(events)
             }
+            Some("config_option_update") => Read::Events(
+                settings(&update["configOptions"])
+                    .map(|payload| {
+                        event(
+                            EventKind::Other(ACP_SETTINGS.into()),
+                            format!("{run}/settings/{seq}"),
+                            payload,
+                        )
+                    })
+                    .into_iter()
+                    .collect(),
+            ),
+            Some("current_mode_update") => Read::Events(
+                text("currentModeId")
+                    .map(|mode| {
+                        event(
+                            EventKind::Other(ACP_SETTINGS.into()),
+                            format!("{run}/settings/{seq}"),
+                            json!({ "mode": mode }),
+                        )
+                    })
+                    .into_iter()
+                    .collect(),
+            ),
             Some("tool_call_update") => Read::Events(
                 result(update, call)
                     .map(|payload| {
@@ -97,6 +123,14 @@ pub fn read(
             json!({ "stop_reason": reason }),
         )
     };
+    // The reply to the session's opening (`session/new`, `session/resume`), which the host forwards: its settings.
+    if let Some(payload) = settings(&message["result"]["configOptions"]) {
+        return Read::Events(vec![event(
+            EventKind::Other(ACP_SETTINGS.into()),
+            format!("{run}/settings/{seq}"),
+            payload,
+        )]);
+    }
     if let Some(reason) = message["result"]["stopReason"].as_str() {
         return Read::Events(vec![turn_end(reason)]);
     }
@@ -114,6 +148,25 @@ pub fn read(
         ]);
     }
     Read::Events(Vec::new())
+}
+
+/// The settings agy's `configOptions` say are current, as the run's settings are filed ([`ACP_SETTINGS`]): each
+/// option's `currentValue` by its category (`model`, `thought_level` as `effort`, `mode`). None when they name none.
+fn settings(options: &Value) -> Option<Value> {
+    let current: serde_json::Map<String, Value> = options
+        .as_array()?
+        .iter()
+        .filter_map(|option| {
+            let key = match option["category"].as_str()? {
+                "model" => "model",
+                "thought_level" => "effort",
+                "mode" => "mode",
+                _ => return None,
+            };
+            Some((key.to_string(), option["currentValue"].as_str()?.into()))
+        })
+        .collect();
+    (!current.is_empty()).then_some(Value::Object(current))
 }
 
 /// The run of chunks that began at the line `first` of the host started as `run`, of the turn
@@ -350,14 +403,68 @@ mod tests {
         assert_eq!(filed[1].kind, EventKind::TurnComplete);
     }
 
+    /// agy's settings as its `configOptions` give them (agy 1.5.15's shape, values cut down): the model family, the
+    /// current model's thought levels and the mode, each with its `currentValue`, and one option of no category.
+    fn options(model: &str, effort: &str, mode: &str) -> Value {
+        json!([
+            {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
+             "options": [{"value": "gemini-4-neon", "name": "Gemini 4 Neon"},
+                         {"value": "gemini-3.8-flash", "name": "Gemini 3.8 Flash"}]},
+            {"id": "thought_level", "name": "Thinking Level", "category": "thought_level", "type": "select",
+             "currentValue": effort, "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]},
+            {"id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": mode,
+             "options": [{"value": "default", "name": "Default"}, {"value": "plan", "name": "Plan"}]},
+            {"id": "other", "name": "Other", "type": "select", "currentValue": "x", "options": []}
+        ])
+    }
+
+    #[test]
+    fn the_sessions_opening_and_each_change_file_its_settings() {
+        let settings = |filed: Vec<PendingEvent>| {
+            assert_eq!(filed.len(), 1);
+            assert_eq!(
+                filed[0].kind,
+                EventKind::Other(crate::facts::ACP_SETTINGS.into())
+            );
+            (
+                filed[0].source_event_id.clone().unwrap(),
+                filed[0].payload.clone(),
+            )
+        };
+        let opening = json!({"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "sess-1",
+            "configOptions": options("gemini-4-neon", "high", "default")}});
+        assert_eq!(
+            settings(events(read(&session(), "c-start", 3, None, &opening))),
+            (
+                "c-start/settings/3".to_string(),
+                json!({"model": "gemini-4-neon", "effort": "high", "mode": "default"})
+            )
+        );
+        let changed = update(json!({"sessionUpdate": "config_option_update",
+            "configOptions": options("gemini-3.8-flash", "low", "plan")}));
+        assert_eq!(
+            settings(events(read(
+                &session(),
+                "c-start",
+                7,
+                Some("c-say"),
+                &changed
+            ))),
+            (
+                "c-start/settings/7".to_string(),
+                json!({"model": "gemini-3.8-flash", "effort": "low", "mode": "plan"})
+            )
+        );
+        let mode = update(json!({"sessionUpdate": "current_mode_update", "currentModeId": "plan"}));
+        assert_eq!(
+            settings(events(read(&session(), "c-start", 8, None, &mode))),
+            ("c-start/settings/8".to_string(), json!({"mode": "plan"}))
+        );
+    }
+
     #[test]
     fn updates_the_timeline_does_not_draw_file_nothing() {
-        for kind in [
-            "plan",
-            "available_commands_update",
-            "current_mode_update",
-            "usage_update",
-        ] {
+        for kind in ["plan", "available_commands_update", "usage_update"] {
             let message = update(json!({"sessionUpdate": kind}));
             assert!(
                 events(read(&session(), "c-start", 12, None, &message)).is_empty(),

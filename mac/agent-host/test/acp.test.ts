@@ -37,7 +37,7 @@ const stdin = (dir: string) => stubLog(dir).filter((event) => event.stdin).map((
 test('a start initializes agy at version 1, opens a session in the folder with the mail server, then prompts', async () => {
   const { dir, work, ccd, outcome } = await run();
   expect(outcome).toMatchObject({ type: 'outcome', uuid: antigravityStart.uuid, status: 'done' });
-  expect(outcome.initialize).toBeUndefined();
+  expect(outcome.initialize?.models.length).toBe(5);
   const permission = await ccd.line('the permission request', (line) => line.type === 'permission');
   const [first] = stubLog(dir);
   expect(first).toStrictEqual({ argv: ['acp'], cwd: work });
@@ -52,10 +52,12 @@ test('a start initializes agy at version 1, opens a session in the folder with t
     mcpServers: [{ name: 'codeconnect', ...antigravityStart.options.mail, env: [] }],
   });
   expect(prompt.params).toStrictEqual({ sessionId: 'sess-1', prompt: [{ type: 'text', text: 'read the note' }] });
-  // The commands agy sent while the session opened came after the outcome, never before it.
+  // The commands agy sent while the session opened, and the opening's reply, came after the outcome, never before it.
   const types = ccd.lines.map((line) => line.type);
   expect(types.indexOf('outcome')).toBeLessThan(types.indexOf('acp'));
-  expect(updates(ccd)).toStrictEqual(['available_commands_update', 'agent_message_chunk', 'agent_message_chunk', 'tool_call']);
+  expect(updates(ccd)).toStrictEqual([
+    'available_commands_update', 'reply', 'agent_message_chunk', 'agent_message_chunk', 'tool_call',
+  ]);
   expect(permission.request).toMatchObject({
     tool_use_id: `${antigravityStart.uuid}/101`,
     tool_name: 'cat NOTE.txt',
@@ -177,13 +179,13 @@ test('a start that names a model sets it on the session before its prompt; a mod
   await ccd.attach(0, 1);
   ccd.send({
     ...antigravityStart, prompt: 'read the note',
-    options: { ...antigravityStart.options, cwd: work, claude_path: writeAgy(dir), model: 'gemini-3.1-flash-lite' },
+    options: { ...antigravityStart.options, cwd: work, claude_path: writeAgy(dir), model: 'gemini-3.8-flash' },
   });
   expect(await ccd.line('the start outcome', (line) => line.type === 'outcome')).toMatchObject({ status: 'done' });
   await ccd.line('the permission request', (line) => line.type === 'permission');
   const methods = stdin(dir).map((message) => message.method);
-  expect(methods.slice(0, 4)).toStrictEqual(['initialize', 'session/new', 'session/set_model', 'session/prompt']);
-  expect(stdin(dir)[2].params).toStrictEqual({ sessionId: 'sess-1', modelId: 'gemini-3.1-flash-lite' });
+  expect(methods.slice(0, 4)).toStrictEqual(['initialize', 'session/new', 'session/set_config_option', 'session/prompt']);
+  expect(stdin(dir)[2].params).toStrictEqual({ sessionId: 'sess-1', configId: 'model', value: 'gemini-3.8-flash' });
 
   const refused = runDir();
   const there = join(refused, 'work');
@@ -198,6 +200,75 @@ test('a start that names a model sets it on the session before its prompt; a mod
   expect(await other.line('the start outcome', (line) => line.type === 'outcome')).toMatchObject({
     status: 'refused', detail: 'agy has no model no-such-model',
   });
+}, 15_000);
+
+test('the start\'s outcome carries agy\'s model families, each with its efforts, and its modes; the opening reply follows it', async () => {
+  const { ccd, outcome } = await run();
+  expect(outcome).toMatchObject({ status: 'done' });
+  expect(outcome.initialize).toStrictEqual({
+    commands: [],
+    account: {},
+    models: [
+      { value: 'gemini-4-neon', displayName: 'Name of gemini-4-neon', supportedEffortLevels: ['high', 'xhigh', 'medium', 'low'] },
+      { value: 'gemini-3.8-flash', displayName: 'Name of gemini-3.8-flash', supportedEffortLevels: ['high', 'medium', 'low'] },
+      { value: 'gpt-oss-120b-medium', displayName: 'Name of gpt-oss-120b-medium', supportedEffortLevels: [] },
+      { value: 'gemini-pro-orchestrator', displayName: 'Name of gemini-pro-orchestrator', supportedEffortLevels: [] },
+      { value: 'gemini-pro-orchestrator-neon', displayName: 'Name of gemini-pro-orchestrator-neon', supportedEffortLevels: [] },
+    ],
+    modes: [
+      { value: 'default', label: 'Default' },
+      { value: 'accept-edits', label: 'Accept edits' },
+      { value: 'auto', label: 'Auto' },
+      { value: 'plan', label: 'Plan' },
+    ],
+  });
+  await ccd.line('the permission request', (line) => line.type === 'permission');
+  const opening = acpLines(ccd).find((message) => message.result?.configOptions);
+  expect(opening?.result.sessionId).toBe('sess-1');
+}, 15_000);
+
+test('a model, an effort and a mode reach agy as its own settings; one agy refuses is refused with its words', async () => {
+  const { dir, ccd } = await run();
+  await ccd.line('the permission request', (line) => line.type === 'permission');
+  const outcome = (uuid: string) => ccd.line(`${uuid}'s outcome`, (line) => line.type === 'outcome' && line.uuid === uuid);
+  ccd.send({ type: 'set_model', uuid: 'c-model', model: 'gemini-3.8-flash' });
+  expect(await outcome('c-model')).toMatchObject({ status: 'done' });
+  ccd.send({ type: 'set_model', uuid: 'c-effort', effort: 'low' });
+  expect(await outcome('c-effort')).toMatchObject({ status: 'done' });
+  ccd.send({ type: 'set_mode', uuid: 'c-mode', mode: 'plan' });
+  expect(await outcome('c-mode')).toMatchObject({ status: 'done' });
+  ccd.send({ type: 'set_model', uuid: 'c-none', model: 'no-such-model' });
+  expect(await outcome('c-none')).toMatchObject({ status: 'refused', detail: 'agy has no model no-such-model' });
+  const asked = stdin(dir).filter((message) => /set_config_option|set_mode/.test(message.method ?? ''));
+  expect(asked.map((message) => [message.method, message.params])).toStrictEqual([
+    ['session/set_config_option', { sessionId: 'sess-1', configId: 'model', value: 'gemini-3.8-flash' }],
+    ['session/set_config_option', { sessionId: 'sess-1', configId: 'thought_level', value: 'low' }],
+    ['session/set_mode', { sessionId: 'sess-1', modeId: 'plan' }],
+    ['session/set_config_option', { sessionId: 'sess-1', configId: 'model', value: 'no-such-model' }],
+  ]);
+  expect(updates(ccd).filter((kind) => kind === 'config_option_update').length).toBe(3);
+  expect(updates(ccd)).toContain('current_mode_update');
+}, 15_000);
+
+test('a relaunch gives the resumed session the effort and the mode the run ended with, before its prompt', async () => {
+  const dir = runDir();
+  const work = join(dir, 'work');
+  mkdirSync(work);
+  startHost(dir);
+  const ccd = await open(dir);
+  await ccd.attach(0, 1);
+  ccd.send({
+    ...antigravityStart, prompt: 'go on',
+    options: { ...antigravityStart.options, cwd: work, claude_path: writeAgy(dir), resume: 'sess-9', effort: 'medium', permission_mode: 'plan' },
+  });
+  expect(await ccd.line('the start outcome', (line) => line.type === 'outcome')).toMatchObject({ status: 'done' });
+  await ccd.line('the permission request', (line) => line.type === 'permission');
+  expect(stdin(dir).slice(1, 5).map((message) => [message.method, message.params])).toStrictEqual([
+    ['session/resume', expect.objectContaining({ sessionId: 'sess-9' })],
+    ['session/set_config_option', { sessionId: 'sess-9', configId: 'thought_level', value: 'medium' }],
+    ['session/set_mode', { sessionId: 'sess-9', modeId: 'plan' }],
+    ['session/prompt', expect.objectContaining({ sessionId: 'sess-9' })],
+  ]);
 }, 15_000);
 
 test('a stop whose prompt agy leaves unanswered ends the turn cancelled, not in an error', async () => {

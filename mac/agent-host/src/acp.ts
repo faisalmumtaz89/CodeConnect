@@ -1,9 +1,11 @@
 // An Antigravity run: `agy acp`, the Agent Client Protocol over its stdio (JSON-RPC 2.0, one message per line), in
 // the host's process group as claude is. The start initializes it (protocol version 1; no file system or terminal
 // offered, so agy uses its own) and opens one session in the run's folder with CodeConnect's mail server, or, for a
-// relaunch (`resume`), resumes the run's session with that server again, only when agy advertises session/resume; a
-// model the start names is set on the session (session/set_model). Its outcome is `done` once the session is open,
-// `refused` with the reason otherwise. Every notification agy sends, and the reply to each prompt, goes to ccd whole as
+// relaunch (`resume`), resumes the run's session with that server again, only when agy advertises session/resume. The
+// opening's reply goes to ccd as agy's settings are (`acp`), and their menus on the start's outcome as `initialize`
+// ([`menus`]); a model the start names, and a relaunch's effort and mode, are set on the session
+// (session/set_config_option, session/set_mode). Its outcome is `done` once the session is open, `refused` with the
+// reason otherwise. Every notification agy sends, and the reply to each prompt, goes to ccd whole as
 // `acp`, with the turn it belongs to: the uuid of the command whose prompt is running (the start's for its own). A
 // `say`, or ccd's `wake` for the run's mail, is one more prompt, queued and `done` at once, and sent once the one
 // before has its reply, so prompts never overlap. An `interrupt` of the running turn answers its open requests
@@ -14,11 +16,12 @@
 // answers every request still open `cancelled`, withdrawing its card, cancels the session's prompt and ends agy's
 // input; a prompt agy then leaves unanswered ends `cancelled`, one cut off by any other end of agy's in the error "agy
 // ended". When agy ends, what it left running in the host's process group (a command in the background) is ended
-// before `exited` is reported. Settings changes are refused: a later slice.
+// before `exited` is reported. A `set_model` or `set_mode` sets agy's own settings (session/set_config_option for its
+// model and thought level, session/set_mode), refused with agy's words.
 import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Unsequenced } from './link.ts';
-import type { Json, PermissionRequest, ToHost } from './protocol.ts';
+import type { InitializeAnswer, Json, PermissionRequest, ToHost } from './protocol.ts';
 import type { Say, Start, Wake } from './start.ts';
 
 /** What is left running in the host's process group besides the host (a command agy ran in the background), by pid. */
@@ -57,6 +60,30 @@ const PROTOCOL_VERSION = 1;
 
 type Answer = Extract<ToHost, { type: 'answer' }>;
 type Interrupt = Extract<ToHost, { type: 'interrupt' }>;
+type Setting = Extract<ToHost, { type: 'set_model' | 'set_mode' }>;
+
+/** What an app may choose for the run, from its session's opening reply, in the shape ccd keeps Claude's initialize
+ * answer in: each model family of agy's `model` option, its name, and its efforts (the last part of agy's own model
+ * ids for it, `gemini-4-neon-high`: one holding no `-` that is not itself a family), and agy's modes. */
+export function menus(opening: any): InitializeAnswer {
+  const options: any[] = opening?.configOptions ?? [];
+  const of = (category: string): any[] => options.find((option) => option.category === category)?.options ?? [];
+  const families = of('model').map((option) => String(option.value));
+  const ids: string[] = (opening?.models?.availableModels ?? []).map((model: any) => String(model.modelId));
+  return {
+    commands: [],
+    account: {},
+    models: of('model').map((option) => ({
+      value: option.value,
+      displayName: option.name,
+      supportedEffortLevels: ids
+        .filter((id) => id.startsWith(`${option.value}-`) && !families.includes(id))
+        .map((id) => id.slice(String(option.value).length + 1))
+        .filter((level) => !level.includes('-')),
+    })),
+    modes: of('mode').map((option) => ({ value: option.value, label: option.name })),
+  };
+}
 type Message = { id?: number | string; method?: string; params?: any; result?: any; error?: { message?: string } };
 type Held = { id: number | string; request: PermissionRequest; options: { optionId: string; kind: string }[] };
 
@@ -123,6 +150,8 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
     }
   });
 
+  // The settings lines, in the order ccd sent them.
+  let settings: Promise<void> = Promise.resolve();
   // The prompts, one at a time: the next is sent once the one before has its reply, which goes to ccd as the turn's
   // end, and a Stop's outcome after it.
   let current: Promise<void> = Promise.resolve();
@@ -156,6 +185,13 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
     held.clear();
   };
 
+  // The settings' menus, from the session's opening reply: on the start's outcome.
+  let initialize: InitializeAnswer | undefined;
+  // One of agy's settings, set on the session: refused with agy's words.
+  const set = async (method: string, params: object) => {
+    const reply = await call(method, { sessionId, ...params });
+    if (reply.error) throw new Error(reply.error.message ?? `agy refused ${method}`);
+  };
   const opened = (async () => {
     const initialized = await call('initialize', {
       protocolVersion: PROTOCOL_VERSION,
@@ -175,24 +211,27 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
       if (initialized.result?.agentCapabilities?.sessionCapabilities?.resume === undefined) {
         throw new Error('this agy does not offer session/resume, so the session cannot go on');
       }
-      const resumed = await call('session/resume', { sessionId: resume, ...opening });
-      if (resumed.error) throw new Error(resumed.error.message ?? 'agy refused to resume the session');
-      sessionId = resume;
-    } else {
-      const session = await call('session/new', opening);
-      if (session.error) throw new Error(session.error.message ?? 'agy refused the session');
-      sessionId = String(session.result?.sessionId);
     }
-    // The model the app chose, set on the session before its first prompt.
-    const model = start.options.model;
-    if (model !== undefined) {
-      const set = await call('session/set_model', { sessionId, modelId: model });
-      if (set.error) throw new Error(set.error.message ?? `agy refused the model ${model}`);
+    const reply =
+      resume !== undefined
+        ? await call('session/resume', { sessionId: resume, ...opening })
+        : await call('session/new', opening);
+    if (reply.error) {
+      throw new Error(reply.error.message ?? `agy refused to ${resume !== undefined ? 'resume' : 'open'} the session`);
     }
+    sessionId = resume ?? String(reply.result?.sessionId);
+    // Its settings as they are now go to ccd with agy's other words; their menus, on the start's outcome.
+    forward(reply as Json);
+    initialize = menus(reply.result);
+    // The model the app chose, and a relaunch's effort and mode (the run's when it ended), before the first prompt.
+    const { model, effort, permission_mode: mode } = start.options;
+    if (model !== undefined) await set('session/set_config_option', { configId: 'model', value: model });
+    if (effort !== undefined) await set('session/set_config_option', { configId: 'thought_level', value: effort });
+    if (mode !== undefined) await set('session/set_mode', { modeId: mode });
   })();
   opened.then(
     () => {
-      send({ type: 'outcome', uuid: start.uuid, status: 'done' });
+      send({ type: 'outcome', uuid: start.uuid, status: 'done', ...(initialize === undefined ? {} : { initialize }) });
       for (const message of early ?? []) send({ type: 'acp', message });
       early = undefined;
       if (start.prompt !== '') queued.push({ uuid: start.uuid, text: start.prompt });
@@ -260,6 +299,31 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
       send({ type: 'outcome', uuid: command.uuid, status: 'done' });
     },
     pending: () => [...held.values()].map((open) => open.request),
+    // An app's change of the model, the effort (agy's thought level) or the mode, each line once the one before is
+    // answered: `done` once agy has taken every part, `refused` with agy's words at the first it does not.
+    setting(command: Setting): void {
+      settings = settings.then(async () => {
+        const option = (configId: string, value: string): [string, object] => [
+          'session/set_config_option',
+          { configId, value },
+        ];
+        const parts: [string, object][] =
+          command.type === 'set_mode'
+            ? [['session/set_mode', { modeId: command.mode }]]
+            : [
+                ...(command.model === undefined ? [] : [option('model', command.model)]),
+                ...(command.effort === undefined ? [] : [option('thought_level', command.effort)]),
+              ];
+        try {
+          if (ended || sessionId === undefined) throw new Error('the run is not taking settings');
+          if (parts.length === 0) throw new Error('nothing to change');
+          for (const [method, params] of parts) await set(method, params);
+          send({ type: 'outcome', uuid: command.uuid, status: 'done' });
+        } catch (error) {
+          refuse(command.uuid, error instanceof Error ? error.message : String(error));
+        }
+      });
+    },
     stop(): void {
       stopped = true;
       cancelHeld();

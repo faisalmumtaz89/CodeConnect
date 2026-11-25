@@ -3451,8 +3451,8 @@ impl Daemon {
         }
         // A live run CodeConnect started offers its settings: a Claude run's from its start's
         // answer, with the one its model fact names marked (its newest receipt read for that
-        // here); a Codex run's from its start's check and the model it started on, its model
-        // fact marked as it is.
+        // here); a Codex run's from its start's check and the model it started on, and an Antigravity
+        // run's from its start's outcome, each with its model fact marked as it is.
         let mut menus: HashMap<String, protocol::event::RunMenus> = HashMap::new();
         // Every Claude run CodeConnect started keeps its start's models, ended or not: its model
         // fact is named by the chosen entry's id, never by claude's receipt of a change.
@@ -3483,9 +3483,18 @@ impl Daemon {
                 protocol::agent::AgentKind::Codex => {
                     codex_ended.push((row.session_uid.clone(), crate::codex_host::menus(&models)));
                 }
-                // No menus yet: its models and modes come with a later slice.
-                protocol::agent::AgentKind::Antigravity
-                | protocol::agent::AgentKind::Unsupported(_) => {}
+                // agy's model families and modes, its model fact a family as its menu names it, as Codex's is.
+                protocol::agent::AgentKind::Antigravity => {
+                    let modes = self.db.hosted_modes(row.session_uid.clone()).await?;
+                    let menu = crate::claude_host::acp_menus(&models, &modes);
+                    if live {
+                        menus.insert(row.session_uid.clone(), menu);
+                        codex_menus.push(row.session_uid.clone());
+                    } else {
+                        codex_ended.push((row.session_uid.clone(), menu));
+                    }
+                }
+                protocol::agent::AgentKind::Unsupported(_) => {}
             }
         }
         // An ended run the person's next message relaunches, of either agent.
@@ -3536,7 +3545,7 @@ impl Daemon {
                     .then(|| fact.value.clone());
             }
         }
-        // A Codex entry's label is its model's name, else the model itself: only a name is given.
+        // A Codex or Antigravity entry's label is its model's name, else the model itself: only a name is given.
         for (uid, menu) in &codex_ended {
             let fact = inner
                 .session_facts

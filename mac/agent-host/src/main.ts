@@ -135,6 +135,7 @@ function begin(start: Start): void {
     permissions = run;
     interrupt = run.interrupt;
     say = run.say;
+    setting = run.setting;
     stop = () => {
       stop = undefined;
       run.stop();

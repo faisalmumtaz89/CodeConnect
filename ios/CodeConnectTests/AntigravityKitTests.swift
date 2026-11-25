@@ -102,6 +102,54 @@ final class AntigravityKitTests: XCTestCase {
         XCTAssertFalse(AgentKind.unsupported("gemini").takesDenyReason)
     }
 
+    /// A recorded hosted summary (`minor-46-wire.json`) as an Antigravity run's, with `changes` applied: the menus,
+    /// facts and label in the shapes ccd's `an_antigravity_runs_settings_are_agys_own` emits for one.
+    private func summary(_ key: String, _ changes: [String: JSONValue]) throws -> SessionSummary {
+        var frame = try XCTUnwrap(try wire("minor-46-wire")[key]?.objectValue)
+        frame["agent"] = .string("antigravity")
+        for (field, value) in changes { frame[field] = value }
+        return try JSONDecoder().decode(SessionSummary.self, from: Data(JSONValue.object(frame).canonicalJSONString.utf8))
+    }
+
+    private func fact(_ value: String) -> JSONValue { .object(["value": .string(value), "seq": .number(4)]) }
+
+    /// A live Antigravity run with menus draws them as a hosted run's: agy's families, the chosen one's efforts, and
+    /// agy's modes, each selected from its facts. Ended, its model reads by its family's name.
+    func testAnAntigravityRunsSettingsAreDrawnFromItsMenus() throws {
+        let model: (String, String, [String]) -> JSONValue = { value, label, efforts in
+            .object(["value": .string(value), "label": .string(label), "efforts": .array(efforts.map { .string($0) })])
+        }
+        let menus: JSONValue = .object([
+            "models": .array([
+                model("gemini-4-neon", "Gemini 4 Neon", ["high", "xhigh", "medium", "low"]),
+                model("gemini-3.8-flash", "Gemini 3.8 Flash", ["high", "medium", "low"]),
+            ]),
+            "modes": .array(
+                [("default", "Default"), ("accept-edits", "Accept edits"), ("auto", "Auto"), ("plan", "Plan")].map {
+                    .object(["value": .string($0.0), "label": .string($0.1)])
+                }),
+            "selected_model": .string("gemini-4-neon"),
+        ])
+        let live = try summary(
+            "session_hosted_live",
+            ["menus": menus, "model": fact("gemini-4-neon"), "effort": fact("high"), "permission_mode": fact("plan")])
+        guard case .hostedLive(let settings) = RunSettings.of(summary: live) else {
+            return XCTFail("an Antigravity run with menus draws no settings: \(RunSettings.of(summary: live))")
+        }
+        XCTAssertEqual(settings.models.map(\.value), ["gemini-4-neon", "gemini-3.8-flash"])
+        XCTAssertEqual(settings.selectedModel?.value, "gemini-4-neon")
+        XCTAssertEqual(settings.efforts.map(\.value), ["high", "xhigh", "medium", "low"])
+        XCTAssertEqual(settings.selectedEffort?.value, "high")
+        XCTAssertEqual(settings.modes.map(\.value), ["default", "accept-edits", "auto", "plan"])
+        XCTAssertEqual(settings.selectedMode?.value, "plan")
+        XCTAssertFalse(settings.modes.contains(where: \.confirm), "none of agy's modes asks nothing")
+
+        let ended = try summary(
+            "session_hosted_ended", ["model": fact("gemini-4-neon"), "model_label": .string("Gemini 4 Neon")])
+        XCTAssertEqual(
+            RunSettings.of(summary: ended), .hostedReadOnly(model: RunModelName(text: "Gemini 4 Neon", reported: false)))
+    }
+
     /// Stop follows the hosted rule, and its sentences name Antigravity.
     func testAnAntigravityTurnIsStoppedAsAHostedOne() {
         XCTAssertNil(

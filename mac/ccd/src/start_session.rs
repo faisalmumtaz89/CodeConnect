@@ -1340,10 +1340,15 @@ async fn agent_availability(
         models: Vec::new(),
         signed_in: None,
     };
-    // Antigravity is startable where an agy is found; nothing is asked of it yet.
+    // Antigravity is startable where an agy is found, with what agy offers.
     if *agent == AgentKind::Antigravity {
         return match agy_path(environment, configured).await {
-            Some(_) => startable(agent, None, Vec::new(), &this_computer()),
+            Some(agy) => {
+                let offer = agy_offer(known, environment, &agy)
+                    .await
+                    .unwrap_or_default();
+                startable(agent, offer.signed_in, offer.models, &this_computer())
+            }
             None => unavailable(missing(agent).1),
         };
     }
@@ -1930,6 +1935,115 @@ async fn ask(
     // A signed-in app-server keeps running, and one that did not answer is ended too, with what it started.
     if *agent != AgentKind::Claude || offer.is_none() {
         end_agent(&mut child).await;
+    }
+    offer
+}
+
+/// What the agy at `agy` offers a start: the model families its settings name, and whether it is signed in. agy has
+/// no list of its own over ACP, so it is asked by opening one session with no prompt (`session/new`, which a signed-out
+/// agy refuses with "Authentication required") and closing it at once (`session/close`): agy 1.5.15 keeps such a
+/// session in no history (measured, `session/list` before and after). Asking starts agy and reaches Google, so a
+/// signed-in answer is kept for that binary (its size and time: agy names no version); a signed-out one is asked
+/// again at each list, as nothing cheaper says when it is signed in. None when agy answered neither way in time.
+async fn agy_offer(
+    known: &KnownAgents,
+    environment: &HashMap<OsString, OsString>,
+    agy: &Path,
+) -> Option<Offer> {
+    let version = std::fs::metadata(agy)
+        .map(|meta| format!("{} {:?}", meta.len(), meta.modified().ok()))
+        .unwrap_or_default();
+    if let Some(kept) = known.offered(&AgentKind::Antigravity, None, &version) {
+        return Some(kept);
+    }
+    let mut command = agent_command(environment, None, &[agy.as_os_str(), OsStr::new("acp")]);
+    let home = home_in(environment);
+    command
+        .current_dir(&home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let asked = async {
+        let mut stdin = child.stdin.take()?;
+        let mut lines = BufReader::new(child.stdout.take()?).lines();
+        let call = |id: u64, method: &str, params: serde_json::Value| {
+            let line =
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+            format!("{line}\n")
+        };
+        // agy's reply to the call numbered `id`; its notifications, and what the user's shell prints, are skipped.
+        async fn reply(
+            lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+            id: u64,
+        ) -> Option<serde_json::Value> {
+            loop {
+                let line = lines.next_line().await.ok()??;
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if value["id"] == id && value.get("method").is_none() {
+                        return Some(value);
+                    }
+                }
+            }
+        }
+        let initialize = call(
+            1,
+            "initialize",
+            serde_json::json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        );
+        stdin.write_all(initialize.as_bytes()).await.ok()?;
+        reply(&mut lines, 1).await?;
+        let new = call(
+            2,
+            "session/new",
+            serde_json::json!({"cwd": home, "mcpServers": []}),
+        );
+        stdin.write_all(new.as_bytes()).await.ok()?;
+        let opened = reply(&mut lines, 2).await?;
+        if opened["error"]["message"] == "Authentication required" {
+            return Some(Offer {
+                signed_in: Some(false),
+                ..Offer::default()
+            });
+        }
+        let session = opened["result"]["sessionId"].as_str()?;
+        let close = call(
+            3,
+            "session/close",
+            serde_json::json!({"sessionId": session}),
+        );
+        stdin.write_all(close.as_bytes()).await.ok()?;
+        reply(&mut lines, 3).await?;
+        let models = opened["result"]["configOptions"]
+            .as_array()?
+            .iter()
+            .find(|option| option["category"] == "model")?["options"]
+            .as_array()?
+            .iter()
+            .filter_map(|entry| {
+                Some(AgentModel {
+                    value: entry["value"].as_str()?.to_string(),
+                    label: entry["name"].as_str()?.to_string(),
+                    detail: None,
+                })
+            })
+            .collect();
+        Some(Offer {
+            models,
+            signed_in: Some(true),
+            menu: Vec::new(),
+        })
+    };
+    let offer = tokio::time::timeout(PROBE_TIMEOUT, asked)
+        .await
+        .ok()
+        .flatten();
+    end_agent(&mut child).await;
+    if offer
+        .as_ref()
+        .is_some_and(|offer| offer.signed_in == Some(true))
+    {
+        known.keep(&AgentKind::Antigravity, None, &version, offer.clone()?);
     }
     offer
 }
@@ -5260,29 +5374,96 @@ esac"#;
         agent_availability(&AgentKind::Codex, known, &rig.env, None, None).await
     }
 
-    /// **Antigravity is listed as startable when an agy is found**, with nothing asked of it
-    /// (no sign-in or models are read from agy yet), and as not installed, in its own name,
-    /// when none is.
+    /// A stand-in `agy` at `path` answering `agy acp` as agy 1.5.15 does: `initialize`, then `session/new` with its
+    /// settings (two model families), or, `signed_out`, with "Authentication required"; `session/close` with nothing.
+    /// Every line it reads goes to `<path>.asks`.
+    fn agy_says(path: &Path, signed_out: bool) {
+        let opened = if signed_out {
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Authentication required"}}"#
+        } else {
+            r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-ask","configOptions":[{"id":"model","category":"model","currentValue":"gemini-4-neon","options":[{"value":"gemini-4-neon","name":"Gemini 4 Neon"},{"value":"gemini-3.8-flash","name":"Gemini 3.8 Flash"}]},{"id":"mode","category":"mode","currentValue":"default","options":[]}]}}"#
+        };
+        let asks = format!("{}.asks", path.display());
+        let script = format!(
+            "#!/bin/sh\nwhile read -r line; do\n  printf '%s\\n' \"$line\" >> '{asks}'\n  case \"$line\" in\n    *'\"initialize\"'*) echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":1}}}}' ;;\n    *'\"session/new\"'*) echo '{opened}' ;;\n    *'\"session/close\"'*) echo '{{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{{}}}}' ;;\n  esac\ndone\n",
+        );
+        std::fs::write(path, script).unwrap();
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+    }
+
+    /// **Antigravity is listed with agy's own models** (S1): its start box offers the model families agy's settings
+    /// name, read from one session opened with no prompt and closed again (which agy keeps in no history), asked
+    /// once while it is signed in. A signed-out agy is listed as such, with no models; none found, as not installed,
+    /// in its own name.
     #[tokio::test]
-    async fn antigravity_is_listed_when_an_agy_is_found() {
+    async fn antigravity_is_listed_with_agys_own_models() {
         let rig = Rig::new("agy-listed", ANSWERING);
         let known = KnownAgents::default();
         let agy = rig.root.join("agy");
-        std::fs::write(&agy, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&agy, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
-        let found = agent_availability(
-            &AgentKind::Antigravity,
-            &known,
-            &rig.env,
-            None,
-            agy.to_str(),
-        )
-        .await;
+        agy_says(&agy, false);
+        let listed = || {
+            agent_availability(
+                &AgentKind::Antigravity,
+                &known,
+                &rig.env,
+                None,
+                agy.to_str(),
+            )
+        };
+        let found = listed().await;
         assert_eq!(found.agent, AgentKind::Antigravity);
         assert!(found.available, "{found:?}");
         assert_eq!(found.detail, None);
-        assert_eq!(found.signed_in, None);
+        assert_eq!(found.signed_in, Some(true));
+        assert_eq!(
+            found.models,
+            vec![
+                AgentModel {
+                    value: "gemini-4-neon".into(),
+                    label: "Gemini 4 Neon".into(),
+                    detail: None
+                },
+                AgentModel {
+                    value: "gemini-3.8-flash".into(),
+                    label: "Gemini 3.8 Flash".into(),
+                    detail: None
+                },
+            ]
+        );
+        let asks = || std::fs::read_to_string(format!("{}.asks", agy.display())).unwrap();
+        assert!(
+            asks().contains(r#""method":"session/close","params":{"sessionId":"sess-ask"}"#),
+            "{}",
+            asks()
+        );
+        assert_eq!(listed().await, found);
+        assert_eq!(
+            asks().matches("initialize").count(),
+            1,
+            "asked once while signed in"
+        );
+
+        let signed_out = rig.root.join("agy-out");
+        agy_says(&signed_out, true);
+        let out = agent_availability(
+            &AgentKind::Antigravity,
+            &KnownAgents::default(),
+            &rig.env,
+            None,
+            signed_out.to_str(),
+        )
+        .await;
+        assert!(out.available);
+        assert_eq!(out.signed_in, Some(false));
+        assert_eq!(out.models, Vec::new());
+        assert_eq!(
+            out.detail,
+            Some(format!(
+                "Antigravity on {} isn’t signed in.",
+                this_computer()
+            ))
+        );
         let missing = agent_availability(
             &AgentKind::Antigravity,
             &known,

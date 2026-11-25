@@ -1737,8 +1737,8 @@ impl Store {
     /// Each read is narrowed in SQL to the rows that can decide its fact under
     /// [`protocol::facts`] — a `session_start` or a user line for the model, a
     /// hook, Claude's permission-mode line or an SDK run's init for the mode, a
-    /// notification or a user line for the effort, and a Codex run's settings
-    /// ([`protocol::facts::CODEX_SETTINGS`]) for each — so a long run costs those rows
+    /// notification or a user line for the effort, and a Codex or an Antigravity run's settings
+    /// ([`protocol::facts::CODEX_SETTINGS`], [`protocol::facts::ACP_SETTINGS`]) for each — so a long run costs those rows
     /// down to the deciding one, not its whole log.
     pub fn session_facts(&self, session_uid: &str) -> Result<protocol::facts::SessionFacts> {
         let conn = self.read();
@@ -1746,24 +1746,26 @@ impl Store {
             model: newest_decided(
                 &conn,
                 session_uid,
-                "kind IN (?2, ?3, ?4)",
+                "kind IN (?2, ?3, ?4, ?5)",
                 &[
                     EventKind::SessionStart.as_str(),
                     EventKind::UserMessage.as_str(),
                     protocol::facts::CODEX_SETTINGS,
+                    protocol::facts::ACP_SETTINGS,
                 ],
                 protocol::facts::model_fact,
             )?,
             permission_mode: newest_decided(
                 &conn,
                 session_uid,
-                "(kind IN (?2, ?6) OR source = ?3 OR (kind = ?4 AND source = ?5))",
+                "(kind IN (?2, ?6, ?7) OR source = ?3 OR (kind = ?4 AND source = ?5))",
                 &[
                     protocol::facts::TRANSCRIPT_PERMISSION_MODE,
                     Source::Hook.as_str(),
                     EventKind::SessionStart.as_str(),
                     Source::Sdk.as_str(),
                     protocol::facts::CODEX_SETTINGS,
+                    protocol::facts::ACP_SETTINGS,
                 ],
                 protocol::facts::permission_mode_fact,
             )?,
@@ -1771,13 +1773,14 @@ impl Store {
             effort: newest_decided(
                 &conn,
                 session_uid,
-                "kind IN (?2, ?3, ?4) AND seq > COALESCE((SELECT MAX(seq) FROM events
+                "kind IN (?2, ?3, ?4, ?6) AND seq > COALESCE((SELECT MAX(seq) FROM events
                                                        WHERE session_uid = ?1 AND kind = ?5), 0)",
                 &[
                     EventKind::Notification.as_str(),
                     EventKind::UserMessage.as_str(),
                     protocol::facts::CODEX_SETTINGS,
                     EventKind::SessionEnd.as_str(),
+                    protocol::facts::ACP_SETTINGS,
                 ],
                 protocol::facts::effort_fact,
             )?,
@@ -1790,7 +1793,7 @@ impl Store {
             ended_with: newest_decided(
                 &conn,
                 session_uid,
-                "kind IN (?2, ?3, ?4)
+                "kind IN (?2, ?3, ?4, ?6)
                  AND seq < (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1 AND kind = ?5)
                  AND seq > (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_uid = ?1 AND kind = ?5
                               AND seq < (SELECT MAX(seq) FROM events WHERE session_uid = ?1 AND kind = ?5))",
@@ -1799,6 +1802,7 @@ impl Store {
                     EventKind::UserMessage.as_str(),
                     protocol::facts::CODEX_SETTINGS,
                     EventKind::SessionEnd.as_str(),
+                    protocol::facts::ACP_SETTINGS,
                 ],
                 protocol::facts::effort_fact,
             )?,
@@ -2399,6 +2403,25 @@ impl Store {
             .map(|json| serde_json::from_str(&json))
             .transpose()
             .context("a hosted run's models")
+    }
+
+    /// The modes of the hosted Antigravity run `session_uid`, as its start's outcome gave them (`{value, label}`);
+    /// empty for any other run and when none are kept.
+    pub fn hosted_modes(&self, session_uid: &str) -> Result<Vec<serde_json::Value>> {
+        let conn = self.read();
+        let modes = conn
+            .query_row(
+                "SELECT json_extract(initialize, '$.modes') FROM run_hosts WHERE session_uid = ?1",
+                [session_uid],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(modes
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .context("a hosted run's modes")?
+            .unwrap_or_default())
     }
 
     /// Whether the run `session_uid` is in a turn: its newest `session_start` has no
@@ -10415,6 +10438,61 @@ mod tests {
                 Some("full-access".into())
             )
         );
+    }
+
+    /// **An Antigravity run's settings are read back after a restart as they were folded live**: its model, effort
+    /// and mode from its newest `acp_settings` naming each, its opening's and a later change of the mode alone, and
+    /// the effort its process held at its end.
+    #[test]
+    fn an_antigravity_runs_settings_are_read_back_as_they_were_folded() {
+        let (store, _path) = temp_store();
+        let session = key("AA", "cc-1");
+        begin(&store, &session);
+        let settings = |payload: serde_json::Value| {
+            let mut report = pending(
+                &session,
+                EventKind::Other(protocol::facts::ACP_SETTINGS.into()),
+                None,
+            );
+            report.source = Source::Acp;
+            report.payload = payload;
+            report
+        };
+        let mut live = protocol::facts::SessionFacts::default();
+        for report in [
+            settings(
+                serde_json::json!({"model": "gemini-4-neon", "effort": "high", "mode": "default"}),
+            ),
+            settings(serde_json::json!({"mode": "plan"})),
+        ] {
+            live.observe(&store.append_event(&report).unwrap().unwrap());
+        }
+        let read = store.session_facts(&session.uid).unwrap();
+        assert_eq!(read, live);
+        assert_eq!(
+            (
+                read.model.map(|fact| fact.value),
+                read.effort.map(|fact| fact.value),
+                read.permission_mode.map(|fact| fact.value),
+            ),
+            (
+                Some("gemini-4-neon".into()),
+                Some("high".into()),
+                Some("plan".into())
+            )
+        );
+        live.observe(
+            &store
+                .append_event(&pending(&session, EventKind::SessionEnd, None))
+                .unwrap()
+                .unwrap(),
+        );
+        let read = store.session_facts(&session.uid).unwrap();
+        assert_eq!(
+            read.ended_with.map(|fact| fact.value).as_deref(),
+            Some("high")
+        );
+        assert_eq!(store.session_facts(&session.uid).unwrap(), live);
     }
 
     #[test]
