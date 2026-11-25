@@ -114,6 +114,9 @@ enum Fixtures {
         /// card whose rule it would grant (fixtures/claude/minor-36-wire.json).
         /// The one fixture that shows what that grant covers.
         case sessionGrant
+        /// **A live Antigravity run held on its first card**, as a rig ccd sent it (`antigravityRunJSON`): the apps'
+        /// one fixture of an agent-host run that is not Claude's.
+        case antigravity
 
         init?(_ raw: String?) {
             guard let raw, let value = Variant(rawValue: raw) else { return nil }
@@ -125,7 +128,7 @@ enum Fixtures {
             case .deck, .ended, .ended45, .longOutput: return deckCards
             case .stacked, .wideTool, .mcpApproval: return deckCards + [stackedCard]
             case .spoofedCommand: return [spoofedCard]
-            case .empty, .timeline, .timelineLongName, .hostedSettings: return []
+            case .empty, .timeline, .timelineLongName, .hostedSettings, .antigravity: return []
             case .single: return deckCards.filter { $0.sessionID == "fx-1" }
             case .sessionGrant: return [sessionGrantCard]
             }
@@ -142,7 +145,7 @@ enum Fixtures {
             case .ended: return 8
             case .ended45: return 45
             case .deck, .stacked, .longOutput, .wideTool, .mcpApproval, .spoofedCommand, .empty,
-                .single, .timeline, .timelineLongName, .hostedSettings, .sessionGrant:
+                .single, .timeline, .timelineLongName, .hostedSettings, .sessionGrant, .antigravity:
                 return 0
             }
         }
@@ -158,6 +161,7 @@ enum Fixtures {
             case .stacked, .longOutput, .wideTool, .mcpApproval: return 5
             case .empty: return 0
             case .hostedSettings: return 5
+            case .antigravity: return 1
             case .timeline, .timelineLongName: return 7
             }
         }
@@ -262,6 +266,7 @@ enum Fixtures {
     }
 
     static func frames(now: Date = Fixtures.now, variant: Variant = .deck) -> [ServerMessage] {
+        if variant == .antigravity { return antigravityFrames(now: now) }
         let cards = variant.cards
         let held = variant.heldCard.map { [$0] } ?? []
         var messages: [ServerMessage] = []
@@ -463,6 +468,27 @@ enum Fixtures {
     /// this ack; see `sampleHelloAckJSON`. `machine_name` and `machine_os`
     /// are what a minor-25 daemon sends, set here so the cards show a
     /// computer; the phone decodes them at any minor.
+    /// The `antigravity` fixture: an ack of a computer that hosts Antigravity runs (`claude_interrupt`, the agent
+    /// host's Stop), then the recorded run's summary and its events, every time stamped `now`.
+    private static func antigravityFrames(now: Date) -> [ServerMessage] {
+        let ack = helloAckJSON.replacingOccurrences(
+            of: #""browse_folders":true}"#, with: #""browse_folders":true,"claude_interrupt":true,"stop_run":true}"#)
+        let recorded = antigravityRunJSON.replacingOccurrences(of: "@STAMP@", with: rfc3339(now))
+        guard let run = try? JSONDecoder().decode(JSONValue.self, from: Data(recorded.utf8)),
+            let sessions = run["sessions"], let events = run["events"]?.arrayValue
+        else { return [] }
+        let frames: [JSONValue] =
+            [.object(["type": .string("sessions"), "sessions": sessions])]
+            + events.map { .object(["type": .string("event"), "event": $0]) }
+        return ([ack] + frames.map(\.canonicalJSONString)).compactMap(decode)
+    }
+
+    /// An Antigravity run started in a stand-in rig (mac/agent-host's stand-in agy), waiting on its first card: the
+    /// rig ccd's own `sessions` list and the run's events, recorded whole by the e2e kit (`wire`), times as `@STAMP@`.
+    private static let antigravityRunJSON = #"""
+        {"events":[{"kind":"link_state","payload":{"link":"attached","reason":"agent host linked"},"seq":1,"session_id":"01M889RXGZHRK9MTWB60WK2AGM","session_uid":"01M889RXGZHRK9MTWB60WK2AGM","source":"daemon","ts":"@STAMP@"},{"kind":"user_message","payload":{"text":"read the note"},"seq":2,"session_id":"01M889RXGZHRK9MTWB60WK2AGM","session_uid":"01M889RXGZHRK9MTWB60WK2AGM","source":"daemon","source_event_id":"say:fe8cecd2-0a3c-412c-bf5f-87331dcd84cb","ts":"@STAMP@"},{"kind":"agent_message","payload":{"text":"Hello."},"seq":3,"session_id":"01M889RXGZHRK9MTWB60WK2AGM","session_uid":"01M889RXGZHRK9MTWB60WK2AGM","source":"acp","source_event_id":"fe8cecd2-0a3c-412c-bf5f-87331dcd84cb/text/4","ts":"@STAMP@","turn_id":"fe8cecd2-0a3c-412c-bf5f-87331dcd84cb"},{"kind":"tool_call","payload":{"tool_input":{"command":"cat NOTE.txt"},"tool_name":"cat NOTE.txt","tool_use_id":"call_1"},"seq":4,"session_id":"01M889RXGZHRK9MTWB60WK2AGM","session_uid":"01M889RXGZHRK9MTWB60WK2AGM","source":"acp","source_event_id":"fe8cecd2-0a3c-412c-bf5f-87331dcd84cb/tool_call/call_1","ts":"@STAMP@","turn_id":"fe8cecd2-0a3c-412c-bf5f-87331dcd84cb"},{"kind":"approval_request","payload":{"card":{"display_text":"cat NOTE.txt\n{\"command\":\"cat NOTE.txt\"}","generation":0,"identity_bound":true,"payload_hash":"c86b1354fb42869d5ac13642fa20cf5628e8b03ea32196d4c3eddab3df2681bc","question_hold":"held","request_id":"fe8cecd2-0a3c-412c-bf5f-87331dcd84cb/101","risk":{"class":"medium"},"tool_input":{"command":"cat NOTE.txt"},"tool_name":"cat NOTE.txt"}},"seq":5,"session_id":"01M889RXGZHRK9MTWB60WK2AGM","session_uid":"01M889RXGZHRK9MTWB60WK2AGM","source":"daemon","source_event_id":"perm:fe8cecd2-0a3c-412c-bf5f-87331dcd84cb/101","ts":"@STAMP@"}],"sessions":[{"account":{"id":null,"label":"Default"},"agent":"antigravity","blocked_on":["fe8cecd2-0a3c-412c-bf5f-87331dcd84cb/101"],"codex_link":"none","created_at":"@STAMP@","cwd":"/private/tmp/ccmk.5YUK0H/h/proj-alpha","last_seq":5,"lifecycle":"live","link":"attached","pending":[{"hold":"held","request_id":"fe8cecd2-0a3c-412c-bf5f-87331dcd84cb/101","seq":5}],"project_label":"proj-alpha","session_id":"01M889RXGZHRK9MTWB60WK2AGM","session_uid":"01M889RXGZHRK9MTWB60WK2AGM","updated_at":"@STAMP@"}]}
+        """#
+
     private static let helloAckJSON = """
         {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
