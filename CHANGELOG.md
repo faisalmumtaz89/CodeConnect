@@ -5,6 +5,11 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.25
 
+- On the Mac and Linux, CodeConnect's background service starts much faster with a long history: with a million
+  events stored, in about 0.9 s instead of 3.0 s on a Mac and 0.55 s instead of 2.0 s on Linux. At rest it runs
+  5 threads instead of 29 on a Mac and 9 on Linux.
+- On the Mac, a phone notification held back while you are at the Mac no longer wakes it ten times a second.
+
 ## CodeConnect 0.19.24
 
 - On the Mac and Linux, switching accounts no longer loses a session's waiting messages from your other sessions,
