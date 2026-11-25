@@ -181,7 +181,7 @@ struct PairingView: View {
                     index: 2,
                     title: "Install CodeConnect on your computer",
                     message:
-                        "Get CodeConnect for your computer at [codeconnect.sh](https://codeconnect.sh). It installs, starts, and shows a code to scan here. Your computer also needs Claude Code or Codex.")
+                        "Get CodeConnect for your computer at [codeconnect.sh](https://codeconnect.sh). It installs, starts, and shows a code to scan here. Your computer also needs Claude Code, Codex or Antigravity.")
                 CCHairline()
                 CCStepRow(
                     index: 3,

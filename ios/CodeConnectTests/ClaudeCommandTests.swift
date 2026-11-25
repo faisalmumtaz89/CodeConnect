@@ -132,18 +132,18 @@ final class PaletteContentTests: XCTestCase {
     /// edit (the latch kept the draft it closed on, and "/" typed again matched it), so Return sent a bare "/".
     func testThePaletteComesBackOnTheNextEdit() {
         var latch = SlashPalette.Latch()
-        XCTAssertNotNil(latch.content(for: "/", claudeRun: true, focused: true))
+        XCTAssertNotNil(latch.content(for: "/", agent: .claude, focused: true))
         latch.close()  // /model ran from the palette
-        XCTAssertNil(latch.content(for: "/", claudeRun: true, focused: true), "closed on the draft it ran from")
+        XCTAssertNil(latch.content(for: "/", agent: .claude, focused: true), "closed on the draft it ran from")
         latch.edited()  // ⌘A Delete
         latch.edited()  // "/"
-        XCTAssertNotNil(latch.content(for: "/", claudeRun: true, focused: true), "the same words typed again show it")
+        XCTAssertNotNil(latch.content(for: "/", agent: .claude, focused: true), "the same words typed again show it")
         latch.close()  // Esc on "/c"
-        XCTAssertNil(latch.content(for: "/c", claudeRun: true, focused: true), "Esc keeps it closed on the words")
+        XCTAssertNil(latch.content(for: "/c", agent: .claude, focused: true), "Esc keeps it closed on the words")
         latch.edited()  // "/cl"
-        XCTAssertEqual(latch.content(for: "/cl", claudeRun: true, focused: true)?.rows.map(\.command), ["clear"])
-        XCTAssertNil(latch.content(for: "/", claudeRun: false, focused: true), "a Codex run has no palette")
-        XCTAssertNil(latch.content(for: "/", claudeRun: true, focused: false), "nor a box without the keyboard")
+        XCTAssertEqual(latch.content(for: "/cl", agent: .claude, focused: true)?.rows.map(\.command), ["clear"])
+        XCTAssertNil(latch.content(for: "/", agent: .codex, focused: true), "a Codex run has no palette")
+        XCTAssertNil(latch.content(for: "/", agent: .claude, focused: false), "nor a box without the keyboard")
     }
 
     /// The palette's keys: the first row lit, ↑ and ↓ move the light and stop at the ends, Return runs the lit row,

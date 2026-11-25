@@ -319,8 +319,9 @@ public enum CodexProse {
             // there is nothing to send, so the control is absent rather than dead.
             guard runningTurn != nil else { return "Nothing is running to stop." }
             return link.blockedReason(for: .stop)
-        case .claude:
-            // A Claude run is stopped when it is live, a turn is actually running,
+        case .claude, .antigravity:
+            // A run on the computer's agent host (Claude Code's, or Antigravity's) is stopped when it is live, a
+            // turn is actually running,
             // and its own link to the host is attached. No Codex control-link
             // check — its interrupt does not travel the Codex link — but it does
             // ride ccd's link to the host.
@@ -334,7 +335,7 @@ public enum CodexProse {
             // banner — in the race where the run's state changes between the button
             // showing and the tap landing (the run ends under a shown button).
             guard daemonHonoursStop else {
-                return "\(HostDevice.current.computer("This computer"))’s CodeConnect is too old to stop a Claude turn. Update it."
+                return "\(HostDevice.current.computer("This computer"))’s CodeConnect is too old to stop \(agent == .antigravity ? "an" : "a") \(agent.displayName) turn. Update it."
             }
             guard isLive else { return "This run has ended, so there is no turn to stop." }
             guard runningTurn != nil else { return "Nothing is running to stop." }
@@ -347,7 +348,7 @@ public enum CodexProse {
             }
             return nil
         case .unsupported:
-            return "Only a Claude or Codex run can be stopped from here."
+            return "Only a Claude, Codex or Antigravity run can be stopped from here."
         }
     }
 

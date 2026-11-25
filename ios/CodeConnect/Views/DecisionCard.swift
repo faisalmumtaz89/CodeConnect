@@ -224,10 +224,9 @@ struct DecisionCardView: View {
                 // Its own `Come back to this` rides in the bar above instead, at
                 // every size, because that one is a queue control and not an
                 // answer.
-                if isClaudeCard,
-                    Self.subordinateControlsShown(
-                        isAccessibilitySize: typeSize.isAccessibilitySize,
-                        isActionable: isActionable)
+                if Self.footerHoldsSubordinates(
+                    agent: sessionAgent, isAccessibilitySize: typeSize.isAccessibilitySize,
+                    isActionable: isActionable)
                 {
                     subordinateControls
                 }
@@ -832,7 +831,7 @@ struct DecisionCardView: View {
             // reader is checking, and its `request_id` is a short opaque token.
             // Claude's, and only on a card known to be Claude's. An unknown
             // agent gets no raw disclosure: the JSON may be Codex's.
-            if isClaudeCard {
+            if isClaudeCard || sessionAgent == .antigravity {
                 CCDisclosure("Full tool input", labelOnContentColumn: false) {
                     VStack(alignment: .leading, spacing: CC.space.sm) {
                         CCMonoBlock(approval.card.shownToolInput).onContainerEdge()
@@ -1015,7 +1014,7 @@ struct DecisionCardView: View {
                 message: DecisionCard.hashMismatchSentence,
                 tone: .danger, icon: "shield-warning-fill")
         case .resolution(let attempt):
-            ResolutionBanner(attempt: attempt)
+            ResolutionBanner(attempt: attempt, agent: sessionAgent ?? .claude)
         case .alreadyResolved(let outcome):
             let banner = DecisionCard.alreadyResolvedBanner(for: outcome, now: model.now)
             CCBanner(banner.title, message: banner.message, tone: banner.tone.ccTone, icon: banner.icon)
@@ -1278,7 +1277,8 @@ struct DecisionCardView: View {
                 linkReason: model.actionsBlockedReason)
         case .unsupported(let raw):
             return DecisionCard.unsupportedAgentReason(raw)
-        case .claude:
+        // An Antigravity card is a hosted card, as a Claude one is; it is never a question.
+        case .claude, .antigravity:
             return DecisionCard.claudeUnanswerableReason(
                 isQuestion: QuestionCard.isQuestionToolName(approval.card.toolName),
                 hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
@@ -1326,6 +1326,12 @@ struct DecisionCardView: View {
     /// `isActionable` the view computes, matching every other surface's methodology.
     static func subordinateControlsShown(isAccessibilitySize: Bool, isActionable: Bool) -> Bool {
         isAccessibilitySize && isActionable
+    }
+
+    /// Whether the card's footer holds `subordinateControls` at this size: for every card whose action bar holds them
+    /// at the other sizes, so any agent but Codex, whose own bar keeps `Come back to this` at every size.
+    static func footerHoldsSubordinates(agent: AgentKind?, isAccessibilitySize: Bool, isActionable: Bool) -> Bool {
+        agent != .codex && subordinateControlsShown(isAccessibilitySize: isAccessibilitySize, isActionable: isActionable)
     }
 
     /// Whether the card draws **only** the queue control and no answer. True for
@@ -1378,7 +1384,7 @@ struct DecisionCardView: View {
                 }
                 .accessibilityIdentifier("allow-for-session")
             }
-            if !denyFieldShown {
+            if !denyFieldShown, sessionAgent?.takesDenyReason == true {
                 CCButton(
                     "Deny with a reason", icon: "chat-text", variant: .ghost, size: .md,
                     fullWidth: true,

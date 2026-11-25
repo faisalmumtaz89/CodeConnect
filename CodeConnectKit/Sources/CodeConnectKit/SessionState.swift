@@ -240,9 +240,40 @@ public final class SessionState {
     public struct Receipts {
         public let compact: CompactConfirmation?
         public let compactSeq: UInt64
+        /// The newest turn end the run has filed, which may settle an Antigravity `/compact`.
+        public var turnEndSeq: UInt64 = 0
+        /// An Antigravity run's newest `/compact`, which agy runs as a prompt of its own.
+        public var compactTurn: CompactTurn?
+
+        public struct CompactTurn {
+            /// Where the person's `/compact` was filed.
+            public let sentSeq: UInt64
+            /// agy's stop reason for that prompt's own turn, nil while it runs.
+            public let endReason: String?
+        }
     }
 
-    var receipts: Receipts { Receipts(compact: lastCompactSignal, compactSeq: lastCompactSignalSeq) }
+    var receipts: Receipts {
+        Receipts(
+            compact: lastCompactSignal, compactSeq: lastCompactSignalSeq,
+            turnEndSeq: events.last { $0.kind == .turnComplete }?.seq ?? 0,
+            compactTurn: Self.compactTurn(in: events))
+    }
+
+    /// The newest `/compact` the person sent and how its own turn ended: ccd files a send as `say:<uuid>` and the
+    /// prompt's turn under that uuid, so a turn running when it was sent, or a later one, does not answer it.
+    static func compactTurn(in events: [Event]) -> Receipts.CompactTurn? {
+        guard
+            let sent = events.last(where: {
+                $0.kind == .userMessage && ($0.payload["text"]?.stringValue ?? "").hasPrefix("/compact")
+            }),
+            let id = sent.sourceEventID, id.hasPrefix("say:")
+        else { return nil }
+        let turn = String(id.dropFirst("say:".count))
+        let end = events.last { $0.kind == .turnComplete && $0.turnID == turn && $0.seq > sent.seq }
+        return Receipts.CompactTurn(
+            sentSeq: sent.seq, endReason: end.map { $0.payload["stop_reason"]?.stringValue ?? "" })
+    }
 
 
     /// What to tell the reader when this run will never ask them anything.

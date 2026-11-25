@@ -739,13 +739,17 @@ fn hosted_run_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostedRun> {
 ///
 /// Returns `(table, other)`: the table a run of `agent` lives in, and the other one.
 ///
-/// **Everything that is not Claude goes to `codex_sessions`**, including an
+/// **Everything that is not a hosted run goes to `codex_sessions`**, including an
 /// [`AgentKind::Unsupported`] run. That is deliberate: `sessions` is the table a
 /// rolled-back v0.6.0 daemon sweeps, and an agent this build understands even less than
 /// Codex is not the one to leave in it. The table is named for the agent it was
 /// built for, not for the only agent it can ever hold.
+///
+/// An Antigravity run is a hosted run, its agent host's as a Claude run's is, so it lives
+/// in `sessions`: the hosts this ccd attaches again are read from there, and every path
+/// over `codex_sessions` takes a recorded host as a Codex app-server.
 fn session_tables_for(agent: &AgentKind) -> (&'static str, &'static str) {
-    if agent.is_claude() {
+    if matches!(agent, AgentKind::Claude | AgentKind::Antigravity) {
         ("sessions", "codex_sessions")
     } else {
         ("codex_sessions", "sessions")
@@ -1729,8 +1733,8 @@ impl Store {
 
     /// A run's facts, rebuilt as the live path keeps them: every event that can decide one, oldest
     /// first, folded by [`protocol::facts::SessionFacts::observe`]. One read of the run, narrowed in
-    /// SQL to those events under [`protocol::facts`] — a `session_start`, a user line, a Codex run's
-    /// settings ([`protocol::facts::CODEX_SETTINGS`]), Claude's permission-mode line, a notification,
+    /// SQL to those events under [`protocol::facts`] — a `session_start`, a user line, a Codex or an
+    /// Antigravity run's settings ([`protocol::facts::CODEX_SETTINGS`], [`protocol::facts::ACP_SETTINGS`]), Claude's permission-mode line, a notification,
     /// a `session_end`, or any hook's — so the facts a restart reads back are the ones the live fold
     /// would hold, by the same rule.
     pub fn session_facts(&self, session_uid: &str) -> Result<protocol::facts::SessionFacts> {
@@ -1738,7 +1742,7 @@ impl Store {
         let mut stmt = conn.prepare_cached(
             "SELECT seq, session_id, ts, kind, payload, source, source_event_id, turn_id, item_id
                FROM events
-              WHERE session_uid = ?1 AND (kind IN (?2, ?3, ?4, ?5, ?6, ?7) OR source = ?8)
+              WHERE session_uid = ?1 AND (kind IN (?2, ?3, ?4, ?5, ?6, ?7, ?9) OR source = ?8)
               ORDER BY seq ASC",
         )?;
         let mut rows = stmt.query(params![
@@ -1750,6 +1754,7 @@ impl Store {
             EventKind::Notification.as_str(),
             EventKind::SessionEnd.as_str(),
             Source::Hook.as_str(),
+            protocol::facts::ACP_SETTINGS,
         ])?;
         let mut facts = protocol::facts::SessionFacts::default();
         while let Some(row) = rows.next()? {
@@ -2258,7 +2263,7 @@ impl Store {
                 filed.push(event);
             }
         }
-        // A hosted run is Claude's, so its row is in Claude's table.
+        // A hosted run, Claude's or Antigravity's, has its row in `sessions`.
         let (table, _) = session_tables_for(&AgentKind::Claude);
         if let Some(id) = &notes.session_id {
             tx.execute(
@@ -2337,6 +2342,25 @@ impl Store {
             .map(|json| serde_json::from_str(&json))
             .transpose()
             .context("a hosted run's models")
+    }
+
+    /// The modes of the hosted Antigravity run `session_uid`, as its start's outcome gave them (`{value, label}`);
+    /// empty for any other run and when none are kept.
+    pub fn hosted_modes(&self, session_uid: &str) -> Result<Vec<serde_json::Value>> {
+        let conn = self.read();
+        let modes = conn
+            .query_row(
+                "SELECT json_extract(initialize, '$.modes') FROM run_hosts WHERE session_uid = ?1",
+                [session_uid],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(modes
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .context("a hosted run's modes")?
+            .unwrap_or_default())
     }
 
     /// Whether the run `session_uid` is in a turn: its newest `session_start` has no
@@ -7154,6 +7178,7 @@ fn parse_source(value: &str) -> Source {
         "daemon" => Source::Daemon,
         "codex" => Source::Codex,
         "sdk" => Source::Sdk,
+        "acp" => Source::Acp,
         "pty" => Source::Pty,
         // An unrecognised persisted source — a fact written by a newer daemon,
         // read back after a rollback — is the lowest trust there is, never the
@@ -10451,6 +10476,61 @@ mod tests {
                 Some("full-access".into())
             )
         );
+    }
+
+    /// **An Antigravity run's settings are read back after a restart as they were folded live**: its model, effort
+    /// and mode from its newest `acp_settings` naming each, its opening's and a later change of the mode alone, and
+    /// the effort its process held at its end.
+    #[test]
+    fn an_antigravity_runs_settings_are_read_back_as_they_were_folded() {
+        let (store, _path) = temp_store();
+        let session = key("AA", "cc-1");
+        begin(&store, &session);
+        let settings = |payload: serde_json::Value| {
+            let mut report = pending(
+                &session,
+                EventKind::Other(protocol::facts::ACP_SETTINGS.into()),
+                None,
+            );
+            report.source = Source::Acp;
+            report.payload = payload;
+            report
+        };
+        let mut live = protocol::facts::SessionFacts::default();
+        for report in [
+            settings(
+                serde_json::json!({"model": "gemini-4-neon", "effort": "high", "mode": "default"}),
+            ),
+            settings(serde_json::json!({"mode": "plan"})),
+        ] {
+            live.observe(&store.append_event(&report).unwrap().unwrap());
+        }
+        let read = store.session_facts(&session.uid).unwrap();
+        assert_eq!(read, live);
+        assert_eq!(
+            (
+                read.model.map(|fact| fact.value),
+                read.effort.map(|fact| fact.value),
+                read.permission_mode.map(|fact| fact.value),
+            ),
+            (
+                Some("gemini-4-neon".into()),
+                Some("high".into()),
+                Some("plan".into())
+            )
+        );
+        live.observe(
+            &store
+                .append_event(&pending(&session, EventKind::SessionEnd, None))
+                .unwrap()
+                .unwrap(),
+        );
+        let read = store.session_facts(&session.uid).unwrap();
+        assert_eq!(
+            read.ended_with.map(|fact| fact.value).as_deref(),
+            Some("high")
+        );
+        assert_eq!(store.session_facts(&session.uid).unwrap(), live);
     }
 
     #[test]

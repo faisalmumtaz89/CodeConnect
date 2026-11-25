@@ -133,11 +133,11 @@ private struct Composer: View {
     private var computer: String { HostDevice.current.computer("the computer", named: model.machineName) }
     private var busy: Bool { sending || running?.phase.busy == true }
 
-    /// The slash palette, on a Claude run while the box has the keyboard and no settings panel is open (Kit's
+    /// The slash palette, on a Claude or Antigravity run while the box has the keyboard and no settings panel is open (Kit's
     /// `SlashPalette`: the commands this app answers itself, as the iPhone offers them). A Codex run has no slash
     /// vocabulary.
     private var slash: SlashPalette.Content? {
-        slashLatch.content(for: kept.reply, claudeRun: summary?.agent == .claude, focused: fieldFocused && panel == nil)
+        slashLatch.content(for: kept.reply, agent: summary?.agent, focused: fieldFocused && panel == nil)
     }
 
     /// A palette row, as the typed command would go: the same `route`, then the palette stays closed.
@@ -202,7 +202,8 @@ private struct Composer: View {
         .focusedSceneValue(\.composerHoldsEscape, panel != nil || fieldFocused)
         // A request that arrives is answered above the box: no settings panel may cover its answers.
         .onChange(of: model.shown(for: key)?.pendingApprovals.first?.id) { _, now in if now != nil { panel = nil } }
-        .onChange(of: model.receipts(for: key)?.compactSeq) { _, _ in settle() }
+        // Claude Code's receipt settles a compact; on Antigravity, the turn agy runs `/compact` in ending does.
+        .onChange(of: model.receipts(for: key).map { [$0.compactSeq, $0.turnEndSeq] }) { _, _ in settle() }
         #if DEBUG
             .task {
                 if let typed = RenderWindow.reply, kept.reply.isEmpty { kept.reply = typed }
@@ -233,7 +234,7 @@ private struct Composer: View {
             quiet?.cancel()
         }
         .sheet(isPresented: $compacting) {
-            CompactDialog(instructions: $instructions) {
+            CompactDialog(instructions: $instructions, agent: summary?.agent ?? .claude) {
                 compacting = false
                 run(.compact(instructions: instructions))
             } cancel: {
@@ -409,7 +410,9 @@ private struct Composer: View {
     /// Kit ranks it); else why sending cannot work, or that the run can only be observed, and why.
     /// A command's line never hides why Send is disabled: the watch for its receipt stays armed underneath.
     private var line: Line? {
-        if blocked == nil, let running, let status = model.commandStatus(running.command, running.phase) {
+        if blocked == nil, let running,
+            let status = model.commandStatus(running.command, running.phase, agent: summary?.agent ?? .claude)
+        {
             return Line(text: status.text, tone: status.tone)
         }
         // A model, effort or mode call on a run started from the app: its answer, for as long as Kit keeps it
@@ -576,7 +579,7 @@ private struct Composer: View {
             // Claude Code's receipt may already have landed while typing.
             let phase =
                 command.phase(after: attempt)
-                ?? model.receiptPhase(for: command, in: key, after: baseline)
+                ?? model.receiptPhase(for: command, in: key, after: baseline, agent: summary?.agent ?? .claude)
                 ?? .waiting(request: command.request, quietly: false)
             show(Running(command: command, phase: phase, baseline: baseline))
         }
@@ -585,7 +588,8 @@ private struct Composer: View {
     /// A receipt above the baseline settles a command still waiting for one, however late it comes.
     private func settle() {
         guard let running, case .waiting = running.phase,
-            let settled = model.receiptPhase(for: running.command, in: key, after: running.baseline)
+            let settled = model.receiptPhase(
+                for: running.command, in: key, after: running.baseline, agent: summary?.agent ?? .claude)
         else { return }
         show(Running(command: running.command, phase: settled, baseline: running.baseline))
     }
@@ -634,6 +638,8 @@ private struct Composer: View {
 /// Compact's own dialog: optional instructions, then Compact now or Cancel. Nothing is typed until Compact now.
 private struct CompactDialog: View {
     @Binding var instructions: String
+    /// The run's agent, whom the compaction is asked of.
+    let agent: AgentKind
     let run: () -> Void
     let cancel: () -> Void
 
@@ -641,13 +647,13 @@ private struct CompactDialog: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 Text(CompactPrompt.title).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
-                Text(CompactPrompt.explanation)
+                Text(CompactPrompt.explanation(for: agent))
                     .font(Theme.ui(12.5))
                     .foregroundStyle(Theme.text2)
                     .fixedSize(horizontal: false, vertical: true)
                 TextField(
                     "", text: $instructions,
-                    prompt: Text(CompactPrompt.placeholder).foregroundStyle(Theme.text3), axis: .vertical
+                    prompt: Text(CompactPrompt.placeholder(for: agent)).foregroundStyle(Theme.text3), axis: .vertical
                 )
                 .textFieldStyle(.plain)
                 .font(Theme.ui(12.5))

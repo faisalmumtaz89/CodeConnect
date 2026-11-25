@@ -93,13 +93,14 @@ public struct DaemonProfile: Sendable, Hashable {
     public var stopsCodexTurns: Bool { capabilities?.codexInterrupt == true }
 
     /// **Whether this daemon honours a Stop for a run of `agent`** — `codex_interrupt`
-    /// for Codex, `claude_interrupt` for a hosted Claude run (minor 37). The same
+    /// for Codex, `claude_interrupt` for a hosted Claude or Antigravity run (minor 37). The same
     /// hard gate as `stopsCodexTurns`, resolved per agent: an unflagged daemon
     /// answers a well-formed refusal to every ask, so the button must not be offered.
     public func honoursStop(for agent: AgentKind) -> Bool {
         switch agent {
         case .codex: return capabilities?.codexInterrupt == true
-        case .claude: return capabilities?.claudeInterrupt == true
+        // An Antigravity run is stopped through the same agent host's interrupt, on any computer that hosts one.
+        case .claude, .antigravity: return capabilities?.claudeInterrupt == true
         case .unsupported: return false
         }
     }

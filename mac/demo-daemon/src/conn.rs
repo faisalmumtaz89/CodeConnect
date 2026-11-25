@@ -278,6 +278,8 @@ where
         | ClientMessage::AddAccount { .. }
         | ClientMessage::ActivateAccount { .. }
         | ClientMessage::SignInAccount { .. }
+        | ClientMessage::SignInAgent { .. }
+        | ClientMessage::SignOutAgent { .. }
         | ClientMessage::RemoveAccount { .. }
         | ClientMessage::PutFile { .. } => {
             send(

@@ -31,6 +31,8 @@ pub enum AgentKind {
     #[default]
     Claude,
     Codex,
+    /// Google Antigravity's agent, `agy`, run through the Agent Client Protocol.
+    Antigravity,
     /// An agent name this build does not know. Never treated as Claude: a use
     /// site that could actuate the session must refuse it. Carries the exact
     /// wire string so it survives a round-trip and can be shown to a human.
@@ -45,6 +47,7 @@ impl AgentKind {
         match self {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
+            AgentKind::Antigravity => "antigravity",
             AgentKind::Unsupported(name) => name.as_str(),
         }
     }
@@ -52,7 +55,7 @@ impl AgentKind {
     /// Decode a **present** wire/storage string. Only true absence (an omitted
     /// field, decoded through `#[serde(default)]`, or a `NULL` column handled by
     /// the caller) means Claude. A *present* value that is neither `claude` nor
-    /// `codex` — including the empty string — is preserved as
+    /// `codex` nor `antigravity` — including the empty string — is preserved as
     /// [`AgentKind::Unsupported`], never silently promoted to Claude: an empty or
     /// unrecognised agent that a peer deliberately sent is a fact this build does
     /// not understand, and it fails closed downstream rather than being read as
@@ -61,6 +64,7 @@ impl AgentKind {
         match value {
             "claude" => AgentKind::Claude,
             "codex" => AgentKind::Codex,
+            "antigravity" => AgentKind::Antigravity,
             other => AgentKind::Unsupported(other.to_string()),
         }
     }
@@ -115,6 +119,10 @@ mod tests {
             serde_json::from_str::<AgentKind>("\"codex\"").unwrap(),
             AgentKind::Codex
         );
+        assert_eq!(
+            serde_json::from_str::<AgentKind>("\"antigravity\"").unwrap(),
+            AgentKind::Antigravity
+        );
     }
 
     #[test]
@@ -137,6 +145,7 @@ mod tests {
         for kind in [
             AgentKind::Claude,
             AgentKind::Codex,
+            AgentKind::Antigravity,
             AgentKind::Unsupported("gemini".into()),
         ] {
             assert_eq!(AgentKind::from_str_lossy(kind.as_str()), kind);

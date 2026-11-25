@@ -1,5 +1,5 @@
 // What the host's tests share: the golden lines, the built executable started as ccd starts it, ccd's end of a
-// connection, and the stand-in claude (stub-claude.ts) a run can be given as its claude.
+// connection, and the stand-ins a run can be given as its claude (stub-claude.ts) or its agy (stub-agy.ts).
 import { spawn } from 'node:child_process';
 import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
@@ -187,6 +187,19 @@ export function writeStub(dir: string, script: StubScript): string {
   writeFileSync(file, JSON.stringify({ ...script, log: join(dir, 'stub.log') }));
   const wrapper = join(dir, 'claude');
   writeFileSync(wrapper, `#!/bin/sh\nBUN_BE_BUN=1 exec '${executable}' '${join(import.meta.dir, 'stub-claude.ts')}' '${file}' "$@"\n`);
+  chmodSync(wrapper, 0o755);
+  return wrapper;
+}
+
+/** Writes the stand-in agy for run `dir` (a sh wrapper running stub-agy.ts on the built host as Bun). */
+export function writeAgy(
+  dir: string,
+  script: { version?: number; resume?: boolean; quiet_on_cancel?: boolean; leave_child?: boolean; tool?: string } = {},
+): string {
+  const file = join(dir, 'agy.json');
+  writeFileSync(file, JSON.stringify({ ...script, log: join(dir, 'stub.log') }));
+  const wrapper = join(dir, 'agy');
+  writeFileSync(wrapper, `#!/bin/sh\nBUN_BE_BUN=1 exec '${executable}' '${join(import.meta.dir, 'stub-agy.ts')}' '${file}' "$@"\n`);
   chmodSync(wrapper, 0o755);
   return wrapper;
 }

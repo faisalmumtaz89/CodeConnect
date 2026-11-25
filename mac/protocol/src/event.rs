@@ -35,6 +35,9 @@ pub enum Source {
     /// [`Source::Codex`] are. Its `source_event_id`s come from
     /// [`sdk_event_id`].
     Sdk,
+    /// An Antigravity run's `agy acp` messages, which its agent host forwards: first-hand
+    /// and structured, trusted as [`Source::Sdk`] is.
+    Acp,
     /// tmux capture-pane snapshot, from earlier builds. Presence checks only,
     /// never semantics.
     Pty,
@@ -66,6 +69,7 @@ impl Source {
             // to the real one; it never competes with a Claude source.
             Source::Codex => 3,
             Source::Sdk => 3,
+            Source::Acp => 3,
             Source::Transcript => 2,
             Source::Pty => 1,
             Source::Unknown => 0,
@@ -79,6 +83,7 @@ impl Source {
             Source::Daemon => "daemon",
             Source::Codex => "codex",
             Source::Sdk => "sdk",
+            Source::Acp => "acp",
             Source::Pty => "pty",
             Source::Unknown => "unknown",
         }

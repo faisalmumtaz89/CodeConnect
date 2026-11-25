@@ -684,6 +684,8 @@ where
                         | ClientMessage::AddAccount { .. }
                         | ClientMessage::ActivateAccount { .. }
                         | ClientMessage::SignInAccount { .. }
+                        | ClientMessage::SignInAgent { .. }
+                        | ClientMessage::SignOutAgent { .. }
                         | ClientMessage::RemoveAccount { .. }
                 ) {
                     if device_id.is_none() {
@@ -699,6 +701,8 @@ where
                             | ClientMessage::AddAccount { .. }
                             | ClientMessage::ActivateAccount { .. }
                             | ClientMessage::SignInAccount { .. }
+                            | ClientMessage::SignInAgent { .. }
+                            | ClientMessage::SignOutAgent { .. }
                             | ClientMessage::RemoveAccount { .. }
                     ) {
                         accounts_pushed = Some(daemon.accounts_tx.subscribe());
@@ -1040,6 +1044,8 @@ where
         | ClientMessage::AddAccount { .. }
         | ClientMessage::ActivateAccount { .. }
         | ClientMessage::SignInAccount { .. }
+        | ClientMessage::SignInAgent { .. }
+        | ClientMessage::SignOutAgent { .. }
         | ClientMessage::RemoveAccount { .. }
         | ClientMessage::GetMachineStats => {}
         ClientMessage::RegisterPush {
@@ -5364,7 +5370,7 @@ mod tests {
             .iter()
             .map(|agent| agent["agent"].as_str().unwrap())
             .collect();
-        assert_eq!(agents, ["claude", "codex"]);
+        assert_eq!(agents, ["claude", "codex", "antigravity"]);
         assert_eq!(
             reply["agents"][0]["available"], true,
             "the stub claude was asked: {reply}"
@@ -6192,8 +6198,9 @@ mod tests {
                 None
             );
         }
+        // The accounts the check was made on, one per agent the phone can start.
         server.daemon.agents.set(
-            vec![None, None],
+            vec![None, None, None],
             vec![
                 AgentAvailability {
                     agent: AgentKind::Claude,

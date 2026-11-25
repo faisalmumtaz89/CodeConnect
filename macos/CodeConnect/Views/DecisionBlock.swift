@@ -172,7 +172,7 @@ struct DecisionBlock: View {
             .accessibilityIdentifier("\(id).command")
             // Outside the command's one spoken element, so Copy is a control of its own.
             .overlay(alignment: .trailing) { CopyButton(text: command, id: "\(id).command.copy").padding(.bottom, 1) }
-            if summary?.agent == .claude { fullInput }
+            if summary?.agent == .claude || summary?.agent == .antigravity { fullInput }
             if let why = CodexCard.reason(in: approval.card.toolInput) {
                 Text(why).font(Theme.ui(12)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
             }
@@ -214,7 +214,8 @@ struct DecisionBlock: View {
             return BannerLine(title: ending.title, message: ending.message, tone: ending.tone)
         }
         switch DecisionCard.resolvedBanner(attempt: attempt, persisted: outcome, isBacked: live != nil) {
-        case .attempt(let attempt): return BannerLine(DecisionCard.resultBanner(for: attempt))
+        case .attempt(let attempt):
+            return BannerLine(DecisionCard.resultBanner(for: attempt, agent: summary?.agent ?? .claude))
         case .persisted(let outcome): return BannerLine(DecisionCard.alreadyResolvedBanner(for: outcome, now: model.now))
         case .unavailable: return BannerLine(DecisionCard.unavailableBanner())
         case .none: break
@@ -301,7 +302,8 @@ struct DecisionBlock: View {
                 linkReason: model.actionsBlockedReason, computer: model.machineName)
         case .unsupported(let raw):
             words = DecisionCard.unsupportedAgentReason(raw, computer: model.machineName)
-        case .claude:
+        // An Antigravity card is a hosted card, as a Claude one is; it is never a question.
+        case .claude, .antigravity:
             words = DecisionCard.claudeUnanswerableReason(
                 isQuestion: QuestionCard.isQuestionToolName(approval.card.toolName),
                 hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
@@ -373,7 +375,8 @@ struct DecisionBlock: View {
     @ViewBuilder private var controls: some View {
         switch surface {
         case .allowDeny(let allowForSession):
-            if boxed {
+            // The reason field only where the run's agent receives a Deny's reason (`AgentKind.takesDenyReason`).
+            if boxed, summary?.agent.takesDenyReason == true {
                 TextField(
                     "", text: Binding { reason } set: { reason = $0 },
                     prompt: Text(placeholder).foregroundStyle(Theme.text3), axis: .vertical

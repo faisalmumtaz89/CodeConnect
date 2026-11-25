@@ -962,6 +962,21 @@ a reconnect after ccd's own restart and a relaunch read those, so **a change Cod
 turn ran and had not yet reported when ccd restarted or Codex was started again is not kept**: the
 run comes back with the settings Codex last reported. Measured on Codex 0.170.0, a change to
 Plan or Read Only made while a turn ran was reported and filed within 4 ms of the app sending it.
+An Antigravity run takes the same `set_model` and `set_mode`, with agy's own settings. Its
+`menus` are agy's model families (its `model` option: Gemini 4 Neon, Gemini 3.8 Flash and the
+rest), each with the efforts agy runs it at (the last part of agy's own model ids for it,
+`gemini-4-neon-high`), and agy's four modes, "Default", "Accept edits", "Auto" and "Plan", none
+marked `confirm`: none lets agy work without asking (Auto still asks before an irreversible
+action). The host reads them from agy's answer to the session's opening and hands them to ccd on
+the start's outcome; the start box lists the same families, from a session ccd opens with no
+prompt and closes at once (agy lists it in no history, `session/list`; its empty conversation
+file stays in agy's folder), kept while agy is signed in, and an agy
+that answers "Authentication required" is listed as not signed in. A model goes to agy as
+`session/set_config_option` (`model`), an effort as its `thought_level`, a mode as
+`session/set_mode`, answered `applied`, or `refused` with agy's words. The run's model, effort
+and mode are what agy names: its answer to the session's opening and each
+`config_option_update` and `current_mode_update`, filed as `acp_settings`. A relaunch resumes
+the session with the effort and mode the run ended with, agy's own modes included.
 When claude asks permission for a tool call, its host holds the request and ccd shows it as
 a card the apps answer: allow, deny, or deny with a reason, and, when claude's request
 suggests an allow rule for the call, "Allow for this session" (`allow_for_session`, minor 36;
@@ -1388,6 +1403,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `ws_loopback` | `true` | Also listen on `127.0.0.1`, for tools on this Mac. The token is still required. |
 | `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. A start checks the claude this list finds. |
 | `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
+| `agy_bin` | auto | Explicit path to Antigravity's `agy`. Unset, it is the first `agy` on `PATH` as your shell finds it, then `~/.local/bin/agy`, where its installer puts it. |
 | `agent_host_bin` | beside ccd | Explicit path to `cc-agent-host`, the agent host ccd runs for each Claude run started from the app. Unset, it is the `cc-agent-host` next to ccd's own executable, where every install puts it. |
 | `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |
 | `tls_required` | `false` | Refuse plaintext. Turn on once every client speaks `wss://`; both share one port until then. |

@@ -114,6 +114,9 @@ enum Fixtures {
         /// card whose rule it would grant (fixtures/claude/minor-36-wire.json).
         /// The one fixture that shows what that grant covers.
         case sessionGrant
+        /// **A live Antigravity run held on its first card**, as a rig ccd sent it (`antigravityRunJSON`): the apps'
+        /// one fixture of an agent-host run that is not Claude's.
+        case antigravity
 
         init?(_ raw: String?) {
             guard let raw, let value = Variant(rawValue: raw) else { return nil }
@@ -125,7 +128,7 @@ enum Fixtures {
             case .deck, .ended, .ended45, .longOutput: return deckCards
             case .stacked, .wideTool, .mcpApproval: return deckCards + [stackedCard]
             case .spoofedCommand: return [spoofedCard]
-            case .empty, .timeline, .timelineLongName, .hostedSettings: return []
+            case .empty, .timeline, .timelineLongName, .hostedSettings, .antigravity: return []
             case .single: return deckCards.filter { $0.sessionID == "fx-1" }
             case .sessionGrant: return [sessionGrantCard]
             }
@@ -142,7 +145,7 @@ enum Fixtures {
             case .ended: return 8
             case .ended45: return 45
             case .deck, .stacked, .longOutput, .wideTool, .mcpApproval, .spoofedCommand, .empty,
-                .single, .timeline, .timelineLongName, .hostedSettings, .sessionGrant:
+                .single, .timeline, .timelineLongName, .hostedSettings, .sessionGrant, .antigravity:
                 return 0
             }
         }
@@ -158,6 +161,7 @@ enum Fixtures {
             case .stacked, .longOutput, .wideTool, .mcpApproval: return 5
             case .empty: return 0
             case .hostedSettings: return 5
+            case .antigravity: return 1
             case .timeline, .timelineLongName: return 7
             }
         }
@@ -262,6 +266,7 @@ enum Fixtures {
     }
 
     static func frames(now: Date = Fixtures.now, variant: Variant = .deck) -> [ServerMessage] {
+        if variant == .antigravity { return antigravityFrames(now: now) }
         let cards = variant.cards
         let held = variant.heldCard.map { [$0] } ?? []
         var messages: [ServerMessage] = []
@@ -468,6 +473,29 @@ enum Fixtures {
     /// this ack; see `sampleHelloAckJSON`. `machine_name` and `machine_os`
     /// are what a minor-25 daemon sends, set here so the cards show a
     /// computer; the phone decodes them at any minor.
+    /// The `antigravity` fixture: an ack of a computer that hosts Antigravity runs (`claude_interrupt`, the agent
+    /// host's Stop), then the recorded run's summary and its events, every time stamped `now` and its folder under `/Users/dev`.
+    private static func antigravityFrames(now: Date) -> [ServerMessage] {
+        let ack = helloAckJSON.replacingOccurrences(
+            of: #""browse_folders":true}"#, with: #""browse_folders":true,"claude_interrupt":true,"stop_run":true}"#)
+        let recorded = antigravityRunJSON.replacingOccurrences(of: "@STAMP@", with: rfc3339(now))
+            .replacingOccurrences(of: "@HOME@", with: "/Users/dev")
+        guard let run = try? JSONDecoder().decode(JSONValue.self, from: Data(recorded.utf8)),
+            let sessions = run["sessions"], let events = run["events"]?.arrayValue
+        else { return [] }
+        let frames: [JSONValue] =
+            [.object(["type": .string("sessions"), "sessions": sessions])]
+            + events.map { .object(["type": .string("event"), "event": $0]) }
+        return ([ack] + frames.map(\.canonicalJSONString)).compactMap(decode)
+    }
+
+    /// An Antigravity run started in a stand-in rig (mac/agent-host's stand-in agy), waiting on its first card: the
+    /// rig ccd's own `sessions` list and the run's events, recorded whole by the e2e kit (`wire`), times as `@STAMP@` and
+    /// the rig's home as `@HOME@`, so a render shows `/Users/dev/proj-alpha`, as the other fixtures' folders read.
+    private static let antigravityRunJSON = #"""
+        {"events":[{"kind":"link_state","payload":{"link":"attached","reason":"agent host linked"},"seq":1,"session_id":"01M89BDTQGTG8HPJQ7KRK60QVR","session_uid":"01M89BDTQGTG8HPJQ7KRK60QVR","source":"daemon","ts":"@STAMP@"},{"kind":"user_message","payload":{"text":"read the note"},"seq":2,"session_id":"01M89BDTQGTG8HPJQ7KRK60QVR","session_uid":"01M89BDTQGTG8HPJQ7KRK60QVR","source":"daemon","source_event_id":"say:65d11d79-e724-4d2a-9f46-7e3bb985d946","ts":"@STAMP@"},{"kind":"acp_settings","payload":{"effort":"high","mode":"default","model":"gemini-4-neon"},"seq":3,"session_id":"01M89BDTQGTG8HPJQ7KRK60QVR","session_uid":"01M89BDTQGTG8HPJQ7KRK60QVR","source":"acp","source_event_id":"65d11d79-e724-4d2a-9f46-7e3bb985d946/settings/4","ts":"@STAMP@"},{"kind":"agent_message","payload":{"text":"Hello."},"seq":4,"session_id":"01M89BDTQGTG8HPJQ7KRK60QVR","session_uid":"01M89BDTQGTG8HPJQ7KRK60QVR","source":"acp","source_event_id":"65d11d79-e724-4d2a-9f46-7e3bb985d946/text/5","ts":"@STAMP@","turn_id":"65d11d79-e724-4d2a-9f46-7e3bb985d946"},{"kind":"tool_call","payload":{"tool_input":{"command":"cat NOTE.txt"},"tool_name":"Read","tool_use_id":"call_1"},"seq":5,"session_id":"01M89BDTQGTG8HPJQ7KRK60QVR","session_uid":"01M89BDTQGTG8HPJQ7KRK60QVR","source":"acp","source_event_id":"65d11d79-e724-4d2a-9f46-7e3bb985d946/tool_call/call_1","ts":"@STAMP@","turn_id":"65d11d79-e724-4d2a-9f46-7e3bb985d946"},{"kind":"approval_request","payload":{"card":{"display_text":"cat NOTE.txt\n{\"command\":\"cat NOTE.txt\"}","generation":0,"identity_bound":true,"payload_hash":"c86b1354fb42869d5ac13642fa20cf5628e8b03ea32196d4c3eddab3df2681bc","question_hold":"held","request_id":"65d11d79-e724-4d2a-9f46-7e3bb985d946/101","risk":{"class":"medium"},"tool_input":{"command":"cat NOTE.txt"},"tool_name":"cat NOTE.txt"}},"seq":6,"session_id":"01M89BDTQGTG8HPJQ7KRK60QVR","session_uid":"01M89BDTQGTG8HPJQ7KRK60QVR","source":"daemon","source_event_id":"perm:65d11d79-e724-4d2a-9f46-7e3bb985d946/101","ts":"@STAMP@"}],"sessions":[{"account":{"id":null,"label":"Default"},"agent":"antigravity","blocked_on":["65d11d79-e724-4d2a-9f46-7e3bb985d946/101"],"codex_link":"none","created_at":"@STAMP@","cwd":"@HOME@/proj-alpha","effort":{"seq":3,"value":"high"},"last_seq":6,"lifecycle":"live","link":"attached","menus":{"models":[{"efforts":["low","medium","high","xhigh"],"label":"Gemini 4 Neon","value":"gemini-4-neon"},{"efforts":["low","medium","high"],"label":"Gemini 3.8 Flash","value":"gemini-3.8-flash"},{"efforts":[],"label":"GPT-OSS 120B (Medium)","value":"gpt-oss-120b-medium"},{"efforts":[],"label":"Orchestrator (Carbon)","value":"gemini-pro-orchestrator"},{"efforts":[],"label":"Orchestrator (Neon)","value":"gemini-pro-orchestrator-neon"}],"modes":[{"label":"Default","value":"default"},{"label":"Accept edits","value":"accept-edits"},{"label":"Auto","value":"auto"},{"label":"Plan","value":"plan"}],"selected_model":"gemini-4-neon"},"model":{"seq":3,"value":"gemini-4-neon"},"pending":[{"hold":"held","request_id":"65d11d79-e724-4d2a-9f46-7e3bb985d946/101","seq":6}],"permission_mode":{"seq":3,"value":"default"},"project_label":"proj-alpha","session_id":"01M89BDTQGTG8HPJQ7KRK60QVR","session_uid":"01M89BDTQGTG8HPJQ7KRK60QVR","updated_at":"@STAMP@"}]}
+        """#
+
     private static let helloAckJSON = """
         {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
@@ -570,7 +598,8 @@ enum Fixtures {
     {
         let stamp = rfc3339(Date())
         let id = "cc-\(listed.count + 1)"
-        let agent = start.agent == .codex ? "\"agent\":\"codex\"," : ""
+        // Claude's summary names no agent, as ccd's does not.
+        let agent = start.agent == .claude ? "" : "\"agent\":\"\(start.agent.rawValue)\","
         let cwd = start.folder ?? Self.newWorktreeFolder(start)
         let summary = """
             {"session_uid":"\(uid)","session_id":"\(id)",\(agent)\

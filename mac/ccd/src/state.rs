@@ -559,6 +559,7 @@ impl Daemon {
         vec![
             protocol::agent::AgentKind::Claude,
             protocol::agent::AgentKind::Codex,
+            protocol::agent::AgentKind::Antigravity,
         ]
     }
 
@@ -616,8 +617,15 @@ impl Daemon {
     /// then does its durable write later — `send_text` in the same breath,
     /// `answer` five awaits later. A run's agent is filed once, when the run
     /// begins, and nothing writes it again.
+    ///
+    /// An Antigravity run is admitted: it is a hosted run as a Claude run is, its row in
+    /// `sessions` beside theirs (`store::session_tables_for`), so a v0.6.0 daemon that sweeps
+    /// its texts and answers already sweeps the row they belong to.
     fn shared_ledgers_admit(&self, agent: &protocol::agent::AgentKind) -> bool {
-        agent.is_claude()
+        matches!(
+            agent,
+            protocol::agent::AgentKind::Claude | protocol::agent::AgentKind::Antigravity
+        )
     }
 
     /// Re-derive from the database everything a restart would otherwise lose.
@@ -2318,10 +2326,10 @@ impl Daemon {
         let mut hosted = None;
         match row.agent {
             protocol::agent::AgentKind::Codex => {}
-            // A Claude run CodeConnect started is stopped through its agent host. Any
-            // other has no interrupt on this wire: its stop control is the keyboard at
-            // the Mac, and saying so is more useful than a bare refusal.
-            protocol::agent::AgentKind::Claude => {
+            // A Claude or Antigravity run CodeConnect started is stopped through its agent
+            // host. Any other has no interrupt on this wire: its stop control is the keyboard
+            // at the Mac, and saying so is more useful than a bare refusal.
+            protocol::agent::AgentKind::Claude | protocol::agent::AgentKind::Antigravity => {
                 match self.db.hosted_link(row.session_uid.clone()).await {
                     Ok(Some(linked)) => hosted = Some(linked.lifecycle),
                     _ => {
@@ -2581,6 +2589,12 @@ impl Daemon {
             // name. Neither silently does the other's job.
             protocol::agent::AgentKind::Claude => {
                 return refuse(crate::codex_refusals::compose_on_claude(&row.session_uid))
+            }
+            protocol::agent::AgentKind::Antigravity => {
+                return refuse(crate::codex_refusals::compose_on_unsupported(
+                    &row.session_uid,
+                    "Antigravity",
+                ))
             }
             protocol::agent::AgentKind::Unsupported(ref name) => {
                 return refuse(crate::codex_refusals::compose_on_unsupported(
@@ -3035,6 +3049,11 @@ impl Daemon {
                      does not offer for it",
                     row.session_uid
                 )),
+                protocol::agent::AgentKind::Antigravity => ClaudeOnly::WrongAgent(format!(
+                    "{} is an Antigravity session, and {what} is something this daemon \
+                     can only do for Claude",
+                    row.session_uid
+                )),
                 protocol::agent::AgentKind::Unsupported(ref name) => {
                     ClaudeOnly::WrongAgent(format!(
                         "{} is a {name} session, and {what} is something this daemon \
@@ -3098,7 +3117,10 @@ impl Daemon {
         // sentence.
         let codex = match self.db.get_session(session_uid.clone()).await {
             Ok(Some(row)) => match row.agent {
-                protocol::agent::AgentKind::Claude => None,
+                // A hosted run: its agent host holds the request.
+                protocol::agent::AgentKind::Claude | protocol::agent::AgentKind::Antigravity => {
+                    None
+                }
                 protocol::agent::AgentKind::Codex => Some(row),
                 protocol::agent::AgentKind::Unsupported(ref name) => {
                     return AnswerResult::Rejected {
@@ -3512,7 +3534,7 @@ impl Daemon {
         // A live run CodeConnect started offers its settings: a Claude run's from its start's
         // answer, with the one its model fact names marked (its newest receipt, kept in its
         // facts, read for that); a Codex run's from its start's check and the model it started
-        // on, its model fact marked as it is.
+        // on, and an Antigravity run's from its start's outcome, each with its model fact marked as it is.
         let mut menus: HashMap<String, protocol::event::RunMenus> = HashMap::new();
         // Every Claude run CodeConnect started keeps its start's models, ended or not: its model
         // fact is named by the chosen entry's id, never by claude's receipt of a change.
@@ -3538,6 +3560,17 @@ impl Daemon {
                 }
                 protocol::agent::AgentKind::Codex => {
                     codex_ended.push((row.session_uid.clone(), crate::codex_host::menus(&models)));
+                }
+                // agy's model families and modes, its model fact a family as its menu names it, as Codex's is.
+                protocol::agent::AgentKind::Antigravity => {
+                    let modes = self.db.hosted_modes(row.session_uid.clone()).await?;
+                    let menu = crate::claude_host::acp_menus(&models, &modes);
+                    if live {
+                        menus.insert(row.session_uid.clone(), menu);
+                        codex_menus.push(row.session_uid.clone());
+                    } else {
+                        codex_ended.push((row.session_uid.clone(), menu));
+                    }
                 }
                 protocol::agent::AgentKind::Unsupported(_) => {}
             }
@@ -3591,7 +3624,7 @@ impl Daemon {
                     .then(|| fact.value.clone());
             }
         }
-        // A Codex entry's label is its model's name, else the model itself: only a name is given.
+        // A Codex or Antigravity entry's label is its model's name, else the model itself: only a name is given.
         for (uid, menu) in &codex_ended {
             let fact = inner
                 .session_facts
@@ -4745,7 +4778,9 @@ impl Daemon {
                 cwd: row.cwd,
                 lifecycle: row.lifecycle,
                 link,
-                claude_session_id: row.claude_session_id,
+                // Claude Code's own session, which an app resumes with `claude --resume`: an
+                // Antigravity run's ACP session is kept in the same column for its relaunch alone.
+                claude_session_id: row.claude_session_id.filter(|_| row.agent.is_claude()),
                 transcript_path: row.transcript_path,
                 last_seq: last_seqs.get(&row.session_uid).copied().unwrap_or_default(),
                 created_at: row.created_at,

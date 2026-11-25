@@ -887,7 +887,8 @@ impl Daemon {
     pub(crate) async fn wake_if_due(self: &Arc<Self>, run_uid: &str) {
         let claude = match self.db.get_session(run_uid.to_string()).await {
             Ok(Some(row)) => match row.agent {
-                AgentKind::Claude => true,
+                // A hosted run: its agent host takes the wake.
+                AgentKind::Claude | AgentKind::Antigravity => true,
                 AgentKind::Codex => false,
                 AgentKind::Unsupported(_) => return,
             },
@@ -921,7 +922,7 @@ impl Daemon {
                 return;
             }
         }
-        // A Claude run CodeConnect started is woken through its agent host's link.
+        // A Claude or Antigravity run CodeConnect started is woken through its agent host's link.
         let issued = if claude {
             crate::claude_host::wake(self, run_uid, nudge()).await
         } else {
@@ -1167,6 +1168,7 @@ fn agent_name(agent: &AgentKind) -> &str {
     match agent {
         AgentKind::Claude => "Claude",
         AgentKind::Codex => "Codex",
+        AgentKind::Antigravity => "Antigravity",
         AgentKind::Unsupported(name) => name,
     }
 }

@@ -1,4 +1,4 @@
-//! The protocol between ccd and the agent host it runs for each Claude run.
+//! The protocol between ccd and the agent host it runs for each Claude or Antigravity run.
 //!
 //! One JSON object per line over the run's unix socket, whole lines only. ccd's first
 //! line on every connection is [`ToHost::Attach`] with its committed cursor. The host
@@ -14,9 +14,15 @@
 //!
 //! `fixtures/host/messages.jsonl` holds a line of every message, emitted by this
 //! module's tests. It is the fixture for the agent host's side of the same lines.
+//!
+//! An Antigravity run's host speaks the Agent Client Protocol to `agy acp` and sends each
+//! message agy writes as [`FromHost::Acp`]; its permission requests and the commands that
+//! drive it are the lines a Claude run's are.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::agent::AgentKind;
 
 /// The version the host writes into `host.json`. A new host is admitted only at this
 /// version, but a restarted ccd attaches a running host again without reading it: a change
@@ -35,7 +41,9 @@ pub struct HostFile {
     pub host_pid: i32,
 }
 
-/// A line ccd sends the host.
+/// A line ccd sends the host. `Start` is the large one and goes once per run, a line at a time, so its size costs
+/// nothing worth an indirection at every place that builds or reads one.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToHost {
@@ -103,8 +111,12 @@ pub enum ToHost {
 /// What the run's `query()` is started with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartOptions {
+    /// The agent the run runs. Absent, Claude: every start before Antigravity is one.
+    #[serde(default, skip_serializing_if = "AgentKind::is_claude")]
+    pub agent: AgentKind,
     pub cwd: String,
-    /// The claude the probe found.
+    /// The path of the agent's binary the probe found, whichever agent `agent` names: claude,
+    /// or Antigravity's `agy`. Named for the one agent it was first for.
     pub claude_path: String,
     /// The mode the app chose. Absent, `query()` is given none, and claude picks its
     /// starting mode itself: the person's `defaultMode`, else its own default.
@@ -123,9 +135,9 @@ pub struct StartOptions {
     /// A new worktree for claude to make and start in, as `claude --worktree <name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
-    /// Folders claude may read beside its own (`additionalDirectories`, `--add-dir`): the run's
-    /// uploads folder (minor 50), so a file sent with a message is read without a card. A host
-    /// that predates it ignores it, and such a file asks first.
+    /// Folders the agent may read beside its own (claude's `additionalDirectories`, `--add-dir`; agy's
+    /// session `additionalDirectories`): the run's uploads folder (minor 50), so a file sent with a
+    /// message is read without a card. A host that predates it ignores it, and such a file asks first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_directories: Vec<String>,
     /// CodeConnect's mail server, run by Claude as a stdio MCP server.
@@ -175,6 +187,16 @@ pub enum FromHost {
     /// claude.ai connectors' commands, which the host leaves out as it does from the
     /// initialize answer's.
     Sdk { seq: u64, message: Value },
+    /// A message `agy acp` wrote, untouched: a `session/update` notification, or the reply
+    /// to a `session/prompt`. Its permission requests come as [`FromHost::Permission`].
+    /// `turn` is the uuid of the command whose prompt was running (the `start`'s or a
+    /// `say`'s): the turn an `interrupt` names.
+    Acp {
+        seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<String>,
+        message: Value,
+    },
     /// A `canUseTool` call, held in the host until it is answered or withdrawn.
     Permission {
         seq: u64,
@@ -246,7 +268,7 @@ pub enum OutcomeStatus {
     Refused,
 }
 
-/// The SDK's initialize answer, as far as ccd keeps it.
+/// The SDK's initialize answer, as far as ccd keeps it, or an Antigravity run's menus in its shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InitializeAnswer {
     /// The SDK's command list, as it gives it but for the claude.ai connectors' commands
@@ -259,6 +281,10 @@ pub struct InitializeAnswer {
     /// The version of the claude that answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_version: Option<String>,
+    /// An Antigravity run's modes, as agy's `mode` option offers them (`{value, label}`); its models are agy's model
+    /// families in Claude's shape (`value`, `displayName`, `supportedEffortLevels`). Empty for Claude.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<Value>,
 }
 
 /// Of the account, only which provider Claude uses. Every other key the SDK gives (the
@@ -295,6 +321,7 @@ mod tests {
     fn from_host_name(message: &FromHost) -> &'static str {
         match message {
             FromHost::Sdk { .. } => "sdk",
+            FromHost::Acp { .. } => "acp",
             FromHost::Permission { .. } => "permission",
             FromHost::Withdrawn { .. } => "withdrawn",
             FromHost::Outcome { .. } => "outcome",
@@ -315,8 +342,9 @@ mod tests {
         "interrupt",
         "stop",
     ];
-    const FROM_HOST: [&str; 6] = [
+    const FROM_HOST: [&str; 7] = [
         "sdk",
+        "acp",
         "permission",
         "withdrawn",
         "outcome",
@@ -356,6 +384,7 @@ mod tests {
             to(ToHost::Start {
                 uuid: "c-start".into(),
                 options: StartOptions {
+                    agent: AgentKind::Claude,
                     cwd: "/Users/person/project".into(),
                     claude_path: "/Users/person/.local/bin/claude".into(),
                     permission_mode: None,
@@ -374,6 +403,7 @@ mod tests {
             to(ToHost::Start {
                 uuid: "c-continue".into(),
                 options: StartOptions {
+                    agent: AgentKind::Claude,
                     cwd: "/Users/person/project".into(),
                     claude_path: "/Users/person/.local/bin/claude".into(),
                     permission_mode: Some("acceptEdits".into()),
@@ -386,6 +416,23 @@ mod tests {
                     mail: mail(),
                 },
                 prompt: "and the docs".into(),
+            }),
+            to(ToHost::Start {
+                uuid: "c-antigravity".into(),
+                options: StartOptions {
+                    agent: AgentKind::Antigravity,
+                    cwd: "/Users/person/project".into(),
+                    claude_path: "/Users/person/.local/bin/agy".into(),
+                    permission_mode: None,
+                    trust: Trust::Trusted,
+                    resume: None,
+                    model: None,
+                    effort: None,
+                    worktree: None,
+                    additional_directories: Vec::new(),
+                    mail: mail(),
+                },
+                prompt: "fix the tests".into(),
             }),
             to(ToHost::Say {
                 uuid: "c-say".into(),
@@ -441,6 +488,16 @@ mod tests {
                 seq: 1,
                 message: json!({"type": "system", "subtype": "init", "session_id": "5f0c1e2a-0000-4000-8000-000000000001", "uuid": "9d1f0000-0000-4000-8000-000000000002"}),
             }),
+            from(FromHost::Acp {
+                seq: 1,
+                turn: Some("c-say".into()),
+                message: json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Done."}}}}),
+            }),
+            from(FromHost::Acp {
+                seq: 2,
+                turn: None,
+                message: json!({"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}),
+            }),
             from(FromHost::Permission {
                 seq: 2,
                 request: request(),
@@ -465,6 +522,7 @@ mod tests {
                         api_provider: Some("firstParty".into()),
                     },
                     claude_code_version: Some("2.1.322".into()),
+                    modes: Vec::new(),
                 }),
                 cancelled: None,
                 terminal_reason: None,

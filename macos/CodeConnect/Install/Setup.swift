@@ -41,7 +41,7 @@ final class Setup {
     /// for either agent). A later answer replaces it.
     func agent(_ agent: StartAgent, in machines: Machines) -> Row {
         #if DEBUG
-            if let forced = RenderWindow.setupRows { return forced[agent == .claude ? "claude" : "codex"] ?? .checking }
+            if let forced = RenderWindow.setupRows { return forced[agent.rawValue] ?? .checking }
         #endif
         guard let context = thisMacContext(in: machines) else { return .checking }
         switch context.models(agent) {
@@ -51,10 +51,12 @@ final class Setup {
         }
     }
 
-    /// A row that needs the person: the service, or an agent that can't start. The PATH line is an opt-in with its own
-    /// Set up, so it never asks for Try Again.
+    /// The checklist needs the person: the service is missing, or no agent can start (`SetupAttention`); one agent
+    /// ready is enough. The PATH line is an opt-in with its own Set up, so it never asks for Try Again.
     func needsAttention(_ machines: Machines) -> Bool {
-        [service, agent(.claude, in: machines), agent(.codex, in: machines)].contains(where: \.isMissing)
+        SetupAttention.needed(
+            serviceMissing: service.isMissing,
+            agentsMissing: StartAgent.allCases.map { agent($0, in: machines).isMissing })
     }
 
     let installer: Installer?

@@ -104,6 +104,55 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             .await
             .0
         }
+        // Antigravity's one sign-in: what it said of itself, and its offer to a start, are its old sign-in's.
+        ClientMessage::SignInAgent { request_id, agent } => {
+            let agy = agy_path(&environment, daemon.config.agy_bin.as_deref()).await;
+            let ended = Arc::clone(daemon);
+            crate::accounts::sign_in_agent(
+                &daemon.store,
+                &daemon.sign_ins,
+                // What agy said is the sign-in the list carries at once; with no answer of agy's, it is read again.
+                move |said| {
+                    ended.agents.forget(&AgentKind::Antigravity);
+                    let known = said.is_some();
+                    crate::accounts::keep_antigravity(&ended.account_facts, said);
+                    tokio::spawn(async move {
+                        if known {
+                            push_accounts(&ended).await
+                        } else {
+                            refresh_facts(&ended).await
+                        }
+                    });
+                },
+                &environment,
+                agent,
+                agy.as_deref(),
+                request_id,
+                crate::accounts::SIGN_IN_WAIT,
+            )
+            .await
+            .0
+        }
+        ClientMessage::SignOutAgent { request_id, agent } => {
+            let agy = agy_path(&environment, daemon.config.agy_bin.as_deref()).await;
+            let reply = crate::accounts::sign_out_agent(
+                &daemon.store,
+                &daemon.account_facts,
+                &environment,
+                agent,
+                agy.as_deref(),
+                request_id,
+            )
+            .await;
+            daemon.agents.forget(&AgentKind::Antigravity);
+            // Refused, agy's sign-in is not known: read again.
+            if !matches!(reply, ServerMessage::Accounts { .. }) {
+                daemon
+                    .account_facts
+                    .forget(&crate::accounts::default_key(&AgentKind::Antigravity));
+            }
+            reply
+        }
         ClientMessage::RemoveAccount {
             request_id,
             account_id,
@@ -152,6 +201,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             accounts,
             active,
             defaults,
+            agent_sign_ins,
             ..
         },
     ) = (changes, &reply)
@@ -161,6 +211,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
             accounts: accounts.clone(),
             active: active.clone(),
             defaults: defaults.clone(),
+            agent_sign_ins: agent_sign_ins.clone(),
         });
     }
     reply
@@ -203,7 +254,11 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
     let Ok(accounts) = daemon.store.accounts() else {
         return;
     };
-    let mut wanted: Vec<(String, AgentKind, Option<crate::store::Account>)> = Vec::new();
+    let mut wanted: Vec<(String, AgentKind, Option<crate::store::Account>)> = vec![(
+        crate::accounts::default_key(&AgentKind::Antigravity),
+        AgentKind::Antigravity,
+        None,
+    )];
     for agent in [AgentKind::Codex, AgentKind::Claude] {
         wanted.push((crate::accounts::default_key(&agent), agent.clone(), None));
         for account in accounts
@@ -222,6 +277,7 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
     let environment = phone_environment();
     let codex = codex_path(&environment, daemon.config.codex_bin.as_deref()).await;
     let claude = claude_path(&environment, daemon.config.claude_bin.as_deref()).await;
+    let agy = agy_path(&environment, daemon.config.agy_bin.as_deref()).await;
     if let Some(asked) = signed {
         let agents = crate::accounts::Agents {
             codex: codex.as_deref(),
@@ -240,8 +296,24 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
         .iter()
         .filter(|(key, _, _)| claimed.contains(key))
         .map(|(key, agent, account)| {
-            let (environment, root, codex, claude) = (&environment, &root, &codex, &claude);
+            let (environment, root, codex, claude, agy) =
+                (&environment, &root, &codex, &claude, &agy);
             async move {
+                // Antigravity's one sign-in: what agy offers a start (kept while it is signed in, so no new run of
+                // agy), its plan its tier's name as agy gives it.
+                if *agent == AgentKind::Antigravity {
+                    let offer = match agy {
+                        Some(agy) => agy_offer(&daemon.agents, environment, agy).await,
+                        None => None,
+                    };
+                    if let Some(offer) = &offer {
+                        daemon.account_facts.keep_agent_signed(key, offer.signed_in);
+                    }
+                    daemon
+                        .account_facts
+                        .read(key, offer.as_ref().and_then(agy_default_facts));
+                    return;
+                }
                 let home = match account {
                     Some(account) => {
                         match crate::accounts::AccountEnv::for_account(root, account) {
@@ -292,8 +364,8 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
     push_accounts(daemon).await;
 }
 
-/// The agents the phone can start.
-const AGENTS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
+/// The agents the phone can start. An app that does not know one leaves it out of its menu.
+const AGENTS: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity];
 
 /// The answer to a `get_project_git`, `list_folder`, `create_folder`,
 /// `start_session` or one of the folder-trust frames. A `list_projects` is answered
@@ -323,6 +395,8 @@ pub async fn answer(
         | ClientMessage::AddAccount { .. }
         | ClientMessage::ActivateAccount { .. }
         | ClientMessage::SignInAccount { .. }
+        | ClientMessage::SignInAgent { .. }
+        | ClientMessage::SignOutAgent { .. }
         | ClientMessage::RemoveAccount { .. } => accounts_answer(daemon, message).await,
         ClientMessage::GetProjectGit { path } => project_git(daemon, path).await,
         // Off the async workers: a read can wait on macOS asking the user.
@@ -403,7 +477,8 @@ pub async fn answer(
                 .unwrap_or_default();
             let result = match agent {
                 AgentKind::Claude => {
-                    let start = claude_start(
+                    let start = hosted_start(
+                        AgentKind::Claude,
                         daemon,
                         crate::state::codex_launcher(),
                         &state_dir,
@@ -421,6 +496,24 @@ pub async fn answer(
                 }
                 AgentKind::Codex => {
                     let start = codex_start(
+                        daemon,
+                        crate::state::codex_launcher(),
+                        &state_dir,
+                        &request_id,
+                        &path,
+                        prompt,
+                        worktree.as_ref(),
+                        model.as_deref(),
+                        &environment,
+                        account.as_ref(),
+                        trust,
+                        attachments,
+                    );
+                    daemon.starts.once(&request_id, start).await
+                }
+                AgentKind::Antigravity => {
+                    let start = hosted_start(
+                        AgentKind::Antigravity,
                         daemon,
                         crate::state::codex_launcher(),
                         &state_dir,
@@ -510,6 +603,12 @@ impl KnownAgents {
             .map(|(_, offer)| offer.clone())
     }
 
+    /// What `agent` offered is forgotten, so the next list asks it again: its sign-in has changed.
+    pub(crate) fn forget(&self, agent: &AgentKind) {
+        let mut offers = self.offers.lock().unwrap_or_else(|p| p.into_inner());
+        offers.remove(&offer_key(agent, None));
+    }
+
     fn keep(
         &self,
         agent: &AgentKind,
@@ -568,6 +667,7 @@ async fn check_and_keep(
         accounts,
         daemon.config.claude_bin.as_deref(),
         daemon.config.codex_bin.as_deref(),
+        daemon.config.agy_bin.as_deref(),
     )
     .await;
     daemon.agents.set(selections(accounts), checked.clone());
@@ -580,10 +680,12 @@ async fn check_agents(
     accounts: &[Option<crate::accounts::AccountEnv>],
     claude_bin: Option<&str>,
     codex_bin: Option<&str>,
+    agy_bin: Option<&str>,
 ) -> Vec<AgentAvailability> {
     futures_util::future::join_all(AGENTS.iter().zip(accounts).map(|(agent, account)| {
         let configured = match agent {
             AgentKind::Codex => codex_bin,
+            AgentKind::Antigravity => agy_bin,
             _ => claude_bin,
         };
         agent_availability(agent, known, environment, account.as_ref(), configured)
@@ -839,16 +941,17 @@ pub(crate) async fn declined(db: &crate::db::Db, folder: &Path) -> bool {
     )
 }
 
-/// A Claude start: the run its request already has (H1), or the start's checks, then
-/// its row and its agent host ([`crate::claude_host`]). The checks here come before
+/// A Claude or Antigravity start: the run its request already has (H1), or the start's
+/// checks, then its row and its agent host ([`crate::claude_host`]). The checks here come before
 /// the row, so a start they refuse leaves none: the cheap refusals, the folder
 /// question, the claude check, the host binary, and `launcher` (the `codeconnect`
 /// that runs the mail server), all before the place, the one step that can change the
 /// repository. A refusal after the row, from the host's admission or from claude
 /// itself, leaves the row `failed`. A new worktree is claude's to make, as
-/// `--worktree` makes it today.
+/// `--worktree` makes it today; Antigravity has no such flag, so ccd makes its new worktree, as Codex's.
 #[allow(clippy::too_many_arguments)]
-async fn claude_start(
+async fn hosted_start(
+    agent: AgentKind,
     daemon: &Arc<Daemon>,
     launcher: Result<PathBuf, String>,
     root: &Path,
@@ -868,16 +971,35 @@ async fn claude_start(
     if let Some(refusal) = refusal(path, prompt) {
         return refusal;
     }
-    // The start path's answer; the folder the run runs in can only lower it (below).
-    let trust = match folder_question(&daemon.db, path, trust).await {
-        Ok(trust) => trust,
-        Err(asked) => return asked,
+    // The start path's answer; the folder the run runs in can only lower it (below). agy has no folder trust (its
+    // mode governs what it may do unasked), so an Antigravity start asks no question and goes as not trusted, a value
+    // its host never reads.
+    let trust = if agent == AgentKind::Antigravity {
+        Trust::NotTrusted
+    } else {
+        match folder_question(&daemon.db, path, trust).await {
+            Ok(trust) => trust,
+            Err(asked) => return asked,
+        }
     };
-    let ready =
-        match claude_preflight(environment, account, daemon.config.claude_bin.as_deref()).await {
-            Ok(ready) => ready,
-            Err(refusal) => return refusal,
-        };
+    let binary = match agent {
+        AgentKind::Antigravity => {
+            match agy_path(environment, daemon.config.agy_bin.as_deref()).await {
+                Some(path) => path,
+                None => {
+                    let (reason, detail) = missing(&agent);
+                    return failed(reason, detail);
+                }
+            }
+        }
+        _ => {
+            match claude_preflight(environment, account, daemon.config.claude_bin.as_deref()).await
+            {
+                Ok(ready) => ready.path,
+                Err(refusal) => return refusal,
+            }
+        }
+    };
     let host_bin = match crate::claude_host::host_binary(&daemon.config) {
         Ok(host_bin) => host_bin,
         Err(why) => return failed(StartFailure::LaunchFailed, why),
@@ -886,21 +1008,25 @@ async fn claude_start(
         Ok(codeconnect) => codeconnect,
         Err(why) => return failed(StartFailure::LaunchFailed, why),
     };
-    let Some(claude_path) = ready.path.to_str() else {
+    let Some(claude_path) = binary.to_str() else {
         return failed(
             StartFailure::LaunchFailed,
             format!(
-                "the claude at {} has a path that is not text",
-                ready.path.display()
+                "the {} at {} has a path that is not text",
+                product(&agent),
+                binary.display()
             ),
         );
     };
     let (cwd, new_worktree) = match worktree {
         None => (path.to_string(), None),
-        Some(StartWorktree::New { name }) => match check_worktree_name(name) {
-            Ok(()) => (path.to_string(), Some(name.as_str())),
-            Err(why) => return failed(StartFailure::LaunchFailed, why),
-        },
+        // Claude makes its own (`--worktree`); agy has no such flag, so ccd makes one for it as for Codex.
+        Some(StartWorktree::New { name }) if agent != AgentKind::Antigravity => {
+            match check_worktree_name(name) {
+                Ok(()) => (path.to_string(), Some(name.as_str())),
+                Err(why) => return failed(StartFailure::LaunchFailed, why),
+            }
+        }
         Some(worktree) => match place(
             environment,
             daemon.config.git_bin.as_deref(),
@@ -931,6 +1057,7 @@ async fn claude_start(
     crate::claude_host::start(
         daemon,
         crate::claude_host::Run {
+            agent,
             root,
             request_id,
             cwd: &cwd,
@@ -1313,6 +1440,18 @@ async fn agent_availability(
         models: Vec::new(),
         signed_in: None,
     };
+    // Antigravity is startable where an agy is found, with what agy offers.
+    if *agent == AgentKind::Antigravity {
+        return match agy_path(environment, configured).await {
+            Some(agy) => {
+                let offer = agy_offer(known, environment, &agy)
+                    .await
+                    .unwrap_or_default();
+                startable(agent, offer.signed_in, offer.models, &this_computer())
+            }
+            None => unavailable(missing(agent).1),
+        };
+    }
     if *agent == AgentKind::Claude {
         return match claude_probe(environment, account, configured).await {
             Err((_, detail)) => unavailable(detail),
@@ -1353,6 +1492,7 @@ const CODEX_FLOOR: (u32, u32, u32) = (0, 167, 0);
 fn product(agent: &AgentKind) -> &'static str {
     match agent {
         AgentKind::Codex => "Codex",
+        AgentKind::Antigravity => "Antigravity",
         _ => "Claude Code",
     }
 }
@@ -1587,6 +1727,19 @@ pub(crate) async fn codex_path(
     )
 }
 
+/// The `agy` an Antigravity start runs: config `agy_bin`, else the first on the login
+/// shell's `PATH`, else its installer's `~/.local/bin/agy`.
+pub(crate) async fn agy_path(
+    environment: &HashMap<OsString, OsString>,
+    agy_bin: Option<&str>,
+) -> Option<PathBuf> {
+    let home = home_in(environment);
+    let mut candidates: Vec<PathBuf> = agy_bin.map(PathBuf::from).into_iter().collect();
+    candidates.extend(login_path_hits(environment, &home, "agy").await);
+    candidates.push(home.join(".local/bin/agy"));
+    protocol::claude_bin::first_runnable(not_installed_in_tests(candidates, agy_bin), None)
+}
+
 /// Every `name` on the `PATH` the user's login shell in `environment` sets up, in
 /// its order.
 async fn login_path_hits(
@@ -1729,9 +1882,12 @@ async fn claude_models(
 
 /// What an agent offers a start: the models it lists, and whether it is signed in.
 #[derive(Debug, Clone, Default, PartialEq)]
-struct Offer {
+pub(crate) struct Offer {
     models: Vec<AgentModel>,
-    signed_in: Option<bool>,
+    pub(crate) signed_in: Option<bool>,
+    /// Antigravity's plan, as agy names it (`_meta.antigravity.tier.name`); none for any other agent, and when agy
+    /// names none.
+    pub(crate) tier: Option<String>,
     /// Codex's own entries for those models, as `model/list` gives them, their efforts
     /// among them: what a Codex run started on this answer keeps for its settings menu
     /// ([`crate::codex_host::Run::models`]). Empty for Claude.
@@ -1886,6 +2042,157 @@ async fn ask(
     offer
 }
 
+/// What Antigravity's Default says of itself, from what agy offers a start: signed in, its plan is agy's tier's name
+/// exactly as agy gives it (none when agy names none); signed out or not known, nothing.
+pub(crate) fn agy_default_facts(offer: &Offer) -> Option<protocol::ws::AccountFacts> {
+    (offer.signed_in == Some(true)).then(|| protocol::ws::AccountFacts {
+        email: None,
+        plan: offer.tier.clone(),
+        windows: Vec::new(),
+        limits_available: None,
+        read_at: protocol::time::now_rfc3339(),
+    })
+}
+
+/// One `agy acp` ccd talks to itself (the start box's ask, a sign-in, a sign-out), started as an agent is
+/// ([`agent_command`], the user's environment, in the home folder, its own process group), its stderr dropped. Its
+/// calls are numbered from 1; a call's answer is agy's reply to it, its notifications and anything else skipped.
+pub(crate) struct Agy {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    next: u64,
+}
+
+impl Agy {
+    pub(crate) fn start(environment: &HashMap<OsString, OsString>, agy: &Path) -> Option<Agy> {
+        let mut command = agent_command(environment, None, &[agy.as_os_str(), OsStr::new("acp")]);
+        command
+            .current_dir(home_in(environment))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = crate::spawn::spawn(&mut command).ok()?;
+        let stdin = child.stdin.take()?;
+        let lines = BufReader::new(child.stdout.take()?).lines();
+        Some(Agy {
+            child,
+            stdin,
+            lines,
+            next: 1,
+        })
+    }
+
+    /// agy's reply to `method` with `params` (its `result` or its `error`); none when agy ended first.
+    pub(crate) async fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let id = self.next;
+        self.next += 1;
+        let line =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        self.stdin
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .ok()?;
+        loop {
+            let line = self.lines.next_line().await.ok()??;
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                if value["id"] == id && value.get("method").is_none() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+
+    /// agy ended, with what it started ([`end_agent`]).
+    pub(crate) async fn end(mut self) {
+        end_agent(&mut self.child).await;
+    }
+}
+
+/// What the agy at `agy` offers a start: the model families its settings name, and whether it is signed in. agy has
+/// no list of its own over ACP, so it is asked by opening one session with no prompt (`session/new`, which a signed-out
+/// agy refuses with "Authentication required") and closing it at once (`session/close`): agy 1.5.15 lists such a
+/// session in no history (measured, `session/list` before and after), though its empty conversation file stays in
+/// agy's folder. Asking starts agy and reaches Google, so a
+/// signed-in answer is kept for that binary (its size and time: agy names no version); a signed-out one is asked
+/// again at each list, as nothing cheaper says when it is signed in. None when agy answered neither way in time.
+pub(crate) async fn agy_offer(
+    known: &KnownAgents,
+    environment: &HashMap<OsString, OsString>,
+    agy: &Path,
+) -> Option<Offer> {
+    let version = std::fs::metadata(agy)
+        .map(|meta| format!("{} {:?}", meta.len(), meta.modified().ok()))
+        .unwrap_or_default();
+    if let Some(kept) = known.offered(&AgentKind::Antigravity, None, &version) {
+        return Some(kept);
+    }
+    let home = home_in(environment);
+    let mut asking = Agy::start(environment, agy)?;
+    let asked = async {
+        asking
+            .call(
+                "initialize",
+                serde_json::json!({"protocolVersion": 1, "clientCapabilities": {}}),
+            )
+            .await?;
+        let opened = asking
+            .call(
+                "session/new",
+                serde_json::json!({"cwd": home, "mcpServers": []}),
+            )
+            .await?;
+        if opened["error"]["message"] == "Authentication required" {
+            return Some(Offer {
+                signed_in: Some(false),
+                ..Offer::default()
+            });
+        }
+        let session = opened["result"]["sessionId"].as_str()?;
+        asking
+            .call("session/close", serde_json::json!({"sessionId": session}))
+            .await?;
+        let models = opened["result"]["configOptions"]
+            .as_array()?
+            .iter()
+            .find(|option| option["category"] == "model")?["options"]
+            .as_array()?
+            .iter()
+            .filter_map(|entry| {
+                Some(AgentModel {
+                    value: entry["value"].as_str()?.to_string(),
+                    label: entry["name"].as_str()?.to_string(),
+                    detail: None,
+                })
+            })
+            .collect();
+        Some(Offer {
+            models,
+            signed_in: Some(true),
+            menu: Vec::new(),
+            tier: opened["result"]["_meta"]["antigravity"]["tier"]["name"]
+                .as_str()
+                .map(str::to_string),
+        })
+    };
+    let offer = tokio::time::timeout(PROBE_TIMEOUT, asked)
+        .await
+        .ok()
+        .flatten();
+    asking.end().await;
+    if offer
+        .as_ref()
+        .is_some_and(|offer| offer.signed_in == Some(true))
+    {
+        known.keep(&AgentKind::Antigravity, None, &version, offer.clone()?);
+    }
+    offer
+}
+
 /// Whether `said` holds every answer `agent` gives to the ask: for Codex, its
 /// models, and its account when `account` asked for it.
 fn answered(agent: &AgentKind, account: bool, said: &[serde_json::Value]) -> bool {
@@ -1923,6 +2230,7 @@ fn offer_from(agent: &AgentKind, said: &[serde_json::Value]) -> Option<Offer> {
                     .collect(),
                 signed_in: None,
                 menu: Vec::new(),
+                tier: None,
             })
         }
         _ => {
@@ -1947,6 +2255,7 @@ fn offer_from(agent: &AgentKind, said: &[serde_json::Value]) -> Option<Offer> {
                         !account["account"].is_null() || account["requiresOpenaiAuth"] == false
                     }),
                 menu: listed.into_iter().cloned().collect(),
+                tier: None,
             })
         }
     }
@@ -2488,11 +2797,14 @@ mod tests {
                 ),
             );
             let (claude, env) = test_claude(&root.join("claude-rig"));
+            // An agy the stand-in host is handed for an Antigravity start; never run here.
+            let agy = program("stand-in-agy", "exit 1".into());
             let daemon = Daemon::new(
                 protocol::config::Config {
                     claude_bin: Some(claude.display().to_string()),
                     codex_bin: Some(codex.display().to_string()),
                     agent_host_bin: Some(host.display().to_string()),
+                    agy_bin: Some(agy.display().to_string()),
                     ..Default::default()
                 },
                 Arc::clone(&store),
@@ -2556,8 +2868,9 @@ mod tests {
                     )
                     .await
                 }
-                _ => {
-                    claude_start(
+                agent => {
+                    hosted_start(
+                        agent,
                         &self.daemon,
                         Ok(self.launcher.clone()),
                         &self.root,
@@ -2795,7 +3108,8 @@ mod tests {
             .unwrap();
         let daemon = hosted_daemon(&root, &claude, &host);
         let project = root.join("project");
-        let result = claude_start(
+        let result = hosted_start(
+            AgentKind::Claude,
             &daemon,
             Ok(root.join("codeconnect")),
             &root,
@@ -2857,7 +3171,8 @@ mod tests {
                        trust: Option<Trust>| {
             let (daemon, root, environment) = (&daemon, &root, &environment);
             async move {
-                claude_start(
+                hosted_start(
+                    AgentKind::Claude,
                     daemon,
                     Ok(root.join("codeconnect")),
                     root,
@@ -3124,7 +3439,8 @@ mod tests {
             }
             None => None,
         };
-        let started = claude_start(
+        let started = hosted_start(
+            AgentKind::Claude,
             &daemon,
             Ok(root.join("codeconnect")),
             &root,
@@ -3368,7 +3684,8 @@ mod tests {
         std::fs::write(&host, "#!/bin/sh\n").unwrap();
         let daemon = hosted_daemon(&root, &claude, &host);
         let project = root.join("project");
-        let result = claude_start(
+        let result = hosted_start(
+            AgentKind::Claude,
             &daemon,
             Ok(root.join("codeconnect")),
             &root,
@@ -3420,7 +3737,8 @@ mod tests {
             .display()
             .to_string();
         let start = |request_id: &'static str, trust: Option<Trust>| {
-            claude_start(
+            hosted_start(
+                AgentKind::Claude,
                 &daemon,
                 Ok(root.join("codeconnect")),
                 &root,
@@ -3478,7 +3796,8 @@ mod tests {
         let host = root.join("stand-in-host");
         std::fs::write(&host, "#!/bin/sh\n").unwrap();
         let daemon = hosted_daemon(&root, &claude, &host);
-        let result = claude_start(
+        let result = hosted_start(
+            AgentKind::Claude,
             &daemon,
             Err("no codeconnect here".into()),
             &root,
@@ -3532,7 +3851,8 @@ mod tests {
             .unwrap();
         let daemon = hosted_daemon(&root, &claude, &host);
         let project = root.join("project");
-        claude_start(
+        hosted_start(
+            AgentKind::Claude,
             &daemon,
             Ok(root.join("codeconnect")),
             &root,
@@ -3620,6 +3940,32 @@ mod tests {
     /// A rig whose starts reach their stand-ins.
     fn counting(tag: &str) -> Rig {
         Rig::new(tag, "exit 1")
+    }
+
+    /// **An Antigravity start asks no folder question** (row 5, the owner's ruling): agy has no folder trust, and its
+    /// mode governs what it may do unasked, so a question whose answer changes nothing is not asked. Its start in a
+    /// folder no one has answered for reaches its host and keeps no answer; a Claude start there is still asked.
+    #[tokio::test]
+    async fn an_antigravity_start_asks_no_folder_question() {
+        let rig = counting("agy-trust");
+        let path = rig.project();
+        let real = std::fs::canonicalize(&rig.project)
+            .unwrap()
+            .display()
+            .to_string();
+        let agy = rig
+            .start_as(AgentKind::Antigravity, &path, "fix the tests", None, None)
+            .await;
+        assert!(reached(&agy), "{agy:?}");
+        assert_eq!(
+            rig.db.folder_trust(real.clone()).await.unwrap(),
+            None,
+            "no answer kept"
+        );
+        assert_eq!(
+            rig.start_answering(&path, None).await,
+            StartSessionResult::NeedsTrust { path: real }
+        );
     }
 
     /// **A folder is asked about once.** The first start there, with no answer,
@@ -4238,6 +4584,30 @@ mod tests {
             own_declined.contains(r#"trust_level = "untrusted""#)
                 && !own_declined.contains(r#"trust_level = "trusted""#),
             "{own_declined}"
+        );
+    }
+
+    /// **A new Antigravity worktree is made as a Codex one is** (S3, row 6): agy has no worktree flag of its own, so
+    /// ccd makes it, where Claude Code makes one, on a branch named as typed, and the run starts in it.
+    #[tokio::test]
+    async fn a_new_antigravity_worktree_is_made_as_a_codex_one_is() {
+        let rig = recording("new-agy");
+        let main = rig.main();
+        let result = rig
+            .start_in(
+                &rig.project(),
+                AgentKind::Antigravity,
+                StartWorktree::New {
+                    name: "fix/agy".into(),
+                },
+            )
+            .await;
+        assert!(reached(&result), "{result:?}");
+        let folder = Path::new(&main).join(".claude/worktrees/fix+agy");
+        assert_eq!(rig.host_cwd(), folder.canonicalize().unwrap());
+        assert_eq!(
+            git(&folder, &["symbolic-ref", "--short", "HEAD"]),
+            "fix/agy"
         );
     }
 
@@ -5226,6 +5596,114 @@ esac"#;
 
     async fn codex_listed(rig: &Rig, known: &KnownAgents) -> AgentAvailability {
         agent_availability(&AgentKind::Codex, known, &rig.env, None, None).await
+    }
+
+    /// A stand-in `agy` at `path` answering `agy acp` as agy 1.5.15 does: `initialize`, then `session/new` with its
+    /// settings (two model families), or, `signed_out`, with "Authentication required"; `session/close` with nothing.
+    /// Every line it reads goes to `<path>.asks`.
+    fn agy_says(path: &Path, signed_out: bool) {
+        let opened = if signed_out {
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Authentication required"}}"#
+        } else {
+            r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-ask","configOptions":[{"id":"model","category":"model","currentValue":"gemini-4-neon","options":[{"value":"gemini-4-neon","name":"Gemini 4 Neon"},{"value":"gemini-3.8-flash","name":"Gemini 3.8 Flash"}]},{"id":"mode","category":"mode","currentValue":"default","options":[]}]}}"#
+        };
+        let asks = format!("{}.asks", path.display());
+        let script = format!(
+            "#!/bin/sh\nwhile read -r line; do\n  printf '%s\\n' \"$line\" >> '{asks}'\n  case \"$line\" in\n    *'\"initialize\"'*) echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":1}}}}' ;;\n    *'\"session/new\"'*) echo '{opened}' ;;\n    *'\"session/close\"'*) echo '{{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{{}}}}' ;;\n  esac\ndone\n",
+        );
+        std::fs::write(path, script).unwrap();
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+    }
+
+    /// **Antigravity is listed with agy's own models** (S1): its start box offers the model families agy's settings
+    /// name, read from one session opened with no prompt and closed again (which agy lists in no history), asked
+    /// once while it is signed in. A signed-out agy is listed as such, with no models; none found, as not installed,
+    /// in its own name.
+    #[tokio::test]
+    async fn antigravity_is_listed_with_agys_own_models() {
+        let rig = Rig::new("agy-listed", ANSWERING);
+        let known = KnownAgents::default();
+        let agy = rig.root.join("agy");
+        agy_says(&agy, false);
+        let listed = || {
+            agent_availability(
+                &AgentKind::Antigravity,
+                &known,
+                &rig.env,
+                None,
+                agy.to_str(),
+            )
+        };
+        let found = listed().await;
+        assert_eq!(found.agent, AgentKind::Antigravity);
+        assert!(found.available, "{found:?}");
+        assert_eq!(found.detail, None);
+        assert_eq!(found.signed_in, Some(true));
+        assert_eq!(
+            found.models,
+            vec![
+                AgentModel {
+                    value: "gemini-4-neon".into(),
+                    label: "Gemini 4 Neon".into(),
+                    detail: None
+                },
+                AgentModel {
+                    value: "gemini-3.8-flash".into(),
+                    label: "Gemini 3.8 Flash".into(),
+                    detail: None
+                },
+            ]
+        );
+        let asks = || std::fs::read_to_string(format!("{}.asks", agy.display())).unwrap();
+        assert!(
+            asks().contains(r#""method":"session/close","params":{"sessionId":"sess-ask"}"#),
+            "{}",
+            asks()
+        );
+        assert_eq!(listed().await, found);
+        assert_eq!(
+            asks().matches("initialize").count(),
+            1,
+            "asked once while signed in"
+        );
+
+        let signed_out = rig.root.join("agy-out");
+        agy_says(&signed_out, true);
+        let out = agent_availability(
+            &AgentKind::Antigravity,
+            &KnownAgents::default(),
+            &rig.env,
+            None,
+            signed_out.to_str(),
+        )
+        .await;
+        assert!(out.available);
+        assert_eq!(out.signed_in, Some(false));
+        assert_eq!(out.models, Vec::new());
+        assert_eq!(
+            out.detail,
+            Some(format!(
+                "Antigravity on {} isn’t signed in.",
+                this_computer()
+            ))
+        );
+        let missing = agent_availability(
+            &AgentKind::Antigravity,
+            &known,
+            &rig.env,
+            None,
+            Some("/nonexistent/agy"),
+        )
+        .await;
+        assert!(!missing.available);
+        assert_eq!(
+            missing.detail,
+            Some(format!(
+                "Antigravity isn’t installed on {}.",
+                this_computer()
+            ))
+        );
     }
 
     /// **Codex is the user's own codex, run itself**: one on the login shell's `PATH`

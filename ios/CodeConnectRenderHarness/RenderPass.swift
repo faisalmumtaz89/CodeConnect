@@ -125,6 +125,27 @@ final class RenderPass: XCTestCase {
 
     func testRendersTheUploadsAtAX5() throws { try render(at: .ax5, RenderCatalog.uploads + RenderCatalog.startFiles) }
 
+    /// An Antigravity run's own commands: no Clear, and Compact in its words.
+    func testRendersAntigravityCommandsAtLarge() throws { try render(at: .large, RenderCatalog.antigravityCommands) }
+
+    /// The first-run screens: what a computer needs, as onboarding says it.
+    private static let onboarding = RenderCatalog.all.filter { $0.name.hasPrefix("onboarding") } + [
+        RenderScenario(
+            name: "onboarding-agents", purpose: "the install step's last sentence, the agents a computer needs, on screen",
+            arguments: [],
+            reach: { app, driver in
+                try driver.require(app.buttons["pairing-sample-mode"], "the first screen")
+                try driver.scrollUntil(app, "the agents sentence whole on screen") {
+                    let sentence = driver.element(containing: "Antigravity", in: app)
+                    return sentence.exists && sentence.frame.maxY <= app.windows.firstMatch.frame.maxY
+                }
+            }),
+    ]
+
+    func testRendersTheOnboardingAtLarge() throws { try render(at: .large, Self.onboarding) }
+
+    func testRendersTheOnboardingAtAX5() throws { try render(at: .ax5, Self.onboarding) }
+
     // MARK: - The pass
 
     private func render(at size: Size, _ scenarios: [RenderScenario] = RenderCatalog.all) throws {

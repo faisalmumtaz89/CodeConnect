@@ -496,6 +496,23 @@ pub enum ClientMessage {
         request_id: String,
         account_id: String,
     },
+    /// **Signs `agent` in with its own sign-in, on this computer** (minor 51): Antigravity's, which keeps one sign-in
+    /// and no accounts of CodeConnect's; agy opens Google's sign-in in a browser here. Answered at once with one
+    /// [`ServerMessage::Accounts`] whose [`AgentSignIn`] for it is `signing_in`; when the sign-in ends (finished in the
+    /// browser, replaced by a newer sign-in, or after ten minutes) the list is pushed with its sign-in as it then is.
+    /// It takes the computer's one sign-in at a time, as [`ClientMessage::SignInAccount`] does. Any other agent is
+    /// refused `bad_request`.
+    SignInAgent {
+        request_id: String,
+        agent: crate::agent::AgentKind,
+    },
+    /// **Signs `agent` out of this computer** (minor 51): Antigravity's own logout. Answered with one
+    /// [`ServerMessage::Accounts`], or [`ServerMessage::AccountsRefused`] when agy could not sign out. Any other agent
+    /// is refused `bad_request`.
+    SignOutAgent {
+        request_id: String,
+        agent: crate::agent::AgentKind,
+    },
     /// **The git worktrees and branches of one folder** (minor 29,
     /// `start_worktree`), answered with one [`ServerMessage::ProjectGit`]. Read
     /// only: nothing is fetched, written or run. `path` is absolute.
@@ -723,6 +740,10 @@ pub enum ServerMessage {
         /// Each agent's Default with what it says of it, once read; omitted when none is.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         defaults: Vec<DefaultAccount>,
+        /// The sign-in of each agent that keeps one and no accounts of CodeConnect's (minor 51: Antigravity), as
+        /// last read; omitted when none is.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        agent_sign_ins: Vec<AgentSignIn>,
     },
     /// A refused account request (any of [`ClientMessage::ListAccounts`], [`ClientMessage::AddAccount`],
     /// [`ClientMessage::ActivateAccount`], [`ClientMessage::SignInAccount`], [`ClientMessage::RemoveAccount`]), naming
@@ -1018,7 +1039,8 @@ pub struct AccountFacts {
     /// The address it is signed in as.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
-    /// Its plan, in the agent's own word (Codex's `planType`: `plus`, `pro`, …).
+    /// Its plan, in the agent's own words (Codex's `planType`: `plus`, `pro`, …; Antigravity's tier name, as agy
+    /// names it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
     /// Each usage window the agent names, as it names it; a window it does not name is absent, so an app labels a
@@ -1049,6 +1071,19 @@ pub struct UsageWindow {
 pub struct DefaultAccount {
     pub agent: crate::agent::AgentKind,
     pub facts: AccountFacts,
+}
+
+/// The sign-in of an agent that keeps one and no accounts of CodeConnect's (minor 51: Antigravity's), its plan in
+/// [`ServerMessage::Accounts`]' `defaults`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSignIn {
+    pub agent: crate::agent::AgentKind,
+    /// Whether it is signed in, as it last said; absent while not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+    /// A sign-in for it is going on this computer, waiting on the browser. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signing_in: bool,
 }
 
 /// The account an agent's starts use now.
@@ -2320,9 +2355,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 50,
             "files for a session's agent (`put_file`, `attachments`, `uploads`) are minor 50"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 51,
+            "Antigravity's sign-in from an app (`sign_in_agent`, `sign_out_agent`, `agent_sign_ins`) is minor 51"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 50);
+        assert_eq!(crate::PROTOCOL_MINOR, 51);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3349,6 +3388,7 @@ mod tests {
                 account_id: "01M80QGTWR9RCHBSJWR169GXCN".into(),
             }],
             defaults: Vec::new(),
+            agent_sign_ins: Vec::new(),
         };
         let expected = serde_json::json!({"type": "accounts", "request_id": "a2",
             "accounts": [{"id": "01M80QGTWR9RCHBSJWR169GXCN", "agent": "codex", "label": "Work"}],
@@ -3424,6 +3464,7 @@ mod tests {
                     ..facts
                 },
             }],
+            agent_sign_ins: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(&told).unwrap(),
@@ -3456,11 +3497,43 @@ mod tests {
             accounts: Vec::new(),
             active: Vec::new(),
             defaults: Vec::new(),
+            agent_sign_ins: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(&pushed).unwrap(),
             serde_json::json!({"type": "accounts", "accounts": [], "active": []})
         );
+        // Antigravity's own sign-in and sign-out (minor 51) name its agent; its sign-in state rides the listing.
+        round_trip_client(
+            ClientMessage::SignInAgent {
+                request_id: "a9".into(),
+                agent: crate::agent::AgentKind::Antigravity,
+            },
+            serde_json::json!({"type": "sign_in_agent", "request_id": "a9", "agent": "antigravity"}),
+        );
+        round_trip_client(
+            ClientMessage::SignOutAgent {
+                request_id: "a10".into(),
+                agent: crate::agent::AgentKind::Antigravity,
+            },
+            serde_json::json!({"type": "sign_out_agent", "request_id": "a10", "agent": "antigravity"}),
+        );
+        let states = ServerMessage::Accounts {
+            request_id: None,
+            accounts: Vec::new(),
+            active: Vec::new(),
+            defaults: Vec::new(),
+            agent_sign_ins: vec![AgentSignIn {
+                agent: crate::agent::AgentKind::Antigravity,
+                signed_in: Some(false),
+                signing_in: true,
+            }],
+        };
+        let expected = serde_json::json!({"type": "accounts", "accounts": [], "active": [],
+            "agent_sign_ins": [{"agent": "antigravity", "signed_in": false, "signing_in": true}]});
+        assert_eq!(serde_json::to_value(&states).unwrap(), expected);
+        let decoded: ServerMessage = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
         // A removal names the account.
         round_trip_client(
             ClientMessage::RemoveAccount {

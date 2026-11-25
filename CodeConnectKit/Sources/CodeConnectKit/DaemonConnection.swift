@@ -1165,6 +1165,17 @@ public final class DaemonConnection {
         try await accountsRequest { .signInAccount(requestID: $0, accountID: accountID) }
     }
 
+    /// Starts `agent`'s own sign-in in a browser on the computer (minor 51, Antigravity); every account, its sign-in
+    /// going. Its end comes in a pushed listing.
+    public func signInAgent(_ agent: String) async throws -> AccountBook {
+        try await accountsRequest { .signInAgent(requestID: $0, agent: agent) }
+    }
+
+    /// Signs `agent` out of the computer (minor 51, Antigravity).
+    public func signOutAgent(_ agent: String) async throws -> AccountBook {
+        try await accountsRequest { .signOutAgent(requestID: $0, agent: agent) }
+    }
+
     /// One accounts request at a time: a change is never sent while another is still unanswered.
     private func accountsRequest(_ message: (String) -> ClientMessage) async throws -> AccountBook {
         if accountsWaiters.values.contains(where: { $0.contains { $0.continuation != nil } }) {
@@ -1215,7 +1226,8 @@ public final class DaemonConnection {
         session: String, requestID: String, turnID: String, payloadHash: String,
         requires agent: AgentKind
     ) async throws -> InterruptResult {
-        let (advertised, flag): (Bool?, String) = agent == .claude
+        // A run on the agent host (Claude Code's or Antigravity's) is stopped through it, under `claude_interrupt`.
+        let (advertised, flag): (Bool?, String) = agent == .claude || agent == .antigravity
             ? (capabilities?.claudeInterrupt, "claude_interrupt")
             : (capabilities?.codexInterrupt, "codex_interrupt")
         guard advertised == true else {

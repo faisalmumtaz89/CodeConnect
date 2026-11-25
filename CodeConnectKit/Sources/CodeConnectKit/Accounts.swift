@@ -99,6 +99,49 @@ public struct DefaultAccount: Decodable, Hashable, Sendable {
     public let facts: AccountFacts
 }
 
+/// The sign-in of an agent that keeps one and no accounts of CodeConnect's (Antigravity's, minor 51), as the computer
+/// last read it: its plan is its Default's facts'.
+public struct AgentSignIn: Decodable, Hashable, Sendable {
+    public let agent: String
+    /// Whether it is signed in; nil while the computer does not know.
+    public let signedIn: Bool?
+    /// A sign-in for it is going on the computer, waiting on the browser.
+    public let signingIn: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case agent
+        case signedIn = "signed_in"
+        case signingIn = "signing_in"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        agent = try c.decode(String.self, forKey: .agent)
+        signedIn = try c.decodeIfPresent(Bool.self, forKey: .signedIn)
+        signingIn = try c.decodeIfPresent(Bool.self, forKey: .signingIn) ?? false
+    }
+
+    /// The words its one row says, beside its plan as the agent names it (`plan`, passed through as sent): "Signed in ·
+    /// <plan>", "Signed in" when it names none; nil otherwise, where the row says it is signed out or signing in.
+    public func line(plan: String?) -> String? {
+        guard signedIn == true, !signingIn else { return nil }
+        return plan.map { "Signed in · \($0)" } ?? "Signed in"
+    }
+
+    /// Signed out, as its row says it: the agent says so and no sign-in is going on.
+    public var signedOut: Bool { signedIn == false && !signingIn }
+
+    /// Its row's acts: Sign In… signed out, Sign Out… signed in, none while not known or signing in.
+    public var acts: [AccountRowAct] {
+        if signingIn { return [] }
+        switch signedIn {
+        case true?: return [.signOut]
+        case false?: return [.signIn]
+        case nil: return []
+        }
+    }
+}
+
 /// The account an agent's new starts use.
 public struct ActiveAccount: Decodable, Hashable, Sendable {
     public let agent: String
@@ -117,11 +160,22 @@ public struct AccountBook: Hashable, Sendable {
     public let active: [ActiveAccount]
     /// What each agent's Default says of itself, where the computer has read it.
     public let defaults: [DefaultAccount]
+    /// The sign-in of each agent that keeps one and no accounts (minor 51: Antigravity).
+    public let agentSignIns: [AgentSignIn]
 
-    public init(accounts: [AgentAccount], active: [ActiveAccount], defaults: [DefaultAccount] = []) {
+    public init(
+        accounts: [AgentAccount], active: [ActiveAccount], defaults: [DefaultAccount] = [],
+        agentSignIns: [AgentSignIn] = []
+    ) {
         self.accounts = accounts
         self.active = active
         self.defaults = defaults
+        self.agentSignIns = agentSignIns
+    }
+
+    /// `agent`'s own sign-in, where the computer has said it.
+    public func agentSignIn(for agent: StartAgent) -> AgentSignIn? {
+        agentSignIns.first { $0.agent == agent.rawValue }
     }
 
     /// What `agent`'s Default says of itself; nil until read.
@@ -225,8 +279,17 @@ public enum AccountSwitchWords {
 /// Remove… for every account added here. The Default is the agent as set up on the computer and offers neither.
 public enum AccountRowAct: Sendable, Hashable {
     case signInAgain, remove
+    /// An agent's own sign-in (Antigravity's), signed out or in.
+    case signIn, signOut
 
-    public var title: String { self == .signInAgain ? "Sign In Again…" : "Remove…" }
+    public var title: String {
+        switch self {
+        case .signInAgain: "Sign In Again…"
+        case .remove: "Remove…"
+        case .signIn: "Sign In…"
+        case .signOut: "Sign Out…"
+        }
+    }
 
     /// `account`'s acts, in the menu's order; none for the Default (nil).
     public static func acts(for account: AgentAccount?) -> [AccountRowAct] {

@@ -15,6 +15,7 @@
 
 use std::path::PathBuf;
 
+pub mod acp_map;
 pub mod agent;
 pub mod build_identity;
 pub mod claude_bin;
@@ -900,7 +901,14 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     [`ws::ClientMessage::StartSession`]'s `attachments` move it into the new run's folder before its first message,
 ///     which carries the same path lines. A daemon below 50 answers `put_file` with `bad_request` and advertises no
 ///     `uploads`.
-pub const PROTOCOL_MINOR: u32 = 50;
+///   * `51` — **Antigravity signs in and out from an app.**
+///
+///     [`ws::ClientMessage::SignInAgent`] and [`ws::ClientMessage::SignOutAgent`] sign an agent that keeps one sign-in
+///     and no accounts of CodeConnect's (Antigravity) in, with its own sign-in in a browser on the computer, and out;
+///     the accounts listing carries its sign-in as [`ws::AgentSignIn`] (`agent_sign_ins`) and its plan, in agy's own
+///     words, as its Default's facts. Any other agent is refused `bad_request`. A daemon below 51 answers the two
+///     frames as undecodable and sends no `agent_sign_ins`, so an app offers them only from 51.
+pub const PROTOCOL_MINOR: u32 = 51;
 
 #[cfg(test)]
 mod ledger_tests {

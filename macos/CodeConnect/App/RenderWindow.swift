@@ -81,13 +81,13 @@
         static var browsed: String? { UserDefaults.standard.string(forKey: "CC_BROWSE") }
         static var browsesHidden: Bool { UserDefaults.standard.bool(forKey: "CC_BROWSE_HIDDEN") }
         static var browseUnasked: Bool { UserDefaults.standard.bool(forKey: "CC_BROWSE_UNASKED") }
-        /// An account in `-CC_ACCOUNTS_WIRE`'s listing is signing in: its row's spinner turns.
+        /// An account, or an agent's own sign-in, in `-CC_ACCOUNTS_WIRE`'s listing is signing in: its row's spinner turns.
         static var accountSigningIn: Bool {
             let arguments = ProcessInfo.processInfo.arguments
             guard let flag = arguments.firstIndex(of: "-CC_ACCOUNTS_WIRE"), flag + 1 < arguments.count,
                 case .accounts(_, let book)? = try? JSONDecoder().decode(ServerMessage.self, from: Data(arguments[flag + 1].utf8))
             else { return false }
-            return book.accounts.contains(where: \.signingIn)
+            return book.accounts.contains(where: \.signingIn) || book.agentSignIns.contains(where: \.signingIn)
         }
         static var newFolderName: String? { UserDefaults.standard.string(forKey: "CC_NEW_FOLDER") }
         /// `-CC_BRANCH_PLACE <branch>`: the start form's place, the repository's worktree on that branch.
@@ -111,11 +111,12 @@
         /// (`panel: …; control: …; window: …`).
         static var openRunMenu: String? { UserDefaults.standard.string(forKey: "CC_RUN_MENU") }
         /// `-CC_ACCOUNT_MENU <account id>`: that account's row on Settings › Accounts, drawn as under the pointer
-        /// (`-CC_HOVER settings.accounts.<agent>.<id>`), opens its "…"'s menu a moment later, as a click does.
+        /// (`-CC_HOVER settings.accounts.<agent>.<id>`), opens its "…"'s menu a moment later, as a click does; an agent's
+        /// Default by `default:<agent>`.
         static var openAccountMenu: String? { UserDefaults.standard.string(forKey: "CC_ACCOUNT_MENU") }
         /// `-CC_LIST_END YES`: the run list opens scrolled to its end.
         static var listAtEnd: Bool { UserDefaults.standard.bool(forKey: "CC_LIST_END") }
-        /// `-CC_CONFIRM endRun|endNote|remove|removeNote|clear|mode|computer|device|batch|batchRun`: that ask or notice is up at launch,
+        /// `-CC_CONFIRM endRun|endNote|remove|removeNote|clear|mode|computer|device|batch|batchRun|signOut`: that ask or notice is up at launch,
         /// about the first run listed, the open run (`-CC_OPEN`), the last computer, or the first device Settings lists.
         static var confirm: String? { UserDefaults.standard.string(forKey: "CC_CONFIRM") }
         /// `-CC_SELECT all|<n>`: the Ended runs open choosing, with all or the first `n` removable runs chosen; with
@@ -152,7 +153,7 @@
             return try? JSONDecoder().decode([FolderAnswer].self, from: Data(arguments[flag + 1].utf8))
         }
 
-        /// `-CC_SETUP_ROWS "service=missing:<sentence>;claude=ready:Ready;codex=checking;path=missing:<sentence>"`: the
+        /// `-CC_SETUP_ROWS "service=missing:<sentence>;claude=ready:Ready;codex=checking;antigravity=…;path=missing:<sentence>"`: the
         /// checklist opens with these answers, settled, and runs nothing.
         static var setupRows: [String: Setup.Row]? {
             guard let text = UserDefaults.standard.string(forKey: "CC_SETUP_ROWS") else { return nil }

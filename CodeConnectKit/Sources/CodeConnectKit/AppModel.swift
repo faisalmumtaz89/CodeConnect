@@ -1344,6 +1344,29 @@ public final class AppModel {
         await accountsRequest { try await $0.signInAccount(accountID: accountID) }
     }
 
+    /// This computer signs an agent in and out with its own sign-in (minor 51: Antigravity's); one before it would
+    /// answer those requests as undecodable, so none is offered there.
+    public var signsAgentsIn: Bool {
+        #if DEBUG
+            if fixtureAccountBook != nil { return true }
+        #endif
+        return keepsAccounts && connection.profile.protocolMinor >= 51
+    }
+
+    /// Starts `agent`'s own sign-in in a browser on the computer; true once the computer has it going.
+    @discardableResult
+    public func signInAgent(_ agent: StartAgent) async -> Bool {
+        guard signsAgentsIn else { return false }
+        return await accountsRequest { try await $0.signInAgent(agent.rawValue) }
+    }
+
+    /// Signs `agent` out of the computer; true once it has.
+    @discardableResult
+    public func signOutAgent(_ agent: StartAgent) async -> Bool {
+        guard signsAgentsIn else { return false }
+        return await accountsRequest { try await $0.signOutAgent(agent.rawValue) }
+    }
+
     private func accountsRequest(_ ask: (DaemonConnection) async throws -> AccountBook) async -> Bool {
         guard keepsAccounts, !accountsBusy else { return false }
         accountsProblem = nil
@@ -3944,6 +3967,15 @@ public final class AppModel {
         case (.claude, .optionId):
             return "An option id is for a Codex run; this is a Claude run, "
                 + "so nothing was sent."
+        case (.antigravity, .allow), (.antigravity, .deny):
+            // Answered through the agent host that holds agy's request, as a Claude card is.
+            guard answersApprovalsByHook else {
+                return "\(HostDevice.current.computer("The computer"))’s CodeConnect is too old to answer Antigravity’s approvals from the "
+                    + "\(HostDevice.current.noun), so nothing was sent. Update it, or answer at \(HostDevice.current.computer("the computer"))."
+            }
+            return nil
+        case (.antigravity, _):
+            return "An Antigravity card is answered Allow or Deny, so nothing was sent."
         case (.unsupported(let raw), _):
             return "This app does not know how to answer a \(raw) run, so nothing was sent."
         default:
