@@ -43,7 +43,7 @@ struct ChangesPanel: View {
             // One branch draws a read diff, the one on hand or, while it is read again, the last one, so a reread keeps
             // the same views and their folds, scroll and unsent comment.
             if let diff = onHand(state) ?? (state.isLoading ? shown : nil) {
-                loaded(diff.raw, diff.parsed, diff.fetchedAt, counted: reply == nil)
+                loaded(diff.raw, diff.parsed, diff.fetchedAt, counted: git == nil)
             } else {
                 unread(state)
             }
@@ -61,10 +61,15 @@ struct ChangesPanel: View {
         .onChange(of: loadedAt) { _, _ in
             if let diff = onHand(model.diffState(for: key)) { shown = diff }
         }
-        // Asked again the moment the link is back, as the iPhone does: only after the app's own link failure, never
-        // after a refusal the computer made.
+        // Read again the moment the link is back, as the iPhone does, but never over a refusal the computer made: its
+        // words stay until the person asks again.
         .onChange(of: model.daemonProfile.isConnected) { _, connected in
-            if connected { reread() }
+            guard connected else { return }
+            if case .failed(.daemon) = model.diffState(for: key) {
+                model.loadRunGit(key: key)
+            } else {
+                reread()
+            }
         }
     }
 
