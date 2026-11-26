@@ -1357,7 +1357,9 @@ to probe credentials.
   (`statusCheckRollup` of its last commit, each check run with its first
   annotations): a batch is at most 3 requests. A check run again on the same
   commit, in the same workflow and for the same event, is listed once, as the
-  run started last; statuses are never merged. `failure_line` is, among a
+  run started last; statuses are never merged. The query reads each check run's
+  workflow, so a token without `Actions: read` (a GitHub App's, say) gets the
+  pull request with no `checks`. `failure_line` is, among a
   failed check run's first 10 annotations, the first at failure level that says
   more than the runner's "Process completed with exit code N.", its first line. A branch whose remote is a URL (as `gh pr checkout` sets for a
   fork's PR) is read from that URL.
