@@ -26,7 +26,7 @@ struct ModelButton: View {
         } label: {
             HStack(spacing: 5) {
                 if let pick { AgentMark(agent: AgentKind(pick.agent)) }
-                Text(label).font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
+                Text(label).font(InputBoxChip.font).lineLimit(1).truncationMode(.tail)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(pick == nil ? Theme.text3 : Theme.text2)
@@ -81,10 +81,9 @@ struct ModelButton: View {
                     }
                 }
             }
-            .padding(.vertical, 5)
         }
-        // The card's own 6 pt each side within its width, as every panel's.
-        .frame(width: placed.width - 12)
+        // The card's own inset each side within its width, as every panel's.
+        .frame(width: placed.width - 2 * MenuMetrics.inset)
         // Its top 8 pt inside the pane (before the button is measured, its tallest).
         .frame(maxHeight: minY > 0 ? min(360, minY - Theme.panelGap - PanelPlace.margin) : 360)
         .fixedSize(horizontal: false, vertical: true)

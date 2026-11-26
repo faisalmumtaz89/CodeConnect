@@ -426,8 +426,8 @@ async fn attach(
 /// found it (H8): its socket, waited for while the host is alive and not yet listening,
 /// as a new host's is; then `attach` from the run's cursor and the link, which reads from
 /// the store what the connection that started the run knew. A run still starting gets
-/// its stored `start` at the first `state`, once the replay is over, and a run stopping
-/// gets `stop` again there (H8). When it cannot connect, the run's host is checked as at
+/// its stored `start` at the first `state`, once the replay is over, and a run stopping, or one its switch was
+/// ending, gets `stop` again there (H8). When it cannot connect, the run's host is checked as at
 /// the link's end ([`end_if_host_gone`]).
 pub(crate) async fn attach_run(
     daemon: Arc<Daemon>,
@@ -488,9 +488,15 @@ pub(crate) async fn attach_run(
         _ => (String::new(), String::new()),
     };
     let effort = start_effort(start.as_ref());
+    // A live run its switch was ending is stopped again, as a stopping run is: a host that had the stop ignores it.
+    let moving = linked.lifecycle == Lifecycle::Live
+        && matches!(
+            daemon.db.switch_state(uid.clone()).await,
+            Ok(Some(crate::store::Store::SWITCH_MOVED))
+        );
     let resend = match linked.lifecycle {
         Lifecycle::Starting => start,
-        Lifecycle::Stopping => match protocol::uid::uuid_v4() {
+        _ if linked.lifecycle == Lifecycle::Stopping || moving => match protocol::uid::uuid_v4() {
             Ok(uuid) => Some(ToHost::Stop { uuid }),
             Err(err) => {
                 crate::log_error!("{uid}: could not name its stop: {err}");
@@ -514,7 +520,8 @@ pub(crate) async fn attach_run(
             // the seconds of a relaunch files its resumed start with no source (a written miss).
             resumed: false,
             effort,
-            account: None,
+            // A relaunch's start goes on the account it was launched on, which its begin recorded.
+            account: linked.launched,
         },
         None,
         BufReader::new(read).lines(),
@@ -622,8 +629,9 @@ struct Turns {
     marked: i64,
     /// Whether the host has replayed what it kept ([`Linked::replayed`]).
     replayed: bool,
-    /// Why the launch's first init starts a session: `startup`, or `resume` for a relaunch.
-    launched: &'static str,
+    /// Why the launch's first init starts a session: `startup`, or `resume` for a relaunch; none for a switch's
+    /// relaunch, which is the switch itself, so no page of the conversation draws its start.
+    launched: Option<&'static str>,
     /// The context the turn's latest top-level call left (its input, cache creation, cache read and output) and that
     /// call's model, for the turn's `usage` (minor 49); none until a call of the turn's own, and again at its result.
     context: Option<(u64, String)>,
@@ -680,7 +688,7 @@ async fn apply_sdk(
         source = if turns.cleared {
             Some("clear")
         } else if turns.init.is_none() {
-            Some(turns.launched)
+            turns.launched
         } else {
             None
         };
@@ -903,6 +911,9 @@ async fn link(
     mut write: OwnedWriteHalf,
 ) {
     let (to_link, mut commands) = tokio::sync::mpsc::unbounded_channel();
+    if !linked.replayed {
+        daemon.set_replaying(&uid, true).await;
+    }
     daemon
         .host_link_attached(&uid, crate::state::HostLink::Claude(to_link))
         .await;
@@ -922,7 +933,7 @@ async fn link(
         cleared: false,
         marked: 0,
         replayed,
-        launched: if resumed { "resume" } else { "startup" },
+        launched: Some(if resumed { "resume" } else { "startup" }),
         context: None,
         acp: None,
         acp_usage: None,
@@ -1007,10 +1018,22 @@ async fn link(
                 // answer that follows the ack finds its card answerable; a live run can
                 // be woken for its mail again, its replayed turns marked.
                 daemon.host_cards_reconcile(&uid, &pending).await;
+                // Attached again to a live run: a message an earlier ccd claimed that the replay settled nothing of
+                // never reached the host, so it holds no move back, and its retry is sent afresh.
+                if !turns.replayed && live {
+                    if let Err(err) = daemon
+                        .db
+                        .release_unsent(uid.clone(), daemon.started_at.clone())
+                        .await
+                    {
+                        crate::log_error!("{uid}: could not release its unsent messages: {err:#}");
+                    }
+                }
                 if let Err(why) = send(&mut write, &ToHost::Ack { seq }).await {
                     break why;
                 }
                 turns.replayed = true;
+                daemon.set_replaying(&uid, false).await;
                 if live {
                     crate::mail::waiter_registered(&daemon, &uid);
                 }
@@ -1038,6 +1061,9 @@ async fn link(
                     Err(why) => break why,
                 };
                 let switching = crate::switch::switched(&daemon, &uid).await;
+                if switching {
+                    turns.launched = None;
+                }
                 let (lifecycle, said) = match status {
                     OutcomeStatus::Done => (Lifecycle::Live, Ok(())),
                     // claude never took a refused relaunch's message, so the run stays
@@ -1051,6 +1077,11 @@ async fn link(
                         Err(detail.unwrap_or_else(|| "the agent host refused the start".into())),
                     ),
                 };
+                // A relaunch's message names the command it is to claude, as any message does.
+                let command = relaunched.as_ref().and_then(|_| {
+                    let answer = initialize.as_ref()?;
+                    sent_command(&start_prompt, &answer.commands).map(str::to_string)
+                });
                 // agy refusing a start as signed out (signed out outside CodeConnect, or Google ended it): what is kept
                 // of its sign-in is old, and is read again, the accounts listing then pushed.
                 if said
@@ -1088,13 +1119,8 @@ async fn link(
                         &start_uuid,
                         &start_prompt,
                         relaunched.as_deref(),
-                        None,
+                        command.as_deref(),
                     ));
-                }
-                // Going live on the new account ends the switch before anything of the start is told, so a device
-                // listing on those events reads it over.
-                if switching && status == OutcomeStatus::Done {
-                    crate::switch::set(&daemon, &uid, None).await;
                 }
                 match daemon
                     .commit_start_outcome(&uid, host, seq, lifecycle, initialize, words, relaunched)
@@ -1102,15 +1128,27 @@ async fn link(
                 {
                     Ok(true) => {
                         live = lifecycle == Lifecycle::Live;
-                        // Live on the account it was launched on, whether or not anyone still waits for the answer.
-                        if let (true, Some(account)) = (live, launched_on.take()) {
-                            if let Err(err) = daemon.db.set_run_account(uid.clone(), account).await
-                            {
-                                crate::log_error!("{uid}: could not record its account: {err:#}");
+                        // Live on the account it was launched on, whether or not anyone still waits for the answer;
+                        // then due to move unless that is the active one ([`crate::switch::settle`]). One whose
+                        // launch account is not known (attached again after a restart) is due when it was moving.
+                        if live {
+                            let known = launched_on.take();
+                            if let Some(account) = &known {
+                                if let Err(err) = daemon
+                                    .db
+                                    .set_run_account(uid.clone(), account.clone())
+                                    .await
+                                {
+                                    crate::log_error!(
+                                        "{uid}: could not record its account: {err:#}"
+                                    );
+                                }
                             }
+                            crate::switch::settle(&daemon, &uid, known.is_none() && switching)
+                                .await;
                         }
                         if let (true, Err(why)) = (switching, &said) {
-                            crate::switch::relaunched(&daemon, &uid, Err(why.clone())).await;
+                            crate::switch::relaunch_failed(&daemon, &uid, why.clone()).await;
                         }
                         // From the outcome, not the lifecycle committed: a refused relaunch is
                         // `exited`, and its host's `exited` is still acknowledged so it ends.
@@ -1179,13 +1217,6 @@ async fn link(
                 {
                     break why;
                 }
-                // A turn's end is where a run marked to switch account may move.
-                if message["type"] == "result" {
-                    tokio::spawn({
-                        let (daemon, uid) = (Arc::clone(&daemon), uid.clone());
-                        async move { crate::switch::at_idle(&daemon, &uid).await }
-                    });
-                }
             }
             Ok(FromHost::Acp { seq, turn, message }) if live => {
                 let Some(protocol::acp_map::Read::Events(mut events)) = acp else {
@@ -1210,6 +1241,11 @@ async fn link(
                         );
                         events.insert(end, usage);
                     }
+                    // A turn spends from the plan's limits, as claude's rate_limit_event says of Claude's: the
+                    // accounts are refreshed, so Antigravity's are read again once what is held is old (at most once a
+                    // FACTS_FRESH, however many runs and turns), and pushed.
+                    let daemon = Arc::clone(&daemon);
+                    tokio::spawn(async move { crate::start_session::refresh_facts(&daemon).await });
                 }
                 let session = acp_session(&message);
                 if let Err(why) = apply_acp(
@@ -2141,6 +2177,8 @@ pub(crate) struct Message {
     /// The app's request id with the hash it was checked against, when it gave them.
     pub identity: Option<(String, String)>,
     pub submit: bool,
+    /// When the request reached ccd, from which a relaunch's deadline runs.
+    pub arrived: Instant,
 }
 
 /// `send_text` to the hosted Claude run `uid`, whose lifecycle was last read as
@@ -2165,6 +2203,7 @@ pub(crate) async fn send_text(
         text,
         identity,
         submit,
+        arrived,
     } = message;
     if let Some(reason) = refused_screen(&text) {
         return refuse(reason);
@@ -2222,8 +2261,24 @@ pub(crate) async fn send_text(
             return refuse("could not record that this message is being sent; nothing was sent");
         }
     }
+    let deadline = arrived + RELAUNCH_WAIT;
     if lifecycle == Lifecycle::Exited {
-        return relaunch(daemon, uid, &request_id, &text).await;
+        // Ended by its move, whose wait for its old group to empty a restart may have cut short: that wait first.
+        if matches!(
+            daemon.db.switch_state(uid.to_string()).await,
+            Ok(Some(crate::store::Store::SWITCH_MOVED))
+        ) && !crate::switch::ended_for_move(daemon, uid, deadline).await
+        {
+            return refuse_relaunch(daemon, uid, &request_id, STILL_ENDING).await;
+        }
+        return relaunch(daemon, uid, &request_id, &text, deadline).await;
+    }
+    // A run due to move to another account and certainly quiet: ended by its switch, then relaunched by this message.
+    if lifecycle == Lifecycle::Live && crate::switch::moves(daemon, uid, &request_id, false).await {
+        if !crate::switch::ended_for_move(daemon, uid, deadline).await {
+            return refuse_relaunch(daemon, uid, &request_id, STILL_ENDING).await;
+        }
+        return relaunch(daemon, uid, &request_id, &text, deadline).await;
     }
     if lifecycle != Lifecycle::Live {
         release_send(daemon, uid, &request_id).await;
@@ -2267,20 +2322,26 @@ pub(crate) async fn send_text(
     }
 }
 
-/// How long a message's relaunch has, from its send to the host's outcome: inside the apps'
-/// 20 s wait for an answer.
-const RELAUNCH_WAIT: Duration = Duration::from_secs(15);
+/// How long a message's relaunch has, from its send to the host's outcome, a switch's end of the run's process
+/// included: inside the apps' 20 s wait for an answer.
+pub(crate) const RELAUNCH_WAIT: Duration = Duration::from_secs(15);
+
+/// A message to a run whose process has not ended yet, which it would relaunch.
+pub(crate) const STILL_ENDING: &str =
+    "This session is still ending; nothing was sent. Try again in a moment.";
 
 /// **The person's message `text`, claimed as `request_id`, to the ended hosted Claude run
 /// `uid`, which relaunches it** (decision 210) when its claude ended without ccd stopping it
 /// ([`crate::store::Store::claude_relaunch`]); every other ended run refuses it, as before.
-/// Never at ccd start. Before anything is launched, the warrant: the run's old host is gone
-/// and its group has no member, unless it was recorded in an earlier boot, whose numbers mean
-/// nothing now; then a start's own checks. The start line resumes claude's session in the
-/// folder claude ran in, with the run's model as its menu marks it chosen
-/// ([`Daemon::selected_model`]), else the start's; the kept folder answer, lowered when the
-/// folder has since been answered not trusted; the mode the run was in when it is one an app
-/// may choose without the person's confirmation ([`relaunch_mode`]), so a run never gains
+/// Never at ccd start. Before anything is launched, the warrant: the run's old host is gone,
+/// and for a run moving to another account its group has no member too (what claude left
+/// running in it, a server or a background job, runs on beside a run that is not moving),
+/// unless it was recorded in an earlier boot, whose numbers mean nothing now; then a start's
+/// own checks. The start line resumes claude's session in the folder claude ran in, with the
+/// run's model as its menu marks it chosen ([`Daemon::selected_model`]), else the start's; the
+/// kept folder answer, lowered when the folder has since been answered not trusted; the mode
+/// the run was in when it is one an app may choose without the person's confirmation
+/// ([`relaunch_mode`]), so a run never gains
 /// permissions by starting again, and none otherwise, so a run in Bypass permissions comes
 /// back in the person's own default (a run moved by a switch of account keeps even that, [`relaunch_mode`]); and the message as its prompt under the send's uuid. One write moves the
 /// run `exited` → `starting`, its host cleared, its cursor zeroed and that start line kept
@@ -2289,10 +2350,15 @@ const RELAUNCH_WAIT: Duration = Duration::from_secs(15);
 /// before that puts the run back `exited` ([`crate::store::Store::undo_relaunch`]) with
 /// nothing sent. The outcome the link commits answers the send: done, the run is `live` and
 /// the words filed once under the request id; refused, it is back `exited` with the host's
-/// detail. No outcome within [`RELAUNCH_WAIT`], or the link ending first, is
+/// detail. No outcome by `deadline`, or the link ending first, is
 /// `Indeterminate`, left to the link and the watch as a start's is.
-async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str) -> SendTextResult {
-    let deadline = Instant::now() + RELAUNCH_WAIT;
+async fn relaunch(
+    daemon: &Arc<Daemon>,
+    uid: &str,
+    request_id: &str,
+    text: &str,
+    deadline: Instant,
+) -> SendTextResult {
     let not_running = "This session isn’t running, so nothing was sent.";
     let ended = match daemon.db.claude_relaunch(uid.to_string()).await {
         Ok(Some(ended)) => ended,
@@ -2313,16 +2379,18 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
             return refuse_relaunch(daemon, uid, request_id, not_running).await;
         }
     };
+    // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
+    let switching = crate::switch::switched(daemon, uid).await;
     if let Some(old) = &old {
         let earlier_boot = matches!(
             (old.boot, protocol::proc_identity::boot_identity()),
             (Some(then), Some(now)) if then != now
         );
         if !earlier_boot
-            && (liveness(&old.host) != Liveness::Gone || group_has_members(old.host.pid))
+            && (liveness(&old.host) != Liveness::Gone
+                || switching && group_has_members(old.host.pid))
         {
-            let still = "This session is still ending; nothing was sent. Try again in a moment.";
-            return refuse_relaunch(daemon, uid, request_id, still).await;
+            return refuse_relaunch(daemon, uid, request_id, STILL_ENDING).await;
         }
     }
     let environment = crate::start_session::phone_environment();
@@ -2363,18 +2431,26 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         let codeconnect = launcher.clone()?;
         Ok::<_, String>((binary, host_bin, codeconnect, kept))
     };
-    // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
-    let switching = crate::switch::switched(daemon, uid).await;
-    let (claude, host_bin, codeconnect, kept) = match checked.await {
+    // A switch's start is ready by its message's deadline, its checks included, or it is refused with nothing sent.
+    let checked = if switching {
+        tokio::time::timeout_at(deadline, checked)
+            .await
+            .unwrap_or_else(|_| Err("it was not ready in time".to_string()))
+    } else {
+        checked.await
+    };
+    let (claude, host_bin, codeconnect, kept) = match checked {
         Ok(checked) => checked,
         Err(why) => {
             if switching {
-                crate::switch::relaunched(daemon, uid, Err(why.clone())).await;
+                crate::switch::relaunch_failed(daemon, uid, why.clone()).await;
             }
             let reason = format!("This session could not start again ({why}); nothing was sent.");
             return refuse_relaunch(daemon, uid, request_id, &reason).await;
         }
     };
+    // The account is Claude Code's: an Antigravity run has none of CodeConnect's, goes on none and records none.
+    let account = account.filter(|_| kept.agent.is_claude());
     let Some(claude_path) = claude.to_str() else {
         let reason = "This session could not start again (its agent's path is not text); nothing \
                       was sent.";
@@ -2427,8 +2503,7 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         host_bin: &host_bin,
         codeconnect: &codeconnect,
         environment: &environment,
-        // The account is Claude Code's; Antigravity has none of CodeConnect's.
-        account: account.as_ref().filter(|_| kept.agent.is_claude()),
+        account: account.as_ref(),
         attachments: crate::uploads::Pending::default(),
     };
     let uuid = send_uuid(uid, request_id);
@@ -2442,7 +2517,13 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
         prompt: text.to_string(),
     };
     let swapped = match serde_json::to_string(&start) {
-        Ok(line) => daemon.db.begin_claude_relaunch(uid.to_string(), line).await,
+        Ok(line) => {
+            let launched = account.as_ref().map(|account| account.id().to_string());
+            daemon
+                .db
+                .begin_claude_relaunch(uid.to_string(), line, launched)
+                .await
+        }
         Err(err) => Err(err.into()),
     };
     match swapped {
@@ -2475,7 +2556,7 @@ async fn relaunch(daemon: &Arc<Daemon>, uid: &str, request_id: &str, text: &str)
                 crate::log_error!("{uid}: could not put the run back to exited: {err:#}");
             }
             if switching {
-                crate::switch::relaunched(daemon, uid, Err(why.clone())).await;
+                crate::switch::relaunch_failed(daemon, uid, why.clone()).await;
             }
             let reason = format!("This session could not start again ({why}); nothing was sent.");
             return refuse_relaunch(daemon, uid, request_id, &reason).await;
@@ -4611,12 +4692,12 @@ mod tests {
                 seqs.push(event.seq);
             }
         }
-        assert_eq!(seqs, (1..=113).collect::<Vec<u64>>(), "each once, in order");
+        assert_eq!(seqs, (1..=119).collect::<Vec<u64>>(), "each once, in order");
 
         let last = messages.len() as u64 + 2;
         sdk(&mut played.write, last, messages.last().unwrap().clone()).await;
         assert_eq!(next(&mut played.lines).await, None);
-        assert_eq!(after_words(&rig, &played.uid).len(), 111);
+        assert_eq!(after_words(&rig, &played.uid).len(), 117);
         assert_eq!(cursor(&rig, &played.uid), last as i64);
         stop(&played.dir);
     }
@@ -12885,6 +12966,101 @@ mod tests {
         stop(&played.dir);
     }
 
+    /// **An Antigravity run relaunched while a Claude Code account is active records no account** (306): its message
+    /// relaunches it, and ccd restarts before agy has taken the start; attached again and live, the run records no
+    /// account of Claude Code's and is not due to move.
+    #[tokio::test]
+    async fn an_antigravity_relaunch_across_a_restart_records_no_claude_account() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        let (claude, _) = crate::start_session::test_claude(&rig.root);
+        let agy = rig.root.join("bin/agy");
+        std::fs::write(&agy, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        rig.daemon = daemon_with(
+            &rig.root,
+            Config {
+                claude_bin: Some(claude.display().to_string()),
+                agy_bin: Some(agy.display().to_string()),
+                agent_host_bin: Some(host.display().to_string()),
+                ..Default::default()
+            },
+        );
+        rig.daemon
+            .relaunch_from
+            .set((rig.root.clone(), Ok(rig.root.join("codeconnect"))))
+            .unwrap();
+        let (uid, mut played) = antigravity_run(&rig).await;
+        let turn = played.start_uuid();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 3, "turn": turn, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-7", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "call_1", "title": "ls",
+                "kind": "execute", "status": "in_progress"}}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 4, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let dir = played.dir.clone();
+        drop(played);
+        until_detached(&rig.daemon, &uid).await;
+        let a = rig.daemon.store.add_account("claude", "A").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("claude", Some(&a.id))
+            .unwrap());
+        let sending = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move { send_as_app(&daemon, &uid, "r-1", "carry on").await })
+        };
+        let Played {
+            lines,
+            write,
+            start,
+            ..
+        } = play_relaunched(&dir, old).await;
+        drop((lines, write));
+        let (restarted, mut lines, mut write) =
+            restarted_as(&rig, &dir, relauncher(&rig.root, &claude, &host)).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 1 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 2, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 2 }));
+        assert_eq!(
+            next(&mut lines).await,
+            Some(start.clone()),
+            "its start, again"
+        );
+        let ToHost::Start { uuid, .. } = start else {
+            panic!("not a start: {start:?}");
+        };
+        say(
+            &mut write,
+            serde_json::json!({"type": "outcome", "seq": 3, "uuid": uuid, "status": "done"}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 3 }));
+        sending.abort();
+        stop(&dir);
+        assert_eq!(restarted.store.run_account(&uid).unwrap(), None);
+        let live = serde_json::to_value(summary(&restarted, &uid).await).unwrap();
+        assert_eq!(live.get("switching"), None, "not due to move: {live}");
+    }
+
     /// **An Antigravity run whose agy ended on its own is relaunched by the person's next
     /// message**, as a Claude run is: the ACP session its lines named is kept as the run's
     /// session, and the new host's `start` names the agent, the agy a start finds (config
@@ -13266,13 +13442,164 @@ mod tests {
         stop(&played.dir);
     }
 
-    /// **A switch moves a live run to the chosen account at its turn's end, reading live throughout** (306 Slice E,
-    /// decision 311; S1, S2, S3, S6): a run on A, in Bypass permissions, is mid-turn when B is chosen, so nothing is
-    /// stopped until its turn ends; then ccd stops it and files the end typed as a switch to B, the run reading live,
-    /// `moved`; its next message is the prompt of its relaunch on B, filed once, resuming claude's same session in
-    /// Bypass permissions; live, it is no longer switching and records B.
+    /// The person chooses `account` (Default for none) for Claude on this computer, as an app does.
+    async fn choose(daemon: &Arc<Daemon>, account: Option<&crate::store::Account>) {
+        let told = crate::start_session::answer(
+            daemon,
+            0,
+            protocol::ws::ClientMessage::ActivateAccount {
+                request_id: "choose".into(),
+                agent: AgentKind::Claude,
+                account_id: account.map(|account| account.id.clone()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(told, protocol::ws::ServerMessage::Accounts { .. }),
+            "{told:?}"
+        );
+    }
+
+    /// A rig with accounts A and B, A active and the rig's runs started on it; B.
+    fn on_a_with_b(rig: &mut Rig) -> crate::store::Account {
+        let a = rig.daemon.store.add_account("claude", "A").unwrap();
+        let b = rig.daemon.store.add_account("claude", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("claude", Some(&a.id))
+            .unwrap());
+        rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap();
+        b
+    }
+
+    /// A run on A whose one turn has completed (its init, message 3; its result, 4), B kept: certainly quiet.
+    async fn quiet_on_a(rig: &mut Rig) -> (Played, crate::store::Account) {
+        let b = on_a_with_b(rig);
+        let mut played = live_run(rig).await;
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        turn_ends(&mut played, 4).await;
+        (played, b)
+    }
+
+    /// The run's old host is stopped by the move of the person's message: it reads the stop, reports claude's exit as
+    /// message `seq` and is gone, its socket closed; then the relaunched host's start is answered with `answer` (its
+    /// status and what goes with it). What the start gave claude, its prompt, and the new host's side.
+    async fn moved_then_started(
+        mut played: Played,
+        seq: u64,
+        answer: serde_json::Value,
+    ) -> (protocol::host::StartOptions, String, Played) {
+        let read = next(&mut played.lines).await;
+        assert!(
+            matches!(read, Some(ToHost::Stop { .. })),
+            "the message moves the run: {read:?}"
+        );
+        ended_then_started(played, seq, answer).await
+    }
+
+    /// [`moved_then_started`] from the old host's stop on: its exit as message `seq`, then the relaunched host.
+    async fn ended_then_started(
+        mut played: Played,
+        seq: u64,
+        answer: serde_json::Value,
+    ) -> (protocol::host::StartOptions, String, Played) {
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": seq, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let Played {
+            dir, lines, write, ..
+        } = played;
+        drop((lines, write));
+        let mut relaunched = play_relaunched(&dir, old).await;
+        let ToHost::Start {
+            uuid,
+            options,
+            prompt,
+        } = relaunched.start.clone()
+        else {
+            panic!("not a start: {:?}", relaunched.start);
+        };
+        let mut outcome = serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid});
+        outcome
+            .as_object_mut()
+            .unwrap()
+            .extend(answer.as_object().unwrap().clone());
+        say(&mut relaunched.write, outcome).await;
+        assert_eq!(
+            next(&mut relaunched.lines).await,
+            Some(ToHost::Ack { seq: 2 })
+        );
+        (options, prompt, relaunched)
+    }
+
+    /// A start's outcome `done`, with the initialize answer `initialize`.
+    fn done_with(initialize: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"status": "done", "initialize": initialize})
+    }
+
+    /// A start's outcome `done`, with the usual initialize answer.
+    fn done() -> serde_json::Value {
+        done_with(initialize_answer())
+    }
+
+    /// The person's message `text` as request `request`, which moves the run: its old host's side as
+    /// [`moved_then_started`] plays it. The send's answer, what the start gave claude, its prompt, the new host's side.
+    async fn moved_by(
+        rig: &Rig,
+        played: Played,
+        request: &str,
+        text: &str,
+        seq: u64,
+    ) -> (SendTextResult, protocol::host::StartOptions, String, Played) {
+        let uid = played.uid.clone();
+        let (sent, (options, prompt, relaunched)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, request, text),
+            moved_then_started(played, seq, done())
+        );
+        (sent, options, prompt, relaunched)
+    }
+
+    /// **Choosing an account stops nothing** (306, decision 311 v4; gate 1): a run idle on A when B is chosen is sent
+    /// nothing, and its summary reads as before, but for its switch, now due.
     #[tokio::test]
-    async fn a_switch_moves_a_live_run_at_its_turns_end() {
+    async fn choosing_an_account_stops_nothing() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        let before = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        choose(&rig.daemon, Some(&b)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), next(&mut played.lines))
+                .await
+                .is_err(),
+            "nothing reaches the host when an account is chosen"
+        );
+        let mut after = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(
+            after.as_object_mut().unwrap().remove("switching"),
+            Some("waiting".into()),
+            "{after}"
+        );
+        assert_eq!(after, before);
+        stop(&played.dir);
+    }
+
+    /// **A quiet run moves with the person's next message, reading live and offering its settings throughout** (306,
+    /// decision 311 v4; gates 2 and 7): a run on A at High effort in Bypass permissions, its turn over, is due once B
+    /// is chosen; the next message stops it, its end filed typed as a switch to B, and is the prompt of its relaunch
+    /// on B, filed once, resuming claude's same session at High in Bypass permissions; live, it is no longer
+    /// switching and records B. Every listing across it reads live, linked and with its menus.
+    #[tokio::test]
+    async fn a_quiet_run_moves_with_the_next_message() {
         let _env = crate::ProcessEnvRead::take();
         let mut rig = relaunch_rig();
         let host = rig.root.join("stub-host");
@@ -13285,13 +13612,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let a = rig.daemon.store.add_account("claude", "A").unwrap();
-        let b = rig.daemon.store.add_account("claude", "B").unwrap();
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&a.id))
-            .unwrap());
+        let b = on_a_with_b(&mut rig);
+        let a = rig.daemon.store.active_account("claude").unwrap().unwrap();
         let folder = |account: &crate::store::Account| {
             crate::accounts::AccountEnv::for_account(&rig.root, account)
                 .unwrap()
@@ -13306,140 +13628,68 @@ mod tests {
                 .1
                 .to_string()
         };
-        rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap();
         let mut played = live_run_on(&rig, &host).await;
         let uid = played.uid.clone();
         sdk(&mut played.write, 3, init_in(&rig.root)).await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
         let session_id = capture()[2]["session_id"].as_str().unwrap().to_string();
+        tokio::join!(
+            rig.daemon.set_setting(&uid, set_model(None, Some("high"))),
+            host_answers_setting(&mut played, 4, "done", None)
+        );
         // The person had put the session in Bypass permissions (decision 308: a switch keeps it).
         sdk(
             &mut played.write,
-            4,
+            5,
             serde_json::json!({"type": "system", "subtype": "status", "status": null,
                 "permissionMode": "bypassPermissions",
                 "uuid": "9d1f0000-0000-4000-8000-0000000002b1",
                 "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
         )
         .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
-
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&b.id))
-            .unwrap());
-        let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
-        crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
-        let marked = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
-        assert_eq!(
-            (marked["lifecycle"].as_str(), marked["switching"].as_str()),
-            (Some("live"), Some("waiting")),
-            "{marked}"
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(500), next(&mut played.lines))
-                .await
-                .is_err(),
-            "nothing is stopped mid-turn"
-        );
-
-        sdk(
-            &mut played.write,
-            5,
-            serde_json::json!({"type": "result", "subtype": "success", "uuid": "r1",
-                               "is_error": false, "num_turns": 1, "usage": {}}),
-        )
-        .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
-        assert!(
-            matches!(next(&mut played.lines).await, Some(ToHost::Stop { .. })),
-            "stopped once its turn is over"
-        );
-        say(
-            &mut played.write,
-            serde_json::json!({"type": "exited", "seq": 6, "code": 0}),
-        )
-        .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 6 }));
-        let between = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        turn_ends(&mut played, 6).await;
+        let shown = |summary: protocol::event::SessionSummary| {
+            (
+                summary.effort.map(|fact| fact.value),
+                summary.permission_mode.map(|fact| fact.value),
+            )
+        };
+        let before = shown(summary(&rig.daemon, &uid).await);
         assert_eq!(
-            (between["lifecycle"].as_str(), between["switching"].as_str()),
-            (Some("live"), Some("moved")),
-            "never read ended: {between}"
+            before,
+            (
+                Some("high".to_string()),
+                Some("bypassPermissions".to_string())
+            )
         );
-        assert!(
-            stored(&rig, &uid)
-                .iter()
-                .any(|event| event["kind"] == "session_end"
-                    && event["payload"]["reason"] == "Switched to B"),
-            "the end is filed as the host reports claude's exit, before the host is gone"
-        );
-        let old = pid_in(&played.dir, "stub.pid");
-        stop(&played.dir);
-        gone(old).await;
-        // The host's socket closes as it ends.
-        let Played {
-            dir, lines, write, ..
-        } = played;
-        drop((lines, write));
 
-        let waiting = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
+        choose(&rig.daemon, Some(&b)).await;
+        let due = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
         assert_eq!(
-            waiting["account"],
-            serde_json::json!({"id": a.id, "label": "A"}),
-            "moved, it still names the account its process ran on: {waiting}"
+            (due["lifecycle"].as_str(), due["switching"].as_str()),
+            (Some("live"), Some("waiting")),
+            "{due}"
         );
-        assert_eq!(
-            (waiting["lifecycle"].as_str(), waiting["switching"].as_str()),
-            (Some("live"), Some("moved")),
-            "nothing started until a message: {waiting}"
-        );
-        // S7: a ccd started again on the same store reads the moved run as the old one did.
-        let restarted = daemon_with(&rig.root, Config::default());
-        let again = serde_json::to_value(summary(&restarted, &uid).await).unwrap();
-        assert_eq!(
-            (again["lifecycle"].as_str(), again["switching"].as_str()),
-            (Some("live"), Some("moved")),
-            "after a restart: {again}"
-        );
-        let (sent, relaunched) = tokio::join!(
-            send_as_app(&rig.daemon, &uid, "r-on-b", "on B now?"),
-            async {
-                let mut relaunched = play_relaunched(&dir, old).await;
-                let ToHost::Start {
-                    uuid,
-                    options,
-                    prompt,
-                } = relaunched.start.clone()
-                else {
-                    panic!("not a start: {:?}", relaunched.start);
-                };
-                assert_eq!(prompt, "on B now?", "the message is the relaunch's prompt");
-                assert_eq!(
-                    options.permission_mode.as_deref(),
-                    Some("bypassPermissions"),
-                    "the mode kept"
-                );
-                assert_eq!(
-                    options.resume.as_deref(),
-                    Some(session_id.as_str()),
-                    "the same session, resumed"
-                );
-                say(
-                    &mut relaunched.write,
-                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
-                               "status": "done", "initialize": initialize_answer()}),
-                )
-                .await;
-                assert_eq!(
-                    next(&mut relaunched.lines).await,
-                    Some(ToHost::Ack { seq: 2 })
-                );
-                relaunched
-            }
-        );
+        assert!(due.get("menus").is_some(), "its settings offered: {due}");
+        let (sent, options, prompt, relaunched) =
+            moved_by(&rig, played, "r-on-b", "on B now?", 7).await;
         assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(prompt, "on B now?", "the message is the relaunch's prompt");
+        assert_eq!(
+            (
+                options.effort.as_deref(),
+                options.permission_mode.as_deref(),
+                options.resume.as_deref()
+            ),
+            (
+                Some("high"),
+                Some("bypassPermissions"),
+                Some(session_id.as_str())
+            ),
+            "its effort and mode kept, its session resumed"
+        );
         assert_eq!(
             words(&rig, &uid)
                 .iter()
@@ -13459,26 +13709,22 @@ mod tests {
             (Some("live"), None),
             "{after}"
         );
-        assert_eq!(
-            rig.daemon.store.run_account(&uid).unwrap(),
-            Some(b.clone()),
-            "the run records B"
-        );
-        let folders = std::fs::read_to_string(dir.join("account")).unwrap();
+        assert_eq!(shown(summary(&rig.daemon, &uid).await), before);
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b.clone()));
+        let folders = std::fs::read_to_string(relaunched.dir.join("account")).unwrap();
         assert_eq!(
             folders.lines().collect::<Vec<_>>(),
             [folder(&a), folder(&b)],
             "{folders}"
         );
-        let events = stored(&rig, &uid);
-        let ends: Vec<_> = events
-            .iter()
+        let ends: Vec<_> = stored(&rig, &uid)
+            .into_iter()
             .filter(|event| event["kind"] == "session_end")
+            .map(|event| event["payload"].clone())
             .collect();
         assert_eq!(ends.len(), 1, "{ends:?}");
-        assert_eq!(ends[0]["payload"]["reason"], "Switched to B", "{ends:?}");
         assert_eq!(
-            ends[0]["payload"]["switched_to"],
+            ends[0]["switched_to"],
             serde_json::json!({"account_id": b.id, "label": "B"}),
             "typed"
         );
@@ -13506,74 +13752,230 @@ mod tests {
             .told(crate::accounts::listing(&rig.daemon.store, None));
         let listing = serde_json::to_value(listing).unwrap();
         assert_eq!(listing["accounts"][1]["id"], b.id.as_str(), "{listing}");
-        assert_eq!(
-            listing["accounts"][1]["facts"]["email"], "b@example.test",
-            "{listing}"
-        );
         frames.push(listing);
         crate::switch::window::keep(&frames, "switch-with-listing-claude-wire.json");
         stop(&relaunched.dir);
     }
 
-    /// A rig with accounts A and B, A active and the rig's runs started on it; B.
-    fn on_a_with_b(rig: &mut Rig) -> crate::store::Account {
-        let a = rig.daemon.store.add_account("claude", "A").unwrap();
-        let b = rig.daemon.store.add_account("claude", "B").unwrap();
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&a.id))
-            .unwrap());
-        rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap();
-        b
+    /// **A message to a run not certainly quiet goes on the account it is on, and the run stays due** (306, decision
+    /// 311 v4; gate 3, and G2's empty run): its first prompt not yet answered; a turn running; a message sent in its
+    /// last turn; a command, subagent or task in its last turn; a prompt scheduled since its process started; a mail
+    /// wake outstanding; a card waiting. Each message reaches the A host
+    /// as a `say`. The first case then moves at its next message, once its turn is over.
+    #[tokio::test]
+    async fn a_message_to_a_run_not_certainly_quiet_goes_on_its_account() {
+        let _env = crate::ProcessEnvRead::take();
+        let tool = |name: &str, input: serde_json::Value| {
+            serde_json::json!({"type": "assistant", "message": {"model": "claude-opus-5-5", "content": [
+                {"type": "tool_use", "id": format!("toolu_{name}"), "name": name, "input": input}]},
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001", "parent_tool_use_id": null,
+                "uuid": format!("9d1f0000-0000-4000-8000-00000000{:04}", name.len())})
+        };
+        for case in [
+            "bash",
+            "task",
+            "agent",
+            "cron",
+            "mid-turn send",
+            "wake",
+            "turn running",
+            "card",
+            "first prompt",
+        ] {
+            let mut rig = relaunch_rig();
+            let b = on_a_with_b(&mut rig);
+            let mut played = live_run(&rig).await;
+            let uid = played.uid.clone();
+            let mut seq = 3;
+            let mut step = || {
+                seq += 1;
+                seq - 1
+            };
+            if case != "first prompt" {
+                turn_begins(&mut played, step(), "turn-1").await;
+            }
+            match case {
+                "bash" | "task" | "agent" | "cron" => {
+                    let name = match case {
+                        "bash" => "Bash",
+                        "task" => "Task",
+                        "agent" => "Agent",
+                        _ => "CronCreate",
+                    };
+                    let at = step();
+                    sdk(&mut played.write, at, tool(name, serde_json::json!({}))).await;
+                    assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: at }));
+                }
+                "mid-turn send" => {
+                    let at = step();
+                    let (sent, _) = tokio::join!(
+                        send_as_app(&rig.daemon, &uid, "r-0", "also the docs"),
+                        host_takes(&mut played, at, "done")
+                    );
+                    assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+                }
+                "card" => {
+                    let at = step();
+                    host_asks(&mut played, at, "toolu_card", serde_json::json!({})).await;
+                }
+                _ => {}
+            }
+            if !matches!(case, "turn running" | "first prompt") {
+                let at = step();
+                turn_ends(&mut played, at).await;
+            }
+            if case == "wake" {
+                assert_eq!(
+                    mail_from_another_run(&rig.daemon, &uid).await,
+                    protocol::ipc::MailState::Waiting
+                );
+                assert_eq!(woken(&mut played.lines).await, crate::mail::nudge());
+            }
+            choose(&rig.daemon, Some(&b)).await;
+            let at = step();
+            let (sent, (_, text)) = tokio::join!(
+                send_as_app(&rig.daemon, &uid, "r-1", "go on"),
+                host_takes(&mut played, at, "done")
+            );
+            assert!(
+                matches!(sent, SendTextResult::Sent { .. }),
+                "{case}: {sent:?}"
+            );
+            assert_eq!(text, "go on", "{case}");
+            let due = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+            assert_eq!(
+                (due["lifecycle"].as_str(), due["switching"].as_str()),
+                (Some("live"), Some("waiting")),
+                "{case}: still due: {due}"
+            );
+            if case == "first prompt" {
+                // G2: its first turn over, its next message moves it, its session named.
+                let at = step();
+                sdk(&mut played.write, at, init_in(&rig.root)).await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: at }));
+                let at = step();
+                turn_ends(&mut played, at).await;
+                let at = step();
+                let (sent, _, prompt, relaunched) =
+                    moved_by(&rig, played, "r-2", "and now?", at).await;
+                assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+                assert_eq!(prompt, "and now?");
+                assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+                stop(&relaunched.dir);
+                continue;
+            }
+            stop(&played.dir);
+        }
     }
 
-    /// The live run's host is stopped by its switch: it reads the stop, reports claude's exit as message `seq`, and is
-    /// gone, its socket closed. Its folder and its pid.
-    async fn stopped_by_its_switch(mut played: Played, seq: u64) -> (PathBuf, i32) {
-        assert!(
-            matches!(next(&mut played.lines).await, Some(ToHost::Stop { .. })),
-            "stopped by its switch"
+    /// **A message to a run already on the active account moves nothing, and a command keeps its name when it moves a
+    /// run** (306, decision 311 v4; gate 6): B chosen, then A again: the next message reaches the A host as a `say`
+    /// and the run is no longer due. A run moved by `/clear` files it as the command it is to claude.
+    #[tokio::test]
+    async fn the_runs_own_account_moves_nothing_and_a_command_keeps_its_name() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let a = rig.daemon.store.active_account("claude").unwrap().unwrap();
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        choose(&rig.daemon, Some(&a)).await;
+        let (sent, (_, text)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-1", "still on A?"),
+            host_takes(&mut played, 5, "done")
         );
-        say(
-            &mut played.write,
-            serde_json::json!({"type": "exited", "seq": seq, "code": 0}),
-        )
-        .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
-        let old = pid_in(&played.dir, "stub.pid");
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(text, "still on A?");
+        let after = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(after.get("switching"), None, "{after}");
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(a));
         stop(&played.dir);
-        gone(old).await;
-        (played.dir, old)
+
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        let mut initialize = initialize_answer();
+        initialize["commands"] = serde_json::json!([{"name": "compact"}, {"name": "clear"}]);
+        let (sent, (_, prompt, relaunched)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-clear", "/clear"),
+            moved_then_started(played, 5, done_with(initialize))
+        );
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(prompt, "/clear");
+        let rows: Vec<_> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "user_message" && event["payload"]["text"] == "/clear")
+            .map(|event| event["payload"]["command"].clone())
+            .collect();
+        assert_eq!(rows, [serde_json::json!("clear")], "its command named");
+        stop(&relaunched.dir);
     }
 
-    /// The run's relaunch by the message `text`, its start answered `done`: what the start gave claude, and the new
-    /// host's side.
-    async fn relaunched_by(
-        rig: &Rig,
-        uid: &str,
-        request: &str,
-        text: &str,
-        dir: &Path,
-        old: i32,
-    ) -> (protocol::host::StartOptions, Played) {
-        let (sent, relaunched) =
-            tokio::join!(send_as_app(&rig.daemon, uid, request, text), async {
-                let mut played = play_relaunched(dir, old).await;
-                let ToHost::Start { uuid, options, .. } = played.start.clone() else {
-                    panic!("not a start: {:?}", played.start);
-                };
-                say(
-                    &mut played.write,
-                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
-                                   "status": "done", "initialize": initialize_answer()}),
-                )
-                .await;
-                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
-                (options, played)
-            });
-        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
-        relaunched
+    /// **Two messages at once move a due run once** (306, decision 311 v4; gate 4): a Mac's and an iPhone's message to
+    /// a quiet run due to move: the first relaunches it on B, the second reaches the new host as a `say`, each filed
+    /// once and in order; mail that arrives while it moves wakes the new host.
+    #[tokio::test]
+    async fn two_messages_at_once_move_a_due_run_once() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        let daemon = Arc::clone(&rig.daemon);
+        let (first, second, relaunched) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-mac", "first"),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                send_as_app(&rig.daemon, &uid, "r-iphone", "second").await
+            },
+            async {
+                let mut played = played;
+                let read = next(&mut played.lines).await;
+                assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+                assert_eq!(
+                    mail_from_another_run(&daemon, &uid).await,
+                    protocol::ipc::MailState::Waiting
+                );
+                let (_, prompt, mut relaunched) = ended_then_started(played, 5, done()).await;
+                assert_eq!(prompt, "first", "one relaunch, by the first message");
+                let (mut said, mut woke) = (None, false);
+                while said.is_none() || !woke {
+                    match next(&mut relaunched.lines).await {
+                        Some(ToHost::Say { uuid, text }) => {
+                            say(
+                                &mut relaunched.write,
+                                serde_json::json!({"type": "outcome", "seq": 3, "uuid": uuid,
+                                                   "status": "done"}),
+                            )
+                            .await;
+                            assert_eq!(
+                                next(&mut relaunched.lines).await,
+                                Some(ToHost::Ack { seq: 3 })
+                            );
+                            said = Some(text);
+                        }
+                        Some(ToHost::Wake { .. }) => woke = true,
+                        other => panic!("{other:?}"),
+                    }
+                }
+                assert_eq!(said.as_deref(), Some("second"));
+                relaunched
+            }
+        );
+        assert!(matches!(first, SendTextResult::Sent { .. }), "{first:?}");
+        assert!(matches!(second, SendTextResult::Sent { .. }), "{second:?}");
+        let said: Vec<_> = words(&rig, &uid)
+            .into_iter()
+            .filter(|text| text == "first" || text == "second")
+            .collect();
+        assert_eq!(said, ["first", "second"], "each once, in order");
+        let ends = stored(&rig, &uid)
+            .iter()
+            .filter(|event| event["kind"] == "session_end")
+            .count();
+        assert_eq!(ends, 1, "one move");
+        stop(&relaunched.dir);
     }
 
     /// The states of the run `uid`'s mail.
@@ -13590,21 +13992,32 @@ mod tests {
         states
     }
 
-    /// **A switch keeps the run's mail** (306 Slice E): mail waiting for a run when its switch ends its process is
-    /// still the run's, through the sweep, and its relaunched process is woken for it.
-    #[tokio::test]
-    async fn a_switch_keeps_the_mail_waiting_for_the_run() {
-        let _env = crate::ProcessEnvRead::take();
-        let mut rig = relaunch_rig();
-        let b = on_a_with_b(&mut rig);
-        let mut played = live_run(&rig).await;
+    /// The mail wake the host reads next, at once or once a turn of messages `seq` and `seq + 1` has ended.
+    async fn woken_soon(played: &mut Played, seq: u64) -> String {
+        match sent_soon(&mut played.lines).await {
+            Some(line) => match serde_json::from_str::<ToHost>(&line) {
+                Ok(ToHost::Wake { text, .. }) => text,
+                _ => panic!("not a mail wake: {line}"),
+            },
+            None => {
+                turn_begins(played, seq, "turn-2").await;
+                turn_ends(played, seq + 1).await;
+                woken(&mut played.lines).await
+            }
+        }
+    }
+
+    /// A run on A, B kept, whose turn the person stopped with mail for it waiting: it waits idle with its mail unread
+    /// (B11 T9), certainly quiet. Its host's next message is 6.
+    async fn stopped_with_mail_on_a(rig: &mut Rig) -> (Played, crate::store::Account) {
+        let b = on_a_with_b(rig);
+        let mut played = live_run(rig).await;
         let uid = played.uid.clone();
         turn_begins(&mut played, 3, "turn-1").await;
         assert_eq!(
             mail_from_another_run(&rig.daemon, &uid).await,
             protocol::ipc::MailState::Waiting
         );
-        // Stopped by the person, the run waits idle with its mail unread (B11 T9).
         let (stopped, _) =
             tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1"), async {
                 let (uuid, _) = host_reads_stop(&mut played).await;
@@ -13614,480 +14027,54 @@ mod tests {
             matches!(stopped, protocol::ws::InterruptResult::Aborted { .. }),
             "{stopped:?}"
         );
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&b.id))
-            .unwrap());
-        crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
-        let (dir, old) = stopped_by_its_switch(played, 6).await;
+        (played, b)
+    }
+
+    /// **A move keeps the run's mail** (306; gate 9): mail waiting for a run when the person's message moves it is
+    /// still the run's, and its relaunched process is woken for it.
+    #[tokio::test]
+    async fn a_move_keeps_the_mail_waiting_for_the_run() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = stopped_with_mail_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        assert_eq!(mail_states(&rig, &uid), ["waiting"]);
+        let (sent, _, _, mut relaunched) = moved_by(&rig, played, "r-on-b", "go on", 6).await;
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
         assert_eq!(
-            mail_states(&rig, &uid),
-            ["waiting"],
-            "a switch's end leaves the run's mail waiting"
-        );
-        rig.daemon.sweep_mail_on(None).await;
-        assert_eq!(
-            mail_states(&rig, &uid),
-            ["waiting"],
-            "the sweep leaves a moved run's mail waiting"
-        );
-        let (_, mut relaunched) = relaunched_by(&rig, &uid, "r-on-b", "go on", &dir, old).await;
-        // Woken at once, or once the relaunch's turn has ended.
-        let wake = match sent_soon(&mut relaunched.lines).await {
-            Some(line) => match serde_json::from_str::<ToHost>(&line) {
-                Ok(ToHost::Wake { text, .. }) => text,
-                _ => panic!("not a mail wake: {line}"),
-            },
-            None => {
-                turn_begins(&mut relaunched, 3, "turn-2").await;
-                turn_ends(&mut relaunched, 4).await;
-                woken(&mut relaunched.lines).await
-            }
-        };
-        assert_eq!(
-            wake,
+            woken_soon(&mut relaunched, 3).await,
             crate::mail::nudge(),
             "the relaunched run is woken for its mail"
         );
         stop(&relaunched.dir);
     }
 
-    /// **A message claude has taken and not started a turn for keeps its run from moving** (306 Slice E): the host
-    /// took the person's message, so claude has it, but no turn has begun when the switch is chosen; the run moves
-    /// only once that message's turn has ended, and the message is filed once.
+    /// **A move whose relaunch is refused says why, keeps the run's mail, and its retry moves it** (306 S9): the
+    /// person's message moves a quiet run on A to B, whose claude refuses the start: the message is refused, the run
+    /// stays ended and relaunchable, reads `failed`, and has a line of its own saying why; the sweep leaves its mail
+    /// waiting; the next message's relaunch goes live, the switch over, and is woken for the mail.
     #[tokio::test]
-    async fn a_message_claude_took_but_has_not_started_keeps_the_run_from_moving() {
+    async fn a_move_whose_relaunch_is_refused_says_why() {
         let _env = crate::ProcessEnvRead::take();
         let mut rig = relaunch_rig();
-        let b = on_a_with_b(&mut rig);
-        let mut played = live_run(&rig).await;
+        let (played, b) = stopped_with_mail_on_a(&mut rig).await;
         let uid = played.uid.clone();
-        turn_begins(&mut played, 3, "turn-1").await;
-        turn_ends(&mut played, 4).await;
-        let (sent, _) = tokio::join!(
-            send_as_app(&rig.daemon, &uid, "r-1", "and the docs"),
-            host_takes(&mut played, 5, "done")
-        );
-        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&b.id))
-            .unwrap());
-        crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(500), next(&mut played.lines))
-                .await
-                .is_err(),
-            "a message claude took and has not started a turn for is not lost to the switch"
-        );
-        turn_begins(&mut played, 6, "turn-2").await;
-        turn_ends(&mut played, 7).await;
-        stopped_by_its_switch(played, 8).await;
-        assert_eq!(
-            words(&rig, &uid)
-                .iter()
-                .filter(|text| *text == "and the docs")
-                .count(),
-            1,
-            "filed once"
-        );
-    }
-
-    /// **Choosing back before the old process has ended leaves the run on the newest choice** (306 Slice E): A to B
-    /// stops the idle run; A again before its process has exited does not undo the move half way, so the run reads
-    /// moved, not ended, and its next message starts it on A.
-    #[tokio::test]
-    async fn choosing_back_before_the_old_process_ends_leaves_the_run_on_the_newest_choice() {
-        let _env = crate::ProcessEnvRead::take();
-        let mut rig = relaunch_rig();
-        let b = on_a_with_b(&mut rig);
-        let a = rig.daemon.store.active_account("claude").unwrap().unwrap();
-        let mut played = live_run(&rig).await;
-        let uid = played.uid.clone();
-        sdk(&mut played.write, 3, init_in(&rig.root)).await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
-        turn_ends(&mut played, 4).await;
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&b.id))
-            .unwrap());
-        crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&a.id))
-            .unwrap());
-        crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
-        let (dir, old) = stopped_by_its_switch(played, 5).await;
-        let moved = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
-        assert_eq!(
-            (moved["lifecycle"].as_str(), moved["switching"].as_str()),
-            (Some("live"), Some("moved")),
-            "the run reads moved, not ended: {moved}"
-        );
-        let (_, relaunched) = relaunched_by(&rig, &uid, "r-on-a", "go on", &dir, old).await;
-        assert_eq!(
-            rig.daemon.store.run_account(&uid).unwrap(),
-            Some(a),
-            "on the newest choice"
-        );
-        let live = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
-        assert_eq!(
-            (live["lifecycle"].as_str(), live.get("switching")),
-            (Some("live"), None),
-            "{live}"
-        );
-        stop(&relaunched.dir);
-    }
-
-    /// **A switched run keeps its effort and its mode** (306 S8, decision 308): a run at High effort in Bypass
-    /// permissions reads the same after its switch's relaunch, and after a second switch claude is still given High.
-    #[tokio::test]
-    async fn a_switched_run_keeps_its_effort_and_mode() {
-        let _env = crate::ProcessEnvRead::take();
-        let mut rig = relaunch_rig();
-        let b = on_a_with_b(&mut rig);
-        let a = rig.daemon.store.active_account("claude").unwrap().unwrap();
-        let mut played = live_run(&rig).await;
-        let uid = played.uid.clone();
-        sdk(&mut played.write, 3, init_in(&rig.root)).await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
-        tokio::join!(
-            rig.daemon.set_setting(&uid, set_model(None, Some("high"))),
-            host_answers_setting(&mut played, 4, "done", None)
-        );
-        sdk(
-            &mut played.write,
-            5,
-            serde_json::json!({"type": "system", "subtype": "status", "status": null,
-                "permissionMode": "bypassPermissions",
-                "uuid": "9d1f0000-0000-4000-8000-0000000002b1",
-                "session_id": "5f0c1e2a-0000-4000-8000-000000000001"}),
-        )
-        .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
-        turn_ends(&mut played, 6).await;
-        let shown = |summary: protocol::event::SessionSummary| {
-            (
-                summary.effort.map(|fact| fact.value),
-                summary.permission_mode.map(|fact| fact.value),
-            )
-        };
-        let before = shown(summary(&rig.daemon, &uid).await);
-        assert_eq!(
-            before,
-            (
-                Some("high".to_string()),
-                Some("bypassPermissions".to_string())
-            )
-        );
-
-        let mut dir_old = None;
-        for (round, to) in [(1, &b), (2, &a)] {
-            assert!(rig
-                .daemon
-                .store
-                .activate_account("claude", Some(&to.id))
-                .unwrap());
-            crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
-            let (dir, old) = stopped_by_its_switch(played, if round == 1 { 7 } else { 5 }).await;
-            assert_eq!(
-                shown(summary(&rig.daemon, &uid).await),
-                before,
-                "round {round}: moved, it shows the effort and mode it had"
-            );
-            let (options, mut relaunched) =
-                relaunched_by(&rig, &uid, &format!("r-{round}"), "go on", &dir, old).await;
-            assert_eq!(
-                (
-                    options.effort.as_deref(),
-                    options.permission_mode.as_deref()
-                ),
-                (Some("high"), Some("bypassPermissions")),
-                "round {round}: the relaunch gives claude the effort and mode it had"
-            );
-            // claude, resumed in the mode it was given, says so at its turn's start, in an init of its own.
-            let mut init = init_in(&rig.root);
-            init["permissionMode"] = "bypassPermissions".into();
-            init["uuid"] = format!("9d1f0000-0000-4000-8000-0000000005a{round}").into();
-            sdk(&mut relaunched.write, 3, init).await;
-            assert_eq!(
-                next(&mut relaunched.lines).await,
-                Some(ToHost::Ack { seq: 3 })
-            );
-            turn_ends(&mut relaunched, 4).await;
-            assert_eq!(
-                shown(summary(&rig.daemon, &uid).await),
-                before,
-                "round {round}: live again, it shows the effort and mode it had"
-            );
-            played = relaunched;
-            dir_old = Some(dir);
-        }
-        let restarted = daemon_on(&rig.root);
-        restarted.recover().await;
-        assert_eq!(
-            shown(summary(&restarted, &uid).await),
-            before,
-            "read back after a restart"
-        );
-        drop(dir_old);
-        stop(&played.dir);
-    }
-
-    /// **A message claude has answered never holds its run back from a switch** (306 Slice E): a message the person
-    /// sends mid-turn, which claude answers in that turn; `/model`, which claude answers with its own line and no
-    /// turn; and a message a Stop took back. Each leaves the run idle once it is answered, so a switch moves it.
-    #[tokio::test]
-    async fn an_answered_message_does_not_hold_back_a_switch() {
-        let _env = crate::ProcessEnvRead::take();
-        for case in ["mid-turn", "/model", "stopped"] {
-            let mut rig = relaunch_rig();
-            let b = on_a_with_b(&mut rig);
-            let mut played = live_run(&rig).await;
-            let uid = played.uid.clone();
-            let next_seq = match case {
-                "mid-turn" => {
-                    turn_begins(&mut played, 3, "turn-1").await;
-                    tokio::join!(
-                        send_as_app(&rig.daemon, &uid, "r-1", "also the docs"),
-                        host_takes(&mut played, 4, "done")
-                    );
-                    turn_ends(&mut played, 5).await;
-                    6
-                }
-                "/model" => {
-                    turn_begins(&mut played, 3, "turn-1").await;
-                    turn_ends(&mut played, 4).await;
-                    tokio::join!(
-                        send_as_app(&rig.daemon, &uid, "r-1", "/model sonnet"),
-                        host_takes(&mut played, 5, "done")
-                    );
-                    // claude's own answer to the command, its line in the recorded session's shape (line 108).
-                    sdk(
-                        &mut played.write,
-                        6,
-                        serde_json::json!({"type": "user", "message": {"role": "user",
-                            "content": "<local-command-stdout>Set model to `claude-sonnet-5-5`</local-command-stdout>"},
-                            "session_id": "5f0c1e2a-0000-4000-8000-000000000001", "parent_tool_use_id": null,
-                            "uuid": "8a2381fc-1a9d-4370-a712-c6381a27ea13", "isReplay": true}),
-                    )
-                    .await;
-                    assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 6 }));
-                    7
-                }
-                _ => {
-                    turn_begins(&mut played, 3, "turn-1").await;
-                    tokio::join!(
-                        send_as_app(&rig.daemon, &uid, "r-1", "also the docs"),
-                        host_takes(&mut played, 4, "done")
-                    );
-                    let cancelled = [send_uuid(&uid, "r-1")];
-                    tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1"), async {
-                        let (uuid, _) = host_reads_stop(&mut played).await;
-                        host_ends_turn(&mut played, 5, &uuid, "aborted_tools", &cancelled).await;
-                    });
-                    assert_eq!(not_sent_notices(&rig, &uid).len(), 1, "taken back");
-                    7
-                }
-            };
-            assert!(rig
-                .daemon
-                .store
-                .activate_account("claude", Some(&b.id))
-                .unwrap());
-            crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
-            let (_, _) = stopped_by_its_switch(played, next_seq).await;
-            let moved = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
-            assert_eq!(moved["switching"], "moved", "{case}: {moved}");
-        }
-    }
-
-    /// **A run whose switch's relaunch failed keeps its mail** (306 S9): mail waiting for a run moved to B is still
-    /// the run's after its relaunch is refused, through the sweep, and the retry that starts it is woken for it.
-    #[tokio::test]
-    async fn a_failed_switch_keeps_the_runs_mail_for_its_retry() {
-        let _env = crate::ProcessEnvRead::take();
-        let mut rig = relaunch_rig();
-        let b = on_a_with_b(&mut rig);
-        let mut played = live_run(&rig).await;
-        let uid = played.uid.clone();
-        turn_begins(&mut played, 3, "turn-1").await;
-        assert_eq!(
-            mail_from_another_run(&rig.daemon, &uid).await,
-            protocol::ipc::MailState::Waiting
-        );
-        tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1"), async {
-            let (uuid, _) = host_reads_stop(&mut played).await;
-            host_ends_turn(&mut played, 4, &uuid, "aborted_tools", &[]).await;
-        });
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&b.id))
-            .unwrap());
-        crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
-        let (dir, old) = stopped_by_its_switch(played, 6).await;
-        let (sent, refused) =
-            tokio::join!(send_as_app(&rig.daemon, &uid, "r-on-b", "on B?"), async {
-                let mut relaunched = play_relaunched(&dir, old).await;
-                let ToHost::Start { uuid, .. } = relaunched.start.clone() else {
-                    panic!("not a start: {:?}", relaunched.start);
-                };
-                say(
-                    &mut relaunched.write,
-                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
-                               "status": "refused", "detail": "B is signed out"}),
-                )
-                .await;
-                assert_eq!(
-                    next(&mut relaunched.lines).await,
-                    Some(ToHost::Ack { seq: 2 })
-                );
-                relaunched
-            });
-        assert!(matches!(sent, SendTextResult::Refused { .. }), "{sent:?}");
-        assert_eq!(
-            summary(&rig.daemon, &uid).await.switching,
-            Some(protocol::event::Switching::Failed)
-        );
-        let refused_host = pid_in(&refused.dir, "stub.pid");
-        stop(&refused.dir);
-        gone(refused_host).await;
-        let Played { lines, write, .. } = refused;
-        drop((lines, write));
-        rig.daemon.sweep_mail_on(None).await;
-        assert_eq!(
-            mail_states(&rig, &uid),
-            ["waiting"],
-            "the sweep leaves the mail of a run whose switch failed waiting"
-        );
-        let (_, mut again) =
-            relaunched_by(&rig, &uid, "r-again", "on B now?", &dir, refused_host).await;
-        let wake = match sent_soon(&mut again.lines).await {
-            Some(line) => match serde_json::from_str::<ToHost>(&line) {
-                Ok(ToHost::Wake { text, .. }) => text,
-                _ => panic!("not a mail wake: {line}"),
-            },
-            None => {
-                turn_begins(&mut again, 3, "turn-2").await;
-                turn_ends(&mut again, 4).await;
-                woken(&mut again.lines).await
-            }
-        };
-        assert_eq!(
-            wake,
-            crate::mail::nudge(),
-            "the retry is woken for its mail"
-        );
-        stop(&again.dir);
-    }
-
-    /// A run on `rig` moved from A to B (306 Slice E): idle on A, B chosen, ended at once by its switch, its host
-    /// gone and its socket closed. Its uid, its folder, the ended host's pid and B.
-    async fn moved_to_b(rig: &mut Rig) -> (String, PathBuf, i32, crate::store::Account) {
-        let (uid, dir, old, b, _) = moved_to_b_recorded(rig, false).await;
-        (uid, dir, old, b)
-    }
-
-    /// [`moved_to_b`], recording the run's window from just before its switch when `record`.
-    #[allow(clippy::type_complexity)]
-    async fn moved_to_b_recorded(
-        rig: &mut Rig,
-        record: bool,
-    ) -> (
-        String,
-        PathBuf,
-        i32,
-        crate::store::Account,
-        Option<(
-            tokio::sync::oneshot::Sender<()>,
-            tokio::task::JoinHandle<Vec<serde_json::Value>>,
-        )>,
-    ) {
-        let a = rig.daemon.store.add_account("claude", "A").unwrap();
-        let b = rig.daemon.store.add_account("claude", "B").unwrap();
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&a.id))
-            .unwrap());
-        rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap();
-        let mut played = live_run(rig).await;
-        let uid = played.uid.clone();
-        sdk(&mut played.write, 3, init_in(&rig.root)).await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
-        sdk(
-            &mut played.write,
-            4,
-            serde_json::json!({"type": "result", "subtype": "success", "uuid": "r1",
-                               "is_error": false, "num_turns": 1, "usage": {}}),
-        )
-        .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&b.id))
-            .unwrap());
-        let window = record.then(|| crate::switch::window::record(&rig.daemon, &uid));
-        crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
-        assert!(
-            matches!(next(&mut played.lines).await, Some(ToHost::Stop { .. })),
-            "idle: stopped at once"
-        );
-        say(
-            &mut played.write,
-            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
-        )
-        .await;
-        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
-        let old = pid_in(&played.dir, "stub.pid");
-        stop(&played.dir);
-        gone(old).await;
-        let Played {
-            dir, lines, write, ..
-        } = played;
-        drop((lines, write));
-        (uid, dir, old, b, window)
-    }
-
-    /// **A relaunch that cannot start on the new account does not end the run quietly** (306 S9): a run moved from A
-    /// to B whose next message's relaunch claude refuses stays ended and relaunchable, reads `failed`, and has a line
-    /// of its own saying why.
-    #[tokio::test]
-    async fn a_switch_whose_relaunch_is_refused_says_why() {
-        let _env = crate::ProcessEnvRead::take();
-        let mut rig = relaunch_rig();
-        let (uid, dir, old, _b) = moved_to_b(&mut rig).await;
         let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
-
-        let (sent, relaunched) =
-            tokio::join!(send_as_app(&rig.daemon, &uid, "r-on-b", "on B?"), async {
-                let mut relaunched = play_relaunched(&dir, old).await;
-                let ToHost::Start { uuid, .. } = relaunched.start.clone() else {
-                    panic!("not a start: {:?}", relaunched.start);
-                };
-                say(
-                    &mut relaunched.write,
-                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
-                               "status": "refused", "detail": "B is signed out"}),
-                )
-                .await;
-                assert_eq!(
-                    next(&mut relaunched.lines).await,
-                    Some(ToHost::Ack { seq: 2 })
-                );
-                relaunched
-            });
+        choose(&rig.daemon, Some(&b)).await;
+        let (sent, (_, _, refused)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-on-b", "on B?"),
+            moved_then_started(
+                played,
+                6,
+                serde_json::json!({"status": "refused", "detail": "B is signed out"})
+            )
+        );
         assert!(matches!(sent, SendTextResult::Refused { .. }), "{sent:?}");
         let failed = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
         assert_eq!(
             failed["account"]["label"], "A",
-            "it never started on B: it still names the account it ran on: {failed}"
+            "it never started on B: {failed}"
         );
         assert_eq!(
             (
@@ -14118,13 +14105,15 @@ mod tests {
             )],
             "said, and the account typed"
         );
-        // Signed in again, the next message's relaunch goes live: the switch is over, nothing reads failed.
-        let refused_host = pid_in(&relaunched.dir, "stub.pid");
-        stop(&relaunched.dir);
+        let refused_host = pid_in(&refused.dir, "stub.pid");
+        stop(&refused.dir);
         gone(refused_host).await;
-        let Played { lines, write, .. } = relaunched;
+        let Played {
+            dir, lines, write, ..
+        } = refused;
         drop((lines, write));
-        let (sent, again) = tokio::join!(
+        rig.daemon.sweep_mail_on(None).await;
+        let (sent, mut again) = tokio::join!(
             send_as_app(&rig.daemon, &uid, "r-again", "on B now?"),
             async {
                 let mut again = play_relaunched(&dir, refused_host).await;
@@ -14148,6 +14137,11 @@ mod tests {
             (Some("live"), None),
             "{live}"
         );
+        assert_eq!(
+            woken_soon(&mut again, 3).await,
+            crate::mail::nudge(),
+            "the retry is woken for its mail"
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
         window_over.send(()).unwrap();
         let frames = window.await.unwrap();
@@ -14157,29 +14151,31 @@ mod tests {
             .map(|frame| frame["sessions"][0]["switching"].clone())
             .collect();
         assert!(states.contains(&serde_json::json!("failed")), "{states:?}");
-        assert_eq!(
-            states.last(),
-            Some(&serde_json::Value::Null),
-            "cleared by the relaunch: {states:?}"
-        );
         crate::switch::window::keep(&frames, "switch-failed-then-recovered-claude-wire.json");
         stop(&again.dir);
     }
 
-    /// **End run on a moved run ends it, as End run ends any run** (306 Slice E): a run moved to B reads live until
-    /// its next message; End run files the end End run files ("Stopped"), so it reads ended and takes no reply, and a
-    /// message to it is refused as to any run ended by End run.
+    /// **End run on a run due to move ends it, as End run ends any run** (306): its end is End run's ("Stopped"), it
+    /// reads ended with no switch, and a message to it is refused as to any run End run ended.
     #[tokio::test]
-    async fn end_run_on_a_moved_run_ends_it() {
+    async fn end_run_on_a_due_run_ends_it() {
         let _env = crate::ProcessEnvRead::take();
         let mut rig = relaunch_rig();
-        // Recorded from just before the switch, so the window holds the switch's typed end and End's.
-        let (uid, _dir, _old, _b, window) = moved_to_b_recorded(&mut rig, true).await;
-        let (window_over, window) = window.unwrap();
-        assert_eq!(
-            stop_run(&rig.daemon, &uid).await,
-            StopRunResult::AlreadyEnded
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
+        choose(&rig.daemon, Some(&b)).await;
+        assert_eq!(stop_run(&rig.daemon, &uid).await, StopRunResult::Stopping);
+        assert!(
+            matches!(next(&mut played.lines).await, Some(ToHost::Stop { .. })),
+            "End run's stop"
         );
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
         let ended = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
         assert_eq!(
             (
@@ -14190,6 +14186,7 @@ mod tests {
             (Some("exited"), None, false),
             "{ended}"
         );
+        stop(&played.dir);
         let sent = send_as_app(&rig.daemon, &uid, "r-after-end", "again").await;
         assert!(matches!(sent, SendTextResult::Refused { .. }), "{sent:?}");
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -14200,60 +14197,41 @@ mod tests {
             .filter(|frame| frame["type"] == "event" && frame["event"]["kind"] == "session_end")
             .map(|frame| frame["event"]["payload"].clone())
             .collect();
-        assert_eq!(ends.len(), 2, "the switch's end, then End's: {ends:?}");
-        assert_eq!(ends[0]["switched_to"]["label"], "B", "{ends:?}");
-        assert_eq!(ends[1], stopped_end(), "End files the end End run files");
+        assert_eq!(ends, [stopped_end()], "End files the end End run files");
         crate::switch::window::keep(&frames, "switch-then-end-claude-wire.json");
     }
 
-    /// **A moved run offers no settings, and a change sent anyway is refused in words** (306 Slice E): its summary
-    /// carries no menus, as an ended run's does not, and a change from an app that sends one is refused saying when
-    /// it can be made.
+    /// **A run due to move offers its settings, and a change applies to it at once** (306, decision 311 v4): its
+    /// summary carries its menus, as any live run's does, and a change goes to its process as to any run's.
     #[tokio::test]
-    async fn a_moved_run_offers_no_settings_and_refuses_a_change_in_words() {
+    async fn a_due_run_offers_its_settings_and_takes_a_change() {
         let _env = crate::ProcessEnvRead::take();
         let mut rig = relaunch_rig();
-        let (uid, _dir, _old, _b) = moved_to_b(&mut rig).await;
-        let moved = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
-        assert_eq!(
-            (moved["switching"].as_str(), moved.get("menus")),
-            (Some("moved"), None),
-            "{moved}"
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        let due = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(due["switching"], "waiting", "{due}");
+        assert!(due.get("menus").is_some(), "{due}");
+        let (changed, _) = tokio::join!(
+            rig.daemon.set_setting(&uid, set_model(None, Some("high"))),
+            host_answers_setting(&mut played, 5, "done", None)
         );
-        let changed = rig
-            .daemon
-            .set_setting(
-                &uid,
-                Setting::Model {
-                    model: Some("sonnet".into()),
-                    effort: None,
-                },
-            )
-            .await;
-        assert_eq!(
-            changed,
-            SettingResult::Refused {
-                reason: "This session starts on B with your next message; its settings can be changed then.".into()
-            }
+        assert!(
+            matches!(changed, SettingResult::Applied { .. }),
+            "{changed:?}"
         );
+        stop(&played.dir);
     }
 
-    /// **A run waiting to move whose claude ends by itself is an ordinary end** (306 Slice E; decisions 214, 215,
-    /// 253, 308): a run in Bypass permissions marked to move, mid-turn, whose claude exits on its own: its end is
-    /// "its process ended", it no longer reads moving, and its next message relaunches it at the person's default
-    /// mode, not Bypass.
+    /// **A run due to move whose claude ends by itself is an ordinary end** (306 Slice E; decisions 214, 215, 253,
+    /// 308): a run in Bypass permissions due to move, mid-turn, whose claude exits on its own: its end is "its process
+    /// ended", it no longer reads due, and its next message relaunches it at the person's default mode, not Bypass.
     #[tokio::test]
-    async fn a_waiting_run_whose_claude_dies_is_an_ordinary_end() {
+    async fn a_due_run_whose_claude_dies_is_an_ordinary_end() {
         let _env = crate::ProcessEnvRead::take();
         let mut rig = relaunch_rig();
-        let a = rig.daemon.store.add_account("claude", "A").unwrap();
-        let b = rig.daemon.store.add_account("claude", "B").unwrap();
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&a.id))
-            .unwrap());
-        rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap();
+        let b = on_a_with_b(&mut rig);
         let mut played = live_run(&rig).await;
         let uid = played.uid.clone();
         sdk(&mut played.write, 3, init_in(&rig.root)).await;
@@ -14268,12 +14246,7 @@ mod tests {
         )
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&b.id))
-            .unwrap());
-        crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
+        choose(&rig.daemon, Some(&b)).await;
         say(
             &mut played.write,
             serde_json::json!({"type": "exited", "seq": 5, "code": 1}),
@@ -14330,16 +14303,33 @@ mod tests {
         stop(&relaunched.dir);
     }
 
-    /// **A relaunch whose answer comes late still names the account it is live on** (306): a moved run's next
-    /// message relaunches it on B, but claude takes the start only after the message stopped waiting (Indeterminate);
-    /// once live, the run names B.
+    /// **A move whose relaunch answers late still names the account it is live on** (306): the person's message moves
+    /// a quiet run to B, but claude takes the start only after the message stopped waiting (Indeterminate); once
+    /// live, the run names B.
     #[tokio::test]
     async fn a_late_relaunch_still_names_the_account_it_is_live_on() {
         let _env = crate::ProcessEnvRead::take();
         let mut rig = relaunch_rig();
-        let (uid, dir, old, b) = moved_to_b(&mut rig).await;
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
         let (sent, relaunched) =
             tokio::join!(send_as_app(&rig.daemon, &uid, "r-late", "on B?"), async {
+                let read = next(&mut played.lines).await;
+                assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+                let old = pid_in(&played.dir, "stub.pid");
+                stop(&played.dir);
+                gone(old).await;
+                let Played {
+                    dir, lines, write, ..
+                } = played;
+                drop((lines, write));
                 let mut relaunched = play_relaunched(&dir, old).await;
                 let ToHost::Start { uuid, .. } = relaunched.start.clone() else {
                     panic!("not a start: {:?}", relaunched.start);
@@ -14371,55 +14361,1379 @@ mod tests {
         stop(&relaunched.dir);
     }
 
-    /// **Choosing back is never a lock** (306 Slice E): a run on A is mid-turn when B is chosen, then A again before
-    /// its turn ends: at the turn's end it is already on the active account, so it only loses its mark and is never
-    /// stopped.
+    /// **A ccd restarted in a move's window leaves the run to move with nothing lost** (306, decision 311 v4; gate 8):
+    /// ccd stopped as the person's message was moving a quiet run to B, its message claimed: while its process was
+    /// being ended, still running; once it had ended, before its relaunch; and once its relaunch had begun, before a
+    /// host was recorded. Opened again (`recover`, then the hosted runs'), the run reads live, the message's claim is
+    /// released, and that message sent again moves it to B, filed once.
     #[tokio::test]
-    async fn a_run_chosen_back_before_its_turns_end_never_restarts() {
+    async fn a_restart_in_a_moves_window_loses_nothing() {
+        let _env = crate::ProcessEnvRead::take();
+        for window in ["ending", "ended", "relaunching"] {
+            let mut rig = relaunch_rig();
+            let (mut played, b) = quiet_on_a(&mut rig).await;
+            let uid = played.uid.clone();
+            choose(&rig.daemon, Some(&b)).await;
+            // What the moving message had written: its claim, and the run's switch under way.
+            let hash = protocol::hash::send_text_hash(&uid, "go on", true);
+            assert_eq!(
+                rig.daemon
+                    .store
+                    .claim_text_mutation(
+                        &uid,
+                        "r-crash",
+                        &hash,
+                        Some("go on"),
+                        &protocol::time::now_rfc3339()
+                    )
+                    .unwrap(),
+                TextClaim::Claimed
+            );
+            rig.daemon
+                .store
+                .set_switch_state(&uid, Some(Store::SWITCH_MOVED))
+                .unwrap();
+            let claude = rig.root.join("bin").join("claude");
+            let host = rig.root.join("stub-host");
+            let restarted = relauncher(&rig.root, &claude, &host);
+            let (sent, relaunched) = if window == "ending" {
+                let Played {
+                    dir, record, start, ..
+                } = played;
+                let (restarted, mut lines, mut write) = restarted_as(&rig, &dir, restarted).await;
+                assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 4 }));
+                say(
+                    &mut write,
+                    serde_json::json!({"type": "state", "seq": 5, "pending": []}),
+                )
+                .await;
+                assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 5 }));
+                let again = Played {
+                    uid: uid.clone(),
+                    dir,
+                    lines,
+                    write,
+                    record,
+                    start,
+                };
+                rig.daemon = restarted;
+                let (sent, _, _, relaunched) = moved_by(&rig, again, "r-crash", "go on", 6).await;
+                (sent, relaunched)
+            } else {
+                assert!(rig.daemon.stop_through_link(&uid).await);
+                let read = next(&mut played.lines).await;
+                assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+                let old = pid_in(&played.dir, "stub.pid");
+                stop(&played.dir);
+                gone(old).await;
+                let Played {
+                    dir, lines, write, ..
+                } = played;
+                drop((lines, write));
+                if window == "relaunching" {
+                    let kept = rig.daemon.store.claude_relaunch(&uid).unwrap().unwrap();
+                    assert!(rig
+                        .daemon
+                        .store
+                        .begin_claude_relaunch(&uid, &kept.start, Some(&b.id))
+                        .unwrap());
+                }
+                restarted.recover().await;
+                restarted.recover_hosted_runs(&rig.root).await;
+                rig.daemon = restarted;
+                let shown = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+                assert_eq!(shown["lifecycle"], "live", "{window}: {shown}");
+                tokio::join!(send_as_app(&rig.daemon, &uid, "r-crash", "go on"), async {
+                    let mut relaunched = play_relaunched(&dir, old).await;
+                    let ToHost::Start { uuid, prompt, .. } = relaunched.start.clone() else {
+                        panic!("not a start: {:?}", relaunched.start);
+                    };
+                    assert_eq!(prompt, "go on", "{window}");
+                    say(
+                        &mut relaunched.write,
+                        serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                   "status": "done", "initialize": initialize_answer()}),
+                    )
+                    .await;
+                    assert_eq!(
+                        next(&mut relaunched.lines).await,
+                        Some(ToHost::Ack { seq: 2 })
+                    );
+                    relaunched
+                })
+            };
+            assert!(
+                matches!(sent, SendTextResult::Sent { .. }),
+                "{window}: {sent:?}"
+            );
+            assert_eq!(
+                words(&rig, &uid)
+                    .iter()
+                    .filter(|text| *text == "go on")
+                    .count(),
+                1,
+                "{window}: filed once"
+            );
+            assert_eq!(
+                rig.daemon.store.run_account(&uid).unwrap(),
+                Some(b),
+                "{window}"
+            );
+            let live = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+            assert_eq!(
+                (live["lifecycle"].as_str(), live.get("switching")),
+                (Some("live"), None),
+                "{window}: {live}"
+            );
+            stop(&relaunched.dir);
+        }
+    }
+
+    /// **Choosing back while a move starts the run leaves it due** (306, decision 311 v4): A to B, the person's message
+    /// moving the run, and A chosen again before B's start has answered: live on B, the run is due to move back.
+    #[tokio::test]
+    async fn choosing_back_while_a_move_starts_leaves_the_run_due() {
         let _env = crate::ProcessEnvRead::take();
         let mut rig = relaunch_rig();
-        let a = rig.daemon.store.add_account("claude", "A").unwrap();
-        let b = rig.daemon.store.add_account("claude", "B").unwrap();
-        assert!(rig
-            .daemon
-            .store
-            .activate_account("claude", Some(&a.id))
-            .unwrap());
-        rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap();
-        let mut played = live_run(&rig).await;
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let a = rig.daemon.store.active_account("claude").unwrap().unwrap();
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        let daemon = Arc::clone(&rig.daemon);
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+                let read = next(&mut played.lines).await;
+                assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+                let old = pid_in(&played.dir, "stub.pid");
+                stop(&played.dir);
+                gone(old).await;
+                let Played {
+                    dir, lines, write, ..
+                } = played;
+                drop((lines, write));
+                let mut relaunched = play_relaunched(&dir, old).await;
+                choose(&daemon, Some(&a)).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        let due = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(due["switching"], "waiting", "due to move back to A: {due}");
+        stop(&relaunched.dir);
+    }
+
+    /// **A ccd restarted while a move's start was answering records the account it started on** (306, decision 311
+    /// v4): the person's message moved the run to B and B's host has its start when ccd stops; opened again, ccd
+    /// attaches to it and, its start done, the run records B.
+    #[tokio::test]
+    async fn a_restart_while_a_move_starts_records_the_account_it_starts_on() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        let sending = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move { send_as_app(&daemon, &uid, "r-1", "go on").await })
+        };
+        let read = next(&mut played.lines).await;
+        assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let Played {
+            dir, lines, write, ..
+        } = played;
+        drop((lines, write));
+        let relaunched = play_relaunched(&dir, old).await;
+        let Played {
+            lines,
+            write,
+            start,
+            ..
+        } = relaunched;
+        drop((lines, write));
+        let claude = rig.root.join("bin").join("claude");
+        let host = rig.root.join("stub-host");
+        let (restarted, mut lines, mut write) =
+            restarted_as(&rig, &dir, relauncher(&rig.root, &claude, &host)).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 1 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 2, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 2 }));
+        assert_eq!(
+            next(&mut lines).await,
+            Some(start.clone()),
+            "its start, again"
+        );
+        let ToHost::Start { uuid, .. } = start else {
+            panic!("not a start: {start:?}");
+        };
+        say(
+            &mut write,
+            serde_json::json!({"type": "outcome", "seq": 3, "uuid": uuid,
+                       "status": "done", "initialize": initialize_answer()}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(
+            restarted.store.run_account(&uid).unwrap(),
+            Some(b),
+            "it records B, the account it runs on"
+        );
+        let live = serde_json::to_value(summary(&restarted, &uid).await).unwrap();
+        assert_eq!(live.get("switching"), None, "{live}");
+        // The message its start carried is settled by it, found by that start's uuid: its retry is answered as
+        // sent, filed once, and nothing of it is left claimed to hold a later move.
+        let retried = send_as_app(&restarted, &uid, "r-1", "go on").await;
+        assert!(
+            matches!(retried, SendTextResult::Duplicate { .. }),
+            "{retried:?}"
+        );
+        assert_eq!(
+            words(&rig, &uid)
+                .iter()
+                .filter(|text| *text == "go on")
+                .count(),
+            1
+        );
+        let claims: i64 = rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM text_mutations WHERE session_uid = ?1 AND status = 'applying'",
+                [&uid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(claims, 0);
+        sending.abort();
+        stop(&dir);
+    }
+
+    /// **A move whose old process does not end is ended as End run ends one** (306): the person's message moves a quiet
+    /// run, but its host takes the stop and never ends; past End run's grace its group is stopped and its end filed as
+    /// the switch's, and the message relaunches it on B.
+    #[tokio::test]
+    async fn a_move_whose_process_does_not_end_is_ended_as_end_run_ends_one() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+                let Played {
+                    dir,
+                    mut lines,
+                    write,
+                    ..
+                } = played;
+                let read = next(&mut lines).await;
+                assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+                // The host takes the stop and does nothing more.
+                drop((lines, write));
+                let old = pid_in(&dir, "stub.pid");
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        let ends: Vec<_> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_end")
+            .map(|event| event["payload"]["switched_to"]["label"].clone())
+            .collect();
+        assert_eq!(ends, ["B"], "one end, the switch's");
+    }
+
+    /// **A move whose old process ignores SIGTERM still goes through with its message** (306): its host takes the stop,
+    /// never ends and ignores SIGTERM; it is stopped as End run stops one, and in time for the message to relaunch the
+    /// run on B.
+    #[tokio::test]
+    async fn a_move_whose_process_ignores_sigterm_still_goes_through() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let deaf = rig.root.join("stub-host-deaf");
+        std::fs::write(
+            &deaf,
+            format!(
+                "#!/bin/sh\necho $$ > \"$1/stub.pid\"\nprintf '{{\"protocol_version\":{HOST_PROTOCOL_VERSION},\"host_pid\":%s}}' \
+                 \"$$\" > \"$1/host.json\"\ntrap '' TERM\nexec sleep 30\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&deaf, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let b = on_a_with_b(&mut rig);
+        let mut played = live_run_on(&rig, &deaf).await;
         let uid = played.uid.clone();
         sdk(&mut played.write, 3, init_in(&rig.root)).await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
-        for account in [&b, &a] {
-            assert!(rig
-                .daemon
+        turn_ends(&mut played, 4).await;
+        choose(&rig.daemon, Some(&b)).await;
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+                let Played {
+                    dir,
+                    mut lines,
+                    write,
+                    ..
+                } = played;
+                let read = next(&mut lines).await;
+                assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+                drop((lines, write));
+                let old = pid_in(&dir, "stub.pid");
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+    }
+
+    /// **A move whose checks take its time is refused within its deadline** (306): the person's message moves a quiet
+    /// run, and Claude Code's version and sign-in checks on B each answer, but only after 9 s: the message is refused,
+    /// nothing launched, within the move's 15 s from its arrival.
+    #[tokio::test]
+    async fn a_move_whose_checks_take_its_time_is_refused_within_its_deadline() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        // Claude Code on B answers its version and its sign-in, each 9 s on.
+        let claude = rig.root.join("bin").join("claude");
+        let real = rig.root.join("bin").join("claude-real");
+        std::fs::rename(&claude, &real).unwrap();
+        std::fs::write(
+            &claude,
+            format!("#!/bin/sh\nsleep 9\nexec '{}' \"$@\"\n", real.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let asked_at = Instant::now();
+        let (sent, old) = tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+            let Played {
+                dir,
+                mut lines,
+                mut write,
+                ..
+            } = played;
+            let read = next(&mut lines).await;
+            assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+            say(
+                &mut write,
+                serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+            )
+            .await;
+            assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 5 }));
+            let old = pid_in(&dir, "stub.pid");
+            stop(&dir);
+            gone(old).await;
+            drop((lines, write));
+            (dir, old)
+        });
+        let waited = asked_at.elapsed();
+        let (dir, old) = old;
+        assert!(matches!(&sent, SendTextResult::Refused { .. }), "{sent:?}");
+        assert!(
+            waited < Duration::from_secs(16),
+            "answered after {waited:?}"
+        );
+        assert_eq!(
+            read_host_file(&dir.join("host.json")).map(|record| record.host_pid),
+            Some(old),
+            "nothing launched"
+        );
+    }
+
+    /// **A move's message after a reboot does not wait on the old group's number** (306): the run's move ended it, and
+    /// the Mac has started again since its host was recorded; a group now has that number. The message relaunches
+    /// the run on B and signals nothing of that group.
+    #[tokio::test]
+    async fn a_moves_message_after_a_reboot_does_not_wait_on_the_old_groups_number() {
+        use std::os::unix::process::CommandExt;
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        rig.daemon
+            .store
+            .set_switch_state(&uid, Some(Store::SWITCH_MOVED))
+            .unwrap();
+        assert!(rig.daemon.stop_through_link(&uid).await);
+        let read = next(&mut played.lines).await;
+        assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let Played {
+            dir, lines, write, ..
+        } = played;
+        drop((lines, write));
+        // Recorded before this boot, as far as ccd can tell; a group of this boot has the number now.
+        let mut other = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .execute(
+                "UPDATE run_hosts SET host_pid = ?2, boot_sec = 1, boot_usec = 1 WHERE session_uid = ?1",
+                rusqlite::params![uid, other.id() as i64],
+            )
+            .unwrap();
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        let untouched = other.try_wait().unwrap().is_none();
+        let _ = other.kill();
+        let _ = other.wait();
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert!(untouched, "the other group is not signalled");
+    }
+
+    /// **A message read before a restart's replay has ended moves nothing** (306): ccd restarted and attached again to a
+    /// due run's host, which has not yet sent the end of what it kept, so what ccd has filed of the run may be behind
+    /// it: the person's message goes to that host as any message does, and the run stays due.
+    #[tokio::test]
+    async fn a_message_before_a_restarts_replay_ends_moves_nothing() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        choose(&rig.daemon, Some(&b)).await;
+        let claude = rig.root.join("bin").join("claude");
+        let host = rig.root.join("stub-host");
+        let Played { uid, dir, .. } = played;
+        let (restarted, mut lines, _write) =
+            restarted_as(&rig, &dir, relauncher(&rig.root, &claude, &host)).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 4 }));
+        rig.daemon = restarted;
+        let sending = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move { send_as_app(&daemon, &uid, "r-1", "go on").await })
+        };
+        let read = next(&mut lines).await;
+        sending.abort();
+        stop(&dir);
+        assert!(
+            matches!(read, Some(ToHost::Say { .. })),
+            "the message goes to its host: {read:?}"
+        );
+        let due = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(due["switching"], "waiting", "still due: {due}");
+    }
+
+    /// **A restart after a move's end, before its old group was emptied, loses nothing** (306): a quiet run whose host's
+    /// group also holds a child started outside claude's tracking, its move's end filed, and ccd stopped before the
+    /// message stopped that child. Opened again, the message stops it as the move would have, then relaunches the run
+    /// on B.
+    #[tokio::test]
+    async fn a_restart_after_a_moves_end_with_its_group_not_empty_loses_nothing() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let b = on_a_with_b(&mut rig);
+        let host = stub_host_with_child(&rig);
+        let mut played = live_run_on(&rig, &host).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        turn_ends(&mut played, 4).await;
+        choose(&rig.daemon, Some(&b)).await;
+        let pid = pid_in(&played.dir, "child.pid");
+        let child = ProcessIdentity {
+            pid,
+            birth: read_birth_identity(pid).unwrap(),
+        };
+        // What the moving message had done when ccd stopped: its claim, its switch under way, its old claude ended.
+        let hash = protocol::hash::send_text_hash(&uid, "go on", true);
+        assert_eq!(
+            rig.daemon
                 .store
-                .activate_account("claude", Some(&account.id))
-                .unwrap());
-            crate::switch::begin(&rig.daemon, &AgentKind::Claude).await;
+                .claim_text_mutation(
+                    &uid,
+                    "r-crash",
+                    &hash,
+                    Some("go on"),
+                    &protocol::time::now_rfc3339()
+                )
+                .unwrap(),
+            TextClaim::Claimed
+        );
+        rig.daemon
+            .store
+            .set_switch_state(&uid, Some(Store::SWITCH_MOVED))
+            .unwrap();
+        assert!(rig.daemon.stop_through_link(&uid).await);
+        let read = next(&mut played.lines).await;
+        assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let Played {
+            dir, lines, write, ..
+        } = played;
+        drop((lines, write));
+        let claude = rig.root.join("bin").join("claude");
+        let restarted = relauncher(&rig.root, &claude, &rig.root.join("stub-host"));
+        restarted.recover().await;
+        restarted.recover_hosted_runs(&rig.root).await;
+        rig.daemon = restarted;
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-crash", "go on"), async {
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        let ended = liveness(&child) == Liveness::Gone;
+        if !ended {
+            // SAFETY: kill(2) of the stand-in's own child, by the pid it recorded, while it is still that child.
+            unsafe { libc::kill(child.pid, libc::SIGKILL) };
         }
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        assert!(ended, "the child ended with the move");
+    }
+
+    /// **A run whose host was running before an upgrade keeps its account until that host ends** (306, G1): ccd
+    /// restarted from a build that filed no background tasks (its store last written at version 6) and attached again
+    /// to a quiet run's host, whose claude may run a task that build acknowledged unfiled: the person's message goes on
+    /// A, and the run stays due.
+    #[tokio::test]
+    async fn a_host_from_before_an_upgrade_keeps_its_account() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        choose(&rig.daemon, Some(&b)).await;
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .pragma_update(None, "user_version", 6i64)
+            .unwrap();
+        let claude = rig.root.join("bin").join("claude");
+        let host = rig.root.join("stub-host");
+        let Played {
+            uid,
+            dir,
+            record,
+            start,
+            ..
+        } = played;
+        let (restarted, mut lines, mut write) =
+            restarted_as(&rig, &dir, relauncher(&rig.root, &claude, &host)).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 4 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 5, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 5 }));
+        rig.daemon = restarted;
+        let mut again = Played {
+            uid: uid.clone(),
+            dir,
+            lines,
+            write,
+            record,
+            start,
+        };
+        let (read, sent) = first_line_of_a_message(&rig, &mut again, 6).await;
+        stop(&again.dir);
+        assert!(
+            matches!(read, Some(ToHost::Say { .. })),
+            "the message goes on A: {read:?}"
+        );
+        assert!(
+            matches!(sent, Some(SendTextResult::Sent { .. })),
+            "{sent:?}"
+        );
+        let due = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(due["switching"], "waiting", "still due: {due}");
+    }
+
+    /// **A ccd restarted with a run's message claimed and never sent lets the run move** (306, decision 311 v4): opened
+    /// again and attached to the run's host, whose replay holds nothing of it, the next message moves the run, whether
+    /// the account was chosen before the restart or after it.
+    #[tokio::test]
+    async fn a_restart_with_a_due_runs_message_unsent_lets_it_move() {
+        let _env = crate::ProcessEnvRead::take();
+        for chosen_before in [true, false] {
+            restart_with_a_message_unsent(chosen_before).await;
+        }
+    }
+
+    async fn restart_with_a_message_unsent(chosen_before: bool) {
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        if chosen_before {
+            choose(&rig.daemon, Some(&b)).await;
+        }
+        let hash = protocol::hash::send_text_hash(&uid, "lost", true);
+        assert_eq!(
+            rig.daemon
+                .store
+                .claim_text_mutation(
+                    &uid,
+                    "r-lost",
+                    &hash,
+                    Some("lost"),
+                    &protocol::time::now_rfc3339()
+                )
+                .unwrap(),
+            TextClaim::Claimed
+        );
+        let claude = rig.root.join("bin").join("claude");
+        let host = rig.root.join("stub-host");
+        let Played {
+            dir, record, start, ..
+        } = played;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let (restarted, mut lines, mut write) =
+            restarted_as(&rig, &dir, relauncher(&rig.root, &claude, &host)).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 4 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 5, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 5 }));
+        rig.daemon = restarted;
+        if !chosen_before {
+            choose(&rig.daemon, Some(&b)).await;
+        }
+        let again = Played {
+            uid: uid.clone(),
+            dir,
+            lines,
+            write,
+            record,
+            start,
+        };
+        let (sent, _, prompt, relaunched) = moved_by(&rig, again, "r-2", "go on", 6).await;
+        assert!(
+            matches!(sent, SendTextResult::Sent { .. }),
+            "chosen before: {chosen_before}: {sent:?}"
+        );
+        assert_eq!(prompt, "go on");
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        stop(&relaunched.dir);
+    }
+
+    /// **A ccd restarted after a move's stop reached the run's host, and before its end was filed, files that end as the
+    /// switch's** (306): opened again, the host's replay of claude's exit is the switch's end, never an ordinary one,
+    /// the run reads live throughout, and the moving message sent again moves it to B.
+    #[tokio::test]
+    async fn a_restart_before_a_moves_end_is_filed_files_it_as_the_switch() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        let hash = protocol::hash::send_text_hash(&uid, "go on", true);
+        assert_eq!(
+            rig.daemon
+                .store
+                .claim_text_mutation(
+                    &uid,
+                    "r-crash",
+                    &hash,
+                    Some("go on"),
+                    &protocol::time::now_rfc3339()
+                )
+                .unwrap(),
+            TextClaim::Claimed
+        );
+        rig.daemon
+            .store
+            .set_switch_state(&uid, Some(Store::SWITCH_MOVED))
+            .unwrap();
+        assert!(rig.daemon.stop_through_link(&uid).await);
+        let read = next(&mut played.lines).await;
+        assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+        let claude = rig.root.join("bin").join("claude");
+        let host = rig.root.join("stub-host");
+        let Played { dir, .. } = played;
+        let (restarted, mut lines, mut write) =
+            restarted_as(&rig, &dir, relauncher(&rig.root, &claude, &host)).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 4 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 5 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 6, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 6 }));
+        rig.daemon = restarted;
+        let ends: Vec<_> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_end")
+            .map(|event| event["payload"]["switched_to"]["label"].clone())
+            .collect();
+        assert_eq!(ends, [serde_json::json!("B")], "the switch's end, only");
+        let shown = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(shown["lifecycle"], "live", "{shown}");
+        let old = pid_in(&dir, "stub.pid");
+        stop(&dir);
+        gone(old).await;
+        drop((lines, write));
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-crash", "go on"), async {
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        stop(&relaunched.dir);
+    }
+
+    /// The person's message `r-1` moves the quiet run `played` on A: its host stops and ends, and the relaunched host
+    /// is spawned and sent its start. The relaunched host's side and its pid, the send still waiting.
+    async fn moved_to_a_new_host(played: Played) -> (Played, i32) {
+        let mut played = played;
+        let read = next(&mut played.lines).await;
+        assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let Played {
+            dir, lines, write, ..
+        } = played;
+        drop((lines, write));
+        let relaunched = play_relaunched(&dir, old).await;
+        let new = pid_in(&dir, "stub.pid");
+        (relaunched, new)
+    }
+
+    /// Wait until the run `uid` reads `exited` in the store.
+    async fn exited(daemon: &Daemon, uid: &str) {
+        for _ in 0..200 {
+            if let Ok(Some(linked)) = daemon.db.hosted_link(uid.to_string()).await {
+                if linked.lifecycle == Lifecycle::Exited {
+                    return;
+                }
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        panic!("{uid} did not end");
+    }
+
+    /// **A move whose new host is gone before its start is answered leaves no message waiting** (306): the person's
+    /// message moved a quiet run to B, and B's host was gone before its start's outcome, with ccd running, or while
+    /// it was stopped: the run is left to its next message, and nothing of that message is left claimed to hold a
+    /// later move back.
+    #[tokio::test]
+    async fn a_moves_host_gone_before_its_start_is_answered_leaves_nothing_claimed() {
+        let _env = crate::ProcessEnvRead::take();
+        for restart in [false, true] {
+            let mut rig = relaunch_rig();
+            let (played, b) = quiet_on_a(&mut rig).await;
+            let uid = played.uid.clone();
+            choose(&rig.daemon, Some(&b)).await;
+            let sending = {
+                let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+                tokio::spawn(async move { send_as_app(&daemon, &uid, "r-1", "go on").await })
+            };
+            let (relaunched, new) = moved_to_a_new_host(played).await;
+            stop(&relaunched.dir);
+            gone(new).await;
+            if restart {
+                let claude = rig.root.join("bin").join("claude");
+                let host = rig.root.join("stub-host");
+                let restarted = relauncher(&rig.root, &claude, &host);
+                restarted.recover().await;
+                restarted.recover_hosted_runs(&rig.root).await;
+                restarted.watch_hosted_runs().await;
+                exited(&restarted, &uid).await;
+                sending.abort();
+                rig.daemon = restarted;
+            } else {
+                drop(relaunched);
+                let sent = sending.await.unwrap();
+                assert!(
+                    matches!(sent, SendTextResult::Indeterminate { .. }),
+                    "{sent:?}"
+                );
+                exited(&rig.daemon, &uid).await;
+            }
+            assert_eq!(
+                rig.daemon.store.host_sends(&uid).unwrap(),
+                Vec::<(String, String)>::new(),
+                "restart: {restart}: nothing left claimed"
+            );
+        }
+    }
+
+    /// **A settings change to a run due to move reaches it before a message moves it** (306): the effort changed on
+    /// the Mac as a message comes from the phone to a quiet run due to move: the change is delivered and answered on A
+    /// first, and only then does the message move the run, which keeps that effort on B.
+    #[tokio::test]
+    async fn a_setting_to_a_due_run_lands_before_a_message_moves_it() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        let setting = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move {
+                daemon
+                    .set_setting(&uid, set_model(None, Some("high")))
+                    .await
+            })
+        };
+        let Some(ToHost::SetModel { uuid, .. }) = next(&mut played.lines).await else {
+            panic!("no settings line");
+        };
+        let sending = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move { send_as_app(&daemon, &uid, "r-1", "go on").await })
+        };
+        let early = tokio::time::timeout(Duration::from_secs(1), next(&mut played.lines)).await;
+        assert!(
+            early.is_err(),
+            "the message waits for the change: {early:?}"
+        );
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "outcome", "seq": 5, "uuid": uuid, "status": "done"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let set = setting.await.unwrap();
+        assert!(
+            matches!(set, protocol::ws::SettingResult::Applied { .. }),
+            "{set:?}"
+        );
+        let (options, prompt, relaunched) = moved_then_started(played, 6, done()).await;
+        assert!(
+            matches!(sending.await.unwrap(), SendTextResult::Sent { .. }),
+            "the message moved the run"
+        );
+        assert_eq!(prompt, "go on");
+        assert_eq!(options.effort.as_deref(), Some("high"));
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        stop(&relaunched.dir);
+    }
+
+    /// **Choosing back the account a run is on leaves it as it was** (306): a run on A, B chosen and then A again, is no
+    /// longer due to move.
+    #[tokio::test]
+    async fn choosing_back_the_account_a_run_is_on_leaves_it_as_it_was() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        let a = rig.daemon.store.active_account("claude").unwrap().unwrap();
+        let uid = played.uid.clone();
+        let before = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        choose(&rig.daemon, Some(&b)).await;
+        choose(&rig.daemon, Some(&a)).await;
+        let after = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(after, before);
+        stop(&played.dir);
+    }
+
+    /// **What a run's old group still holds that claude does not track ends with its move** (306, G1): a quiet run on
+    /// A whose host's group also holds a child started outside claude's tracking (a `cmd &`) moves to B with the
+    /// person's message: once its host is gone the group is stopped as a dead host's is, and the relaunch waits for it
+    /// to be empty.
+    #[tokio::test]
+    async fn an_untracked_process_in_the_old_group_ends_with_the_move() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let b = on_a_with_b(&mut rig);
+        let host = stub_host_with_child(&rig);
+        let mut played = live_run_on(&rig, &host).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        turn_ends(&mut played, 4).await;
+        choose(&rig.daemon, Some(&b)).await;
+        let pid = pid_in(&played.dir, "child.pid");
+        let child = ProcessIdentity {
+            pid,
+            birth: read_birth_identity(pid).unwrap(),
+        };
+        let (sent, (_, _, relaunched)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-1", "go on"),
+            moved_then_started(played, 5, done())
+        );
+        let ended = liveness(&child) == Liveness::Gone;
+        if !ended {
+            // SAFETY: kill(2) of the stand-in's own child, by the pid it recorded, while it is still that child.
+            unsafe { libc::kill(child.pid, libc::SIGKILL) };
+        }
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        assert!(ended, "the child ended with the move");
+    }
+
+    /// A run on A whose first turn ran a command claude tracks as a background task (`npm run dev`, through Bash run in
+    /// the background when `flagged`, else moved there while it ran): its start filed, then its end when `ended`; then
+    /// a second turn. Its host's next message is message 10.
+    async fn with_a_background_task(played: &mut Played, flagged: bool, ended: bool) {
+        let session = "5f0c1e2a-0000-4000-8000-000000000001";
+        turn_begins(played, 3, "turn-1").await;
         sdk(
             &mut played.write,
             4,
-            serde_json::json!({"type": "result", "subtype": "success", "uuid": "r1",
-                               "is_error": false, "num_turns": 1, "usage": {}}),
+            serde_json::json!({"type": "assistant", "message": {"model": "claude-opus-5-5", "content": [
+                {"type": "tool_use", "id": "toolu_bg", "name": "Bash",
+                 "input": {"command": "npm run dev", "run_in_background": flagged}}]},
+                "session_id": session, "parent_tool_use_id": null,
+                "uuid": "9d1f0000-0000-4000-8000-000000000b01"}),
         )
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(500), next(&mut played.lines))
-                .await
-                .is_err(),
-            "never stopped"
-        );
+        sdk(
+            &mut played.write,
+            5,
+            serde_json::json!({"type": "system", "subtype": "task_started", "task_id": "bdev1",
+                "tool_use_id": "toolu_bg", "description": "npm run dev", "task_type": "local_bash",
+                "uuid": "9d1f0000-0000-4000-8000-000000000b02", "session_id": session}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        turn_ends(played, 6).await;
+        if ended {
+            sdk(
+                &mut played.write,
+                7,
+                serde_json::json!({"type": "system", "subtype": "task_notification", "task_id": "bdev1",
+                    "tool_use_id": "toolu_bg", "status": "completed", "output_file": "", "summary": "npm run dev",
+                    "uuid": "9d1f0000-0000-4000-8000-000000000b03", "session_id": session}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 7 }));
+        }
+        turn_begins(played, 8, "turn-2").await;
+        turn_ends(played, 9).await;
+    }
+
+    /// The person's message `go on` to the due run `played` as message `seq` of its host: what reached the host first,
+    /// and the send's answer once a `say` is taken; a stop is left unanswered.
+    async fn first_line_of_a_message(
+        rig: &Rig,
+        played: &mut Played,
+        seq: u64,
+    ) -> (Option<ToHost>, Option<SendTextResult>) {
+        let uid = played.uid.clone();
+        let sending = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move { send_as_app(&daemon, &uid, "r-1", "go on").await })
+        };
+        let read = next(&mut played.lines).await;
+        let Some(ToHost::Say { uuid, .. }) = &read else {
+            sending.abort();
+            return (read, None);
+        };
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "outcome", "seq": seq, "uuid": uuid, "status": "done"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq }));
+        (read, Some(sending.await.unwrap()))
+    }
+
+    /// **A finished background job lets the run move** (306, G1): a job claude ran in the background in an earlier
+    /// turn, its end filed, keeps nothing on A: the next message moves the run. Its start and end are filed as quiet
+    /// facts, which change no listing's time.
+    #[tokio::test]
+    async fn a_finished_background_job_lets_the_run_move() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let b = on_a_with_b(&mut rig);
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let before = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        with_a_background_task(&mut played, true, true).await;
         let after = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
-        assert_eq!(
-            (after["lifecycle"].as_str(), after.get("switching")),
-            (Some("live"), None),
-            "{after}"
-        );
-        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(a));
+        let kinds: Vec<_> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["payload"]["task_id"] == "bdev1")
+            .map(|event| event["kind"].clone())
+            .collect();
+        choose(&rig.daemon, Some(&b)).await;
+        let (read, _) = first_line_of_a_message(&rig, &mut played, 10).await;
         stop(&played.dir);
+        assert!(
+            matches!(read, Some(ToHost::Stop { .. })),
+            "the message moves the run: {read:?}"
+        );
+        assert_eq!(after["updated_at"], before["updated_at"], "{after}");
+        assert_eq!(
+            kinds,
+            [
+                serde_json::json!("background_task"),
+                serde_json::json!("background_task")
+            ]
+        );
+    }
+
+    /// **A background job still running holds the move** (306, G1): a job claude tracks as a background task, started
+    /// in an earlier turn and not ended, may still be running: the next message goes on A, and the run stays due.
+    #[tokio::test]
+    async fn a_running_background_job_holds_the_move() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let b = on_a_with_b(&mut rig);
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        with_a_background_task(&mut played, false, false).await;
+        choose(&rig.daemon, Some(&b)).await;
+        let (read, sent) = first_line_of_a_message(&rig, &mut played, 10).await;
+        stop(&played.dir);
+        assert!(
+            matches!(read, Some(ToHost::Say { .. })),
+            "the message goes on A: {read:?}"
+        );
+        assert!(
+            matches!(sent, Some(SendTextResult::Sent { .. })),
+            "{sent:?}"
+        );
+        let due = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(due["switching"], "waiting", "still due: {due}");
+    }
+
+    /// **A restart keeps a run's background jobs as they were** (306, G1): opened again (`recover`, then the hosted
+    /// runs'), a job still running holds the move, and a finished one lets it.
+    #[tokio::test]
+    async fn a_restart_keeps_a_runs_background_jobs_as_they_were() {
+        let _env = crate::ProcessEnvRead::take();
+        for ended in [false, true] {
+            let mut rig = relaunch_rig();
+            let b = on_a_with_b(&mut rig);
+            let mut played = live_run(&rig).await;
+            with_a_background_task(&mut played, ended, ended).await;
+            let claude = rig.root.join("bin").join("claude");
+            let host = rig.root.join("stub-host");
+            let Played {
+                uid,
+                dir,
+                record,
+                start,
+                ..
+            } = played;
+            let (restarted, mut lines, mut write) =
+                restarted_as(&rig, &dir, relauncher(&rig.root, &claude, &host)).await;
+            assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 9 }));
+            say(
+                &mut write,
+                serde_json::json!({"type": "state", "seq": 10, "pending": []}),
+            )
+            .await;
+            assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 10 }));
+            rig.daemon = restarted;
+            let mut again = Played {
+                uid,
+                dir,
+                lines,
+                write,
+                record,
+                start,
+            };
+            choose(&rig.daemon, Some(&b)).await;
+            let (read, _) = first_line_of_a_message(&rig, &mut again, 11).await;
+            stop(&again.dir);
+            if ended {
+                assert!(
+                    matches!(read, Some(ToHost::Stop { .. })),
+                    "finished: it moves: {read:?}"
+                );
+            } else {
+                assert!(
+                    matches!(read, Some(ToHost::Say { .. })),
+                    "running: it stays on A: {read:?}"
+                );
+            }
+        }
+    }
+
+    /// **A ccd restarted while a failed move's retry was starting leaves its message unclaimed** (306): a move whose
+    /// start B refused, then the retry's message claimed and its relaunch begun with no host yet when ccd stops: opened
+    /// again, nothing of that message is left claimed, so its retry is sent afresh and no later move waits for it.
+    #[tokio::test]
+    async fn a_restart_while_a_failed_moves_retry_starts_leaves_nothing_claimed() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        let (sent, (_, _, refused)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-on-b", "on B?"),
+            moved_then_started(
+                played,
+                5,
+                serde_json::json!({"status": "refused", "detail": "B is signed out"})
+            )
+        );
+        assert!(matches!(sent, SendTextResult::Refused { .. }), "{sent:?}");
+        let refused_host = pid_in(&refused.dir, "stub.pid");
+        stop(&refused.dir);
+        gone(refused_host).await;
+        drop(refused);
+        let hash = protocol::hash::send_text_hash(&uid, "again", true);
+        assert_eq!(
+            rig.daemon
+                .store
+                .claim_text_mutation(
+                    &uid,
+                    "r-again",
+                    &hash,
+                    Some("again"),
+                    &protocol::time::now_rfc3339()
+                )
+                .unwrap(),
+            TextClaim::Claimed
+        );
+        let kept = rig.daemon.store.claude_relaunch(&uid).unwrap().unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .begin_claude_relaunch(&uid, &kept.start, Some(&b.id))
+            .unwrap());
+        let claude = rig.root.join("bin").join("claude");
+        let host = rig.root.join("stub-host");
+        let restarted = relauncher(&rig.root, &claude, &host);
+        restarted.recover().await;
+        restarted.recover_hosted_runs(&rig.root).await;
+        assert_eq!(
+            restarted.store.host_sends(&uid).unwrap(),
+            Vec::<(String, String)>::new(),
+            "nothing left claimed"
+        );
+    }
+
+    /// **A settings change sent before an account is chosen lands before a message moves the run** (306): the effort
+    /// changed on the Mac while the run is not yet due, then B chosen and a message sent from the phone: the change is
+    /// answered on A first, and only then does the message move the run.
+    #[tokio::test]
+    async fn a_setting_sent_before_a_choice_lands_before_the_move() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        let setting = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move {
+                daemon
+                    .set_setting(&uid, set_model(None, Some("high")))
+                    .await
+            })
+        };
+        let Some(ToHost::SetModel { uuid, .. }) = next(&mut played.lines).await else {
+            panic!("no settings line");
+        };
+        choose(&rig.daemon, Some(&b)).await;
+        let sending = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move { send_as_app(&daemon, &uid, "r-1", "go on").await })
+        };
+        let early = tokio::time::timeout(Duration::from_secs(1), next(&mut played.lines)).await;
+        assert!(
+            early.is_err(),
+            "the message waits for the change: {early:?}"
+        );
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "outcome", "seq": 5, "uuid": uuid, "status": "done"}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let set = setting.await.unwrap();
+        assert!(
+            matches!(set, protocol::ws::SettingResult::Applied { .. }),
+            "{set:?}"
+        );
+        let (_, prompt, relaunched) = moved_then_started(played, 6, done()).await;
+        assert!(matches!(
+            sending.await.unwrap(),
+            SendTextResult::Sent { .. }
+        ));
+        assert_eq!(prompt, "go on");
+        stop(&relaunched.dir);
+    }
+
+    /// **A run its switch ended offers no settings while nothing moves it** (306): its process ended by its switch and
+    /// no message starting it again, it lists no menus, and a change is refused in words.
+    #[tokio::test]
+    async fn a_run_its_switch_ended_offers_no_settings_while_nothing_moves_it() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        rig.daemon
+            .store
+            .set_switch_state(&uid, Some(Store::SWITCH_MOVED))
+            .unwrap();
+        assert!(rig.daemon.stop_through_link(&uid).await);
+        let read = next(&mut played.lines).await;
+        assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let listed = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        let set = rig
+            .daemon
+            .set_setting(&uid, set_model(None, Some("high")))
+            .await;
+        stop(&played.dir);
+        assert_eq!(listed.get("menus"), None, "{listed}");
+        assert!(
+            matches!(set, protocol::ws::SettingResult::Refused { .. }),
+            "{set:?}"
+        );
+    }
+
+    /// **Mail reaches a run its move has ended and not yet started again** (306, G11): it reads live, so mail sent it
+    /// then waits for it.
+    #[tokio::test]
+    async fn mail_reaches_a_run_between_its_moves_end_and_its_start() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        rig.daemon
+            .store
+            .set_switch_state(&uid, Some(Store::SWITCH_MOVED))
+            .unwrap();
+        assert!(rig.daemon.stop_through_link(&uid).await);
+        let read = next(&mut played.lines).await;
+        assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        assert_eq!(
+            mail_from_another_run(&rig.daemon, &uid).await,
+            protocol::ipc::MailState::Waiting
+        );
     }
 
     /// **A Claude menu entry names no default effort** (decision 345): Claude Code reports none, and the level a run
@@ -14877,6 +16191,66 @@ mod tests {
         );
         assert_eq!(kept(&rig, &alive.uid).0, "exited", "put back as it was");
         assert!(summary(&rig.daemon, &alive.uid).await.relaunchable);
+    }
+
+    /// **A run whose claude ended on its own while a process it started lives on is relaunched by the next
+    /// message, beside that process.** Its host is gone but its group still has that member: the message is sent,
+    /// the run is `live` on a new host, and the process runs on.
+    #[tokio::test]
+    async fn a_message_relaunches_a_run_beside_a_process_its_claude_left_running() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = relaunch_rig();
+        let host = stub_host_with_child(&rig);
+        let mut played = live_run_on(&rig, &host).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 4, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let child = pid_in(&played.dir, "child.pid");
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let Played {
+            dir, lines, write, ..
+        } = played;
+        drop((lines, write));
+        assert!(
+            running(child),
+            "the process claude started outlives its host"
+        );
+        let (sent, played) = tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+            let mut played = play_relaunched(&dir, old).await;
+            let ToHost::Start { uuid, .. } = played.start.clone() else {
+                panic!("not a start: {:?}", played.start);
+            };
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                   "status": "done", "initialize": initialize_answer()}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+            played
+        });
+        let alive = running(child);
+        if alive {
+            // SAFETY: kill(2) of the test's own stand-in child.
+            unsafe { libc::kill(child, libc::SIGKILL) };
+        }
+        assert_eq!(
+            sent,
+            SendTextResult::Sent {
+                matched: "go on".into()
+            }
+        );
+        assert!(alive, "the process claude left running runs on");
+        assert_eq!(kept(&rig, &uid).0, "live");
+        stop(&played.dir);
     }
 
     /// **Decision 210 G3: a relaunch claude refuses leaves the run relaunchable.** The host's

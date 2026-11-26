@@ -17,9 +17,17 @@ its identity file in the folder; your own Claude Code sign-in is not touched. A 
 the folder: it uses that account's sign-in, and your own settings and projects, where its
 conversations are kept.
 
-Choosing another account moves each running session to it between turns: once a session's turn
-has ended it is stopped, and your next message to it resumes the same conversation on the new
-account.
+Choosing another account stops nothing, and new sessions use it at once. An open session moves to
+it when you next send it a message, if nothing is running in it: it is stopped, and your message
+resumes the same conversation on the new account. If something is running (a turn, a command or
+task it started in its last turn, a message of yours it hasn't answered), that message goes on the
+old account and the session moves at the next one. A session with a background job still running (a
+dev server, a watcher) stays on its account until the job ends; a finished job lets it move with its
+next message. A session already running when CodeConnect was updated to this version stays on its
+account until its Claude Code ends, since what it started in the background before then was not
+recorded. Its menus and settings stay as they are. A session that does not end within 5 seconds of
+being stopped for its move is ended as End Run ends one. A process a
+session started outside Claude Code's own tracking (a `cmd &`) ends when the session moves accounts.
 
 For each Claude Code account, and the Default, the Accounts page shows the email and plan it is
 signed in as (from `claude auth status`) and its plan's five-hour and seven-day usage, or that

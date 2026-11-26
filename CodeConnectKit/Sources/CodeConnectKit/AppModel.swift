@@ -1315,7 +1315,10 @@ public final class AppModel {
             target: target,
             waiting: moving.count { $0.switching == .waiting },
             moved: moving.count { $0.switching == .moved },
-            failed: moving.filter { $0.switching == .failed }.map(\.projectLabel))
+            // A failed move is said only while its row reads ended and relaunchable: once a retry starts it, the
+            // listing may still carry the mark for an instant, and nothing has failed any more.
+            failed: moving.filter { $0.switching == .failed && $0.lifecycle == .exited && $0.relaunchesOnMessage }
+                .map(\.projectLabel))
     }
 
     /// Adds an account for `agent` and starts its sign-in in the browser at once; no name is asked of the person (an
@@ -1954,6 +1957,13 @@ public final class AppModel {
 
     public func refreshFleet() {
         requestSessions()
+    }
+
+    /// The daemon's answer to a message for a run that was moving to another account ends the move's step, whether the
+    /// move went through or not: the list is asked for again at once, so the run shows its account and where its move
+    /// stands without waiting for the next refresh.
+    private func listAgainAfterAMove(_ moving: Bool) {
+        if moving { requestSessions() }
     }
 
     /// The one way a `sessions` request leaves, so each is counted in the order
@@ -3613,17 +3623,21 @@ public final class AppModel {
 
         retireSettingNoticeForSend(key)
         controls.beginCompose()
+        let moving = summary.switching != nil
         do {
             let result = try await connection.compose(
                 session: reference, requestID: requestID, text: text, payloadHash: hash, attachments: files)
             controls.settleCompose(result, material: hash)
+            listAgainAfterAMove(moving)
             switch result {
-            case .started, .steered, .duplicate: filesSent(files, from: key)
+            case .started, .steered, .duplicate:
+                filesSent(files, from: key)
             default: break
             }
             states[key]?.codexTurnsChanged()
             return result
         } catch let refusal as DaemonConnection.CodexRefusal {
+            listAgainAfterAMove(moving)
             controls.composeNotSent(Self.sentence(for: refusal, verb: "carry this message"))
             return nil
         } catch ConnectionError.sentButUnanswered {
@@ -3650,12 +3664,15 @@ public final class AppModel {
         guard let reference = Self.sessionReference(summary) else { return .refused(Self.noUidSentence) }
         let hash = CodexHash.compose(sessionRef: reference, text: text)
         retireSettingNoticeForSend(key)
+        let moving = summary.switching != nil
         do {
             let result = try await connection.compose(
                 session: reference, requestID: "say-" + hash, text: text, payloadHash: hash)
+            listAgainAfterAMove(moving)
             states[key]?.codexTurnsChanged()
             return Self.commentAttempt(for: result, matched: runLabel(for: key).project)
         } catch let refusal as DaemonConnection.CodexRefusal {
+            listAgainAfterAMove(moving)
             return .refused(Self.sentence(for: refusal, verb: "carry this comment"))
         } catch ConnectionError.sentButUnanswered {
             return .indeterminate(Self.sentNoAnswerSentence)
@@ -4092,10 +4109,12 @@ public final class AppModel {
         let requestID = pendingSendIdentities[mutation] ?? UUID().uuidString.lowercased()
         let payloadHash = SendTextIdentity.payloadHash(
             session: key, text: trimmed, submit: submit, attachments: files)
+        let moving = summary(for: key)?.switching != nil
         do {
             let result = try await connection.sendText(
                 session: key, text: trimmed, submit: submit,
                 requestID: requestID, payloadHash: payloadHash, attachments: files)
+            listAgainAfterAMove(moving)
             switch result {
             case .sent(let matched):
                 pendingSendIdentities[mutation] = nil

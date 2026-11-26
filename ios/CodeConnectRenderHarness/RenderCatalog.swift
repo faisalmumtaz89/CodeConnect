@@ -844,52 +844,53 @@ enum RenderCatalog {
                     throw RenderFailure.unreachable("the reply box, not the ended line")
                 }
             }),
-        // **A run moved to another account** (decision 306), from the daemon's own recordings (`SwitchFixtures`):
-        // waiting and moved runs stay live with their reply box, one quiet "Switched to" row and no "Run ended"; a
-        // failed move reads Ended with one warning row and keeps its box; End run after a move ends it.
+        // **A run moved to another account** (decision 306; decision 311 v4), from the daemon's own recordings
+        // (`SwitchFixtures`): a run the person's message is moving stays live exactly as before, with its reply box and
+        // settings and no row for the move; a failed move reads Ended with one warning row and keeps its box; End run on
+        // a run due to move ends it.
         RenderScenario(
-            name: "switch-claude-waiting-fleet",
-            purpose: "a Claude run waiting to move to another account, in the fleet's live list",
+            name: "switch-claude-moving-fleet",
+            purpose: "a Claude run its message is moving to another account, in the fleet's live list",
             arguments: ["-CC_SWITCH", "switch-claude", "-CC_SWITCH_STEP", "2"],
             reach: { app, driver in
-                try driver.requireExists(app.buttons["session-01M8299ZGSRFFX29Z8KF3Q5Q2V"], "the waiting run's row")
+                try driver.requireExists(app.buttons["session-01M89G4WF7VPP746TMY6Y404JB"], "the moving run's row")
             }),
         RenderScenario(
-            name: "switch-claude-moved-session",
-            purpose: "a Claude run moved to another account: one Switched to row, its reply box kept",
+            name: "switch-claude-moving-session",
+            purpose: "a Claude run its message is moving to another account: no row, its reply box and settings kept",
             arguments: [
-                "-CC_SWITCH", "switch-claude", "-CC_SWITCH_STEP", "6",
-                "-CC_DEEPLINK", "codeconnect://session/01M8299ZGSRFFX29Z8KF3Q5Q2V",
+                "-CC_SWITCH", "switch-claude", "-CC_SWITCH_STEP", "2",
+                "-CC_DEEPLINK", "codeconnect://session/01M89G4WF7VPP746TMY6Y404JB",
             ],
             reach: { app, driver in
-                try driver.requireExists(driver.text(containing: "Switched to", in: app), "the Switched to row")
+                try driver.requireExists(app.buttons["session.composer.settings"], "its settings")
             }),
         RenderScenario(
-            name: "switch-claude-moved-by-email-session",
-            purpose: "a moved run whose account the app's account book knows: the row names the account by its email",
+            name: "switch-claude-moved-with-book-session",
+            purpose: "a run moved with the app's account book in: its message is the move's one row",
             arguments: [
                 "-CC_SWITCH", "switch-with-listing-claude",
-                "-CC_DEEPLINK", "codeconnect://session/01M82X1ASERF7DPA32E16243H9",
+                "-CC_DEEPLINK", "codeconnect://session/01M89G4WF7VPP746TMY6Y404JB",
             ],
             reach: { app, driver in
-                try driver.requireExists(driver.text(containing: "b@example.test", in: app), "the row by its email")
+                try driver.requireExists(driver.text(containing: "on B now?", in: app), "the message that moved it")
             }),
         RenderScenario(
-            name: "switch-codex-moved-session",
-            purpose: "a Codex run moved to another account: one Switched to row, its reply box kept",
+            name: "switch-codex-moving-session",
+            purpose: "a Codex run its message is moving to another account: no row, its reply box and settings kept",
             arguments: [
-                "-CC_SWITCH", "switch-codex", "-CC_SWITCH_STEP", "6",
-                "-CC_DEEPLINK", "codeconnect://session/01M83Z938F675T5TMSSPQSCX19",
+                "-CC_SWITCH", "switch-codex", "-CC_SWITCH_STEP", "2",
+                "-CC_DEEPLINK", "codeconnect://session/01M89T5Z50QTD00VMHHYNBVR4C",
             ],
             reach: { app, driver in
-                try driver.requireExists(driver.text(containing: "Switched to", in: app), "the Switched to row")
+                try driver.requireExists(app.buttons["session.composer.settings"], "its settings")
             }),
         RenderScenario(
             name: "switch-failed-session",
             purpose: "a move that could not start: Ended, one warning row, its reply box kept",
             arguments: [
-                "-CC_SWITCH", "switch-failed-then-recovered-claude", "-CC_SWITCH_STEP", "4",
-                "-CC_DEEPLINK", "codeconnect://session/01M831X70BPJ4V41GRANPBPB4T",
+                "-CC_SWITCH", "switch-failed-then-recovered-claude", "-CC_SWITCH_STEP", "6",
+                "-CC_DEEPLINK", "codeconnect://session/01M89T5Z4ZAC3JWB35FH06S29P",
             ],
             reach: { app, driver in
                 try driver.requireExists(driver.text(containing: "Couldn", in: app), "the warning row")
@@ -899,7 +900,7 @@ enum RenderCatalog {
             purpose: "the failed move's run after its next message started it on the new account",
             arguments: [
                 "-CC_SWITCH", "switch-failed-then-recovered-claude",
-                "-CC_DEEPLINK", "codeconnect://session/01M831X70BPJ4V41GRANPBPB4T",
+                "-CC_DEEPLINK", "codeconnect://session/01M89T5Z4ZAC3JWB35FH06S29P",
             ],
             reach: { app, driver in
                 try driver.requireExists(driver.text(containing: "on B now?", in: app), "the message that started it")
@@ -909,17 +910,17 @@ enum RenderCatalog {
             purpose: "a Codex run moved onto a plan without its model: one quiet row names the model it is now on",
             arguments: [
                 "-CC_SWITCH", "relaunch-plan-default-codex",
-                "-CC_DEEPLINK", "codeconnect://session/01M83Z9VF8JMX4SJ351YY2BJ2X",
+                "-CC_DEEPLINK", "codeconnect://session/01M89T5Z51SXVEP19X4QRKVKFK",
             ],
             reach: { app, driver in
                 try driver.requireExists(driver.text(containing: "Now on", in: app), "the model-changed row")
             }),
         RenderScenario(
             name: "switch-then-end-session",
-            purpose: "End run after a move: Switched to, then Run ended, and no reply box",
+            purpose: "End run on a run due to move: Run ended, and no reply box",
             arguments: [
                 "-CC_SWITCH", "switch-then-end-claude",
-                "-CC_DEEPLINK", "codeconnect://session/01M82B4K7A2XN1X22R98H2XB7Z",
+                "-CC_DEEPLINK", "codeconnect://session/01M89G4WF8XNPTVJRGNRVE69DY",
             ],
             reach: { app, driver in
                 try driver.requireExists(

@@ -1,18 +1,17 @@
 import XCTest
 
-/// A run moved to another account on the Mac, as the phone shows it, from the daemon's own recordings of the switch
-/// (`-CC_SWITCH`, `SwitchFixtures`): a waiting or moved run stays in the live list with its reply box and reads one
-/// quiet "Switched to" row, never "Run ended"; a move that could not start reads Ended with one warning row and keeps
-/// its box; End run after a move ends the run, with no box; a moved run's settings line is read only; a move onto a
-/// plan without the run's model says, in one quiet row, which model it is now on.
+/// A run moved to another account on the Mac, as the phone shows it, from the daemon's own recordings of a move
+/// (`-CC_SWITCH`, `SwitchFixtures`): a run its message is moving stays in the live list exactly as before, with its
+/// reply box and its settings, and draws no row for the move; a move that could not start reads Ended with one warning
+/// row and keeps its box; End run on a run due to move ends it, with no box; a move onto a plan without the run's model
+/// says, in one quiet row, which model it is now on.
 final class SwitchedRunUITests: XCTestCase {
 
-    private static let claude = "01M8299ZGSRFFX29Z8KF3Q5Q2V"
-    private static let codex = "01M83Z938F675T5TMSSPQSCX19"
-    private static let failed = "01M831X70BPJ4V41GRANPBPB4T"
-    private static let ended = "01M82B4K7A2XN1X22R98H2XB7Z"
-    private static let planLacksModel = "01M83Z9VF8JMX4SJ351YY2BJ2X"
-    private static let withBook = "01M82X1ASERF7DPA32E16243H9"
+    private static let claude = "01M89G4WF7VPP746TMY6Y404JB"
+    private static let codex = "01M89T5Z50QTD00VMHHYNBVR4C"
+    private static let failed = "01M89T5Z4ZAC3JWB35FH06S29P"
+    private static let ended = "01M89G4WF8XNPTVJRGNRVE69DY"
+    private static let planLacksModel = "01M89T5Z51SXVEP19X4QRKVKFK"
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -53,44 +52,41 @@ final class SwitchedRunUITests: XCTestCase {
         return row
     }
 
-    func testWaitingAndMovedRunsStayInTheLiveList() {
-        let waiting = open("switch-claude", step: 2)
-        XCTAssertFalse(row(waiting, Self.claude).label.contains("Ended"), "waiting: live")
-        waiting.terminate()
-        let moved = open("switch-claude", step: 6)
+    func testAMovingRunStaysInTheLiveList() {
+        let moving = open("switch-claude", step: 2)
+        XCTAssertFalse(row(moving, Self.claude).label.contains("Ended"), "moving: live")
+        moving.terminate()
+        let moved = open("switch-claude")
         XCTAssertFalse(row(moved, Self.claude).label.contains("Ended"), "moved: live")
     }
 
-    func testAMovedClaudeRunReadsSwitchedToAndKeepsItsReplyBox() {
-        movedRun(open("switch-claude", step: 6, session: Self.claude))
+    func testAMovingClaudeRunDrawsNothingAndKeepsItsReplyBoxAndSettings() {
+        movingRun(open("switch-claude", step: 2, session: Self.claude))
     }
 
-    func testAMovedCodexRunReadsSwitchedToAndKeepsItsReplyBox() {
-        movedRun(open("switch-codex", step: 6, session: Self.codex))
+    func testAMovingCodexRunDrawsNothingAndKeepsItsReplyBoxAndSettings() {
+        movingRun(open("switch-codex", step: 2, session: Self.codex))
     }
 
-    private func movedRun(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
-        let switched = texts(app, beginningWith: "Switched to")
-        XCTAssertTrue(switched.firstMatch.waitForExistence(timeout: 25), "the Switched to row", file: file, line: line)
-        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 1, "one row", file: file, line: line)
-        XCTAssertFalse(texts(app, beginningWith: "Run ended").firstMatch.exists, "no Run ended", file: file, line: line)
-        XCTAssertTrue(replyBox(app), "its reply box", file: file, line: line)
+    private func movingRun(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(
-            app.staticTexts.matching(identifier: "session.composer.model").firstMatch.exists,
-            "its model, read only", file: file, line: line)
-        XCTAssertFalse(app.buttons["session.composer.settings"].exists, "no settings to change", file: file, line: line)
+            app.buttons["session.composer.settings"].waitForExistence(timeout: 25), "its settings, to change",
+            file: file, line: line)
+        XCTAssertTrue(replyBox(app), "its reply box", file: file, line: line)
+        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 0, "no row for the move", file: file, line: line)
+        XCTAssertFalse(texts(app, beginningWith: "Run ended").firstMatch.exists, "no Run ended", file: file, line: line)
     }
 
-    /// With the account book's listing (ccd's, recorded with the switch), the row names the account by its email.
-    func testAMovedRunNamesTheAccountByItsEmailWhenTheBookKnowsIt() {
-        let app = open("switch-with-listing-claude", session: Self.withBook)
-        let row = texts(app, beginningWith: "Switched to b@example.test")
-        XCTAssertTrue(row.firstMatch.waitForExistence(timeout: 25), "the row by its email")
-        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 1, "one row")
+    /// With the account book's listing (ccd's, recorded with the move), the conversation still draws no row for it:
+    /// the message that moved the run is its one row.
+    func testAMovedRunDrawsNoRowWhenTheBookKnowsTheAccount() {
+        let app = open("switch-with-listing-claude", session: Self.claude)
+        XCTAssertTrue(texts(app, beginningWith: "on B now?").firstMatch.waitForExistence(timeout: 25), "the message")
+        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 0, "no row for the move")
     }
 
     func testAMoveThatCouldNotStartReadsEndedWithOneWarningAndKeepsItsReplyBox() {
-        let app = open("switch-failed-then-recovered-claude", step: 4, session: Self.failed)
+        let app = open("switch-failed-then-recovered-claude", step: 6, session: Self.failed)
         let warning = texts(app, beginningWith: "Couldn’t move to")
         XCTAssertTrue(warning.firstMatch.waitForExistence(timeout: 25), "the warning row")
         XCTAssertEqual(rows(app, beginningWith: "Couldn’t move to"), 1, "one warning row")
@@ -106,18 +102,18 @@ final class SwitchedRunUITests: XCTestCase {
         XCTAssertTrue(row.firstMatch.waitForExistence(timeout: 25), "the model-changed row")
         XCTAssertEqual(rows(app, beginningWith: "Now on"), 1, "one row")
         XCTAssertTrue(row.firstMatch.label.contains("isn’t in"), row.firstMatch.label)
-        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 1, "the move")
-        XCTAssertFalse(texts(app, beginningWith: "Run resumed").firstMatch.exists, "a switch's relaunch draws nothing")
+        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 0, "no row for the move")
+        XCTAssertFalse(texts(app, beginningWith: "Run resumed").firstMatch.exists, "a move's relaunch draws nothing")
         XCTAssertTrue(replyBox(app), "its reply box")
     }
 
-    func testEndRunAfterAMoveEndsTheRunWithNoReplyBox() {
+    func testEndRunOnADueRunEndsTheRunWithNoReplyBox() {
         let app = open("switch-then-end-claude", session: Self.ended)
         XCTAssertTrue(
             app.descendants(matching: .any).matching(identifier: "session-ended-line").firstMatch
                 .waitForExistence(timeout: 25), "the ended line")
-        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 1, "the move")
-        XCTAssertTrue(texts(app, beginningWith: "Run ended").firstMatch.exists, "then Run ended")
+        XCTAssertEqual(rows(app, beginningWith: "Switched to"), 0, "no move")
+        XCTAssertTrue(texts(app, beginningWith: "Run ended").firstMatch.exists, "Run ended")
         XCTAssertFalse(replyBox(app), "no reply box")
     }
 }

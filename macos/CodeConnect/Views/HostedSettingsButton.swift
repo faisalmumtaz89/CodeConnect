@@ -11,12 +11,12 @@ enum SettingsPanel {
 /// A Claude or Codex run started from the app: its settings as the reply box's controls, built from the run's own menus
 /// (Kit's `HostedSettings`). The model button, with the run's agent mark and the setting's name, opens the models, one
 /// line each, and the selected model's efforts as one row of segments. The mode button names the run's mode at all
-/// times, a mode the menu marks `confirm` (one that lets the agent work without asking) in red; its list ends such a
-/// mode in "…", which asks first in the reply box's confirmation. On a Claude run "⋯" holds Compact… and Clear…, which
-/// type Claude Code's commands; a Codex run takes neither and has no "⋯". One panel is open at a time, above the
-/// controls, its leading edge on the button that opened it and inside the reply box's content (`PanelPlace`); Esc or a
-/// click anywhere else closes it. The checks follow the run's facts, never a guess
-/// between a click and its answer; while one of its calls is in flight every control is disabled and a small spinner
+/// times, a mode the menu marks `confirm` (one that lets the agent work without asking) in red; its list draws such a
+/// mode in red, ends it in "…", and asks first in the reply box's confirmation. On a Claude run "⋯" holds Compact… and
+/// Clear…, which type Claude Code's commands; a Codex run takes neither and has no "⋯". One panel is open at a time,
+/// above the controls, its leading edge on the button that opened it and inside the reply box's content (`PanelPlace`);
+/// Esc or a click anywhere else closes it. The checks follow the run's facts, never a guess between a click and its
+/// answer; while one of its calls is in flight every control is disabled and a small spinner
 /// stands in the model button's chevron, and what became of the call is the reply box's note line.
 struct HostedSettingsButton: View {
     let model: AppModel
@@ -44,9 +44,10 @@ struct HostedSettingsButton: View {
     private var effort: String? { model.shownSummary(for: key).flatMap(RunSettings.effortName) }
 
     var body: some View {
-        HStack(spacing: 2) {
-            modelButton
-            if !settings.modes.isEmpty { modeButton }
+        BarLayout(spacing: 2) {
+            // Short of room, the model's words cut before the mode's.
+            modelButton.yields(0)
+            if !settings.modes.isEmpty { modeButton.yields(1) }
             if agent == .claude || agent == .antigravity { moreButton }
         }
         .coordinateSpace(.named(Self.space))
@@ -68,14 +69,15 @@ struct HostedSettingsButton: View {
     private var modelButton: some View {
         control(
             .model, id: "session.composer.commands", label: effort.map { "\(name), \($0) effort" } ?? name,
-            help: "Model and effort"
+            help: "Model and effort: " + (effort.map { "\(name) · \($0)" } ?? name)
         ) {
             HStack(spacing: 5) {
                 AgentMark(agent: agent)
                 // The agent's own report of the model (an id) in code type; a menu row's label in the app's.
                 Text(name).font(settings.modelDisplayReported ? Theme.mono(11.5) : InputBoxChip.font)
                     .foregroundStyle(Theme.text)
-                if let effort { Text("· \(effort)").foregroundStyle(Theme.text2) }
+                    .lineLimit(1).truncationMode(.tail)
+                if let effort { Text("· \(effort)").foregroundStyle(Theme.text2).fixedSize() }
                 if settings.inFlight {
                     ProgressView().controlSize(.small).accessibilityHidden(true)
                 } else {
@@ -88,9 +90,12 @@ struct HostedSettingsButton: View {
     /// The run's mode as its fact names it, "Permission mode" when the fact names none of the listed modes.
     private var modeButton: some View {
         let label = settings.selectedMode?.label ?? RunSettingWords.permissionMode
-        return control(.mode, id: "session.composer.modes", label: label, help: RunSettingWords.permissionMode) {
+        return control(
+            .mode, id: "session.composer.modes", label: label, help: "\(RunSettingWords.permissionMode): \(label)"
+        ) {
             HStack(spacing: 5) {
                 Text(label).foregroundStyle(settings.selectedMode?.confirm == true ? Theme.red : Theme.text)
+                    .lineLimit(1).truncationMode(.tail)
                 chevron
             }
         }
@@ -225,12 +230,12 @@ struct HostedSettingsButton: View {
     private func card<Content: View>(_ which: SettingsPanel, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) { content() }
             .disabled(settings.inFlight)
-            .frame(width: placed(which).width - 12)
+            .frame(width: placed(which).width - 2 * MenuMetrics.inset)
             .fixedSize(horizontal: false, vertical: true)
             .menuCard()
-            // The card takes every click inside it: one on its checked or disabled rows, a header or a gap does
-            // nothing, rather than reaching the reply box or the conversation under it.
-            .contentShape(RoundedRectangle(cornerRadius: 14))
+            // The card takes every click inside it: one on a disabled row, a header or a gap does nothing, rather
+            // than reaching the reply box or the conversation under it.
+            .contentShape(RoundedRectangle(cornerRadius: MenuMetrics.cardRadius))
             .onTapGesture {}
     }
 
@@ -250,28 +255,29 @@ struct HostedSettingsButton: View {
         Task { await set() }
     }
 
-    /// Choice `index` of its panel. The checked one is the run's fact already, never chosen or lit.
+    /// Choice `index` of its panel. The checked one is the run's fact already: drawn in full with its check, never lit or
+    /// reached by the keys, and a click on it only closes the panel. One that asks first (`asksFirst`) is drawn in red, as
+    /// every act that asks is.
     private func row(
         _ index: Int, _ title: String, detail: String? = nil, marked: Bool, id: String, asksFirst: Bool = false,
         set: @escaping () async -> Void
     ) -> some View {
-        Button {
-            choose(asksFirst: asksFirst, set)
-        } label: {
-            rowLabel(title, detail: detail, marked: marked)
+        let act = { if marked { open = nil } else { choose(asksFirst: asksFirst, set) } }
+        return Button(action: act) {
+            rowLabel(title, detail: detail, marked: marked, red: asksFirst)
         }
         .buttonStyle(.panelRow)
-        .panelRow(index, id: id) { choose(asksFirst: asksFirst, set) }
-        .disabled(marked)
+        .panelRow(index, id: id, choosable: !marked, choose: act)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier(id)
         .accessibilityAddTraits(marked ? .isSelected : [])
     }
 
     /// A row's label, and beside it, quieter, the agent's own description as sent, cut at its end.
-    private func rowLabel(_ title: String, detail: String? = nil, marked: Bool) -> some View {
+    private func rowLabel(_ title: String, detail: String? = nil, marked: Bool, red: Bool) -> some View {
         MenuRow(chosen: marked) {
-            Text(title).font(Theme.ui(12.5)).foregroundStyle(settings.inFlight ? Theme.text3 : Theme.text)
+            Text(title).font(Theme.ui(12.5))
+                .foregroundStyle(settings.inFlight ? Theme.text3 : red ? Theme.red : Theme.text)
                 .lineLimit(1)
                 .layoutPriority(1)
             if let detail {
@@ -296,10 +302,12 @@ struct ModelFactLabel: View {
             // By its menu's name, or as the run reported it in code type; "Model" while it has reported none.
             Text(fact?.text ?? "Model").font(fact?.reported == true ? Theme.mono(11.5) : InputBoxChip.font)
                 .foregroundStyle(Theme.text)
-            if let effort { Text("· \(effort)").foregroundStyle(Theme.text2) }
+                .lineLimit(1).truncationMode(.tail)
+            if let effort { Text("· \(effort)").foregroundStyle(Theme.text2).fixedSize() }
         }
         .font(InputBoxChip.font)
         .inputBoxChip(open: false)
+        .help(effort.map { "\(fact?.text ?? "Model") · \($0)" } ?? fact?.text ?? "Model")
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("session.composer.model")
     }

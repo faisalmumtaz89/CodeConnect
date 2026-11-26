@@ -163,15 +163,15 @@ final class AntigravityKitTests: XCTestCase {
         return book
     }
 
-    /// Antigravity's one row says its plan exactly as agy names it ("Google AI Pro" here), "Signed in" when agy names
-    /// none, and nothing of its own while it is signed out or signing in (the row says those); its "…" offers Sign Out…
+    /// Antigravity's one row says its plan alone, exactly as agy names it ("Google AI Pro" here), as Claude Code's says
+    /// "Max"; "Signed in" when agy names none, and nothing of its own while it is signed out or signing in (the row says those); its "…" offers Sign Out…
     /// signed in, Sign In… signed out, and nothing while a sign-in is going.
     func testAntigravitysRowSaysItsSignInAndItsPlanAsAgyNamesIt() throws {
         let line: (AccountBook) -> String? = { book in
             book.agentSignIn(for: .antigravity)?.line(plan: book.defaultFacts(for: .antigravity)?.plan)
         }
         let pro = try signInBook("signed_in_pro")
-        XCTAssertEqual(line(pro), "Signed in · Google AI Pro")
+        XCTAssertEqual(line(pro), "Google AI Pro")
         XCTAssertEqual(pro.agentSignIn(for: .antigravity)?.acts, [.signOut])
         XCTAssertEqual(line(try signInBook("signed_in_no_tier")), "Signed in")
         let out = try signInBook("signed_out")
@@ -212,6 +212,38 @@ final class AntigravityKitTests: XCTestCase {
         XCTAssertFalse(needed(false, [true, true, false]), "Antigravity only")
         XCTAssertTrue(needed(false, [true, true, true]), "none")
         XCTAssertTrue(needed(true, [false, false, false]), "no service")
+    }
+
+    /// A missing agent's row is drawn as lacking only while no agent can start: beside a ready one it is on offer.
+    func testAMissingAgentIsLackingOnlyWhenNoAgentIsReady() {
+        let lacking = { (missing: Bool, agents: [Bool]) in
+            SetupAttention.agentLacking(missing: missing, serviceMissing: false, agentsMissing: agents)
+        }
+        XCTAssertFalse(lacking(true, [false, false, true]), "Antigravity missing, Claude Code and Codex ready")
+        XCTAssertFalse(lacking(true, [false, true, true]), "Codex missing, Claude Code ready")
+        XCTAssertTrue(lacking(true, [true, true, true]), "none ready")
+        XCTAssertFalse(lacking(false, [false, true, true]), "a ready agent is never lacking")
+    }
+
+    /// **Antigravity's plan limits are one window, Gemini's week, read as Claude Code's are** (minor 55; the owner's
+    /// ruling, 2026-11-26): ccd's own frame gives Antigravity's Default one window, captioned "Week" with its reset, and
+    /// the bar's figures are that window alone; none of the "Claude and GPT models" windows reaches the app. A daemon of
+    /// 54 sends its windows by group in `grouped_windows`, which this app reads as none.
+    func testAntigravitysLimitsAreGeminisWeekAlone() throws {
+        let now = Date(timeIntervalSince1970: 1_795_660_000)
+        let facts = try XCTUnwrap(try signInBook("signed_in_usage").defaultFacts(for: .antigravity))
+        let limits = ReplyBar.limits(facts, now: now)
+        XCTAssertEqual(limits.map(\.caption), ["Week"])
+        XCTAssertEqual(limits.map(\.usedPercent), [20])
+        XCTAssertEqual(limits.first?.resets, "resets in 6 days")
+        let older = try JSONDecoder().decode(
+            AccountFacts.self,
+            from: Data(
+                #"{"read_at": "2026-11-26T04:10:00.000Z", "grouped_windows": [{"used_percent": 0, "window_minutes": 10080, "resets_at": 0, "group": "Claude and GPT models"}]}"#
+                    .utf8))
+        XCTAssertEqual(ReplyBar.limits(older, now: now), [], "a 54 daemon's grouped windows are read as none")
+        let unopened = UsageWindow(usedPercent: 0, windowMinutes: 10080, resetsAt: 0)
+        XCTAssertEqual(AccountSwitchWords.resets(unopened, now: now), "not started")
     }
 
     /// An Antigravity run's "/" offers model, effort, compact and diff: agy has no `/clear`. Compact's words name

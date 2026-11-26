@@ -354,7 +354,7 @@ struct StartForm: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "folder").font(.system(size: 11)).accessibilityHidden(true)
-                Text(folder?.name ?? "Choose folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
+                Text(folder?.name ?? "Choose folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.tail)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             // While none is chosen, the folder is the piece still missing: the bar's one lit, bordered chip.
@@ -390,7 +390,7 @@ struct StartForm: View {
     /// Up to 520 pt wide, inside the box (`PanelPlace.place`).
     private func folderPanel(_ context: StartContext, width: CGFloat) -> some View {
         folderRows(context)
-            .frame(width: width - 12)
+            .frame(width: width - 2 * MenuMetrics.inset)
             .menuCard()
     }
 
@@ -454,7 +454,7 @@ struct StartForm: View {
             // A folder from elsewhere, whatever the list holds: this Mac's from the standard folder panel, another
             // computer's by browsing it.
             if !browsing && (isThisMac(context) || context.browses) {
-                MenuDivider()
+                MenuDivider().padding(.vertical, 5)
                 if isThisMac(context) { chooseButton } else { browseButton }
             }
         }
@@ -481,7 +481,7 @@ struct StartForm: View {
                 Text(project.shownPath).font(Theme.mono(11.5)).truncationMode(.head)
             }
         }
-        .buttonStyle(.hover(radius: 8, id: "start.folder.\(project.path)"))
+        .buttonStyle(.menuRow(id: "start.folder.\(project.path)"))
         .focusable(false)
         .accessibilityIdentifier("start.folder.\(project.path)")
         .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
@@ -491,9 +491,9 @@ struct StartForm: View {
     /// Any folder on this Mac, from the standard folder panel.
     private var chooseButton: some View {
         Button(action: chooseFolder) {
-            MenuRow { Text("Choose a folder\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
+            MenuRow(chosen: false) { Text("Choose a folder\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
         }
-        .buttonStyle(.hover(radius: 8, id: "start.choose"))
+        .buttonStyle(.menuRow(id: "start.choose"))
         .accessibilityIdentifier("start.choose")
     }
 
@@ -504,9 +504,9 @@ struct StartForm: View {
             branchMenuOpen = false
             browsing = true
         } label: {
-            MenuRow { Text("Browse\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
+            MenuRow(chosen: false) { Text("Browse\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
         }
-        .buttonStyle(.hover(radius: 8, id: "start.browse"))
+        .buttonStyle(.menuRow(id: "start.browse"))
         .accessibilityIdentifier("start.browse")
     }
 
@@ -559,7 +559,7 @@ struct StartForm: View {
     /// The first message, and in the box's bar the computer, the folder and where in the repository, then the model and
     /// Start (↩). The folder's and the computer's menus open below the bar, the model's and the branch's above it.
     private func composer(_ context: StartContext) -> some View {
-        InputBox(barHeight: 50, trailingOpen: menuOpen) {
+        InputBox(barHeight: 50) {
             // The files going with the first message stand above its words.
             VStack(alignment: .leading, spacing: 12) {
                 if !draft.files.isEmpty {
@@ -584,8 +584,10 @@ struct StartForm: View {
             }
         } leading: {
             if context.takesUploads { AttachButton(id: "start.attach", take: draft.attach) }
-            computerChip(context)
-            folderButton(context)
+            // Short of room, the words cut first where they say least for their length: the computer's name, then
+            // the branch, then the folder; the model's last.
+            computerChip(context).yields(0)
+            folderButton(context).yields(2)
             if let folder, context.branchAhead(folder) {
                 BranchRow(
                     context: context, folder: folder, agent: pick?.agent, place: choice(\.place),
@@ -596,9 +598,11 @@ struct StartForm: View {
                         giveKeyboard($messageFocused, caret: $messageSelection, endOf: draft.message)
                     }
                 }
+                .yields(1)
             }
         } trailing: {
             ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }
+                .yields(3)
             startButton
         }
         .takesFiles(context.takesUploads, pasting: messageFocused, draft.attach)
@@ -876,7 +880,7 @@ private struct ComputerButton: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "desktopcomputer").font(.system(size: 11)).accessibilityHidden(true)
-                Text(chosen.machineName).font(InputBoxChip.font).lineLimit(1).truncationMode(.middle)
+                Text(chosen.machineName).font(InputBoxChip.font).lineLimit(1).truncationMode(.tail)
                 Circle().fill(Theme.green).frame(width: 6, height: 6).accessibilityHidden(true)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
@@ -884,6 +888,7 @@ private struct ComputerButton: View {
             .inputBoxChip(open: open)
         }
         .buttonStyle(.hover(radius: 8, id: "start.computer"))
+        .help(chosen.machineName)
         .accessibilityIdentifier("start.computer")
         .accessibilityValue(open ? "open" : "closed")
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(StartForm.space)).minX } action: { minX = $0 }
@@ -926,7 +931,7 @@ private struct ComputerButton: View {
             .panelRow(contexts.count, id: "start.addComputer", choose: adding)
             .accessibilityIdentifier("start.addComputer")
         }
-        .frame(width: placed.width - 12)
+        .frame(width: placed.width - 2 * MenuMetrics.inset)
         .menuCard()
     }
 }

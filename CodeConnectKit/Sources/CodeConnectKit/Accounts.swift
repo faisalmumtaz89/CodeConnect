@@ -46,7 +46,8 @@ public struct AgentAccount: Decodable, Hashable, Sendable, Identifiable {
 }
 
 /// What an agent says of one of its accounts, read by the computer on demand and held in its memory only: the address,
-/// the plan in the agent's own word, and each usage window it names (a window it doesn't name is absent).
+/// the plan in the agent's own word, and each usage window it names (a window it doesn't name is absent; of
+/// Antigravity's, only the Gemini models' week).
 public struct AccountFacts: Decodable, Hashable, Sendable {
     public let email: String?
     public let plan: String?
@@ -77,7 +78,7 @@ public struct AccountFacts: Decodable, Hashable, Sendable {
 public struct UsageWindow: Decodable, Hashable, Sendable {
     public let usedPercent: Int
     public let windowMinutes: Int
-    /// Unix seconds.
+    /// Unix seconds; 0 for a window the agent has not opened yet (Antigravity's, unused).
     public let resetsAt: Int
 
     public init(usedPercent: Int, windowMinutes: Int, resetsAt: Int) {
@@ -121,11 +122,12 @@ public struct AgentSignIn: Decodable, Hashable, Sendable {
         signingIn = try c.decodeIfPresent(Bool.self, forKey: .signingIn) ?? false
     }
 
-    /// The words its one row says, beside its plan as the agent names it (`plan`, passed through as sent): "Signed in ·
-    /// <plan>", "Signed in" when it names none; nil otherwise, where the row says it is signed out or signing in.
+    /// The words its one row says signed in: its plan as the agent names it (`plan`, passed through as sent), as Claude
+    /// Code's row says "Max"; "Signed in" when it names none; nil otherwise, where the row says it is signed out or
+    /// signing in.
     public func line(plan: String?) -> String? {
         guard signedIn == true, !signingIn else { return nil }
-        return plan.map { "Signed in · \($0)" } ?? "Signed in"
+        return plan ?? "Signed in"
     }
 
     /// Signed out, as its row says it: the agent says so and no sign-in is going on.
@@ -207,21 +209,12 @@ public struct AccountsRefusal: LocalizedError, Sendable, Equatable {
 }
 
 /// The Accounts page's words for a switch in progress and for a row's quiet second line (design A). A switch is lazy:
-/// each session moves with its next message, and one still in a turn finishes it first.
+/// each open session moves with its next message, once nothing is running in it.
 public enum AccountSwitchWords {
-    /// Under the group while sessions are moving to `target`; nil with none live.
+    /// Under the group while sessions are due to move to `target`, each with its next message; nil with none.
     public static func sentence(to target: String, waiting: Int, moved: Int) -> String? {
-        let total = waiting + moved
-        guard total > 0 else { return nil }
-        let move = total == 1
-            ? "1 session will use \(target) from its next message."
-            : "\(total) sessions will use \(target) from their next message."
-        switch waiting {
-        case 0: return move
-        case 1 where total == 1: return "\(move) It finishes its turn first."
-        case 1: return "\(move) 1 finishes its turn first."
-        default: return "\(move) \(waiting) finish their turn first."
-        }
+        guard waiting + moved > 0 else { return nil }
+        return "Open sessions move to \(target) with their next message."
     }
 
     /// In amber under the group: the sessions that couldn't switch, named when one; nil with none. No account is
@@ -250,6 +243,7 @@ public enum AccountSwitchWords {
     /// down), "resets in Nh Mm" from an hour ("resets in 5h" on the hour), "resets in N min" under an hour (at least 1);
     /// nil once the time has come, until the computer reads the window again.
     public static func resets(_ window: UsageWindow, now: Date) -> String? {
+        if window.resetsAt == 0 { return "not started" }
         let left = window.resetsAt - Int(now.timeIntervalSince1970.rounded(.down))
         guard left > 0 else { return nil }
         if left >= 2 * 86400 { return "resets in \(left / 86400) days" }
@@ -298,8 +292,8 @@ public enum AccountRowAct: Sendable, Hashable {
     }
 }
 
-/// A switch in progress for one agent's sessions on a computer: the account the waiting and moved ones go to (its email
-/// where its agent says it, else its name), how many still finish a turn first, how many move with their next message,
+/// A switch in progress for one agent's sessions on a computer: the account the due and moving ones go to (its email
+/// where its agent says it, else its name), how many are due to move with their next message, how many are moving,
 /// and the ones that couldn't switch, by their folder's name, whatever account they tried.
 public struct AccountSwitch: Equatable, Sendable {
     public let target: String

@@ -64,6 +64,11 @@ const INTERRUPTS: [&str; 2] = [
     "[Request interrupted by user for tool use]",
 ];
 
+/// The kind ccd files a background task claude runs under (a command run in the background, a subagent): its
+/// `task_started` and its `task_notification`, each as `{"task_id", "ended"}`. A quiet fact, never drawn and no
+/// activity: an open one holds a switch of account's move ([`crate::event::EventKind::Other`]).
+pub const BACKGROUND_TASK: &str = "background_task";
+
 /// The events and signals of `message`, filed under `session`. `turn` is the
 /// uuid of the turn's `system/init`, which an init's own events carry too.
 pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped {
@@ -140,6 +145,15 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
                 0,
                 pick(message, &["permissionMode"]),
             ));
+        }
+        (Some("system"), Some(subtype @ ("task_started" | "task_notification"))) => {
+            if let Some(id) = text("task_id") {
+                mapped.events.push(event(
+                    EventKind::Other(BACKGROUND_TASK.into()),
+                    0,
+                    json!({"task_id": id, "ended": subtype == "task_notification"}),
+                ));
+            }
         }
         (Some("system"), Some("compact_boundary")) => {
             mapped.events.push(event(
@@ -362,9 +376,10 @@ mod tests {
         .unwrap();
     }
 
-    /// The recorded session's 150 messages file 111 events: one for each message that
-    /// has a row, and two, its end and its usage, for each turn's result. Three of the
-    /// `user_message`s are commands' output (`/model`'s, `/compact`'s and `/effort`'s).
+    /// The recorded session's 150 messages file 117 events: one for each message that
+    /// has a row, two, its end and its usage, for each turn's result, and one for each of its three background
+    /// tasks' start and end. Three of the `user_message`s are commands' output (`/model`'s, `/compact`'s and
+    /// `/effort`'s).
     #[test]
     fn the_session_files_its_events_by_kind() {
         let mut counts = BTreeMap::new();
@@ -380,6 +395,7 @@ mod tests {
             ("turn_complete", 17),
             ("usage", 17),
             ("notification", 2),
+            ("background_task", 6),
         ]
         .into_iter()
         .map(|(kind, count)| (kind.to_string(), count))

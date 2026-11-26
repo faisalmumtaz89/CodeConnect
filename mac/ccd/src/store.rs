@@ -122,7 +122,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 ///     forgotten once. A version gate, as `3` is. No schema changes, so an
 ///     older daemon reads everything; a rollback writes its own number back,
 ///     and the way back up forgets the rows it ended, once more.
-const SCHEMA_VERSION: i64 = 6;
+///   * `7` — a Claude run's background tasks are filed ([`protocol::sdk_map::BACKGROUND_TASK`]); an earlier build
+///     acknowledged them unfiled, so on the way up each Claude run whose host may still be running is filed one task
+///     open whose id names none, once ([`file_unknown_tasks`]): it moves to another account only once that host has
+///     ended. A version gate, as `6` is. No schema changes.
+const SCHEMA_VERSION: i64 = 7;
 
 pub struct Store {
     /// The only connection that writes. One, so `BEGIN IMMEDIATE` never has to
@@ -542,8 +546,10 @@ pub struct WatchedHost {
 /// ([`Store::begin_relaunch`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveCodexRun {
-    /// Its recorded app-server: for a relaunch, the one that ended.
-    pub host: WatchedHost,
+    pub session_uid: String,
+    /// Its recorded app-server: for a relaunch, the one that ended; none for a run its switch left with no app-server
+    /// recorded ([`Store::fail_codex_starts`]).
+    pub host: Option<WatchedHost>,
     /// The folder it runs in.
     pub cwd: String,
     /// The thread its first message started.
@@ -563,6 +569,8 @@ pub struct HostedLink {
     pub start: Option<String>,
     /// The uuid of the run's last SDK init, which its turn's later events carry.
     pub turn: Option<String>,
+    /// The account its newest relaunch was launched on (inside, `None` for Default); `None` when not recorded.
+    pub launched: Option<Option<String>>,
 }
 
 /// What one host message tells a hosted run's row besides its events
@@ -635,7 +643,11 @@ fn recorded_host_is(conn: &Connection, session_uid: &str, host: &ProcessIdentity
 fn live_codex_run_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveCodexRun> {
     let start: Option<String> = row.get(9)?;
     Ok(LiveCodexRun {
-        host: watched_host_from(row)?,
+        session_uid: row.get(0)?,
+        host: match row.get::<_, Option<i32>>(2)? {
+            Some(_) => Some(watched_host_from(row)?),
+            None => None,
+        },
         cwd: row.get(7)?,
         thread: row.get(8)?,
         trust: start
@@ -648,8 +660,9 @@ fn live_codex_run_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveCodexRun
 /// is `exited`, the last end it filed reads "Stopped: its process ended"
 /// ([`crate::claude_host::PROCESS_ENDED`]), so its app-server ended without ccd stopping it, or "Switched to …"
 /// ([`crate::switch::SWITCHED`]), so ccd stopped it to move it to another account, and
-/// it has a recorded app-server and a thread. A run ended by End run ("Stopped") or a start that
-/// failed is not one. No column says how a run ended; its end's `reason` does.
+/// it has a thread and a recorded app-server, or a switch, whose relaunch a restart may have left with none. A run
+/// ended by End run ("Stopped") or a start that failed is not one. No column says how a run ended; its end's
+/// `reason` does.
 fn relaunchable_in(conn: &Connection, session_uid: &str) -> Result<Option<LiveCodexRun>> {
     let (table, _) = session_tables_for(&AgentKind::Codex);
     Ok(conn
@@ -658,7 +671,8 @@ fn relaunchable_in(conn: &Connection, session_uid: &str) -> Result<Option<LiveCo
                 "SELECT h.session_uid, s.lifecycle, h.host_pid, h.host_start_sec, h.host_start_usec,
                         h.boot_sec, h.boot_usec, s.cwd, s.codex_thread_id, h.start
                    FROM run_hosts AS h JOIN {table} AS s USING(session_uid)
-                  WHERE h.session_uid = ?1 AND s.lifecycle = ?2 AND h.host_pid IS NOT NULL
+                  WHERE h.session_uid = ?1 AND s.lifecycle = ?2
+                    AND (h.host_pid IS NOT NULL OR h.switching IS NOT NULL)
                     AND s.codex_thread_id IS NOT NULL
                     AND EXISTS (SELECT 1 FROM (SELECT json_extract(payload, '$.reason') AS reason FROM events
                                                 WHERE session_uid = ?1 AND kind = ?3
@@ -1413,6 +1427,16 @@ impl Store {
             ),
             [],
         )?;
+        // The one-shot for `7`: see [`SCHEMA_VERSION`].
+        if from_version < 7 {
+            let filed = file_unknown_tasks(&tx)?;
+            if filed > 0 {
+                crate::log_info!(
+                    "schema: {filed} running Claude run(s) keep their account until their process ends: what \
+                     they run in the background was not recorded before"
+                );
+            }
+        }
         tx.commit()?;
         // An earlier build's transcript cursors, name tombstones and run tombstones:
         // nothing reads them, and a cursor names a run's transcript, so they do not
@@ -2382,27 +2406,152 @@ impl Store {
         Ok(newest.as_deref() == Some(EventKind::SessionStart.as_str()))
     }
 
-    /// Whether a message ccd gave the Claude run `session_uid` waits for its answer: nothing has followed its
-    /// newest `user_message` filed by ccd (the person's words, a relaunch's prompt) that answers it, no turn begun
-    /// or ended and no line of claude's own, so claude has it and has not begun the turn that answers it.
-    pub fn message_awaits_turn(&self, session_uid: &str) -> Result<bool> {
+    /// **Whether the run `session_uid` is certainly quiet, by what ccd has filed of it** ([`crate::switch::moves`]):
+    /// a turn of its process has completed and none has begun since; no message of the person's sent it waits to be
+    /// taken or answered (a claim still `applying`, or one filed after its last turn began, which may run as a turn
+    /// of its own); its last turn ran no command, subagent or task (Codex: no command, and no subagent in any turn), and its process
+    /// scheduled no prompt; no background task it started (a command, a subagent, [`protocol::sdk_map::BACKGROUND_TASK`])
+    /// is still open; and no mail wake is outstanding. `sending`, the message being sent
+    /// now, is no message waiting. Anything not known reads not quiet.
+    pub fn certainly_quiet(&self, session_uid: &str, sending: &str) -> Result<bool> {
         let conn = self.read();
-        let newest = conn
+        let codex = conn
             .query_row(
-                "SELECT kind = ?4 AND source = ?5 FROM events
-                  WHERE session_uid = ?1 AND kind IN (?2, ?3, ?4)
-                  ORDER BY seq DESC LIMIT 1",
-                params![
-                    session_uid,
-                    EventKind::SessionStart.as_str(),
-                    EventKind::TurnComplete.as_str(),
-                    EventKind::UserMessage.as_str(),
-                    Source::Daemon.as_str()
-                ],
-                |row| row.get::<_, bool>(0),
+                "SELECT agent FROM all_sessions WHERE session_uid = ?1",
+                params![session_uid],
+                |row| row.get::<_, String>(0),
             )
-            .optional()?;
-        Ok(newest == Some(true))
+            .optional()?
+            .is_some_and(|agent| agent == AgentKind::Codex.as_str());
+        let waiting: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM text_mutations
+                            WHERE session_uid = ?1 AND status = 'applying' AND request_id IS NOT ?3)
+                 OR EXISTS(SELECT 1 FROM mutation_ledger
+                            WHERE session_uid = ?1 AND operation_kind = ?2 AND status = 'applying'
+                              AND client_request_id IS NOT ?3)
+                 OR EXISTS(SELECT 1 FROM mail_wake WHERE session_uid = ?1 AND outstanding = 1)",
+            params![session_uid, OPERATION_COMPOSE, sending],
+            |row| row.get(0),
+        )?;
+        if waiting {
+            return Ok(false);
+        }
+        // What its process has filed: everything since the run's newest end, whose process this one followed.
+        let mut stmt = conn.prepare(
+            "SELECT kind, source, payload FROM events
+              WHERE session_uid = ?1
+                AND seq > COALESCE((SELECT MAX(seq) FROM events WHERE session_uid = ?1 AND kind = ?2), 0)
+              ORDER BY seq",
+        )?;
+        let events = stmt
+            .query_map(
+                params![session_uid, EventKind::SessionEnd.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let kind_at = |i: usize| events[i].0.as_str();
+        let Some(ended) = (0..events.len())
+            .rev()
+            .find(|&i| kind_at(i) == EventKind::TurnComplete.as_str())
+        else {
+            return Ok(false);
+        };
+        // Where its last turn began: a Claude turn's init; a Codex turn's first user message after the turn before,
+        // whose tools are read from that turn's end on.
+        let before = (0..ended)
+            .rev()
+            .find(|&i| kind_at(i) == EventKind::TurnComplete.as_str())
+            .map_or(0, |i| i + 1);
+        let began = if codex {
+            (before..ended).find(|&i| kind_at(i) == EventKind::UserMessage.as_str())
+        } else {
+            (0..ended)
+                .rev()
+                .find(|&i| kind_at(i) == EventKind::SessionStart.as_str())
+        };
+        let Some(began) = began else {
+            return Ok(false);
+        };
+        let turn_start = if codex {
+            EventKind::UserMessage.as_str()
+        } else {
+            EventKind::SessionStart.as_str()
+        };
+        let blocks = |payload: &str| -> Vec<serde_json::Value> {
+            serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|payload| payload["message"]["content"].as_array().cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|block| block["type"] == "tool_use")
+                .collect()
+        };
+        // A background task claude runs, from its start until its end, whichever turn began it.
+        let mut open = std::collections::HashSet::new();
+        for (kind, _, payload) in &events {
+            if kind != protocol::sdk_map::BACKGROUND_TASK {
+                continue;
+            }
+            let task = serde_json::from_str::<serde_json::Value>(payload).unwrap_or_default();
+            let Some(id) = task["task_id"].as_str() else {
+                continue;
+            };
+            if task["ended"] == true {
+                open.remove(id);
+            } else {
+                open.insert(id.to_string());
+            }
+        }
+        if !open.is_empty() {
+            return Ok(false);
+        }
+        for (i, (kind, source, payload)) in events.iter().enumerate() {
+            let in_last_turn = i > began;
+            let quiet = match kind.as_str() {
+                // A turn begun after the last one ended.
+                kind if i > ended && kind == turn_start => false,
+                // The person's message after the last turn began, which may run as a turn of its own.
+                kind if in_last_turn
+                    && kind == EventKind::UserMessage.as_str()
+                    && (codex || source == Source::Daemon.as_str()) =>
+                {
+                    false
+                }
+                // A Codex command in its last turn; a file change is no command.
+                kind if codex
+                    && i >= before
+                    && (kind == EventKind::ToolCall.as_str()
+                        || kind == EventKind::ToolResult.as_str()) =>
+                {
+                    serde_json::from_str::<serde_json::Value>(payload)
+                        .is_ok_and(|payload| payload["tool"] == "file_change")
+                }
+                // A Codex subagent it spawned in any turn of this app-server, which may work on after that turn: Codex
+                // files no end of a subagent that ccd reads, so the run keeps its account until the app-server ends.
+                kind if codex && kind == "codex_collabAgentToolCall" => false,
+                // A prompt it scheduled may still come, whichever turn scheduled it.
+                kind if kind == EventKind::AgentMessage.as_str() => {
+                    blocks(payload).iter().all(|block| {
+                        !(block["name"] == "CronCreate"
+                            || in_last_turn
+                                && ["Bash", "Task", "Agent"]
+                                    .iter()
+                                    .any(|name| block["name"] == *name))
+                    })
+                }
+                _ => true,
+            };
+            if !quiet {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Whether the Codex run `session_uid` is in a turn: its newest user message, the
@@ -2571,28 +2720,56 @@ impl Store {
     }
 
     /// Every `starting` hosted Claude run with no recorded host becomes `failed`: the ccd
-    /// that began it died before it recorded a host, so no `start` was ever sent. Only
-    /// before this ccd starts any run of its own. The number of runs failed.
+    /// that began it died before it recorded a host, so no `start` was ever sent; one its switch was relaunching
+    /// goes back to `exited`, still switching, for its next message. Only before this ccd starts any run of its own.
+    /// The number of runs failed or put back.
     pub fn fail_unhosted_starts(&self) -> Result<usize> {
         let (table, _) = session_tables_for(&AgentKind::Claude);
         Ok(self.write().execute(
             &format!(
-                "UPDATE {table} SET lifecycle = ?1, updated_at = ?2
+                "UPDATE {table} SET updated_at = ?2,
+                        lifecycle = CASE WHEN session_uid IN
+                                         (SELECT session_uid FROM run_hosts WHERE switching IS NOT NULL)
+                                    THEN ?4 ELSE ?1 END
                   WHERE lifecycle = ?3 AND session_uid IN
                         (SELECT session_uid FROM run_hosts WHERE host_pid IS NULL)"
             ),
             params![
                 lifecycle_str(Lifecycle::Failed),
                 protocol::time::now_rfc3339(),
-                lifecycle_str(Lifecycle::Starting)
+                lifecycle_str(Lifecycle::Starting),
+                lifecycle_str(Lifecycle::Exited)
             ],
         )?)
     }
 
+    /// A restarted ccd's moves (306): a run its switch was ending stays so, its process stopped again once found
+    /// alive ([`crate::claude_host::attach_run`], [`crate::state::Daemon::recover_codex_runs`]), so the end it
+    /// reports is the switch's. The message that was moving a run that has not started again since, or retrying a
+    /// failed move, never reached a process, and is released, so its retry relaunches it. Only before this ccd starts
+    /// any run of its own, once [`Store::fail_unhosted_starts`] has put a relaunch that never got a host back to
+    /// `exited`.
+    pub fn recover_moves(&self) -> Result<()> {
+        self.write().execute(
+            "DELETE FROM text_mutations WHERE status = 'applying' AND session_uid IN
+                    (SELECT h.session_uid FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
+                      WHERE (h.switching = ?1 AND s.lifecycle IN (?3, ?4))
+                         OR (h.switching = ?2 AND s.lifecycle = ?4))",
+            params![
+                Store::SWITCH_MOVED,
+                Store::SWITCH_FAILED,
+                lifecycle_str(Lifecycle::Live),
+                lifecycle_str(Lifecycle::Exited)
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Every `starting` Codex run ccd hosts becomes `failed`: a restarted ccd never goes on
-    /// with a start that a ccd before it began. The number of runs failed, and the recorded
-    /// app-server of each that has one, for the ladder. Only before this ccd starts any run
-    /// of its own.
+    /// with a start that a ccd before it began; one its switch was relaunching goes back to `exited`, still
+    /// switching, for its next message. The number of runs failed or put back, and the recorded app-server of each
+    /// that has one, for the ladder: nothing ccd did not record is signalled. Only before this ccd starts any run of
+    /// its own.
     pub fn fail_codex_starts(&self) -> Result<(usize, Vec<WatchedHost>)> {
         let (table, _) = session_tables_for(&AgentKind::Codex);
         let mut conn = self.write();
@@ -2611,13 +2788,17 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let failed = tx.execute(
             &format!(
-                "UPDATE {table} SET lifecycle = ?1, updated_at = ?2
+                "UPDATE {table} SET updated_at = ?2,
+                        lifecycle = CASE WHEN session_uid IN
+                                         (SELECT session_uid FROM run_hosts WHERE switching IS NOT NULL)
+                                    THEN ?4 ELSE ?1 END
                   WHERE lifecycle = ?3 AND session_uid IN (SELECT session_uid FROM run_hosts)"
             ),
             params![
                 lifecycle_str(Lifecycle::Failed),
                 protocol::time::now_rfc3339(),
-                lifecycle_str(Lifecycle::Starting)
+                lifecycle_str(Lifecycle::Starting),
+                lifecycle_str(Lifecycle::Exited)
             ],
         )?;
         tx.commit()?;
@@ -2663,9 +2844,15 @@ impl Store {
     /// `exited` → `starting`; its recorded host and boot are cleared, as a first start's row
     /// stands before its spawn, so the watch never reads the old host as this launch's; its
     /// cursor goes back to 0, since a new host numbers its messages from 1; and its start line
-    /// becomes `start`, which a restarted ccd sends again. Whether it moved: `false`, with nothing
-    /// written, when it is no longer one to relaunch (a second message met it `starting`).
-    pub fn begin_claude_relaunch(&self, session_uid: &str, start: &str) -> Result<bool> {
+    /// becomes `start`, which a restarted ccd sends again, with `account`, the account it is launched on (`None` its
+    /// Default), which a restarted ccd records once it goes live ([`HostedLink::launched`]). Whether it moved: `false`,
+    /// with nothing written, when it is no longer one to relaunch (a second message met it `starting`).
+    pub fn begin_claude_relaunch(
+        &self,
+        session_uid: &str,
+        start: &str,
+        account: Option<&str>,
+    ) -> Result<bool> {
         let (table, _) = session_tables_for(&AgentKind::Claude);
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2686,12 +2873,24 @@ impl Store {
         )?;
         tx.execute(
             "UPDATE run_hosts SET host_pid = NULL, host_start_sec = NULL, host_start_usec = NULL,
-                                  boot_sec = NULL, boot_usec = NULL, cursor = 0, start = ?2
+                                  boot_sec = NULL, boot_usec = NULL, cursor = 0, start = ?2,
+                                  launch_account = ?3
               WHERE session_uid = ?1",
-            params![session_uid, start],
+            params![session_uid, start, serde_json::json!(account).to_string()],
         )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// The messages to the run `session_uid` claimed before `before` (an earlier ccd's) and still `applying` once its
+    /// host has replayed what it holds: none of them reached it, so each is released, and a retry is a fresh attempt.
+    pub fn release_unsent(&self, session_uid: &str, before: &str) -> Result<()> {
+        self.write().execute(
+            "DELETE FROM text_mutations
+              WHERE session_uid = ?1 AND status = 'applying' AND started_at < ?2",
+            params![session_uid, before],
+        )?;
+        Ok(())
     }
 
     /// Begin a message's relaunch of the hosted Codex run `session_uid` (P3 R4), in one
@@ -2730,8 +2929,10 @@ impl Store {
     }
 
     /// A hosted run's start whose host was found gone, failed in one transaction: `starting` →
-    /// `failed`, only while it is still `starting` and `host`, the host the caller found gone,
-    /// is still the one recorded for it. Whether it moved.
+    /// `failed`, or `exited` for a relaunch by its switch, which its next message relaunches again; only while it is
+    /// still `starting` and `host`, the host the caller found gone, is still the one recorded for it. The message a
+    /// relaunch started with, which the gone host may or may not have given claude, is settled indeterminate, so its
+    /// retry is told so and no later move waits for it. Whether it moved.
     pub fn fail_hosted_start(&self, session_uid: &str, host: &ProcessIdentity) -> Result<bool> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2743,15 +2944,26 @@ impl Store {
         for table in SESSION_TABLES {
             moved += tx.execute(
                 &format!(
-                    "UPDATE {table} SET lifecycle = ?2, updated_at = ?3
+                    "UPDATE {table} SET updated_at = ?3,
+                            lifecycle = CASE WHEN session_uid IN
+                                             (SELECT session_uid FROM run_hosts WHERE switching IS NOT NULL)
+                                        THEN ?5 ELSE ?2 END
                       WHERE session_uid = ?1 AND lifecycle = ?4"
                 ),
                 params![
                     session_uid,
                     lifecycle_str(Lifecycle::Failed),
                     now,
-                    lifecycle_str(Lifecycle::Starting)
+                    lifecycle_str(Lifecycle::Starting),
+                    lifecycle_str(Lifecycle::Exited)
                 ],
+            )?;
+        }
+        if moved == 1 {
+            tx.execute(
+                "UPDATE text_mutations SET status = 'indeterminate', settled_at = ?2
+                  WHERE session_uid = ?1 AND status = 'applying'",
+                params![session_uid, now],
             )?;
         }
         tx.commit()?;
@@ -2818,9 +3030,9 @@ impl Store {
     /// init stamped on its `SessionStart`. `None` when the run has no `run_hosts` row.
     pub fn hosted_link(&self, session_uid: &str) -> Result<Option<HostedLink>> {
         let conn = self.read();
-        let Some((lifecycle, cursor, start)) = conn
+        let Some((lifecycle, cursor, start, launched)) = conn
             .query_row(
-                "SELECT s.lifecycle, h.cursor, h.start
+                "SELECT s.lifecycle, h.cursor, h.start, h.launch_account
                    FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
                   WHERE h.session_uid = ?1",
                 params![session_uid],
@@ -2829,6 +3041,7 @@ impl Store {
                         parse_lifecycle(&row.get::<_, String>(0)?),
                         row.get::<_, i64>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
@@ -2855,6 +3068,7 @@ impl Store {
             cursor: cursor as u64,
             start,
             turn,
+            launched: launched.and_then(|json| serde_json::from_str(&json).ok()),
         }))
     }
 
@@ -2970,8 +3184,9 @@ impl Store {
             .optional()?)
     }
 
-    /// Makes `id` the account `agent`'s starts use, or its Default for `None`. False, and nothing changed, for an id
-    /// that is not one of `agent`'s accounts. The runs going are moved to it by [`crate::switch`], not here.
+    /// Makes `id` the account `agent`'s starts use, or its Default for `None`, and marks `agent`'s live runs on another
+    /// account due to move to it ([`crate::switch`]), in one transaction. False, and nothing changed, for an id that is
+    /// not one of `agent`'s accounts.
     pub fn activate_account(&self, agent: &str, id: Option<&str>) -> Result<bool> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -3001,6 +3216,14 @@ impl Store {
                 )?;
             }
         }
+        // Its live runs are due to move to it, each at its next message ([`crate::switch::moves`]), but a run already
+        // on it; a run already moving goes on moving, and starts on the account active then.
+        tx.execute(
+            "UPDATE run_hosts SET switching = CASE WHEN account_id IS ?4 THEN NULL ELSE ?2 END
+              WHERE switching IS NOT ?3 AND session_uid IN
+                    (SELECT session_uid FROM all_sessions WHERE agent = ?1 AND lifecycle = 'live')",
+            params![agent, Store::SWITCH_WAITING, Store::SWITCH_MOVED, id],
+        )?;
         tx.commit()?;
         Ok(true)
     }
@@ -3028,33 +3251,11 @@ impl Store {
         Ok(removed)
     }
 
-    /// A switch's states ([`Store::switch_state`]): waiting for the run's idle point; ended there by the switch, its
-    /// next message to start it on the new account; that start not gone through.
+    /// A switch's states ([`Store::switch_state`]): due, to move at the run's next message; its process being ended
+    /// by that message, which then starts it on the new account; that start not gone through.
     pub const SWITCH_WAITING: i64 = 1;
     pub const SWITCH_FAILED: i64 = 2;
     pub const SWITCH_MOVED: i64 = 3;
-
-    /// Marks every live run of `agent` as switching to its agent's active account; the uids marked. A run already
-    /// moved, its process being stopped, is left moved: its next message starts it on the account active then.
-    pub fn mark_switching(&self, agent: &str) -> Result<Vec<String>> {
-        let conn = self.write();
-        let mut stmt = conn.prepare(
-            "SELECT h.session_uid FROM run_hosts AS h JOIN all_sessions AS s USING(session_uid)
-              WHERE s.agent = ?1 AND s.lifecycle = 'live' AND h.switching IS NOT ?2",
-        )?;
-        let uids = stmt
-            .query_map(params![agent, Store::SWITCH_MOVED], |row| {
-                row.get::<_, String>(0)
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for uid in &uids {
-            conn.execute(
-                "UPDATE run_hosts SET switching = 1 WHERE session_uid = ?1",
-                params![uid],
-            )?;
-        }
-        Ok(uids)
-    }
 
     /// Where the run `session_uid`'s switch of account stands: [`Store::SWITCH_WAITING`],
     /// [`Store::SWITCH_MOVED`], [`Store::SWITCH_FAILED`], or `None`.
@@ -3221,6 +3422,17 @@ impl Store {
         let Some(lifecycle) = row else {
             return Ok(DeleteOutcome::NotFound);
         };
+        // A run due to move, or moving, reads live until a message has started it; one whose move failed is ended.
+        let switching: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_hosts WHERE session_uid = ?1 AND switching IN (?2, ?3))",
+            params![session_uid, Store::SWITCH_WAITING, Store::SWITCH_MOVED],
+            |row| row.get(0),
+        )?;
+        if switching {
+            return Ok(DeleteOutcome::NotExited {
+                lifecycle: lifecycle_str(Lifecycle::Live).to_string(),
+            });
+        }
         let ended = lifecycle == lifecycle_str(Lifecycle::Exited)
             || lifecycle == lifecycle_str(Lifecycle::Failed);
         if !ended {
@@ -3345,6 +3557,8 @@ impl Store {
                     AND NOT EXISTS(SELECT 1 FROM all_sessions AS b
                                     WHERE b.session_uid = a.session_uid
                                       AND b.lifecycle NOT IN (?1, ?2))
+                    AND NOT EXISTS(SELECT 1 FROM run_hosts AS h
+                                    WHERE h.session_uid = a.session_uid AND h.switching IS NOT NULL)
                   ORDER BY created_at ASC, session_uid ASC",
             )?;
             let ended = params![
@@ -4873,7 +5087,7 @@ impl Store {
 
     /// **Every run that has not ended**, with the protocol minor kept for it
     /// ([`Store::note_mail_minor`]): the runs mail can be for, whether or not their
-    /// link is attached at this moment.
+    /// link is attached at this moment. A run its switch is moving reads live, its process ended or not.
     pub fn mail_runs(&self) -> Result<Vec<(SessionRow, u32)>> {
         let minors: std::collections::HashMap<String, u32> = {
             let conn = self.read();
@@ -4881,10 +5095,16 @@ impl Store {
             let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
+        let moving: std::collections::HashSet<String> = self
+            .switching_runs()?
+            .into_iter()
+            .filter(|(_, state)| *state != Store::SWITCH_FAILED)
+            .map(|(uid, _)| uid)
+            .collect();
         Ok(self
             .list_sessions()?
             .into_iter()
-            .filter(|row| row.lifecycle != Lifecycle::Exited)
+            .filter(|row| row.lifecycle != Lifecycle::Exited || moving.contains(&row.session_uid))
             .filter_map(|row| {
                 let minor = *minors.get(&row.session_uid)?;
                 Some((row, minor))
@@ -6330,7 +6550,8 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             commands_at     TEXT,
             screen_only     TEXT,
             account_id      TEXT,
-            switching       INTEGER
+            switching       INTEGER,
+            launch_account  TEXT
         );
 
         -- An agent's accounts on this computer: each a folder of ccd's own,
@@ -6553,6 +6774,7 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     // The account a run started on (minor 48); null is its agent's Default, and every run recorded before accounts.
     ("run_hosts", "account_id", "TEXT"),
     ("run_hosts", "switching", "INTEGER"),
+    ("run_hosts", "launch_account", "TEXT"),
 ];
 
 /// Repair push tuples a rollback or a pre-tuple build could have left incoherent.
@@ -7095,6 +7317,36 @@ fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Resul
         turn_id: pending.turn_id.clone(),
         item_id: pending.item_id.clone(),
     }))
+}
+
+/// The task id [`file_unknown_tasks`] files: no task claude names.
+pub(crate) const UNKNOWN_TASK: &str = "unknown";
+
+/// Each Claude run whose host may still be running (`starting`, `live` or `stopping`), launched by a build that filed
+/// none of its claude's background tasks: one task filed open under [`UNKNOWN_TASK`], which no end closes, so the run
+/// is never certainly quiet while that host runs ([`Store::certainly_quiet`]). The runs filed.
+fn file_unknown_tasks(tx: &rusqlite::Transaction<'_>) -> Result<usize> {
+    let uids = tx
+        .prepare(
+            "SELECT s.session_uid FROM sessions s JOIN run_hosts h ON h.session_uid = s.session_uid
+              WHERE s.agent = ?1 AND s.lifecycle IN ('starting', 'live', 'stopping')",
+        )?
+        .query_map(params![AgentKind::Claude.as_str()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for uid in &uids {
+        append_in_tx(
+            tx,
+            &PendingEvent::new(
+                &protocol::event::SessionKey::new(uid, uid),
+                EventKind::Other(protocol::sdk_map::BACKGROUND_TASK.into()),
+                serde_json::json!({"task_id": UNKNOWN_TASK, "ended": false}),
+                Source::Daemon,
+            ),
+        )?;
+    }
+    Ok(uids.len())
 }
 
 fn session_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
@@ -8283,7 +8535,8 @@ mod tests {
 
     /// A Codex run.
     /// **An account a live run is on is not removed** (306 Slice D, minor 2): with a live Codex run recorded on A,
-    /// removing A is refused with the sentence a person reads, and nothing is removed; once the run has exited, the
+    /// removing A is refused with the sentence a person reads, and nothing is removed: while A is chosen, to choose
+    /// another; once another is chosen, that its sessions move with their next message. Once the run has exited, the
     /// account is no longer in use.
     #[tokio::test]
     async fn an_account_a_live_run_is_on_is_not_removed() {
@@ -8298,32 +8551,40 @@ mod tests {
         );
         store.set_lifecycle(&run.uid, Lifecycle::Live).unwrap();
         assert!(store.account_in_use(&a.id).unwrap());
-        let refused = serde_json::to_value(
-            crate::accounts::remove_with(
-                &store,
-                &crate::accounts::SignIns::default(),
-                &std::collections::HashMap::new(),
-                crate::accounts::Agents::default(),
-                "r1".into(),
-                a.id.clone(),
+        for (chosen, words) in [
+            (
+                Some(a.id.as_str()),
+                "Sessions are running on this account. Choose another account first.",
+            ),
+            (
+                None,
+                "Open sessions started on A move with their next message; end them or send to them first.",
+            ),
+        ] {
+            assert!(store.activate_account("codex", chosen).unwrap());
+            let refused = serde_json::to_value(
+                crate::accounts::remove_with(
+                    &store,
+                    &crate::accounts::SignIns::default(),
+                    &std::collections::HashMap::new(),
+                    crate::accounts::Agents::default(),
+                    "r1".into(),
+                    a.id.clone(),
+                )
+                .await,
             )
-            .await,
-        )
-        .unwrap();
-        assert_eq!(
-            (
-                refused["type"].as_str(),
-                refused["code"].as_str(),
-                refused["message"].as_str()
-            ),
-            (
-                Some("accounts_refused"),
-                Some("accounts_in_use"),
-                Some("Sessions are running on this account. Choose another account first.")
-            ),
-            "{refused}"
-        );
-        assert_eq!(store.accounts().unwrap().len(), 1, "nothing removed");
+            .unwrap();
+            assert_eq!(
+                (
+                    refused["type"].as_str(),
+                    refused["code"].as_str(),
+                    refused["message"].as_str()
+                ),
+                (Some("accounts_refused"), Some("accounts_in_use"), Some(words)),
+                "{refused}"
+            );
+            assert_eq!(store.accounts().unwrap().len(), 1, "nothing removed");
+        }
         store.set_lifecycle(&run.uid, Lifecycle::Exited).unwrap();
         assert!(
             !store.account_in_use(&a.id).unwrap(),
@@ -10887,6 +11148,65 @@ mod tests {
         assert_eq!(store.hosted_run_for_request("req-1").unwrap(), None);
     }
 
+    /// **A run with a switch of account is never pruned, and deleted only once its move failed** (306, decision 311
+    /// v4; gate 9): due or moving, it reads live to every device until a message has started it; one whose move
+    /// failed reads ended, and the person may delete it.
+    #[test]
+    fn a_run_with_a_switch_is_pruned_never_and_deleted_once_its_move_failed() {
+        let (store, _path) = temp_store();
+        let moving = begun(&store, "AA", "req-1");
+        let failed = begun(&store, "AB", "req-2");
+        for (run, state) in [
+            (&moving, Store::SWITCH_MOVED),
+            (&failed, Store::SWITCH_FAILED),
+        ] {
+            store.set_lifecycle(&run.uid, Lifecycle::Exited).unwrap();
+            store.set_switch_state(&run.uid, Some(state)).unwrap();
+        }
+        assert_eq!(store.prune_exited_sessions(&[], false).unwrap(), []);
+        for state in [Store::SWITCH_WAITING, Store::SWITCH_MOVED] {
+            store.set_switch_state(&moving.uid, Some(state)).unwrap();
+            assert!(matches!(
+                store.delete_exited_session(&moving.uid).unwrap(),
+                DeleteOutcome::NotExited { .. }
+            ));
+        }
+        assert!(matches!(
+            store.delete_exited_session(&failed.uid).unwrap(),
+            DeleteOutcome::Deleted { .. }
+        ));
+        store.set_switch_state(&moving.uid, None).unwrap();
+        assert_eq!(store.prune_exited_sessions(&[], false).unwrap().len(), 1);
+    }
+
+    /// **A switch's relaunch a restart finds unfinished goes back to ended, still switching** (306, decision 311 v4;
+    /// gate 8): one with no host recorded, and one whose host was found gone, are `exited`, for their next message,
+    /// not `failed`; any other start is failed as before.
+    #[test]
+    fn a_switchs_relaunch_left_unfinished_goes_back_to_ended() {
+        let (store, _path) = temp_store();
+        let unhosted = begun(&store, "AA", "req-1");
+        let hosted = begun(&store, "AB", "req-2");
+        let other = begun(&store, "AC", "req-3");
+        for run in [&unhosted, &hosted] {
+            store
+                .set_switch_state(&run.uid, Some(Store::SWITCH_MOVED))
+                .unwrap();
+        }
+        store.record_host(&hosted.uid, &HOST, None).unwrap();
+        assert!(store.fail_hosted_start(&hosted.uid, &HOST).unwrap());
+        assert_eq!(store.fail_unhosted_starts().unwrap(), 2);
+        let lifecycle = |run: &SessionKey| store.get_session(&run.uid).unwrap().unwrap().lifecycle;
+        assert_eq!(
+            (lifecycle(&unhosted), lifecycle(&hosted), lifecycle(&other)),
+            (Lifecycle::Exited, Lifecycle::Exited, Lifecycle::Failed)
+        );
+        assert_eq!(
+            store.switch_state(&unhosted.uid).unwrap(),
+            Some(Store::SWITCH_MOVED)
+        );
+    }
+
     #[test]
     fn prune_removes_a_failed_run_and_keeps_a_starting_one() {
         let (store, _path) = temp_store();
@@ -11939,7 +12259,7 @@ mod tests {
         // Written out rather than compared against the constant that produced
         // it: a version on disk is a fact other builds read, and a test that
         // asks the schema what the schema said would agree with any answer.
-        assert_eq!(version, 6, "the schema version other builds will read");
+        assert_eq!(version, 7, "the schema version other builds will read");
         assert_eq!(version, SCHEMA_VERSION);
         // **One answer ledger, and it is the generalized one.** `mutation_ledger`
         // was built for "answer, compose, interrupt" and its conflict law is

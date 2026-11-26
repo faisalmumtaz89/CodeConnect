@@ -883,8 +883,11 @@ impl Daemon {
     /// outstanding, wakes have not stopped, and no turn of it runs: decided in one
     /// store transaction, then issued (Codex's turn read from its own events first). A wake that cannot be issued
     /// is released, and the next trigger decides again; nothing else ever reaches
-    /// the agent. The wake carries nothing of any message.
+    /// the agent. The wake carries nothing of any message. Decided and issued under the run's move gate
+    /// ([`Daemon::move_gate`]), so no wake reaches a process a person's message is moving.
     pub(crate) async fn wake_if_due(self: &Arc<Self>, run_uid: &str) {
+        let gate = self.move_gate(run_uid).await;
+        let _moving = gate.lock().await;
         let claude = match self.db.get_session(run_uid.to_string()).await {
             Ok(Some(row)) => match row.agent {
                 // A hosted run: its agent host takes the wake.

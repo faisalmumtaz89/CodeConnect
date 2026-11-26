@@ -467,8 +467,9 @@ pub enum ClientMessage {
     },
     /// **Makes `account_id` the account `agent`'s starts use**, or its Default (the agent as it is on the computer)
     /// for none. An id that is not one of `agent`'s accounts is refused. Each of `agent`'s sessions running then moves
-    /// to it: once idle (its turn over, no card waiting, no message unread by the agent) its process is ended, and its
-    /// next message starts it again on the account active then, in the same session. It reads live meanwhile, with
+    /// to it at the person's next message, when that finds it certainly quiet (its turn over, nothing of the person's
+    /// unanswered, no card waiting): its process is ended and the message starts it again on the account active then,
+    /// in the same session (minor 52). Nothing is stopped by the choice itself. It reads live throughout, with
     /// [`crate::event::SessionSummary::switching`] saying where its move stands. Answered with one
     /// [`ServerMessage::Accounts`].
     ActivateAccount {
@@ -667,6 +668,15 @@ pub enum ServerMessage {
         captured_at: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        /// Every changed file (minor 53): the tracked ones against `HEAD` and the untracked
+        /// ones, each with its lines, whole even when `unified` was cut. Absent when git could
+        /// not list them, outside a repository, and from an older daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files: Option<Vec<DiffFile>>,
+        /// `files` stops short of the tree's changes: more than [`MAX_DIFF_FILES`], more
+        /// untracked names than the daemon lists at once, or more than one message carries.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        files_truncated: bool,
     },
     Error {
         code: String,
@@ -1043,8 +1053,8 @@ pub struct AccountFacts {
     /// names it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
-    /// Each usage window the agent names, as it names it; a window it does not name is absent, so an app labels a
-    /// figure from its own `window_minutes`, never from a guess.
+    /// Each usage window the agent names, as it names it (of Antigravity's, only the Gemini models' week); a window it
+    /// does not name is absent, so an app labels a figure from its own `window_minutes`, never from a guess.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<UsageWindow>,
     /// Whether plan limits apply to this sign-in, where the agent says (Claude Code's `rate_limits_available`): false
@@ -1062,7 +1072,7 @@ pub struct UsageWindow {
     pub used_percent: u32,
     /// The window's length, in minutes.
     pub window_minutes: u64,
-    /// When the window resets (Unix seconds).
+    /// When the window resets (Unix seconds); 0 for a window the agent has not opened yet (Antigravity's, unused).
     pub resets_at: i64,
 }
 
@@ -1199,6 +1209,44 @@ pub enum ComposeResult {
 /// Ceiling on a `diff` payload. A phone screen cannot use more, and an
 /// unbounded diff would blow past the client message limit on the way out.
 pub const MAX_DIFF_BYTES: usize = 512 * 1024;
+
+/// Ceiling on the files one `diff` lists ([`ServerMessage::Diff`]'s `files`).
+pub const MAX_DIFF_FILES: usize = 1000;
+
+/// One changed file of a [`ServerMessage::Diff`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffFile {
+    /// From the repository's top folder.
+    pub path: String,
+    /// Where a renamed or copied file came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub status: DiffFileStatus,
+    /// Lines added and removed, as `git diff --numstat` counts them; an untracked file's
+    /// every line is added. Absent for a binary file, for an untracked one that is not a
+    /// regular file, and for one past the daemon's reading budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
+}
+
+/// What happened to a [`DiffFile`], from git's own status letter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    /// A file became a symlink, or the other way round.
+    TypeChanged,
+    /// Not tracked by git yet, and not ignored.
+    Untracked,
+}
 
 /// What CodeConnect can actually do, reported honestly rather than assumed.
 /// Mirrors ACP's capability shape; the iPhone disables affordances it does not
@@ -2359,9 +2407,25 @@ mod tests {
             crate::PROTOCOL_MINOR >= 51,
             "Antigravity's sign-in from an app (`sign_in_agent`, `sign_out_agent`, `agent_sign_ins`) is minor 51"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 52,
+            "a switch of account moving a run at its next message, a moving run's `menus` offered, is minor 52"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 53,
+            "a diff listing its files (`files`, `files_truncated`) is minor 53"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 54,
+            "a usage window's model group (`group`) is minor 54"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 55,
+            "Antigravity's one window, Gemini's week, as a plain window (no `group`, no `grouped_windows`) is minor 55"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 51);
+        assert_eq!(crate::PROTOCOL_MINOR, 55);
     }
 
     /// **The tags, pinned on this side too.**
@@ -4096,11 +4160,69 @@ mod tests {
             truncated: false,
             captured_at: "2026-07-31T10:00:00.000Z".into(),
             note: None,
+            files: None,
+            files_truncated: false,
         };
         let encoded = serde_json::to_string(&reply).unwrap();
         assert!(encoded.contains("\"type\":\"diff\""), "{encoded}");
         assert!(!encoded.contains("note"), "an absent note must not be sent");
-        let _: ServerMessage = serde_json::from_str(&encoded).unwrap();
+        assert!(!encoded.contains("files"), "{encoded}");
+        match serde_json::from_str(&encoded).unwrap() {
+            ServerMessage::Diff {
+                files,
+                files_truncated,
+                ..
+            } => assert_eq!(
+                (files, files_truncated),
+                (None, false),
+                "a minor-51 diff decodes with no files"
+            ),
+            other => panic!("wrong message: {other:?}"),
+        }
+    }
+
+    /// **A diff's files on the wire**: snake-case statuses, a rename's old path, a
+    /// binary file with no counts and no `binary: false` noise on a text one.
+    #[test]
+    fn a_diffs_files_encode_as_the_apps_read_them() {
+        let files = vec![
+            DiffFile {
+                path: "b.txt".into(),
+                old_path: Some("a.txt".into()),
+                status: DiffFileStatus::Renamed,
+                added: Some(0),
+                removed: Some(0),
+                binary: false,
+            },
+            DiffFile {
+                path: "img.png".into(),
+                old_path: None,
+                status: DiffFileStatus::TypeChanged,
+                added: None,
+                removed: None,
+                binary: true,
+            },
+        ];
+        let reply = ServerMessage::Diff {
+            session_id: "cc-1".into(),
+            unified: String::new(),
+            truncated: false,
+            captured_at: "t".into(),
+            note: None,
+            files: Some(files),
+            files_truncated: true,
+        };
+        let encoded = serde_json::to_value(&reply).unwrap();
+        assert_eq!(
+            encoded["files"],
+            serde_json::json!([
+                {"path": "b.txt", "old_path": "a.txt", "status": "renamed", "added": 0, "removed": 0},
+                {"path": "img.png", "status": "type_changed", "binary": true},
+            ])
+        );
+        assert_eq!(encoded["files_truncated"], true);
+        let decoded: ServerMessage = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded);
     }
 
     #[test]
@@ -4111,6 +4233,8 @@ mod tests {
             truncated: false,
             captured_at: "t".into(),
             note: Some("not a git repository".into()),
+            files: None,
+            files_truncated: false,
         })
         .unwrap();
         assert!(encoded.contains("not a git repository"), "{encoded}");

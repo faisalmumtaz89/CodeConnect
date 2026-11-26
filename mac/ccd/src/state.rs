@@ -166,7 +166,7 @@ pub struct Daemon {
     /// construction: [`SERVICE_LABEL_VAR`] is set by launchd, or by CodeConnect's
     /// systemd unit, at exec, and reading it later would be reading whatever the
     /// environment has become.
-    started_at: String,
+    pub(crate) started_at: String,
     launchd_label: Option<String>,
     inner: Arc<Mutex<Inner>>,
     /// One gate per run, held across *both* halves of an ingest.
@@ -176,6 +176,9 @@ pub struct Daemon {
     /// behind a write. Kept in its own map so the lock ordering is one-way —
     /// gate, then `inner`, never the reverse.
     publish_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One gate per run, held by a person's message to a run with a switch of account from reading the run through
+    /// sending it, and by a mail wake from its claim through its issue ([`Daemon::move_gate`]).
+    move_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// One gate per session, held across a hosted run's recorded end and what
     /// follows it ([`Daemon::end_hosted_run`]).
     ///
@@ -299,6 +302,9 @@ struct Inner {
     /// Hosted runs whose agent host or app-server this daemon is attached to now, by
     /// `session_uid`: what makes such a run's link read attached.
     host_links: HashMap<String, HostLink>,
+    /// Claude runs whose link attached again to a running host whose replay has not ended yet: what ccd has filed of
+    /// such a run may be behind what its host holds ([`Daemon::replaying`]).
+    replaying: HashSet<String>,
     /// Messages sent to a run's agent host and waiting for its outcome, by the message's
     /// uuid, each with its run's `session_uid`: told `true` once the host has taken the
     /// message into claude's input, `false` once it refused it. Dropped when the run's
@@ -534,6 +540,7 @@ impl Daemon {
             launchd_label: launchd_label(),
             inner: Arc::new(Mutex::new(Inner::default())),
             publish_gates: Mutex::new(HashMap::new()),
+            move_gates: Mutex::new(HashMap::new()),
             registration_gates: Mutex::new(HashMap::new()),
             #[cfg(test)]
             test_tailnet: std::sync::Mutex::new(None),
@@ -911,6 +918,32 @@ impl Daemon {
         let mut gates = self.publish_gates.lock().await;
         gates.retain(|_, gate| Arc::strong_count(gate) > 1);
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
+    }
+
+    /// The run `session_uid`'s move gate (306): a person's message to a run due to move to another account decides
+    /// whether it moves and sends or relaunches with it as one step under it, from before any read of the run's
+    /// switch, lifecycle or link; a mail wake holds it from its claim through its issue, so none slips between the
+    /// decision and the stop. Same eviction rule as [`Daemon::publish_gate`].
+    pub(crate) async fn move_gate(&self, session_uid: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.move_gates.lock().await;
+        gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+        Arc::clone(gates.entry(session_uid.to_string()).or_default())
+    }
+
+    /// The run `session_uid`'s move gate, held while the run has a switch, read under it: a person's message to such a
+    /// run is decided and sent under it ([`crate::switch::moves`]), and a settings change, an interrupt or a Stop to it
+    /// is delivered under it, so no move ends the process it is on its way to. `None`, the gate let go, for a run
+    /// with none, which is sent to as before, a message at a time no more than before.
+    pub(crate) async fn move_guard(
+        &self,
+        session_uid: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let guard = self.move_gate(session_uid).await.lock_owned().await;
+        matches!(
+            self.db.switch_state(session_uid.to_string()).await,
+            Ok(Some(_))
+        )
+        .then_some(guard)
     }
 
     /// The gate serializing one session's recorded end ([`Daemon::end_hosted_run`]).
@@ -2322,6 +2355,7 @@ impl Daemon {
                 return refuse(crate::codex_refusals::SESSION_LOOKUP_FAILED.to_string());
             }
         };
+        let moving = self.move_guard(&row.session_uid).await;
         // A Claude run CodeConnect started: its lifecycle, for its own branch below.
         let mut hosted = None;
         match row.agent {
@@ -2451,7 +2485,7 @@ impl Daemon {
         };
         if let Some(commands) = engine {
             return Daemon::interrupt_result(
-                self.interrupt_on_engine(&commands, &session.uid, request_id, turn_id)
+                self.interrupt_on_engine(&commands, &session.uid, request_id, turn_id, moving)
                     .await,
             );
         }
@@ -2473,6 +2507,7 @@ impl Daemon {
         uid: &str,
         request_id: &str,
         turn_id: &str,
+        moving: Option<tokio::sync::OwnedMutexGuard<()>>,
     ) -> crate::codex_host::InterruptReport {
         use crate::codex_host::InterruptReport;
         let (reply, told) = tokio::sync::oneshot::channel();
@@ -2481,6 +2516,10 @@ impl Daemon {
             turn_id: turn_id.to_string(),
             reply,
         });
+        // Handed to the link, which takes its commands in order and reads a stop it holds as a turn running: the move
+        // gate is let go here, not when Codex ends the turn, which it may never do, so an End run is never held behind
+        // it.
+        drop(moving);
         if asked.is_ok() {
             if let Ok(report) = told.await {
                 return report;
@@ -2565,6 +2604,7 @@ impl Daemon {
         use protocol::ws::ComposeResult;
 
         let refuse = |reason: String| ComposeResult::Rejected { reason };
+        let arrived = tokio::time::Instant::now();
 
         // 1. **The run, and the agent that is running in it — before any lock or durable
         //    claim.** An unreadable row is a refusal too: unreadable is not evidence of
@@ -2660,11 +2700,36 @@ impl Daemon {
         // startup records it unknown and never sends it again; a run whose app-server ended
         // without ccd stopping it is relaunched by the message, which its new link then sends
         // ([`crate::codex_host::relaunch`]); otherwise nothing is sent and the person is told
-        // so.
-        let engine = match self.inner.lock().await.host_links.get(&session.uid) {
+        // so. A run due to move to another account and certainly quiet is ended by its switch
+        // first and relaunched by the message the same way ([`crate::switch::moves`]), all under
+        // the run's move gate.
+        let moving = self.move_guard(&session.uid).await;
+        // One deadline for a message's relaunch, a move's end of the old app-server included: a move's runs from the
+        // message's arrival, within the apps' wait for an answer, so one that cannot start is refused, nothing sent,
+        // before they stop waiting.
+        let mut deadline = tokio::time::Instant::now() + crate::start_session::START_TIMEOUT;
+        let mut engine = match self.inner.lock().await.host_links.get(&session.uid) {
             Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
             _ => None,
         };
+        if let Some(commands) = engine.clone() {
+            if moving.is_some() {
+                let (reply, told) = tokio::sync::oneshot::channel();
+                let running = commands
+                    .send(crate::codex_host::LinkCommand::TurnRunning(reply))
+                    .is_err()
+                    || told.await.unwrap_or(true);
+                // A message the ledger holds is answered from it, and moves nothing.
+                if !recorded && crate::switch::moves(self, &session.uid, request_id, running).await
+                {
+                    deadline = arrived + crate::claude_host::RELAUNCH_WAIT;
+                    if !crate::switch::ended_for_move(self, &session.uid, deadline).await {
+                        return refuse(crate::claude_host::STILL_ENDING.into());
+                    }
+                    engine = None;
+                }
+            }
+        }
         if let Some(commands) = engine {
             return Daemon::compose_result(
                 self.compose_on_engine(&commands, &session.uid, request_id, text, claimed_hash)
@@ -2700,7 +2765,11 @@ impl Daemon {
             claimed_hash,
             reply,
         };
-        if crate::codex_host::relaunch(self, &session.uid, ask).await {
+        // A run its switch ended, moved or failed: its relaunch has the move's deadline, from the message's arrival.
+        if crate::switch::switched(self, &session.uid).await {
+            deadline = arrived + crate::claude_host::RELAUNCH_WAIT;
+        }
+        if crate::codex_host::relaunch(self, &session.uid, ask, deadline).await {
             return Daemon::compose_result(
                 self.engine_report(&session.uid, request_id, told).await,
             );
@@ -3238,6 +3307,7 @@ impl Daemon {
         connection: u64,
         attachments: &[String],
     ) -> SendTextResult {
+        let arrived = tokio::time::Instant::now();
         if text.len() > protocol::ws::MAX_SEND_TEXT_BYTES {
             return SendTextResult::Refused {
                 reason: format!(
@@ -3296,7 +3366,8 @@ impl Daemon {
         };
 
         // A Claude run started in an agent host takes the message through its host;
-        // no other run has anything to deliver it.
+        // no other run has anything to deliver it. Read and sent under the run's move gate while it has a switch.
+        let _moving = self.move_guard(&session_uid).await;
         match self.db.hosted_link(session_uid.clone()).await {
             Ok(Some(linked)) => {
                 // The files are the message's from here, before anything is said. A message the
@@ -3325,6 +3396,7 @@ impl Daemon {
                         text,
                         identity,
                         submit,
+                        arrived,
                     },
                 )
                 .await
@@ -3543,7 +3615,11 @@ impl Daemon {
         // A Codex run that is not live keeps its menu only to name its model by.
         let mut codex_ended: Vec<(String, protocol::event::RunMenus)> = Vec::new();
         for row in &rows {
-            let live = row.lifecycle == Lifecycle::Live;
+            // A run its switch is moving offers them while a message moves it (its move gate held): its next process
+            // takes a change. Ended by its switch with nothing moving it, it offers none, as an ended run.
+            let live = row.lifecycle == Lifecycle::Live
+                || switching.get(&row.session_uid) == Some(&crate::store::Store::SWITCH_MOVED)
+                    && self.move_gate(&row.session_uid).await.try_lock().is_err();
             let Some(models) = self.db.hosted_models(row.session_uid.clone()).await? else {
                 continue;
             };
@@ -3663,16 +3739,19 @@ impl Daemon {
                 Some(crate::store::Store::SWITCH_FAILED) => {
                     session.switching = Some(protocol::event::Switching::Failed)
                 }
-                // Moved once its process has ended; until then, whatever stopped it, it is waiting.
-                Some(_) => {
-                    session.switching = Some(match session.lifecycle {
-                        Lifecycle::Live | Lifecycle::Stopping => {
-                            protocol::event::Switching::Waiting
-                        }
-                        _ => protocol::event::Switching::Moved,
-                    });
+                // Due to move, or moving: its process being ended by a message and its next one started, when it
+                // reads linked throughout, as a run that is answered and takes a message.
+                Some(state) => {
                     session.lifecycle = Lifecycle::Live;
                     session.relaunchable = false;
+                    session.switching = Some(protocol::event::Switching::Waiting);
+                    if state == crate::store::Store::SWITCH_MOVED {
+                        session.switching = Some(protocol::event::Switching::Moved);
+                        session.link = protocol::event::Link::Attached;
+                        if session.agent == protocol::agent::AgentKind::Codex {
+                            session.codex_link = protocol::event::CodexLink::Subscribed;
+                        }
+                    }
                 }
                 None => {}
             }
@@ -3692,6 +3771,23 @@ impl Daemon {
             .insert(session_uid.to_string(), link);
         self.file_host_link_state(session_uid, "attached", "agent host linked")
             .await;
+    }
+
+    /// Whether the Claude run `session_uid`'s link, attached again to its running host, has yet to read the end of that
+    /// host's replay: until it has, what ccd has filed of the run may be behind what its host holds, so no message moves
+    /// the run ([`crate::switch::moves`]).
+    pub(crate) async fn replaying(&self, session_uid: &str) -> bool {
+        self.inner.lock().await.replaying.contains(session_uid)
+    }
+
+    /// The Claude run `session_uid`'s link has begun reading its host's replay (`true`) or has read its end (`false`).
+    pub(crate) async fn set_replaying(&self, session_uid: &str, replaying: bool) {
+        let mut inner = self.inner.lock().await;
+        if replaying {
+            inner.replaying.insert(session_uid.to_string());
+        } else {
+            inner.replaying.remove(session_uid);
+        }
     }
 
     /// A hosted run's link change as a `link_state` fact.
@@ -3751,18 +3847,6 @@ impl Daemon {
         }
     }
 
-    /// The Codex run `session_uid`'s link asked whether it may switch account now
-    /// ([`crate::codex_host::LinkCommand::SwitchIfIdle`]). Whether a link took it.
-    pub(crate) async fn switch_through_link(&self, session_uid: &str) -> bool {
-        let inner = self.inner.lock().await;
-        match inner.host_links.get(session_uid) {
-            Some(HostLink::Codex(_, commands)) => commands
-                .send(crate::codex_host::LinkCommand::SwitchIfIdle)
-                .is_ok(),
-            _ => false,
-        }
-    }
-
     /// [`ClientMessage::StopRun`](protocol::ws::ClientMessage::StopRun): end a run
     /// CodeConnect started, Claude's or Codex's ([`crate::claude_host::stop_run`], which
     /// refuses any other).
@@ -3781,6 +3865,7 @@ impl Daemon {
                 return refuse("This computer could not read its sessions.");
             }
         };
+        let _moving = self.move_guard(&row.session_uid).await;
         crate::claude_host::stop_run(self, &row.session_uid).await
     }
 
@@ -3807,26 +3892,9 @@ impl Daemon {
                 return refuse("This computer could not read its sessions.");
             }
         };
-        // A run its switch ended has no process to change; its settings are the ended run's until its next message.
-        if row.lifecycle != Lifecycle::Live
-            && self
-                .db
-                .switch_state(row.session_uid.clone())
-                .await
-                .ok()
-                .flatten()
-                == Some(crate::store::Store::SWITCH_MOVED)
-        {
-            let label = self
-                .store
-                .active_account(row.agent.as_str())
-                .ok()
-                .flatten()
-                .map_or_else(|| "Default".to_string(), |account| account.label);
-            return refuse(&format!(
-                "This session starts on {label} with your next message; its settings can be changed then."
-            ));
-        }
+        // Delivered under the run's move gate, marked or not: a choice and a message that come meanwhile move nothing
+        // until it is answered.
+        let _moving = self.move_gate(&row.session_uid).await.lock_owned().await;
         if row.agent == protocol::agent::AgentKind::Codex {
             let commands = match self.inner.lock().await.host_links.get(&row.session_uid) {
                 Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
@@ -3935,6 +4003,9 @@ impl Daemon {
             ),
             Err(err) => crate::log_error!("could not fail the hosted runs with no host: {err:#}"),
         }
+        if let Err(err) = self.db.recover_moves().await {
+            crate::log_error!("could not put back the moves a stopped ccd left: {err:#}");
+        }
         let recorded = match self
             .db
             .recorded_hosts(protocol::agent::AgentKind::Claude)
@@ -3973,7 +4044,8 @@ impl Daemon {
     /// recorded app-server's group gets the ladder under its warrant, each in a task of its
     /// own: a start is never sent again. A run `stopping` whose recorded app-server is alive
     /// has its escalation started again ([`crate::claude_host::escalate_stop`]), as a Claude
-    /// run's is. Then every `live` Codex run whose recorded app-server is alive is connected
+    /// run's is. A `live` run its switch was ending has its app-server stopped, so its end is the switch's. Then
+    /// every other `live` Codex run whose recorded app-server is alive is connected
     /// again ([`crate::codex_host::reconnect`]), each in a task of its own, with `launcher`
     /// as the `codeconnect` its thread config names; one whose app-server is gone is the
     /// liveness watch's.
@@ -4020,13 +4092,28 @@ impl Daemon {
             }
             Err(err) => crate::log_error!("could not read the Codex runs stopping: {err:#}"),
         }
-        let live = match self.db.codex_live_runs().await {
+        let mut live = match self.db.codex_live_runs().await {
             Ok(live) => live,
             Err(err) => {
                 crate::log_error!("could not read the live Codex runs to connect again: {err:#}");
                 return;
             }
         };
+        // A run its switch was ending has its app-server's stop finished, not its link again: its end is the switch's.
+        let mut moving = Vec::new();
+        for run in &live {
+            if let Ok(Some(crate::store::Store::SWITCH_MOVED)) =
+                self.db.switch_state(run.session_uid.clone()).await
+            {
+                moving.push(run.session_uid.clone());
+                if let Some(watch) = run.host.clone() {
+                    tokio::spawn(async move {
+                        crate::codex_host::stop(&watch.session_uid, watch.host, watch.boot).await;
+                    });
+                }
+            }
+        }
+        live.retain(|run| !moving.contains(&run.session_uid));
         if live.is_empty() {
             return;
         }
@@ -4041,9 +4128,10 @@ impl Daemon {
             }
         };
         for run in live {
-            if protocol::proc_identity::liveness(&run.host.host)
-                != protocol::proc_identity::Liveness::Alive
-            {
+            if !run.host.as_ref().is_some_and(|watch| {
+                protocol::proc_identity::liveness(&watch.host)
+                    == protocol::proc_identity::Liveness::Alive
+            }) {
                 continue;
             }
             tokio::spawn(crate::codex_host::reconnect(
@@ -4063,15 +4151,20 @@ impl Daemon {
         {
             let mut inner = self.inner.lock().await;
             inner.host_links.remove(session_uid);
+            inner.replaying.remove(session_uid);
             inner.host_sends.retain(|_, (uid, _)| uid != session_uid);
             inner.host_stops.retain(|_, (uid, _)| uid != session_uid);
             inner
                 .host_settings
                 .retain(|_, pending| pending.uid != session_uid);
         }
+        // A run its switch is ending lets its link go on purpose: its next process's link is the same run's.
         let live = matches!(
             self.db.get_session(session_uid.to_string()).await,
             Ok(Some(row)) if row.lifecycle == Lifecycle::Live
+        ) && !matches!(
+            self.db.switch_state(session_uid.to_string()).await,
+            Ok(Some(crate::store::Store::SWITCH_MOVED))
         );
         if live {
             self.file_host_link_state(session_uid, "detached", "agent host disconnected")

@@ -83,6 +83,7 @@ final class CatchUpTests: XCTestCase {
         var pending: [(id: String, seq: Int)] = []
         var codexLink = "none"
         var created = "2026-10-16T10:00:00Z"
+        var switching: String?
     }
 
     private func list(_ rows: [Row]) -> ServerMessage {
@@ -93,7 +94,8 @@ final class CatchUpTests: XCTestCase {
                 "cwd":"/tmp/\(row.uid.suffix(2))","lifecycle":"\(row.lifecycle)","link":"attached",\
                 "last_seq":\(row.lastSeq),"created_at":"\(row.created)",\
                 "updated_at":"2026-10-16T10:00:00Z","blocked_on":[\(row.pending.map { "\"\($0.id)\"" }.joined(separator: ","))],\
-                "agent":"\(row.agent)","codex_link":"\(row.codexLink)","pending":[\(pending.joined(separator: ","))]}
+                "agent":"\(row.agent)","codex_link":"\(row.codexLink)","pending":[\(pending.joined(separator: ","))]\
+                \(row.switching.map { #","switching":"\#($0)""# } ?? "")}
                 """
         }
         return frame(#"{"type":"sessions","sessions":["# + body.joined(separator: ",") + "]}")
@@ -701,6 +703,28 @@ final class CatchUpTests: XCTestCase {
         await settle(model)
         XCTAssertEqual(Array(publications(model, a).dropFirst(published)), [.release])
         XCTAssertEqual(model.shown(for: a)?.drawnThrough, 60)
+    }
+
+    /// **A message the daemon takes for a run that is moving to another account asks for the list again, once**, so
+    /// the run shows its new account without waiting for the next refresh; a message to any other run asks nothing.
+    func testAMessageToAMovingRunAsksForTheListOnce() async throws {
+        let (model, wire) = await caughtUp([Row(uid: a, lastSeq: 2, switching: "waiting"), Row(uid: b, lastSeq: 2)])
+        model.connection.sendTextStub = { _, _ in .sent(matched: "cc-1") }
+        let before = wire.sessionsAsked
+        _ = await model.send(text: "carry on", to: b)
+        XCTAssertEqual(wire.sessionsAsked, before, "a run that is not moving asks for nothing")
+        _ = await model.send(text: "carry on", to: a)
+        XCTAssertEqual(wire.sessionsAsked, before + 1, "the moving run's message asks for the list once")
+    }
+
+    /// **A refused message to a moving run asks for the list again too**: its move did not go through, and the list says
+    /// where it stands.
+    func testARefusedMessageToAMovingRunAsksForTheListOnce() async throws {
+        let (model, wire) = await caughtUp([Row(uid: a, lastSeq: 2, switching: "moved")])
+        model.connection.sendTextStub = { _, _ in .refused(reason: "This session is still ending; nothing was sent.") }
+        let before = wire.sessionsAsked
+        _ = await model.send(text: "carry on", to: a)
+        XCTAssertEqual(wire.sessionsAsked, before + 1, "the moving run's refused message asks for the list once")
     }
 
     // MARK: "Not sent: stopped" — the hand-back fires on a live arrival, never a replay

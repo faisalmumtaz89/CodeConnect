@@ -171,6 +171,11 @@ function begin(start: Start): void {
       if (inputEnded) return;
       const command = queued.shift()!;
       yield userMessage(command.uuid, command.text, command.type);
+      // `done` goes as soon as the SDK pulls the next message, before claude reads this one: the pinned SDK's input
+      // loop writes a message without waiting for claude and pulls the next at once, so a replay after ccd restarts
+      // already carries the outcome of a message claude has not read. ccd relies on that to release only sends nothing
+      // settled. On an SDK upgrade, check it still holds: hold claude's input past a say larger than its pipe, and the
+      // replay must carry `done` for that say and the one behind it.
       link.send({ type: 'outcome', uuid: command.uuid, status: 'done' });
     }
   })();

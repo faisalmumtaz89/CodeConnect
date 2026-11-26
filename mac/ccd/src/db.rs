@@ -285,6 +285,15 @@ impl Db {
         self.run(|store| store.fail_codex_starts()).await
     }
 
+    pub async fn release_unsent(&self, session_uid: String, before: String) -> Result<()> {
+        self.run(move |store| store.release_unsent(&session_uid, &before))
+            .await
+    }
+
+    pub async fn recover_moves(&self) -> Result<()> {
+        self.run(|store| store.recover_moves()).await
+    }
+
     pub async fn codex_live_runs(&self) -> Result<Vec<crate::store::LiveCodexRun>> {
         self.run(|store| store.codex_live_runs()).await
     }
@@ -320,8 +329,13 @@ impl Db {
             .await
     }
 
-    pub async fn begin_claude_relaunch(&self, session_uid: String, start: String) -> Result<bool> {
-        self.run(move |store| store.begin_claude_relaunch(&session_uid, &start))
+    pub async fn begin_claude_relaunch(
+        &self,
+        session_uid: String,
+        start: String,
+        account: Option<String>,
+    ) -> Result<bool> {
+        self.run(move |store| store.begin_claude_relaunch(&session_uid, &start, account.as_deref()))
             .await
     }
 
@@ -423,8 +437,8 @@ impl Db {
             .await
     }
 
-    pub async fn message_awaits_turn(&self, session_uid: String) -> Result<bool> {
-        self.run(move |store| store.message_awaits_turn(&session_uid))
+    pub async fn certainly_quiet(&self, session_uid: String, sending: String) -> Result<bool> {
+        self.run(move |store| store.certainly_quiet(&session_uid, &sending))
             .await
     }
 
@@ -859,10 +873,6 @@ impl Db {
     pub async fn set_switch_state(&self, session_uid: String, state: Option<i64>) -> Result<()> {
         self.run(move |store| store.set_switch_state(&session_uid, state))
             .await
-    }
-
-    pub async fn mark_switching(&self, agent: String) -> Result<Vec<String>> {
-        self.run(move |store| store.mark_switching(&agent)).await
     }
 
     pub async fn host_sends(&self, session_uid: String) -> Result<Vec<(String, String)>> {

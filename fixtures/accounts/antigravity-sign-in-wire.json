@@ -38,6 +38,33 @@
     ],
     "type": "accounts"
   },
+  "signed_in_usage": {
+    "accounts": [],
+    "active": [],
+    "agent_sign_ins": [
+      {
+        "agent": "antigravity",
+        "signed_in": true
+      }
+    ],
+    "defaults": [
+      {
+        "agent": "antigravity",
+        "facts": {
+          "plan": "Google AI Ultra",
+          "read_at": "2026-11-25T12:00:00.000Z",
+          "windows": [
+            {
+              "resets_at": 1796258851,
+              "used_percent": 20,
+              "window_minutes": 10080
+            }
+          ]
+        }
+      }
+    ],
+    "type": "accounts"
+  },
   "signed_out": {
     "accounts": [],
     "active": [],

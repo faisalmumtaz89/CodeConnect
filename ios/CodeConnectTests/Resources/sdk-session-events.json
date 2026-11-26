@@ -1180,6 +1180,36 @@
     "turn_id": "983afc27-7e29-4b32-8653-6091fb32cc41"
   },
   {
+    "item_id": "8beec615-a5a2-420e-8872-a28656efcedb",
+    "kind": "background_task",
+    "payload": {
+      "ended": false,
+      "task_id": "a0642738868f542e0"
+    },
+    "seq": 48,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "sdk",
+    "source_event_id": "8beec615-a5a2-420e-8872-a28656efcedb/background_task/0",
+    "ts": "2026-11-13T12:00:00.000Z",
+    "turn_id": "983afc27-7e29-4b32-8653-6091fb32cc41"
+  },
+  {
+    "item_id": "f13bf5c0-a331-4a25-a40a-3eca6a276881",
+    "kind": "background_task",
+    "payload": {
+      "ended": true,
+      "task_id": "a0642738868f542e0"
+    },
+    "seq": 49,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "sdk",
+    "source_event_id": "f13bf5c0-a331-4a25-a40a-3eca6a276881/background_task/0",
+    "ts": "2026-11-13T12:00:00.000Z",
+    "turn_id": "983afc27-7e29-4b32-8653-6091fb32cc41"
+  },
+  {
     "item_id": "23273de3-ae70-4aa4-be99-206208474bfa",
     "kind": "tool_result",
     "payload": {
@@ -1198,7 +1228,7 @@
         ]
       }
     },
-    "seq": 48,
+    "seq": 50,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1221,7 +1251,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 49,
+    "seq": 51,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1243,7 +1273,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 50,
+    "seq": 52,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1259,7 +1289,7 @@
       "num_turns": 2,
       "subtype": "success"
     },
-    "seq": 51,
+    "seq": 53,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1311,7 +1341,7 @@
         "speed": "standard"
       }
     },
-    "seq": 52,
+    "seq": 54,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1326,7 +1356,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 53,
+    "seq": 55,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1357,11 +1387,41 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 54,
+    "seq": 56,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
     "source_event_id": "f0b60e7d-505e-422e-8d28-11e354338ee7/agent_message/0",
+    "ts": "2026-11-13T12:00:00.000Z",
+    "turn_id": "79efc59d-4c32-4bd6-8be6-2d15ffbecd09"
+  },
+  {
+    "item_id": "d09890f5-325d-4f31-b6e3-d12dd3c29b90",
+    "kind": "background_task",
+    "payload": {
+      "ended": false,
+      "task_id": "b6jmlpd4f"
+    },
+    "seq": 57,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "sdk",
+    "source_event_id": "d09890f5-325d-4f31-b6e3-d12dd3c29b90/background_task/0",
+    "ts": "2026-11-13T12:00:00.000Z",
+    "turn_id": "79efc59d-4c32-4bd6-8be6-2d15ffbecd09"
+  },
+  {
+    "item_id": "33dea049-178f-475a-a95e-24d659bc8073",
+    "kind": "background_task",
+    "payload": {
+      "ended": true,
+      "task_id": "b6jmlpd4f"
+    },
+    "seq": 58,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "sdk",
+    "source_event_id": "33dea049-178f-475a-a95e-24d659bc8073/background_task/0",
     "ts": "2026-11-13T12:00:00.000Z",
     "turn_id": "79efc59d-4c32-4bd6-8be6-2d15ffbecd09"
   },
@@ -1380,7 +1440,7 @@
         ]
       }
     },
-    "seq": 55,
+    "seq": 59,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1410,7 +1470,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 56,
+    "seq": 60,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1433,7 +1493,7 @@
         ]
       }
     },
-    "seq": 57,
+    "seq": 61,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1455,7 +1515,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 58,
+    "seq": 62,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1471,7 +1531,7 @@
       "num_turns": 3,
       "subtype": "success"
     },
-    "seq": 59,
+    "seq": 63,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1523,7 +1583,7 @@
         "speed": "standard"
       }
     },
-    "seq": 60,
+    "seq": 64,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1538,7 +1598,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 61,
+    "seq": 65,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1569,11 +1629,41 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 62,
+    "seq": 66,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
     "source_event_id": "0e498f65-1a1d-4075-9ece-6fca62e50706/agent_message/0",
+    "ts": "2026-11-13T12:00:00.000Z",
+    "turn_id": "355053f6-a808-4d45-9c6d-6f0666cbb951"
+  },
+  {
+    "item_id": "be596302-363e-42d5-9908-43e2870b8759",
+    "kind": "background_task",
+    "payload": {
+      "ended": false,
+      "task_id": "b1s82czu9"
+    },
+    "seq": 67,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "sdk",
+    "source_event_id": "be596302-363e-42d5-9908-43e2870b8759/background_task/0",
+    "ts": "2026-11-13T12:00:00.000Z",
+    "turn_id": "355053f6-a808-4d45-9c6d-6f0666cbb951"
+  },
+  {
+    "item_id": "c21c084c-1a5c-4ce6-844a-c1696757b645",
+    "kind": "background_task",
+    "payload": {
+      "ended": true,
+      "task_id": "b1s82czu9"
+    },
+    "seq": 68,
+    "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "sdk",
+    "source_event_id": "c21c084c-1a5c-4ce6-844a-c1696757b645/background_task/0",
     "ts": "2026-11-13T12:00:00.000Z",
     "turn_id": "355053f6-a808-4d45-9c6d-6f0666cbb951"
   },
@@ -1592,7 +1682,7 @@
         ]
       }
     },
-    "seq": 63,
+    "seq": 69,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1613,7 +1703,7 @@
         ]
       }
     },
-    "seq": 64,
+    "seq": 70,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1629,7 +1719,7 @@
       "num_turns": 3,
       "subtype": "error_during_execution"
     },
-    "seq": 65,
+    "seq": 71,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1681,7 +1771,7 @@
         "speed": "standard"
       }
     },
-    "seq": 66,
+    "seq": 72,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1696,7 +1786,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 67,
+    "seq": 73,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1727,7 +1817,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 68,
+    "seq": 74,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1750,7 +1840,7 @@
         ]
       }
     },
-    "seq": 69,
+    "seq": 75,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1771,7 +1861,7 @@
         ]
       }
     },
-    "seq": 70,
+    "seq": 76,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1787,7 +1877,7 @@
       "num_turns": 3,
       "subtype": "error_during_execution"
     },
-    "seq": 71,
+    "seq": 77,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1839,7 +1929,7 @@
         "speed": "standard"
       }
     },
-    "seq": 72,
+    "seq": 78,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1854,7 +1944,7 @@
       "model": "claude-opus-5-5",
       "permissionMode": "default"
     },
-    "seq": 73,
+    "seq": 79,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1877,7 +1967,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 74,
+    "seq": 80,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1899,7 +1989,7 @@
         "model": "claude-opus-5-5"
       }
     },
-    "seq": 75,
+    "seq": 81,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1915,7 +2005,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 76,
+    "seq": 82,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1967,7 +2057,7 @@
         "speed": "standard"
       }
     },
-    "seq": 77,
+    "seq": 83,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1983,7 +2073,7 @@
         "content": "<local-command-stdout>Set model to `claude-sonnet-5-5`</local-command-stdout>"
       }
     },
-    "seq": 78,
+    "seq": 84,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -1998,7 +2088,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 79,
+    "seq": 85,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2020,7 +2110,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 80,
+    "seq": 86,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2036,7 +2126,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 81,
+    "seq": 87,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2088,7 +2178,7 @@
         "speed": "standard"
       }
     },
-    "seq": 82,
+    "seq": 88,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2103,7 +2193,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 83,
+    "seq": 89,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2118,7 +2208,7 @@
       "message": "Conversation compacted",
       "notification_type": "compacted"
     },
-    "seq": 84,
+    "seq": 90,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2134,7 +2224,7 @@
         "content": "<local-command-stdout>Compacted </local-command-stdout>"
       }
     },
-    "seq": 85,
+    "seq": 91,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2151,7 +2241,7 @@
       "num_turns": 0,
       "subtype": "success"
     },
-    "seq": 86,
+    "seq": 92,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2187,7 +2277,7 @@
         "speed": "standard"
       }
     },
-    "seq": 87,
+    "seq": 93,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2202,7 +2292,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 88,
+    "seq": 94,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2224,7 +2314,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 89,
+    "seq": 95,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2240,7 +2330,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 90,
+    "seq": 96,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2292,7 +2382,7 @@
         "speed": "standard"
       }
     },
-    "seq": 91,
+    "seq": 97,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2307,7 +2397,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 92,
+    "seq": 98,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2329,7 +2419,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 93,
+    "seq": 99,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2345,7 +2435,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 94,
+    "seq": 100,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2397,7 +2487,7 @@
         "speed": "standard"
       }
     },
-    "seq": 95,
+    "seq": 101,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2412,7 +2502,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 96,
+    "seq": 102,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2428,7 +2518,7 @@
         "content": "<local-command-stdout>Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead</local-command-stdout>"
       }
     },
-    "seq": 97,
+    "seq": 103,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2445,7 +2535,7 @@
       "num_turns": 0,
       "subtype": "success"
     },
-    "seq": 98,
+    "seq": 104,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2481,7 +2571,7 @@
         "speed": "standard"
       }
     },
-    "seq": 99,
+    "seq": 105,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2496,7 +2586,7 @@
       "message": "Conversation cleared",
       "notification_type": "conversation_cleared"
     },
-    "seq": 100,
+    "seq": 106,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2512,7 +2602,7 @@
       "permissionMode": "default",
       "source": "clear"
     },
-    "seq": 101,
+    "seq": 107,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2529,7 +2619,7 @@
       "num_turns": 0,
       "subtype": "success"
     },
-    "seq": 102,
+    "seq": 108,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2565,7 +2655,7 @@
         "speed": "standard"
       }
     },
-    "seq": 103,
+    "seq": 109,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2580,7 +2670,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 104,
+    "seq": 110,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2603,7 +2693,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 105,
+    "seq": 111,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2625,7 +2715,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 106,
+    "seq": 112,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2641,7 +2731,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 107,
+    "seq": 113,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2693,7 +2783,7 @@
         "speed": "standard"
       }
     },
-    "seq": 108,
+    "seq": 114,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2708,7 +2798,7 @@
       "model": "claude-sonnet-5-5",
       "permissionMode": "default"
     },
-    "seq": 109,
+    "seq": 115,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2731,7 +2821,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 110,
+    "seq": 116,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2753,7 +2843,7 @@
         "model": "claude-sonnet-5-5"
       }
     },
-    "seq": 111,
+    "seq": 117,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2769,7 +2859,7 @@
       "num_turns": 1,
       "subtype": "success"
     },
-    "seq": 112,
+    "seq": 118,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",
@@ -2821,7 +2911,7 @@
         "speed": "standard"
       }
     },
-    "seq": 113,
+    "seq": 119,
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "source": "sdk",

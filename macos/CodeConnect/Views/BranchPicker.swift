@@ -37,6 +37,7 @@ struct BranchRow: View {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text(StartWords.readingBranches(folder.name)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                        .lineLimit(1).truncationMode(.tail)
                 }
                 .accessibilityIdentifier("start.branch.reading")
             }
@@ -103,6 +104,7 @@ struct BranchRow: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "arrow.triangle.branch").font(.system(size: 11)).accessibilityHidden(true)
+                // A branch keeps meaning at both ends ("feature/oauth-device-flow"): cut in its middle.
                 Text(verbatim: title).font(Theme.mono(12)).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
@@ -205,10 +207,11 @@ struct BranchMenu: View {
     let choose: (StartPlace?) -> Void
 
     static let width: CGFloat = 440
-    static let rowHeight: CGFloat = 32
+    /// A line: a menu row and its gap (`MenuRow`).
+    static let rowHeight: CGFloat = MenuMetrics.rowHeight + MenuMetrics.rowGap
     static let mostRows = 12
     /// The card's padding (`menuCard`), above and below the rows.
-    private static let inset: CGFloat = 6
+    private static let inset = MenuMetrics.inset
 
     /// The menu's lines for this folder: each section's heading and entries.
     static func rows(git: StartGit, folder: StartProject) -> Int {
@@ -279,7 +282,7 @@ struct BranchMenu: View {
             }
             .overlay(alignment: .top) { MenuDivider() }
         }
-        .frame(width: width - 12, alignment: .leading)
+        .frame(width: width - 2 * MenuMetrics.inset, alignment: .leading)
         .menuCard()
     }
 
@@ -313,7 +316,6 @@ struct BranchMenu: View {
     ) -> some View {
         Button(action: choose) {
             MenuRow(chosen: checked) { content() }
-                .frame(height: Self.rowHeight)
         }
         .buttonStyle(.panelRow)
         .panelRow(index, id: id, choose: choose)

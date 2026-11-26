@@ -850,7 +850,7 @@ pub const PROTOCOL_MISMATCH: &str =
 ///   * `46` — **An ended run names its model as its menu did.**
 ///
 ///     No message changes shape. A [`event::SessionSummary`] of a run CodeConnect started that is sent no
-///     `menus` (it is not live: stopping, ended, or moved by a switch of account) may carry `model_label`,
+///     `menus` (it is not live: stopping, ended, or failed in a switch of account) may carry `model_label`,
 ///     the label of the start's entry for its model, by the rule the apps name a live run's model by, so an
 ///     ended run reads "Opus", not `claude-opus-5-5`. A daemon of 0.19.14 or older sends it for a Claude
 ///     run only, and a daemon below 46 sends none: an app then shows the model as reported.
@@ -870,8 +870,8 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     listing pushed, with no request id, whenever it changes. To paired devices only, behind
 ///     [`ws::Capabilities::accounts`]. An account is a folder of the computer's own that a start on it is given, its
 ///     agent's credential its own and the rest of the person's home shared; an agent's Default is the agent as it is.
-///     Choosing one moves the agent's running sessions to it: each is ended when idle, its end typed
-///     [`event::SWITCHED_TO`], and its next message starts it on the account active then; it reads live meanwhile,
+///     Choosing one moves the agent's running sessions to it (from minor 52, at each one's next message): its end
+///     typed [`event::SWITCHED_TO`], and the message starts it on the account active then; it reads live meanwhile,
 ///     [`event::SessionSummary::switching`] saying where its move stands, and a start that did not go through files
 ///     [`event::notice::SWITCH_FAILED`]; one on a plan without its model runs on the plan's default, filing
 ///     [`event::notice::MODEL_UNAVAILABLE`], its menu then the plan's. Each run CodeConnect started names the account its process runs on
@@ -908,7 +908,39 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     the accounts listing carries its sign-in as [`ws::AgentSignIn`] (`agent_sign_ins`) and its plan, in agy's own
 ///     words, as its Default's facts. Any other agent is refused `bad_request`. A daemon below 51 answers the two
 ///     frames as undecodable and sends no `agent_sign_ins`, so an app offers them only from 51.
-pub const PROTOCOL_MINOR: u32 = 51;
+///   * `52` — **A switch of account moves a run at its next message.**
+///
+///     No message changes shape. Choosing an account ([`ws::ClientMessage::ActivateAccount`]) stops nothing: each live
+///     run of that agent on another account reads [`event::Switching::Waiting`], due to move, and is otherwise exactly
+///     as before, its `menus` and settings, mail and messages those of a live run. A message the person sends it moves
+///     it when it is certainly quiet (no turn running, no message of theirs unanswered, no card, no mail wake
+///     outstanding, no background task of it still running, and nothing it started in its last turn that may still
+///     run): its process is ended, its end typed [`event::SWITCHED_TO`], and the message relaunches it on the account
+///     active then. Otherwise the message goes on the account it is on, and the run stays due; one already on the
+///     active account is no longer due. While a message moves it, a run reads [`event::Switching::Moved`], `live`,
+///     `link` attached, a Codex run's `codex_link` subscribed, and it carries its `menus`; a change or a Stop sent then
+///     waits for the move. A daemon of 48 to 51 ends a run at its first idle point after the choice, and sends a moved
+///     run no `menus`.
+///   * `53` — **A diff lists its files.**
+///
+///     [`ws::ServerMessage::Diff`] gains `files`, every changed file with its status and lines ([`ws::DiffFile`]),
+///     whole even when `unified` is cut, at most [`ws::MAX_DIFF_FILES`] with `files_truncated` saying when there were
+///     more; an untracked file is listed with every line added. [`event::SessionSummary::diff_stat`] is their counted
+///     lines' sum, so it counts untracked files' lines too. A daemon below 53 sends no `files`, and its `diff_stat` counts tracked
+///     files only.
+///   * `54` — **Antigravity's plan limits, by model group.**
+///
+///     `grouped_windows` (in [`ws::AccountFacts`]) carries windows by model group, each naming its group (`group`, in
+///     [`ws::UsageWindow`], the agent's own words: Antigravity's "Gemini Models", "Claude and GPT models"), in
+///     a field of their own so an app below 54, which tells windows apart by their length, never meets two of one
+///     length. Antigravity's Default carries its windows there, read from agy's own `/usage`; a window agy has not
+///     opened yet has `resets_at` 0. A daemon below 54 sends Antigravity no windows.
+///   * `55` — **Antigravity's one window: Gemini's week, a plain window.**
+///
+///     Antigravity's Default carries one window in `windows`, as Claude Code's and Codex's do: the Gemini models'
+///     weekly one, read from agy's own `/usage`; its other windows, and the other group of models, are not sent.
+///     `grouped_windows` and `group` are gone: a daemon of 54 sends them, and an app from 55 reads none.
+pub const PROTOCOL_MINOR: u32 = 55;
 
 #[cfg(test)]
 mod ledger_tests {

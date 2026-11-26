@@ -3,6 +3,32 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.29
+
+- On the Mac, the reply and Start bars stay on one row: when space runs short their words are cut with "…", the
+  computer's name first and the model's last, instead of wrapping onto a second line.
+- The Start pane stands on a slowly drifting field of figures, which lights up around the pointer and ripples where you
+  click.
+- A session whose Claude ended while a command it started was still running takes your next message again, instead of
+  saying it is still ending; that command keeps running.
+- A session's count of changed lines includes the files it added that git doesn't track yet.
+- Settings › Accounts and the reply bar show Antigravity's plan limits, by model group.
+
+## CodeConnect 0.19.28
+
+- On the Mac, choosing another account in Settings › Accounts stops nothing: new sessions use it at once, and an open
+  session moves to it when you next send it a message, going on with the same conversation. A session with something
+  still running (a turn, a command, a subagent or a background job) sends that message on its current account and
+  moves at a later one.
+- A session that moves looks as it did: its conversation shows no "Switched to" line and no restart, and its menus and
+  settings stay as they are. A command it started outside the agent's own tracking (a `cmd &`) stops when it moves.
+- Sessions already open when you update keep their account until they end; new ones use the chosen account.
+
+## CodeConnect 0.19.27
+
+- On the Mac, Set Up shows an agent that isn't installed in grey, not amber, while another agent can start: one
+  agent is enough.
+
 ## CodeConnect 0.19.26
 
 - On the Mac, Antigravity is an agent you can start beside Claude Code and Codex, on a Mac where Google's Antigravity

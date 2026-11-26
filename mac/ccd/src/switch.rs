@@ -1,22 +1,25 @@
-//! Moving a computer's live runs to an agent's active account (decision 306, Slice E; decision 311).
+//! Moving a computer's open runs to an agent's active account (decision 306, Slice E; decision 311).
 //!
-//! Choosing an account (`ActivateAccount`) marks every live run of that agent switching. A marked run moves at its
-//! next idle point, its turn over, no card waiting and no message of the person's unread by the agent or taken and not
-//! yet answered: ccd ends its process and files that end typed as a switch (`switched_to`). The run reads live
-//! and `moved` from then on, its waiting mail kept, and its next message relaunches it, as a message relaunches any
-//! ended run, on the agent's ACTIVE account as of that message, resuming its session with its model, its mode (Bypass
-//! and Full Access included, decision 308) and its effort, with no effort notice. That relaunch going live ends the
-//! switch; one that does not go through leaves the run ended and relaunchable, its own line saying why, `failed`. A run
-//! already on the active account when its idle point comes only loses its mark, so choosing again, or choosing back,
-//! is never a lock; a run already moved stays moved whatever is chosen after, and starts on the account active then.
+//! Choosing an account (`ActivateAccount`) marks every live run of that agent due to move, in the same write that
+//! makes the choice; nothing is stopped then. A due run is simply live: its menus, settings, mail and listing are
+//! as before. It moves when the person next sends it a message, if it is certainly quiet ([`moves`]): its turn over,
+//! no message of the person's still to answer, no card waiting, no wake outstanding, and nothing it started in its
+//! last turn that may still be running. ccd then ends its process and files that end typed as a switch
+//! (`switched_to`), and the message relaunches it, as a message relaunches any ended run, on the agent's ACTIVE
+//! account as of that message, resuming its session with its model, its mode (Bypass and Full Access included,
+//! decision 308) and its effort, with no effort notice. That relaunch going live ends the switch; one that does not
+//! go through leaves the run ended and relaunchable, its own line saying why, `failed`. A run not certainly quiet
+//! takes the message on the account it is on and stays due: any doubt waits. A run already on the active account
+//! when a message comes only loses its mark, so choosing again, or choosing back, is never a lock.
 //!
-//! A moved run offers no settings, as an ended run offers none: they can be changed once its next message has
-//! started it. A Codex run with no link when the choice is made moves when its link
-//! attaches. A second message sent while the
-//! first one's relaunch is starting is refused, as for any ended run. Accepted misses: a message queued inside Codex
-//! itself (`codex queue`) does not survive the app-server's end; a command or helper an agent left running in the
-//! background is stopped when its session moves (ccd sees no background shell, background subagent or Codex
-//! terminal).
+//! The decision and the send are one step under the run's move gate ([`crate::state::Daemon::move_gate`]): a
+//! second message, a mail wake, a settings change or a Stop waits for it. A background task claude runs (a command
+//! run in the background, a subagent) holds the move from its start until its end, as the SDK reports both: a
+//! finished one lets the next message move the run, one that never ends keeps it on its account; a host running from
+//! before ccd filed them keeps it there until that host ends ([`crate::store::UNKNOWN_TASK`]). Accepted misses: a
+//! message queued inside Codex itself (`codex queue`) does not survive the app-server's end; and a process a session
+//! started outside its agent's own tracking (a Claude `cmd &`, a Codex background command from an earlier turn) ends
+//! when the session moves.
 
 use std::sync::Arc;
 
@@ -33,36 +36,25 @@ pub(crate) fn switched_reason(label: &str) -> String {
     format!("{SWITCHED}{label}")
 }
 
-/// Marks `agent`'s live runs and moves each that is idle now.
-pub(crate) async fn begin(daemon: &Arc<Daemon>, agent: &AgentKind) {
-    let uids = match daemon.db.mark_switching(agent.as_str().to_string()).await {
-        Ok(uids) => uids,
-        Err(err) => {
-            crate::log_error!(
-                "could not mark {}'s runs to switch account: {err:#}",
-                agent.as_str()
-            );
-            return;
-        }
-    };
-    for uid in uids {
-        // Codex's link alone knows whether a turn runs.
-        if *agent == AgentKind::Codex {
-            daemon.switch_through_link(&uid).await;
-        } else {
-            at_idle(daemon, &uid).await;
-        }
-    }
-}
-
-/// The run `uid` at a point it may be idle: when it is marked, it moves if idle, or loses its mark if it is on the
-/// active account already.
-pub(crate) async fn at_idle(daemon: &Arc<Daemon>, uid: &str) {
-    if daemon.db.switch_state(uid.to_string()).await.ok().flatten() != Some(Store::SWITCH_WAITING) {
-        return;
+/// What the person's message `request_id` to the run `uid`, read live under its move gate, does with a switch: `false`, it is
+/// sent as any message is; `true`, its process is being ended by its switch ([`Store::SWITCH_MOVED`]) and the
+/// message relaunches it once it has ([`ended_for_move`]). A run due to move moves only when certainly quiet
+/// ([`crate::store::Store::certainly_quiet`], a card, `turn_running`, a Codex link's own word on its turn, and a
+/// Claude link's replay read to its end, [`Daemon::replaying`]); a
+/// run on the active account already loses its mark and is not moved. A run already moving goes on moving.
+pub(crate) async fn moves(
+    daemon: &Arc<Daemon>,
+    uid: &str,
+    request_id: &str,
+    turn_running: bool,
+) -> bool {
+    match daemon.db.switch_state(uid.to_string()).await {
+        Ok(Some(Store::SWITCH_WAITING)) => {}
+        Ok(Some(Store::SWITCH_MOVED)) => return true,
+        _ => return false,
     }
     let Ok(Some(row)) = daemon.db.get_session(uid.to_string()).await else {
-        return;
+        return false;
     };
     let active = daemon
         .store
@@ -78,16 +70,111 @@ pub(crate) async fn at_idle(daemon: &Arc<Daemon>, uid: &str) {
         .map(|account| account.id);
     if active == current {
         set(daemon, uid, None).await;
-        return;
+        return false;
     }
-    if !idle(daemon, uid, &row.agent).await {
-        return;
+    if turn_running
+        || daemon.replaying(uid).await
+        || !daemon
+            .db
+            .certainly_quiet(uid.to_string(), request_id.to_string())
+            .await
+            .unwrap_or(false)
+        || daemon.has_pending_card(uid).await
+    {
+        return false;
     }
     // Ended by its switch from here: the end its process makes is filed as switched, any other end (a crash) as
     // what it is. The run's own link stops it as an End run would, the run left live.
     set(daemon, uid, Some(Store::SWITCH_MOVED)).await;
     if !daemon.stop_through_link(uid).await {
         set(daemon, uid, Some(Store::SWITCH_WAITING)).await;
+        return false;
+    }
+    true
+}
+
+/// The run `uid`, live on the account it records: due to move when that is not its agent's active account (a choice
+/// made while it was starting or moving, which marked nothing), or when `doubt`; otherwise its switch is over.
+pub(crate) async fn settle(daemon: &Daemon, uid: &str, doubt: bool) {
+    let Ok(Some(row)) = daemon.db.get_session(uid.to_string()).await else {
+        return;
+    };
+    let active = daemon
+        .store
+        .active_account(row.agent.as_str())
+        .ok()
+        .flatten()
+        .map(|account| account.id);
+    let current = daemon
+        .store
+        .run_account(uid)
+        .ok()
+        .flatten()
+        .map(|account| account.id);
+    let due = (doubt || active != current).then_some(Store::SWITCH_WAITING);
+    set(daemon, uid, due).await;
+}
+
+/// How long a process its move stopped has to end before it is stopped as End run stops one: with the ladder's own
+/// grace after it, inside the message's [`crate::claude_host::RELAUNCH_WAIT`], with time left to start it again.
+const MOVE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often [`ended_for_move`] looks again.
+const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Whether the run `uid`, its process stopped by its switch, has ended by `deadline`: its row `exited` and its
+/// recorded host or app-server gone with no member left in its group, as a message's relaunch requires. What its
+/// group still holds once that host is gone (a process started outside the agent's own tracking) is stopped as a dead
+/// host's group is ([`crate::claude_host::stop_group`]), once. A process still running past [`MOVE_GRACE`] is
+/// stopped as End run stops one ([`crate::claude_host::escalate_stop`]): its group, then its end filed; only the
+/// process this wait first found live, never one started since. A run with no host recorded has none to wait for, nor
+/// one whose host was recorded before this Mac last started: its group's number names nothing of the run now.
+pub(crate) async fn ended_for_move(
+    daemon: &Arc<Daemon>,
+    uid: &str,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let escalate = tokio::time::Instant::now() + MOVE_GRACE;
+    let mut stopping = None;
+    let mut laddered = false;
+    loop {
+        let watched = daemon.db.watched_host(uid.to_string()).await;
+        // No host recorded (a relaunch begun before a restart cleared it): no process of its to wait for.
+        if matches!(watched, Ok(None)) {
+            return true;
+        }
+        if let Ok(Some(watch)) = watched {
+            let gone = protocol::proc_identity::liveness(&watch.host)
+                == protocol::proc_identity::Liveness::Gone;
+            if watch.lifecycle == protocol::event::Lifecycle::Exited && gone {
+                let earlier_boot = matches!(
+                    (watch.boot, protocol::proc_identity::boot_identity()),
+                    (Some(then), Some(now)) if then != now
+                );
+                if earlier_boot || !protocol::proc_identity::group_has_members(watch.host.pid) {
+                    return true;
+                }
+                if let (false, Some(boot)) = (laddered, watch.boot) {
+                    laddered = true;
+                    crate::claude_host::stop_group(watch.host, boot).await;
+                    continue;
+                }
+            }
+            if watch.lifecycle == protocol::event::Lifecycle::Live
+                && *stopping.get_or_insert(watch.host) == watch.host
+                && tokio::time::Instant::now() >= escalate
+            {
+                if let (false, false, Some(boot)) = (gone, laddered, watch.boot) {
+                    laddered = true;
+                    crate::claude_host::stop_group(watch.host, boot).await;
+                }
+                crate::claude_host::end_if_host_gone(daemon, uid).await;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(POLL).await;
     }
 }
 
@@ -126,16 +213,9 @@ pub(crate) async fn ended(daemon: &Arc<Daemon>, uid: &str) {
     }
 }
 
-/// The relaunch by the next message of the run `uid`, marked switching, went live on the new account (`Ok`), or
-/// did not go through (`Err`, why): its mark goes, or becomes `failed` with a line of its own saying why.
-pub(crate) async fn relaunched(daemon: &Arc<Daemon>, uid: &str, outcome: Result<(), String>) {
-    let why = match outcome {
-        Ok(()) => {
-            set(daemon, uid, None).await;
-            return;
-        }
-        Err(why) => why,
-    };
+/// The relaunch by the message of the run `uid`, marked switching, did not go through (`why`): its mark becomes
+/// `failed`, with a line of its own saying why. One that goes live is [`settle`]d.
+pub(crate) async fn relaunch_failed(daemon: &Arc<Daemon>, uid: &str, why: String) {
     set(daemon, uid, Some(Store::SWITCH_FAILED)).await;
     crate::log_warn!("{uid}: its switch's start failed: {why}");
     let agent = match daemon.db.get_session(uid.to_string()).await {
@@ -169,30 +249,6 @@ pub(crate) async fn relaunched(daemon: &Arc<Daemon>, uid: &str, outcome: Result<
     if let Err(err) = daemon.ingest(notice).await {
         crate::log_error!("{uid}: could not file why its switch failed: {err:#}");
     }
-}
-
-/// No turn running, no card waiting, and no message of the person's the agent has not read yet, or has taken and not
-/// yet answered. A Codex run's turn is its link's to know: it asks only once none runs
-/// (`LinkCommand::SwitchIfIdle`, a turn's end).
-async fn idle(daemon: &Arc<Daemon>, uid: &str, agent: &AgentKind) -> bool {
-    (*agent == AgentKind::Codex
-        || !(daemon
-            .db
-            .turn_running(uid.to_string())
-            .await
-            .unwrap_or(true)
-            || daemon
-                .db
-                .message_awaits_turn(uid.to_string())
-                .await
-                .unwrap_or(true)))
-        && !daemon.has_pending_card(uid).await
-        && daemon
-            .db
-            .host_sends(uid.to_string())
-            .await
-            .map(|sends| sends.is_empty())
-            .unwrap_or(false)
 }
 
 /// A switched run's end: the account it goes on, its agent's active one (Default for none), typed
@@ -264,8 +320,9 @@ pub(crate) mod window {
         (stop, recording)
     }
 
-    /// `frames` hold exactly one end, the switch's, typed with `label`, and every listing among them reads the run
-    /// live; written to `fixtures/accounts/<name>` when `CC_RECORD_SWITCH` is set.
+    /// `frames` hold exactly one end, the switch's, typed with `label`, and no link let go; every listing among them
+    /// reads the run live, linked and offering its settings, as an unswitched run's would; written to
+    /// `fixtures/accounts/<name>` when `CC_RECORD_SWITCH` is set.
     pub(crate) fn check(frames: &[serde_json::Value], label: &str, name: &str) {
         let ends: Vec<_> = frames
             .iter()
@@ -277,17 +334,38 @@ pub(crate) mod window {
             label,
             "{ends:?}"
         );
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| frame["event"]["kind"] == "link_state"
+                    && frame["event"]["payload"]["link"] == "detached"),
+            "no link let go: {frames:#?}"
+        );
         for listing in frames.iter().filter(|frame| frame["type"] == "sessions") {
-            assert_eq!(
-                listing["sessions"][0]["lifecycle"], "live",
-                "never listed ended: {listing}"
+            let run = &listing["sessions"][0];
+            assert_eq!(run["lifecycle"], "live", "never listed ended: {listing}");
+            assert_eq!(run["link"], "attached", "never listed unlinked: {listing}");
+            assert!(
+                run.get("menus").is_some(),
+                "its settings offered: {listing}"
             );
+            if run["agent"] == "codex" {
+                assert_eq!(run["codex_link"], "subscribed", "{listing}");
+            }
         }
         keep(frames, name);
     }
 
-    /// `frames` written to `fixtures/accounts/<name>` when `CC_RECORD_SWITCH` is set.
+    /// `frames`, which file no start a timeline draws on any page (none names why it started), written to
+    /// `fixtures/accounts/<name>` when `CC_RECORD_SWITCH` is set.
     pub(crate) fn keep(frames: &[serde_json::Value], name: &str) {
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| frame["event"]["kind"] == "session_start"
+                    && frame["event"]["payload"].get("source").is_some()),
+            "a switch's start draws nothing: {frames:#?}"
+        );
         if std::env::var_os("CC_RECORD_SWITCH").is_some() {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../fixtures/accounts")

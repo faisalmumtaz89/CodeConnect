@@ -423,6 +423,8 @@ where
                         truncated: false,
                         captured_at: protocol::time::now_rfc3339(),
                         note: None,
+                        files: None,
+                        files_truncated: false,
                     },
                 )
                 .await?

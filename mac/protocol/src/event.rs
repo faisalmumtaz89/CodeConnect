@@ -511,9 +511,9 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Fact>,
     /// What an app may set this run to (minor 39): a live Claude run CodeConnect started,
-    /// once its start is answered, or a live Codex one (minor 43). Omitted for any other run,
-    /// before then, once it has ended, and from an older daemon; a client offers the model,
-    /// effort and mode controls only where it is.
+    /// once its start is answered, or a live Codex one (minor 43), and one its switch of account is moving
+    /// ([`Switching::Moved`], minor 52). Omitted for any other run, before then, once it has ended, and from an
+    /// older daemon; a client offers the model, effort and mode controls only where it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menus: Option<RunMenus>,
     /// The name the apps give `model` on a run CodeConnect started that is sent no `menus`
@@ -530,9 +530,12 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
     /// Lines added and removed in `cwd` against `HEAD` (minor 31), read at the
-    /// same moments as `git_branch`. Tracked files only: a new file git does not
-    /// track yet is not counted. Absent outside a repository, before the first
-    /// read, and from any older daemon.
+    /// same moments as `git_branch`: the sum of a `diff`'s `files`' counted lines,
+    /// so it is the total the open diff shows. A new file git does not track yet
+    /// counts every line (minor 53; tracked files only before); a file with no count
+    /// (binary, or past the daemon's reading budget) adds nothing. Absent outside a
+    /// repository, before the first read, when there were more untracked files than
+    /// the daemon lists at once, and from any older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_stat: Option<DiffStat>,
     /// The person's next message relaunches this ended run (minor 42): a run CodeConnect
@@ -542,7 +545,7 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub relaunchable: bool,
     /// The run's move to its agent's active account (minor 48); absent when it has none. A moving run reads live
-    /// throughout, its `lifecycle` aside, until its next message is running on the new account.
+    /// throughout, its `lifecycle` aside, until a message of the person's has started it on the new account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switching: Option<Switching>,
     /// The account the run's process runs on, as recorded at its start or its newest relaunch (minor 48): not its
@@ -565,9 +568,11 @@ pub struct RunAccount {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Switching {
-    /// Its turn, a card or a message unread by the agent is still going; it moves once idle.
+    /// Due to move: the person's next message moves it if it is certainly quiet, and otherwise goes on the account
+    /// it is on (minor 52). A daemon below 52 moves it at its first idle point instead.
     Waiting,
-    /// Its process has ended at an idle point: its next message starts it on the new account.
+    /// A message of the person's is ending its process to start it on the new account with that message (minor
+    /// 52); below 52, its process ended at an idle point and its next message starts it on the new account.
     Moved,
     /// Its start on the new account did not go through (that account signed out, a refusal): it reads as the
     /// relaunchable end it is, its own line says why, and the person's attention is needed.

@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -147,9 +148,10 @@ impl AccountEnv {
     /// home (`CODEX_HOME` in `environment`, else `~/.codex`) that it lacks is linked into it before each launch, so a
     /// start on the account has the person's config, trust, skills and threads, and a thread one account started
     /// resumes on another (measured on codex 0.170.0, 2026-11-22: linked homes share the state db and `sessions/`).
-    /// Accepted misses: a `CODEX_HOME` the person sets only in a shell file is not seen here (the home linked is the
-    /// environment's, else `~/.codex`); and an entry codex makes in the account's home before the person's home has
-    /// it stays the account's own.
+    /// The person's `sessions/` is made (0700) when it is not there yet, so an account's first thread is recorded in
+    /// it. Accepted misses: a `CODEX_HOME` the person sets only in a shell file is not seen here (the home linked is
+    /// the environment's, else `~/.codex`); and any other entry codex makes in the account's home before the person's
+    /// home has it stays the account's own.
     pub(crate) fn link_shared(&self, environment: &HashMap<OsString, OsString>) {
         if self.variable != "CODEX_HOME" {
             return;
@@ -161,6 +163,13 @@ impl AccountEnv {
                 None => return,
             },
         };
+        if let Err(err) = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(own.join("sessions"))
+        {
+            crate::log_error!("could not make the Codex home's sessions folder: {err}");
+        }
         let Ok(entries) = std::fs::read_dir(&own) else {
             return;
         };
@@ -434,7 +443,6 @@ impl Facts {
     }
 
     /// What is held for `key` is as old as [`FACTS_FRESH`], so the next refresh reads it again.
-    #[cfg(test)]
     pub(crate) fn age(&self, key: &str) {
         if let Some((_, at)) = self.known.lock().unwrap().get_mut(key) {
             *at = at.checked_sub(FACTS_FRESH).unwrap();
@@ -1211,11 +1219,21 @@ pub(crate) async fn remove_with(
     match store.account_in_use(&account.id) {
         Ok(false) => {}
         Ok(true) => {
-            return refused_as(
-                request_id,
-                "accounts_in_use",
-                "Sessions are running on this account. Choose another account first.".into(),
-            )
+            let chosen = store
+                .active_account(&account.agent)
+                .ok()
+                .flatten()
+                .is_some_and(|active| active.id == account.id);
+            // Once another account is chosen, its open sessions move with their next message ([`crate::switch`]).
+            let words = if chosen {
+                "Sessions are running on this account. Choose another account first.".to_string()
+            } else {
+                format!(
+                    "Open sessions started on {} move with their next message; end them or send to them first.",
+                    account.label
+                )
+            };
+            return refused_as(request_id, "accounts_in_use", words);
         }
         Err(err) => return unavailable(request_id, "read the account's sessions", err),
     }
@@ -1856,7 +1874,7 @@ pub(crate) mod tests {
                 vec![protocol::ws::UsageWindow {
                     used_percent: 42,
                     window_minutes: 7 * 24 * 60,
-                    resets_at: 1_795_928_400
+                    resets_at: 1_795_928_400,
                 }]
             ))
         );
@@ -2238,11 +2256,19 @@ done
 
     /// Antigravity's sign-in as each listing carries it (S2), built as ccd builds one (its sign-in slot's mark, then
     /// what is held): signed in with agy's tier "Google AI Pro", signed in with no tier named, signed out, and signing
-    /// in. Its read time is fixed, so the frames are the same at every build.
+    /// in; and signed in with its plan's limits, read by agy's own /usage as ccd reads them (records shaped as agy 1.5.15
+    /// prints them; of them, its Gemini week, partly used). Its read time is fixed, so the frames are the same at every
+    /// build.
     fn antigravity_sign_in_frames() -> serde_json::Value {
         let store = crate::store::Store::open_temp("ccd-agy-frames");
         let _db = store.temp_db();
         let key = super::default_key(&protocol::agent::AgentKind::Antigravity);
+        let usage = crate::start_session::agy_usage_windows(
+            "Gemini Models\tWeekly Limit Remaining\t80%\t2026-12-03T00:47:31Z\n\
+             Gemini Models\tFive Hour Limit Remaining\t45%\t2026-11-26T05:47:31Z\n\
+             Claude and GPT models\tWeekly Limit Remaining\t100%\t1970-01-01T00:00:00Z\n\
+             Claude and GPT models\tFive Hour Limit Remaining\t100%\t1970-01-01T00:00:00Z\n",
+        );
         let frame = |signed_in: Option<bool>, plan: Option<&str>, going: bool| {
             let facts = super::Facts::default();
             facts.keep_agent_signed(&key, signed_in);
@@ -2251,7 +2277,11 @@ done
                 (signed_in == Some(true)).then(|| protocol::ws::AccountFacts {
                     email: None,
                     plan: plan.map(str::to_string),
-                    windows: Vec::new(),
+                    windows: if plan == Some("Google AI Ultra") {
+                        usage.clone()
+                    } else {
+                        Vec::new()
+                    },
                     limits_available: None,
                     read_at: "2026-11-25T12:00:00.000Z".into(),
                 }),
@@ -2268,6 +2298,7 @@ done
             "signed_in_no_tier": frame(Some(true), None, false),
             "signed_out": frame(Some(false), None, false),
             "signing_in": frame(Some(false), None, true),
+            "signed_in_usage": frame(Some(true), Some("Google AI Ultra"), false),
         })
     }
 
@@ -2742,6 +2773,34 @@ done
                 own.join(name)
             );
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **An account's first Codex thread is the person's too** (306): with no Codex home of the person's yet, an
+    /// account's launch links a `sessions/` made in the person's home, so the thread its codex records there resumes
+    /// from any other account.
+    #[test]
+    fn an_accounts_first_codex_thread_is_the_persons_too() {
+        let root = std::env::temp_dir().join(format!(
+            "ccs-first.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let own = root.join("own-codex");
+        let environment: HashMap<OsString, OsString> =
+            HashMap::from([(OsString::from("CODEX_HOME"), own.clone().into_os_string())]);
+        let account = crate::store::Account {
+            id: protocol::uid::new().unwrap(),
+            agent: "codex".into(),
+            label: "A".into(),
+        };
+        let a = super::AccountEnv::for_account(&root, &account)
+            .unwrap()
+            .unwrap();
+        a.link_shared(&environment);
+        assert_eq!(
+            std::fs::read_link(a.folder().join("sessions")).ok(),
+            Some(own.join("sessions"))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
