@@ -47,8 +47,7 @@ struct SettingsList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Clear of the traffic lights.
-            Color.clear.frame(height: 52)
+            // Beside the traffic lights, where the list's toggle stands over the agents.
             Button(action: close) {
                 HStack(spacing: 7) {
                     Image(systemName: "chevron.left").font(.system(size: 10.5, weight: .semibold))
@@ -64,8 +63,9 @@ struct SettingsList: View {
             .help("Back to your agents")
             .accessibilityLabel("Back to your agents")
             .accessibilityIdentifier("settings.back")
-            .padding(.horizontal, 8)
-            .padding(.bottom, 6)
+            .padding(.leading, 84)
+            .padding(.trailing, 8)
+            .frame(height: 52)
             VStack(alignment: .leading, spacing: 1) {
                 ForEach(SettingsSection.allCases) { each in
                     if let group = each.group, group != previous(each)?.group {
