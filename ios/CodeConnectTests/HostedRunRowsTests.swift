@@ -226,6 +226,7 @@ final class HostedRunRowsTests: XCTestCase {
             var event = try XCTUnwrap(
                 try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(cleared)).objectValue)
             event["payload"] = .object(payload)
+            event["source"] = .string("daemon")
             return try JSONDecoder().decode(Event.self, from: Data(JSONValue.object(event).canonicalJSONString.utf8))
         }
         let committed = try notice([
@@ -237,7 +238,9 @@ final class HostedRunRowsTests: XCTestCase {
             shape(TimelineBuilder.drawn(shown.timeline).filter { $0.seq == 4 }), ["notice:You committed 2 files · 9f2c41e"])
         let bare = try notice(["notification_type": .string("committed"), "message": .string("Add a and b")])
         let plain = await state(wire.filter { $0.seq < 4 } + [bare])
-        XCTAssertEqual(TimelineBuilder.drawn(plain.timeline).filter { $0.seq == 4 }.count, 1, "still one row")
+        XCTAssertEqual(
+            shape(TimelineBuilder.drawn(plain.timeline).filter { $0.seq == 4 }), ["notice:Committed"],
+            "the generic row, never a commit of no files")
     }
 
     /// Any other command an app sends draws as a terminal run's invocation does, a command row, and starts its turn:
