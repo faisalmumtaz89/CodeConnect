@@ -73,21 +73,8 @@ struct MainWindow: View {
                 // With no run open, the start form is beside the list.
                 let showsStart = open == nil
                 if showsList {
-                    FleetList(
-                        scope: $scope, filter: $filter, opened: $opened, newRun: { adding = .agent },
-                        addComputer: { adding = .computer }, openSettings: { settings = .general })
-                        // Beside an open run, or the start form, the list is the grid's 256; alone, it fills the window.
-                        .frame(width: showsRun || showsStart ? 256 : nil)
-                        .environment(\.headerClearance, clearance(first: true, last: !showsRun && !showsStart))
-                        // Its computer menu opens over the pane beside it.
-                        .zIndex(1)
-                        // The arrows open a run; Return then puts the cursor in its reply box, which is there only while
-                        // the run's changes don't stand in its place.
-                        .onKeyPress(.return) {
-                            guard opened != nil, !changesInPlace else { return .ignored }
-                            replyFocus += 1
-                            return .handled
-                        }
+                    // Its computer menu opens over the pane beside it.
+                    runList(besideAPane: showsRun || showsStart).zIndex(1)
                 }
                 if let open, let model, showsRun {
                     if showsList { Rectangle().fill(Theme.hairline).frame(width: 1) }
@@ -291,6 +278,23 @@ struct MainWindow: View {
         Binding(
             get: { changesOpen.contains(run) },
             set: { if $0 { changesOpen.insert(run) } else { changesOpen.remove(run) } })
+    }
+
+    /// The run list: beside an open run, or the start form, the grid's 256; alone, it fills the window. The arrows open
+    /// a run; Return then puts the cursor in its reply box, which is there only while the run's changes don't stand in
+    /// its place. Only a plain Return: ⌘↩ is the open run's own (a card's Allow).
+    private func runList(besideAPane: Bool) -> some View {
+        FleetList(
+            scope: $scope, filter: $filter, opened: $opened, newRun: { adding = .agent },
+            addComputer: { adding = .computer }, openSettings: { settings = .general }
+        )
+        .frame(width: besideAPane ? 256 : nil)
+        .environment(\.headerClearance, clearance(first: true, last: !besideAPane))
+        .onKeyPress(keys: [.return]) { press in
+            guard press.modifiers.isEmpty, opened != nil, !changesInPlace else { return .ignored }
+            replyFocus += 1
+            return .handled
+        }
     }
 
     /// A refused computer paired again: the Add Computer sheet, its address already in the code form.
