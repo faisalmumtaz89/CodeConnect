@@ -110,6 +110,24 @@ public enum DiffFailure: Sendable, Equatable {
     }
 }
 
+/// Where a run's action from its Changes panel stands (`AppModel.gitActionState(for:)`): one at a time, a commit or a
+/// pull request.
+public enum GitActionState: Sendable, Equatable {
+    case idle
+    case working
+    /// The computer opened this pull request, or found it open: kept until the run's repository, read again, has it (GitHub
+    /// is asked at most every 30 s).
+    case opened(number: UInt64, url: String)
+    /// The computer did not do `step`, or may not have: why, in the app's words.
+    case refused(String, step: GitStep)
+}
+
+/// The step a Changes panel action takes.
+public enum GitStep: Sendable, Equatable {
+    case commit
+    case pullRequest
+}
+
 /// The state of one session's on-demand diff.
 public enum DiffState: Sendable {
     case idle
@@ -262,6 +280,11 @@ public final class AppModel {
     public private(set) var now = Date()
     /// One diff per session, keyed like `states`, fetched only when asked for.
     private(set) var diffs: [String: DiffState] = [:]
+    /// Each run's repository as its computer last read it (`runGit(for:)`), and the runs a read is on its way for.
+    private(set) var runGits: [String: RunGitReply] = [:]
+    private var runGitsReading: Set<String> = []
+    /// Each run's action from its Changes panel: on its way, or what the computer said when it did not do it.
+    private(set) var gitActions: [String: GitActionState] = [:]
 
     /// How far back to backfill a session we have never cached. The daemon pages
     /// at 500; this keeps a cold open bounded without hiding recent work.
@@ -1895,6 +1918,8 @@ public final class AppModel {
         answerAttempts = [:]
         answersInFlight = []
         diffs = [:]
+        runGits = [:]
+        gitActions = [:]
         // **The mutation controllers go with the fleet.** They were left
         // behind, so a reconnect that re-created a session under the same key
         // inherited the previous fleet's in-flight ids and settled banners —
@@ -2252,6 +2277,9 @@ public final class AppModel {
         departedMarks.removeAll()
         if diffs.contains(where: { states[$0.key] == nil }) {
             diffs = diffs.filter { states[$0.key] != nil }
+        }
+        if runGits.contains(where: { states[$0.key] == nil }) {
+            runGits = runGits.filter { states[$0.key] != nil }
         }
         // Each assigned only when it differs: `@Observable` fires on the
         // assignment, and an equal list redraws every row for nothing.
@@ -3105,6 +3133,8 @@ public final class AppModel {
         shownSessions[key] = nil
         if departedMarks.remove(key) != nil { ReviewMarks.forget(sessionKey: key) }
         diffs[key] = nil
+        runGits[key] = nil
+        gitActions[key] = nil
         catchUp?.list?.removeAll { $0.sessionKey == key }
         catchUp?.progressed = true
         #if DEBUG
@@ -4283,10 +4313,93 @@ public final class AppModel {
 
     public func diffState(for key: String) -> DiffState { diffs[key] ?? .idle }
 
+    /// The run's repository as its computer last read it for its Changes panel (minor 56): nil before a read, from a
+    /// computer that does not read repositories, and in the sample fleet and fixtures, which have none.
+    public func runGit(for key: String) -> RunGitReply? { runGits[key] }
+
+    /// The computer commits a run's changes from its Changes panel (minor 59).
+    public var commitsChanges: Bool { connection.capabilities?.commitsChanges == true }
+
+    /// The computer opens a pull request from a run's branch (minor 61).
+    public var opensPullRequests: Bool { connection.capabilities?.opensPullRequests == true }
+
+    /// Where the run's action from its Changes panel stands.
+    public func gitActionState(for key: String) -> GitActionState { gitActions[key] ?? .idle }
+
+    /// Commits every change in the run's folder with `message`. Each is its own request: once a commit has landed,
+    /// another finds nothing to commit.
+    public func commit(key: String, message: String) {
+        perform(key: key, step: .commit) { [connection] in
+            try await connection.commit(sessionUID: key, message: message, requestID: UUID().uuidString)
+        }
+    }
+
+    /// Opens a pull request from the run's branch, pushed first, into the repository its `run_git` names. Each press is
+    /// its own request: once one is open, the computer answers with it.
+    public func createPullRequest(key: String) {
+        perform(key: key, step: .pullRequest) { [connection] in
+            try await connection.createPullRequest(sessionUID: key, requestID: UUID().uuidString)
+        }
+    }
+
+    /// One action of the run's Changes panel, unless one is on its way. Done, the panel's diff and repository are read
+    /// again, and they show what the action made; refused, the computer's reason is kept, in the app's words, until the
+    /// step it was for has passed.
+    private func perform(key: String, step: GitStep, _ request: @escaping () async throws -> GitActionResult) {
+        guard gitActions[key] != .working else { return }
+        gitActions[key] = .working
+        Task { [weak self] in
+            guard let self else { return }
+            let after: GitActionState
+            do {
+                switch try await request() {
+                case .done: after = .idle
+                case .pullRequest(let number, let url): after = .opened(number: number, url: url)
+                case .refused(let code, let detail):
+                    after = .refused(ChangesWords.actionRefused(code: code, detail: detail, step: step), step: step)
+                case .unknown: after = .refused(ChangesWords.actionUnknown, step: step)
+                }
+            } catch {
+                after = .refused(ChangesWords.actionUnknown, step: step)
+            }
+            self.gitActions[key] = after
+            // A read already on its way waits behind the action on the computer, so it shows the action's result.
+            if self.diffs[key]?.isLoading != true { self.loadDiff(key: key, force: true) }
+            self.loadRunGit(key: key)
+        }
+    }
+
+    /// Reads the run's repository again, unless a read is on its way. A failed read keeps the last one: the panel's
+    /// diff says what became of the link, in its own words, so this read adds no second account of it.
+    public func loadRunGit(key: String) {
+        guard !sampleFleetActive, !fixturesActive, connection.capabilities?.readsRunGit == true,
+            connection.phase.isConnected, !runGitsReading.contains(key)
+        else { return }
+        runGitsReading.insert(key)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.runGitsReading.remove(key) }
+            guard let reply = try? await self.connection.runGit(session: key) else { return }
+            self.runGits[key] = reply
+            // A clean repository ends what a refused commit said: the next changes are another commit.
+            // What the panel holds has passed once the repository shows it: a whole clean repository ends a commit's
+            // refusal; a pull request ends a pull request's refusal, and the one just opened.
+            if let git = reply.git {
+                let passed =
+                    switch self.gitActions[key] {
+                    case .refused(_, .commit): git.changed.files == 0 && git.changed.complete
+                    case .refused(_, .pullRequest), .opened: git.pullRequest != nil
+                    default: false
+                    }
+                if passed { self.gitActions[key] = nil }
+            }
+        }
+    }
+
     /// Ask the daemon for this run's working-tree diff.
     ///
-    /// On demand only, and never automatically refreshed: a diff is a thing you
-    /// ask for when you are about to read it. The result is stamped with the
+    /// On demand only: a diff is a thing you ask for when you are about to read
+    /// it, or again while a panel that shows it follows its run. The result is stamped with the
     /// daemon's own `captured_at` so the view can say how old what you are
     /// reading is, rather than implying it is live.
     public func loadDiff(key: String, force: Bool = false) {
@@ -4295,6 +4408,8 @@ public final class AppModel {
         // to ask, and falling through would overwrite the loaded diff with a
         // failure written in the link's vocabulary.
         if sampleFleetActive { return }
+        // A fixture's preloaded diff likewise has no daemon to read it again.
+        if fixturesActive, case .loaded = diffs[key] { return }
         if !force, diffs[key]?.isLoading == true { return }
         guard connection.phase.isConnected else {
             // The app's own sentence about its own link. Tagged `.app` so the

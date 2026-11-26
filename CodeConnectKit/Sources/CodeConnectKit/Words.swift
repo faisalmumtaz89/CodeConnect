@@ -245,6 +245,102 @@ public enum ChangesWords {
     public static func committed(files count: Int, sha: String) -> String {
         "You committed \(files(count)) · \(sha.prefix(7))"
     }
+    /// The Changes panel's line under its state while it can commit, or why it cannot yet.
+    public static let commitReady = "The run has stopped, so you can commit what it left"
+    public static let commitWaitsWorking = "Agent is working · actions wait until it stops"
+    public static let commitWaitsCard = "Waiting on you · actions wait until the agent stops"
+    public static let commitWaitsMerge = "A merge has unresolved files · resolve them to commit"
+    public static let commitWaitsBranch = "No branch is checked out · check one out to commit"
+    /// Where Create PR opens its pull request: the base branch, when the computer knows it, on the repository it opens
+    /// it in (a fork's parent when there is one).
+    public static func pullRequestTarget(repo: String, base: String?) -> String {
+        base.map { "Pushes the branch, then opens a PR into \($0) on \(repo)" }
+            ?? "Pushes the branch, then opens a PR into \(repo)"
+    }
+    /// Why the computer did not do `step` (commit or open a pull request), by its code (`git_refusal`), with git's or
+    /// gh's own words after where it gave them.
+    public static func actionRefused(code: String, detail: String?, step: GitStep) -> String {
+        let reason: String
+        switch (code, step) {
+        case ("busy", .pullRequest): reason = "A run in this folder is working or waiting for you, so nothing was pushed."
+        case ("unmerged", .pullRequest): reason = "A merge has unresolved files, so nothing was pushed."
+        case ("git_failed", .pullRequest): reason = "Git could not push the branch, so no PR was opened."
+        case ("timeout", .pullRequest): reason = "Git took too long; the branch may or may not have been pushed, and no PR was opened."
+        default: return actionRefused(code: code, detail: detail)
+        }
+        guard let detail, !detail.isEmpty else { return reason }
+        return "\(reason) \(detail)"
+    }
+
+    /// Why the computer did not act, by its code, in the words every step shares.
+    static func actionRefused(code: String, detail: String?) -> String {
+        let reason: String
+        switch code {
+        case "busy": reason = "A run in this folder is working or waiting for you, so nothing was committed."
+        case "unmerged": reason = "A merge has unresolved files, so nothing was committed."
+        case "nothing_to_commit": reason = "Nothing has changed since the last commit."
+        case "detached": reason = "No branch is checked out, so nothing was done."
+        case "not_a_repository": reason = "This run’s folder is not in a git repository."
+        case "unknown_session": reason = "This run is no longer on its computer."
+        case "bad_request": reason = "The computer could not take this request, so nothing was done."
+        case "git_failed": reason = "Git did not commit."
+        case "timeout": reason = "Git took too long, so nothing was committed."
+        case "gh_missing": reason = "This computer has no gh, so no PR was opened."
+        case "gh_signed_out": reason = "This computer’s gh isn’t signed in to GitHub, so no PR was opened."
+        case "github_unavailable": reason = "GitHub could not be reached, so nothing was pushed."
+        case "no_github_remote": reason = "No remote of this repository is on GitHub, so no PR was opened."
+        case "on_base_branch": reason = "The branch checked out is the base branch itself, so no PR was opened."
+        case "base_unknown": reason = "No base branch is known for this repository, so nothing was pushed."
+        case "nothing_to_propose": reason = "The branch has no commits its base lacks, so no PR was opened."
+        case "create_failed": reason = "GitHub did not open the PR."
+        default: return actionUnknown
+        }
+        guard let detail, !detail.isEmpty else { return reason }
+        return "\(reason) \(detail)"
+    }
+    /// Why Create PR waits, before it is pressed, for what the computer would refuse it for.
+    public static let pullRequestWaitsBase = "This is the base branch · a PR comes from another branch"
+    public static let pullRequestWaitsSignIn = "gh isn’t signed in to GitHub on this computer · sign in to open a PR"
+    public static let pullRequestWaitsGh = "This computer has no gh · install it to open a PR"
+    /// An action whose outcome is not known: the panel's repository, read again, shows what git and GitHub have now.
+    public static let actionUnknown = "It is not known whether it was done; the panel below shows what git and GitHub have now."
+    /// A Changes panel's state line from its run's repository: an unresolved merge, the files changed (at least so
+    /// many when the computer could not count them all), and the commits not on the base, pushed or not, or nothing
+    /// committed yet. Only what the computer read; nothing from an agent's words.
+    public static func state(_ git: RunGit) -> String {
+        var parts: [String] = []
+        // A branch's pull request speaks for its commits and its push.
+        if let pr = git.pullRequest {
+            switch pr.state {
+            case .open: parts.append("PR #\(pr.number) · Open")
+            case .merged: parts.append("PR #\(pr.number) · Merged into \(pr.base)")
+            case .closed: parts.append("PR #\(pr.number) · Closed")
+            case .unknown: parts.append("PR #\(pr.number)")
+            }
+        }
+        if git.unmerged { parts.append("Merge conflicts") }
+        let changed = Int(git.changed.files)
+        if changed > 0 {
+            parts.append(git.changed.complete ? "\(files(changed)) changed" : "At least \(files(changed)) changed")
+        } else if !git.changed.complete {
+            parts.append("Changes not all counted")
+        }
+        if let pr = git.pullRequest {
+            // Commits made since an open pull request was opened, not yet on its branch (a merged one's branch is
+            // often deleted, which is no unpushed work).
+            if pr.state == .open, !git.pushed, git.branch != nil { parts.append("not pushed") }
+            return parts.joined(separator: " · ")
+        }
+        if let ahead = git.ahead, ahead > 0 {
+            parts.append(ahead == 1 ? "1 commit" : "\(ahead) commits")
+            if git.branch != nil { parts.append(git.pushed ? "pushed" : "not pushed") }
+        } else if git.ahead == 0 || git.headOID == nil, changed > 0 {
+            parts.append("nothing committed")
+        }
+        // Clean, with no base to count commits against: nothing more is known than that nothing is uncommitted.
+        if parts.isEmpty { return git.ahead == nil && git.headOID != nil ? "No uncommitted changes" : "No changes" }
+        return parts.joined(separator: " · ")
+    }
     public static func showMoreLines(_ count: Int) -> String { "Show \(count) more line\(count == 1 ? "" : "s")" }
     public static func unchangedLines(_ count: Int) -> String {
         count == 1 ? "1 unchanged line" : "\(count) unchanged lines"

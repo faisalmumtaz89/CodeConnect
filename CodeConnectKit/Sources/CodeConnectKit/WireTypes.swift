@@ -89,6 +89,8 @@ public enum EngineNotice {
     public static let compacted = "compacted"
     /// A run moving to another account could not start there (`{message, switched_to}`, minor 48).
     public static let switchFailed = "switch_failed"
+    /// A commit made from the run's Changes panel (minor 59): its `files` and `oid`.
+    public static let committed = "committed"
     /// A run moved onto an account whose plan lacks its model, going on with that plan's default (`{from_model,
     /// from_label, to_model, to_label, account}`, minor 48).
     public static let modelUnavailable = "model_unavailable"

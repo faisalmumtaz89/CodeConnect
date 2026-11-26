@@ -782,6 +782,15 @@ public enum TimelineBuilder {
             return NoticeItem(
                 kind: .other, symbol: "arrows-clockwise", title: "Now on \(to): \(from) isn’t in \(account)’s plan.",
                 detail: nil, severity: .info)
+        // The computer's note of a commit made from the Changes panel: how many files, and the commit. One without
+        // them is drawn as any other notice.
+        case EngineNotice.committed
+        where event.payload["files"]?.intValue != nil && event.payload["oid"]?.stringValue != nil:
+            return NoticeItem(
+                kind: .other, symbol: "check-circle",
+                title: ChangesWords.committed(
+                    files: event.payload["files"]?.intValue ?? 0, sha: event.payload["oid"]?.stringValue ?? ""),
+                detail: nil, severity: .info)
         case EngineNotice.mailNudge:
             // ccd's own notice that it woke a Claude run for its mail; its message is the wake line, which is ccd's
             // words to the agent, not the reader's, so the row is the one a Codex wake draws.
