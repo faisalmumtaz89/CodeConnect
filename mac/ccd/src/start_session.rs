@@ -817,9 +817,22 @@ async fn codex_start(
         Err(why) => return failed(StartFailure::LaunchFailed, why),
     };
     let git_bin = daemon.config.git_bin.as_deref();
+    let worktree = match free_new_worktree(git_bin, path, &AgentKind::Codex, worktree).await {
+        Ok(worktree) => worktree,
+        Err(why) => return failed(StartFailure::LaunchFailed, why),
+    };
+    let worktree = worktree.as_ref();
     let cwd = match worktree {
         None => path.to_string(),
-        Some(worktree) => match place(environment, git_bin, path, worktree).await {
+        Some(worktree) => match place(
+            environment,
+            git_bin,
+            path,
+            worktree,
+            trust == Trust::Trusted,
+        )
+        .await
+        {
             Ok(cwd) => cwd,
             Err(why) => return failed(StartFailure::LaunchFailed, why),
         },
@@ -928,8 +941,8 @@ async fn folder_question(
 
 /// The folder a Claude run runs in, for every start kind: the start folder; an existing or
 /// a branch's worktree, as `place` found or made it (`cwd`); a new worktree's folder in
-/// Claude's own layout under the repository's main folder, which `--worktree <name>`
-/// reopens when it is already there.
+/// Claude's own layout under the repository's main folder, under a name no folder there
+/// has yet (`free_worktree_name`).
 async fn run_folder(
     path: &str,
     cwd: &str,
@@ -1043,9 +1056,16 @@ async fn hosted_start(
             ),
         );
     };
+    let worktree =
+        match free_new_worktree(daemon.config.git_bin.as_deref(), path, &agent, worktree).await {
+            Ok(worktree) => worktree,
+            Err(why) => return failed(StartFailure::LaunchFailed, why),
+        };
+    let worktree = worktree.as_ref();
     let (cwd, new_worktree) = match worktree {
         None => (path.to_string(), None),
-        // Claude makes its own (`--worktree`); agy has no such flag, so ccd makes one for it as for Codex.
+        // Claude makes its own (`--worktree`), and its checkout runs none of the repository's hooks
+        // (claude 2.1.332); agy has no such flag, so ccd makes one for it as for Codex.
         Some(StartWorktree::New { name }) if agent != AgentKind::Antigravity => {
             match check_worktree_name(name) {
                 Ok(()) => (path.to_string(), Some(name.as_str())),
@@ -1057,6 +1077,12 @@ async fn hosted_start(
             daemon.config.git_bin.as_deref(),
             path,
             worktree,
+            // Antigravity asks no folder question: its hooks are off where the folder was answered not
+            // trusted for another agent's start.
+            match agent {
+                AgentKind::Antigravity => !declined(&daemon.db, Path::new(path)).await,
+                _ => trust == Trust::Trusted,
+            },
         )
         .await
         {
@@ -1189,11 +1215,14 @@ pub(crate) fn system_words(err: &std::io::Error) -> String {
 
 /// The folder for a start in `worktree`, making the worktree first when it is
 /// new. Every check reads the repository afresh, and every refusal says why.
+/// `hooks`: git runs the repository's own hooks as it checks the worktree out; off for a
+/// folder answered not trusted, whose code nothing may run (screen 35).
 async fn place(
     environment: &HashMap<OsString, OsString>,
     git_bin: Option<&str>,
     path: &str,
     worktree: &StartWorktree,
+    hooks: bool,
 ) -> Result<String, String> {
     let entries = crate::git::worktrees(path, git_bin, GIT_READ_TIMEOUT)
         .await
@@ -1228,6 +1257,7 @@ async fn place(
             add_worktree(
                 environment,
                 path,
+                hooks,
                 &[OsStr::new("--"), folder.as_os_str(), OsStr::new(branch)],
             )
             .await?;
@@ -1242,6 +1272,7 @@ async fn place(
             add_worktree(
                 environment,
                 path,
+                hooks,
                 &[
                     OsStr::new("-b"),
                     OsStr::new(name),
@@ -1254,6 +1285,72 @@ async fn place(
             Ok(made(folder))
         }
     }
+}
+
+/// A start's new worktree under a name nothing in its repository has (`free_worktree_name`), read afresh; any other
+/// place as it is.
+async fn free_new_worktree(
+    git_bin: Option<&str>,
+    path: &str,
+    agent: &AgentKind,
+    worktree: Option<&StartWorktree>,
+) -> Result<Option<StartWorktree>, String> {
+    let Some(StartWorktree::New { name }) = worktree else {
+        return Ok(worktree.cloned());
+    };
+    check_worktree_name(name)?;
+    let main = crate::git::worktrees(path, git_bin, GIT_READ_TIMEOUT)
+        .await
+        .and_then(|entries| entries.first().map(|main| main.path.clone()))
+        .ok_or_else(|| format!("{path} is not in a git repository"))?;
+    let branches = crate::git::local_branches(path, git_bin, GIT_READ_TIMEOUT)
+        .await
+        .ok_or_else(|| format!("git could not list the branches of {path}"))?;
+    let name = free_worktree_name(name, agent, &branches, &main)?;
+    Ok(Some(StartWorktree::New { name }))
+}
+
+/// A new worktree's name nothing in the repository has: `name`, else `name-2`, `name-3`, …. Taken: the branch the
+/// agent would make (Claude Code's `worktree-<name>` with each `/` as `+`, the name itself for the others) is a
+/// branch or clashes with
+/// one's path (`fix` beside `fix/x`), or the worktree's folder is already there, which Claude Code would reopen. The
+/// app avoids the names it was listed; only this computer sees every branch. A name under an existing branch
+/// (`fix/x` under `fix`) no number frees: refused in git's words.
+fn free_worktree_name(
+    name: &str,
+    agent: &AgentKind,
+    branches: &[String],
+    main: &str,
+) -> Result<String, String> {
+    // Claude Code writes each `/` of the name as `+`, in its branch as in its folder.
+    let branch = |name: &str| match agent {
+        AgentKind::Claude => format!("worktree-{}", name.replace('/', "+")),
+        _ => name.to_string(),
+    };
+    if let Some(parent) = branches
+        .iter()
+        .find(|existing| branch(name).starts_with(&format!("{existing}/")))
+    {
+        return Err(format!(
+            "a branch named {parent} already exists, so {} can't be made",
+            branch(name)
+        ));
+    }
+    let taken = |name: &str| {
+        let wanted = branch(name);
+        branches
+            .iter()
+            .any(|existing| *existing == wanted || existing.starts_with(&format!("{wanted}/")))
+            || worktree_folder(main, name).exists()
+    };
+    let mut free = name.to_string();
+    let mut number = 2;
+    while taken(&free) {
+        free = format!("{name}-{number}");
+        number += 1;
+    }
+    check_worktree_name(&free)?;
+    Ok(free)
 }
 
 /// Where a worktree named `name` goes: Claude Code's own layout, with each `/`
@@ -1292,15 +1389,27 @@ fn check_worktree_name(name: &str) -> Result<(), String> {
 async fn add_worktree(
     environment: &HashMap<OsString, OsString>,
     path: &str,
+    hooks: bool,
     args: &[&OsStr],
 ) -> Result<(), String> {
-    let mut argv: Vec<&OsStr> = vec![
-        OsStr::new("git"),
+    let mut argv: Vec<&OsStr> = vec![OsStr::new("git")];
+    // Nothing of the repository's own runs for a folder answered not trusted: neither its hooks nor a
+    // `core.fsmonitor` program its config names (as the status read in git.rs does). A filter driver its
+    // config defines for a checked-out file still runs: git has no switch for every filter (an accepted miss).
+    if !hooks {
+        argv.extend([
+            OsStr::new("-c"),
+            OsStr::new("core.hooksPath=/dev/null"),
+            OsStr::new("-c"),
+            OsStr::new("core.fsmonitor=false"),
+        ]);
+    }
+    argv.extend([
         OsStr::new("-C"),
         OsStr::new(path),
         OsStr::new("worktree"),
         OsStr::new("add"),
-    ];
+    ]);
     argv.extend_from_slice(args);
     let mut command = login_shell_command(environment, None, &argv);
     command
@@ -3481,15 +3590,15 @@ mod tests {
 
         // Every start kind, each row its own repository: the folder its run runs in is the
         // start folder, an existing worktree, a branch's worktree, or a new worktree's folder
-        // in Claude's layout, there or not there (removed, its answer kept). The answers are
-        // kept ones: the start folder's by its real path, the run folder's by its real path,
-        // or by its own path while it is not there.
+        // in Claude's layout, which is never there yet (a name whose folder is there goes to
+        // the next name). The answers are kept ones: the start folder's by its real path, the
+        // run folder's by its real path, or by its own path while it is not there.
         #[derive(Debug)]
         enum Kind {
             StartFolder,
             Existing,
             Branch,
-            New { there: bool },
+            New,
         }
         use Trust::{NotTrusted as Not, Trusted as Yes};
         let rows = [
@@ -3497,19 +3606,16 @@ mod tests {
             (Kind::StartFolder, Not, None, Not),
             (Kind::Existing, Yes, Some(Not), Not),
             (Kind::Branch, Yes, Some(Not), Not),
-            (Kind::New { there: true }, Yes, Some(Not), Not),
-            (Kind::New { there: false }, Yes, Some(Not), Not),
+            (Kind::New, Yes, Some(Not), Not),
             // The mirror: a run folder answered trusted never raises the start folder's.
             (Kind::Existing, Not, Some(Yes), Not),
             (Kind::Branch, Not, Some(Yes), Not),
-            (Kind::New { there: true }, Not, Some(Yes), Not),
-            (Kind::New { there: false }, Not, Some(Yes), Not),
+            (Kind::New, Not, Some(Yes), Not),
             // A run folder with no answer of its own keeps the start folder's.
             (Kind::StartFolder, Yes, None, Yes),
             (Kind::Existing, Yes, None, Yes),
             (Kind::Branch, Yes, None, Yes),
-            (Kind::New { there: true }, Yes, None, Yes),
-            (Kind::New { there: false }, Yes, None, Yes),
+            (Kind::New, Yes, None, Yes),
         ];
         let mut wrong = Vec::new();
         for (row, (kind, start, own, runs)) in rows.iter().enumerate() {
@@ -3546,21 +3652,8 @@ mod tests {
                         worktree_folder(main, "fix/b10"),
                     )
                 }
-                Kind::New { there } => {
+                Kind::New => {
                     let folder = worktree_folder(main, "feat/b10");
-                    if *there {
-                        git(
-                            &project,
-                            &[
-                                "worktree",
-                                "add",
-                                "-q",
-                                "-b",
-                                "worktree-feat",
-                                folder.to_str().unwrap(),
-                            ],
-                        );
-                    }
                     let name = "feat/b10".to_string();
                     (Some(StartWorktree::New { name }), folder)
                 }
@@ -3645,12 +3738,10 @@ mod tests {
 
     /// **B10 G3's start**: a real, signed-in claude on the real agent host, started as the
     /// app starts one, through the folder question: in `g3_project` under
-    /// `CODECONNECT_TEST_RIG_DIR/<name>`, its answer `trust` given with the start; with
-    /// `worktree`, in a new worktree of that name whose folder is already there (checked out
-    /// from the project, so its project is there too) and answered not trusted in its own
-    /// right. The host and claude get this test's `HOME`, `USER`, `LOGNAME`, `PATH` and
+    /// `CODECONNECT_TEST_RIG_DIR/<name>`, its answer `trust` given with the start. The host
+    /// and claude get this test's `HOME`, `USER`, `LOGNAME`, `PATH` and
     /// `CLAUDE_CONFIG_DIR`, as B7's G2 gives them.
-    async fn g3_start(name: &str, trust: Trust, worktree: Option<&str>) -> G3 {
+    async fn g3_start(name: &str, trust: Trust) -> G3 {
         let var =
             |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set"));
         let host = PathBuf::from(var("CODECONNECT_TEST_AGENT_HOST"));
@@ -3672,34 +3763,6 @@ mod tests {
         .map(|name| (OsString::from(name), var(name)))
         .collect();
         environment.insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
-        let place = match worktree {
-            Some(name) => {
-                let folder = worktree_folder(project.to_str().unwrap(), name);
-                let branch = format!("worktree-{name}");
-                git(
-                    &project,
-                    &[
-                        "worktree",
-                        "add",
-                        "-q",
-                        "-b",
-                        &branch,
-                        folder.to_str().unwrap(),
-                    ],
-                );
-                let folder = std::fs::canonicalize(folder).unwrap();
-                let folder = folder.to_str().unwrap().to_string();
-                daemon
-                    .db
-                    .set_folder_trust(folder, Trust::NotTrusted)
-                    .await
-                    .unwrap();
-                Some(StartWorktree::New {
-                    name: name.to_string(),
-                })
-            }
-            None => None,
-        };
         let started = hosted_start(
             AgentKind::Claude,
             &daemon,
@@ -3708,7 +3771,7 @@ mod tests {
             name,
             project.to_str().unwrap(),
             "Say hello in one short sentence.",
-            place.as_ref(),
+            None,
             None,
             &environment,
             None,
@@ -3830,7 +3893,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
     async fn a_folder_answered_trusted_loads_its_project_into_a_real_claude() {
-        let g3 = g3_start("g3t", Trust::Trusted, None).await;
+        let g3 = g3_start("g3t", Trust::Trusted).await;
         let hook = g3.root.join("hook-canary").exists();
         let mcp = g3.root.join("mcp-canary").exists();
         println!(
@@ -3875,7 +3938,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
     async fn a_folder_answered_not_trusted_loads_nothing_of_its_project_into_a_real_claude() {
-        let g3 = g3_start("g3u", Trust::NotTrusted, None).await;
+        let g3 = g3_start("g3u", Trust::NotTrusted).await;
         let hook = g3.root.join("hook-canary").exists();
         let mcp = g3.root.join("mcp-canary").exists();
         println!(
@@ -3891,42 +3954,6 @@ mod tests {
             (hook, g3.listed, g3.reply.contains("ZEBRA-G10"), mcp),
             (false, false, false, false),
             "hook canary, g10canary listed, ZEBRA-G10 in the reply, mcp canary"
-        );
-    }
-
-    /// **B10 G3, a new worktree's folder reopened**: from a folder answered trusted, a new
-    /// worktree whose folder, `.claude/worktrees/<name>` in Claude's layout, is already there
-    /// and answered not trusted in its own right. A real claude reopens that folder (its
-    /// transcript's `cwd`) and loads nothing of the project checked out there. Ignored and
-    /// gated as B7's G2 is.
-    #[tokio::test]
-    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
-    async fn a_new_worktree_reopens_its_declined_folder_and_loads_nothing_into_a_real_claude() {
-        let g3 = g3_start("g3w", Trust::Trusted, Some("g3")).await;
-        let reopened = std::fs::canonicalize(g3.root.join("project/.claude/worktrees/g3"))
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        let hook = g3.root.join("hook-canary").exists();
-        println!(
-            "G3 new worktree: ran in {:?}, the folder {reopened:?}; hook canary {hook}; g10canary listed {}; reply {:?}",
-            g3.ran_in, g3.listed, g3.reply
-        );
-        g3_end(&g3).await;
-        assert!(
-            !g3.reply.is_empty(),
-            "the run never replied, so the reply's canary proves nothing"
-        );
-        assert_eq!(
-            g3.ran_in.as_deref(),
-            Some(reopened.as_str()),
-            "claude reopened the folder that was there"
-        );
-        assert_eq!(
-            (hook, g3.listed, g3.reply.contains("ZEBRA-G10")),
-            (false, false, false),
-            "hook canary, g10canary listed, ZEBRA-G10 in the reply"
         );
     }
 
@@ -4531,8 +4558,8 @@ mod tests {
 
     /// **A new Codex worktree is made where Claude Code makes one, on a branch named
     /// as typed**, from the commit of the folder it was asked in: here a linked
-    /// worktree one commit ahead of main. A second one by the same name is git's to
-    /// refuse.
+    /// worktree one commit ahead of main. A second one by the same name goes to the next
+    /// name, its branch being there by then.
     #[tokio::test]
     async fn a_new_codex_worktree_starts_from_the_folder_it_is_asked_in() {
         let rig = recording("new-codex");
@@ -4564,9 +4591,15 @@ mod tests {
         );
         assert_eq!(git(&folder, &["rev-parse", "HEAD"]), ahead);
 
-        let detail = refusal(rig.start_in(&existing, AgentKind::Codex, new()).await);
-        assert!(detail.contains("already exists"), "{detail}");
-        assert_eq!(rig.runs(), 1);
+        // The same name again: its branch is there now, so the next start goes to the next name.
+        let again = rig.start_in(&existing, AgentKind::Codex, new()).await;
+        assert!(reached(&again), "{again:?}");
+        let next = Path::new(&main).join(".claude/worktrees/fix+login-2");
+        assert_eq!(
+            git(&next, &["symbolic-ref", "--short", "HEAD"]),
+            "fix/login-2"
+        );
+        assert_eq!(rig.runs(), 2);
     }
 
     /// **A repeated Codex start on a branch finds its run and makes no second worktree**:
@@ -4869,6 +4902,176 @@ mod tests {
         assert_eq!(
             git(&folder, &["symbolic-ref", "--short", "HEAD"]),
             "fix/agy"
+        );
+    }
+
+    /// The project's post-checkout hook and, set in its own config, a `core.fsmonitor` program:
+    /// each leaves `<root>/hook-ran` when git runs it.
+    fn arm_checkout_hook(rig: &Rig) -> PathBuf {
+        let marker = rig.root.join("hook-ran");
+        let script = format!("#!/bin/sh\ntouch '{}'\n", marker.display());
+        let hook = rig.project.join(".git/hooks/post-checkout");
+        let monitor = rig.root.join("fsmonitor");
+        for program in [&hook, &monitor] {
+            std::fs::write(program, &script).unwrap();
+            std::fs::set_permissions(program, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        }
+        git(
+            &rig.project,
+            &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+        );
+        marker
+    }
+
+    /// **A folder answered not trusted runs none of its repository's hooks** when ccd makes a new worktree in it
+    /// (screen 35: "the agent starts with nothing from the folder"); a trusted one runs them, as git-lfs needs.
+    #[tokio::test]
+    async fn a_new_codex_worktree_runs_the_repositorys_hooks_only_when_trusted() {
+        for (trust, runs) in [(Trust::NotTrusted, false), (Trust::Trusted, true)] {
+            let rig = recording(&format!("hooks-codex-{trust:?}"));
+            let marker = arm_checkout_hook(&rig);
+            let result = rig
+                .start_as(
+                    AgentKind::Codex,
+                    &rig.project(),
+                    "fix the tests",
+                    Some(&StartWorktree::New {
+                        name: "fix-the-tests".into(),
+                    }),
+                    Some(trust),
+                )
+                .await;
+            assert!(reached(&result), "{trust:?}: {result:?}");
+            assert_eq!(marker.exists(), runs, "{trust:?}: the hook ran");
+        }
+    }
+
+    /// **Antigravity, which asks no folder question, runs no hooks in a folder answered not trusted** (kept from
+    /// another agent's start); otherwise its repository's hooks run.
+    #[tokio::test]
+    async fn a_new_antigravity_worktree_runs_no_hooks_in_a_folder_answered_not_trusted() {
+        for (kept, runs) in [(Some(Trust::NotTrusted), false), (None, true)] {
+            let rig = recording(&format!("hooks-agy-{kept:?}"));
+            let marker = arm_checkout_hook(&rig);
+            if let Some(kept) = kept {
+                let real = rig.project.canonicalize().unwrap().display().to_string();
+                rig.db.set_folder_trust(real, kept).await.unwrap();
+            }
+            let result = rig
+                .start_in(
+                    &rig.project(),
+                    AgentKind::Antigravity,
+                    StartWorktree::New {
+                        name: "fix-the-tests".into(),
+                    },
+                )
+                .await;
+            assert!(reached(&result), "{kept:?}: {result:?}");
+            assert_eq!(marker.exists(), runs, "{kept:?}: the hook ran");
+        }
+    }
+
+    /// **A new worktree's name the repository has is not reused**: a branch of that name, however many newer branches
+    /// stand before it (the app is listed only the newest 100), and the run goes in `<name>-2`.
+    #[tokio::test]
+    async fn a_new_codex_worktree_named_as_a_branch_the_app_was_not_listed_goes_to_the_next_name() {
+        let rig = recording("taken-codex");
+        git(&rig.project, &["branch", "fix-the-tests"]);
+        for i in 0..100 {
+            git(&rig.project, &["branch", &format!("newer-{i}")]);
+        }
+        let main = rig.main();
+        let result = rig
+            .start_in(
+                &rig.project(),
+                AgentKind::Codex,
+                StartWorktree::New {
+                    name: "fix-the-tests".into(),
+                },
+            )
+            .await;
+        assert!(reached(&result), "{result:?}");
+        let folder = Path::new(&main).join(".claude/worktrees/fix-the-tests-2");
+        assert_eq!(
+            git(&folder, &["symbolic-ref", "--short", "HEAD"]),
+            "fix-the-tests-2"
+        );
+    }
+
+    /// **A new worktree whose folder is already there goes to the next name**, as Claude Code would reopen it.
+    #[tokio::test]
+    async fn a_new_antigravity_worktree_whose_folder_is_there_goes_to_the_next_name() {
+        let rig = recording("taken-agy");
+        let main = rig.main();
+        let there = Path::new(&main).join(".claude/worktrees/fix-the-tests");
+        std::fs::create_dir_all(&there).unwrap();
+        std::fs::write(there.join("notes.txt"), "kept").unwrap();
+        let result = rig
+            .start_in(
+                &rig.project(),
+                AgentKind::Antigravity,
+                StartWorktree::New {
+                    name: "fix-the-tests".into(),
+                },
+            )
+            .await;
+        assert!(reached(&result), "{result:?}");
+        let folder = Path::new(&main).join(".claude/worktrees/fix-the-tests-2");
+        assert_eq!(rig.host_cwd(), folder.canonicalize().unwrap());
+    }
+
+    /// **The next free name, by each agent's branch**: Claude Code's `worktree-<name>` (each `/` written `+`), the
+    /// others' `<name>`; a branch
+    /// path clashing either way (`fix` beside `fix/x`); a name under a branch no number frees (`fix/x` under `fix`) is
+    /// refused in git's words.
+    #[test]
+    fn a_new_worktree_takes_the_next_name_no_branch_or_folder_has() {
+        let main = std::env::temp_dir().join(format!("free-names-{}", std::process::id()));
+        let main = main.display().to_string();
+        let branches = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        let free = |name: &str, agent: AgentKind, names: &[&str]| {
+            free_worktree_name(name, &agent, &branches(names), &main)
+        };
+        assert_eq!(free("fix", AgentKind::Codex, &[]), Ok("fix".into()));
+        assert_eq!(free("fix", AgentKind::Claude, &["fix"]), Ok("fix".into()));
+        assert_eq!(
+            free(
+                "fix",
+                AgentKind::Claude,
+                &["worktree-fix", "worktree-fix-2"]
+            ),
+            Ok("fix-3".into())
+        );
+        assert_eq!(
+            free("fix", AgentKind::Codex, &["worktree-fix", "fix"]),
+            Ok("fix-2".into())
+        );
+        assert_eq!(
+            free("fix", AgentKind::Codex, &["fix/x"]),
+            Ok("fix-2".into())
+        );
+        assert_eq!(
+            free("fix", AgentKind::Antigravity, &["fix/x/y", "fix-2"]),
+            Ok("fix-3".into())
+        );
+        assert_eq!(
+            free("fix/x", AgentKind::Codex, &["fix"]),
+            Err("a branch named fix already exists, so fix/x can't be made".into())
+        );
+        // Claude Code writes each "/" of the name as "+" in its branch, as in its folder.
+        assert_eq!(
+            free("fix/login", AgentKind::Claude, &["worktree-fix+login"]),
+            Ok("fix/login-2".into())
+        );
+        assert_eq!(
+            free("fix/login", AgentKind::Claude, &["worktree-fix"]),
+            Ok("fix/login".into())
         );
     }
 

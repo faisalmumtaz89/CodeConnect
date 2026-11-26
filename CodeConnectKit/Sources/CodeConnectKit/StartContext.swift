@@ -14,6 +14,8 @@ public struct StartContext {
 
     public var starter: SessionStarter { model.starter }
     public var machineName: String { model.machineName ?? "this computer" }
+    /// The system the computer's daemon names ("macos", "linux"), by the same rule as its name; nil before it says.
+    public var machineOS: String? { model.daemonProfile.machineOS ?? model.machine?.os }
     public var projects: [StartProject] { (starter.projects ?? []).filter(\.exists) }
 
     public var id: String { model.machineID ?? "" }
@@ -131,6 +133,30 @@ public struct StartContext {
     public var checkingModels: String { "Checking Claude Code and Codex on \(machineName)…" }
     /// When neither agent can start here.
     public var noAgent: String { "Neither Claude Code nor Codex can start on \(machineName)." }
+
+    /// An agent the form names under its folder, in the computer's own sentence.
+    public struct AgentNotice: Hashable, Sendable {
+        public let agent: StartAgent
+        public let sentence: String
+    }
+
+    /// What the start form says about agents that can't start here (screen 31; one rule for every agent).
+    public var agentNotices: [AgentNotice] { Self.notices(startAgents.map { ($0, models($0)) }) }
+
+    /// Each agent installed but signed out, while another can start; every agent, when none can. One that can't start
+    /// for another reason is not mentioned while another can: the computer's answer doesn't say whether it is missing or
+    /// below the floor, and one agent is enough. Nothing while the computer hasn't answered.
+    nonisolated static func notices(_ states: [(StartAgent, StartModels)]) -> [AgentNotice] {
+        guard !states.contains(where: { $0.1 == .checking }) else { return [] }
+        let none = !states.contains { if case .choices = $0.1 { true } else { false } }
+        return states.compactMap { agent, state in
+            switch state {
+            case .signedOut(let sentence): AgentNotice(agent: agent, sentence: sentence)
+            case .missing(let sentence) where none: AgentNotice(agent: agent, sentence: sentence)
+            case .missing, .checking, .choices: nil
+            }
+        }
+    }
 
     /// What the model menu holds for an agent here. The agent's own models, in
     /// its order and words, with Default first: Claude Code's own `default`
@@ -273,14 +299,7 @@ extension Machines {
     }
 }
 
-/// `main · 4m ago · Claude Code`: the branch, when it was last used and by
-/// which agent. A folder that is not a repository has no branch to show.
-public func startProjectMeta(_ project: StartProject, now: Date = Date()) -> String {
-    ([project.gitBranch].compactMap { $0 } + [startProjectLastUsed(project, now: now)]).joined(separator: " · ")
-}
-
-/// `4m ago · Claude Code`: the meta line after its branch, the part that
-/// never gives way when the line is short of room.
+/// `4m ago · Claude Code`: when a folder was last used, and by which agent.
 public func startProjectLastUsed(_ project: StartProject, now: Date = Date()) -> String {
     ([Format.ago(since: project.lastUsed, now: now)] + [project.lastAgent?.displayName].compactMap { $0 })
         .joined(separator: " · ")
@@ -328,7 +347,10 @@ public func startPlaceSummary(_ place: StartPlace, agent: StartAgent, project: S
     case .folder: return git?.checkout(at: project?.path ?? "").map(\.title) ?? "This folder"
     case .existing(let checkout): return "\(checkout.title) · worktree"
     case .branch(let branch): return "\(branch) · new worktree"
-    case .new(let name): return "\(StartPlace.newBranch(name, for: agent)) · new worktree"
+    case .new(let name):
+        // As the computer will make it: the next free name where the one asked is the repository's.
+        let made = git.map { StartPlace.free(name, for: agent, in: $0) } ?? name
+        return "\(StartPlace.newBranch(made, for: agent)) · new worktree"
     }
 }
 

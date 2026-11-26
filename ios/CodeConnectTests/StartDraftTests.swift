@@ -7,7 +7,7 @@ import XCTest
 @MainActor
 final class StartDraftTests: XCTestCase {
 
-    private func ask(_ computer: String = "a", message: String = "Fix the parser.", place: StartPlace = .folder)
+    private func ask(_ computer: String = "a", message: String = "Fix the parser.", place: StartPlace? = .folder)
         -> StartDraft.Ask
     {
         StartDraft.Ask(
@@ -56,6 +56,17 @@ final class StartDraftTests: XCTestCase {
         XCTAssertEqual(draft.send(for: ask(), outcome: .started(sessionUID: "s1"), computerKnown: true), .new)
     }
 
+    /// The default place (nothing chosen) is asked as nothing chosen, not as the name the Mac makes from the task when it
+    /// sends: a withdrawn start asked again is the same ask, and goes again under its own id, whatever the repository
+    /// lists by then (a new worktree named "fix-the-parser" made by the first send would make the name "-2").
+    func testAWithdrawnDefaultStartGoesAgainUnderItsOwnId() {
+        let draft = StartDraft()
+        draft.didSend("r1", asking: ask(place: nil))
+        draft.withdraw()
+        XCTAssertEqual(draft.send(for: ask(place: nil), outcome: nil, computerKnown: true), .resume(requestID: "r1"))
+        XCTAssertEqual(draft.send(for: ask(place: .new("fix-the-parser-2")), outcome: nil, computerKnown: true), .new)
+    }
+
     /// Withdrawn, and answered with a start that never ran: the form, quietly.
     func testAWithdrawnStartAnsweredWithoutARunEndsQuietly() {
         let draft = StartDraft()
@@ -88,9 +99,11 @@ final class StartDraftTests: XCTestCase {
         XCTAssertEqual(draft.choices(on: "a").folderPath, "/w/query-parser")
         XCTAssertEqual(draft.choices(on: "a").place, .branch("feature/strict-mode"))
         XCTAssertEqual(draft.choices(on: "b").folderPath, "/w/other")
-        // Only the person's own new folder resets the place.
+        // Only the person's own new folder resets the place: to none chosen, which each app's form reads as its own
+        // default.
         draft.chooseFolder("/w/web", on: "a")
-        XCTAssertEqual(draft.choices(on: "a").place, .folder)
+        XCTAssertNil(draft.choices(on: "a").place)
+        XCTAssertNil(StartDraft.Choices().place)
     }
 
     /// New Agent's keyboard request is kept until the form draws, and taken once.
@@ -134,7 +147,7 @@ final class StartDraftTests: XCTestCase {
         draft.didOpen()
         XCTAssertEqual(draft.message, "")
         XCTAssertNil(draft.sent)
-        XCTAssertEqual(draft.choices(on: "a").place, .folder)
+        XCTAssertNil(draft.choices(on: "a").place)
         XCTAssertEqual(draft.choices(on: "a").folderPath, "/w/query-parser")
     }
 

@@ -1,15 +1,17 @@
 import CodeConnectKit
 import SwiftUI
 
-/// Where in its repository a start runs, under the folder: the folder as it is, a worktree the repository has, a new
-/// worktree for a branch no checkout has, or a new one by name. The row is there only while the computer can say what
+/// Where in its repository a start runs, in the box's bar: by default a new worktree whose branch is named from the task
+/// (nothing chosen), else the folder as it is, a worktree the repository has, a new worktree for a branch no checkout
+/// has, or a new one by name. The row is there only while the computer can say what
 /// the folder's repository holds and has not said it is outside one (`StartContext.branchAhead`), as the iPhone's
 /// Branch step is; until it has said, the row says it is reading. What it offers and every word are Kit's.
 struct BranchRow: View {
     let context: StartContext
     let folder: StartProject
     let agent: StartAgent?
-    @Binding var place: StartPlace
+    /// The place chosen; nil is the default, a new worktree named from the task.
+    @Binding var place: StartPlace?
     /// A new worktree's name while one is being named, else nil.
     @Binding var newName: String?
     @Binding var open: Bool
@@ -18,21 +20,24 @@ struct BranchRow: View {
     /// A new worktree's name was kept with Return: the menu has closed, and the keyboard goes back to the form.
     let named: () -> Void
 
-    @Environment(\.startHeight) private var startHeight
     @Environment(\.startBox) private var startBox
     /// The row, label to last line, in the form's coordinates.
     @State private var frame: CGRect = .zero
-    /// The button's bottom edge, in the row's coordinates.
-    @State private var buttonBottom: CGFloat = 0
     /// How tall the menu's naming of a new worktree stands, while one is being named.
     @State private var namingHeight: CGFloat = 0
+    /// The menu lists the branches to start a new worktree from, in place of its own rows.
+    @State private var listing = false
 
     var body: some View {
         Group {
             if let answer = context.git(folder.path), let git = answer {
                 // A new worktree being named is named in the menu (`BranchNaming`); here, its kind.
-                let summary = startPlaceSummary(place, agent: agent ?? .claude, project: folder, git: git)
-                button(newName == nil ? summary : StartWords.newWorktree)
+                let summary = place.map { startPlaceSummary($0, agent: agent ?? .claude, project: folder, git: git) }
+                if newName == nil, let summary {
+                    button(summary, branch: true)
+                } else {
+                    button(StartWords.newWorktree, branch: false)
+                }
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -42,7 +47,6 @@ struct BranchRow: View {
                 .accessibilityIdentifier("start.branch.reading")
             }
         }
-        .coordinateSpace(.named(Self.space))
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(StartForm.space)) } action: { frame = $0 }
         .overlay(alignment: .topLeading) {
             if open, let answer = context.git(folder.path), let git = answer { menu(git) }
@@ -50,28 +54,31 @@ struct BranchRow: View {
         // Around the menu as well as the button: the menu says where it is through what this sets, so a click on one
         // of its rows is a click inside, not one that closes it before the row is chosen.
         .closesPanel($open)
+        .onChange(of: open) {
+            listing = false
+            #if DEBUG
+                if open && RenderWindow.opensBranchList { listing = true }
+            #endif
+        }
     }
 
-    private nonisolated static let space = "start.branch.row"
     /// The least a menu keeps from the form's edges.
     private static let margin: CGFloat = 8
 
-    /// The menu, as tall as its rows up to `BranchMenu.mostRows`, ending inside the pane. It opens above the row,
-    /// clear of the label, when all of it fits between the label and `top`; else on the side of the button
-    /// with more room, as many whole rows as fit there, the rest scrolled to. Either way it stands the panels' one gap
-    /// from its button.
+    /// The menu, as tall as its rows up to `BranchMenu.mostRows`, above its chip as every menu of the box's bar opens
+    /// (screen 34), the panels' one gap from it: as many whole rows as fit between the chip and `top`, the rest scrolled
+    /// to.
     private func menu(_ git: StartGit) -> some View {
-        let rows = BranchMenu.rows(git: git, folder: folder)
+        let rows = BranchMenu.rows(git: git, folder: folder, listing: listing)
         let gap = Theme.panelGap
         let highest = max(top, Self.margin)
-        let naming = newName == nil ? 0 : namingHeight
+        // The naming shows under the menu's own rows, not under the branches' list.
+        let naming = newName == nil || listing ? 0 : namingHeight
         let above = frame.minY - gap - highest - naming
-        let below = startHeight - frame.minY - buttonBottom - gap - Self.margin - naming
-        let opensAbove = BranchMenu.height(rows: rows) <= above || above > below
-        let shown = BranchMenu.rows(fitting: opensAbove ? above : below, of: rows)
+        let shown = BranchMenu.rows(fitting: above, of: rows)
         let placed = PanelPlace.place(widest: BranchMenu.width, leading: frame.minX, box: startBox)
         return BranchMenu(
-            git: git, folder: folder, running: context.runningFolders, place: newName == nil ? place : nil,
+            git: git, folder: folder, place: place, listing: $listing,
             // Inside the box by the start form's one rule (`PanelPlace`), not as narrow as its chip, whose names would
             // be cut that need not be.
             shownRows: shown, width: placed.width,
@@ -82,30 +89,34 @@ struct BranchRow: View {
                 },
             namingHeight: $namingHeight
         ) { chosen in
-            if let chosen {
-                place = chosen
+            switch chosen {
+            case .task, .place:
+                if case .place(let chosen) = chosen { place = chosen } else { place = nil }
                 newName = nil
                 open = false
-            } else {
-                // The menu stays open on its name, under "New branch…".
+            case .name:
+                // The menu stays open on its name, under "New Branch…".
                 newName = ""
             }
         }
         .openPanel()
         .offset(
             x: placed.x - frame.minX,
-            y: opensAbove ? -(BranchMenu.height(rows: shown) + naming + gap) : buttonBottom + gap)
+            y: -(BranchMenu.height(rows: shown) + naming + gap))
     }
 
     /// The chosen place, a button that opens the menu.
-    private func button(_ title: String) -> some View {
+    /// `branch`: the title is a branch, in a terminal's type and cut in the middle, where its prefix and its end both
+    /// show; else words ("New worktree"), in the bar's type and cut at their end, as the other chips are.
+    private func button(_ title: String, branch: Bool) -> some View {
         Button {
             open.toggle()
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "arrow.triangle.branch").font(.system(size: 11)).accessibilityHidden(true)
                 // A branch keeps meaning at both ends ("feature/oauth-device-flow"): cut in its middle.
-                Text(verbatim: title).font(Theme.mono(12)).lineLimit(1).truncationMode(.middle)
+                Text(verbatim: title).font(branch ? Theme.mono(12) : InputBoxChip.font).lineLimit(1)
+                    .truncationMode(branch ? .middle : .tail)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(Theme.text)
@@ -115,7 +126,6 @@ struct BranchRow: View {
         .help(title)
         .accessibilityIdentifier("start.branch")
         .accessibilityValue(open ? "open" : "closed")
-        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).maxY } action: { buttonBottom = $0 }
     }
 }
 
@@ -159,7 +169,11 @@ struct BranchNaming: View {
                 // Each on a line of its own, as Changes is: the menu is narrower than the box.
                 VStack(alignment: .leading, spacing: 5) {
                     fact(StartWords.branch) {
-                        Text(verbatim: valid ? StartPlace.newBranch(trimmed, for: agent) : StartWords.notNamedYet)
+                        // As the computer will make it: the next free name where the one typed is taken.
+                        Text(
+                            verbatim: valid
+                                ? StartPlace.newBranch(StartPlace.free(trimmed, for: agent, in: git), for: agent)
+                                : StartWords.notNamedYet)
                             .font(valid ? Theme.mono(11) : Theme.ui(11))
                     }
                     fact(StartWords.from) { Text(StartPlace.newWorktreeBase(for: agent, from: here)) }
@@ -185,26 +199,38 @@ private func fact(_ label: String, @ViewBuilder value: () -> some View) -> some 
     .font(Theme.ui(11))
 }
 
-/// The places a start can run in a repository, in the iPhone's sections and words: the folder's own checkout, the
-/// repository's other worktrees (one whose folder is gone is shown, never chosen), a new worktree for each branch no
-/// checkout has, then a new one by name. Drawn as the model menu is. `choose` gets nil for a new one by name.
+
+/// The places a start can run in a repository (screen 34): the folder's own checkout; a new worktree, by default named
+/// from the task or from a branch no checkout has; the repository's other worktrees (one whose folder is gone is shown,
+/// never chosen); then a new one by name. "From a branch…" lists the branches in the menu's place, as the folder
+/// browser lists folders: a line naming the list, ".." back, and ← or ⌫ back too.
 ///
 /// Every line, a section's heading included, is one `rowHeight` tall, so a menu cut to `shownRows` ends on a whole
-/// line and scrolls to the rest. Its foot, "New branch…" and the note on older branches above it, stays in sight under
-/// the lines that scroll: naming a new worktree is never scrolled away.
+/// line and scrolls to the rest. Its foot ("New Branch…", or the note on older branches under the branches) stays in
+/// sight under the lines that scroll: naming a new worktree is never scrolled away.
 struct BranchMenu: View {
+    enum Choice {
+        /// A new worktree named from the task: nothing chosen.
+        case task
+        case place(StartPlace)
+        /// A new worktree by name, named under "New Branch…".
+        case name
+    }
+
     let git: StartGit
     let folder: StartProject
-    let running: Set<String>
-    /// The chosen place, checked; nil while a new one is being named.
+    /// The chosen place, checked; nil is the new worktree named from the task, checked unless one is being named.
     let place: StartPlace?
+    @Binding var listing: Bool
     /// How many lines show before it scrolls.
     let shownRows: Int
     let width: CGFloat
-    /// A new worktree's naming, under "New branch…" while one is being named, and how tall it stands.
+    /// A new worktree's naming, under "New Branch…" while one is being named, and how tall it stands.
     let naming: BranchNaming?
     @Binding var namingHeight: CGFloat
-    let choose: (StartPlace?) -> Void
+    let choose: (Choice) -> Void
+
+    @FocusState private var backKeys: Bool
 
     static let width: CGFloat = 440
     /// A line: a menu row and its gap (`MenuRow`).
@@ -213,11 +239,12 @@ struct BranchMenu: View {
     /// The card's padding (`menuCard`), above and below the rows.
     private static let inset = MenuMetrics.inset
 
-    /// The menu's lines for this folder: each section's heading and entries.
-    static func rows(git: StartGit, folder: StartProject) -> Int {
+    /// The menu's lines for this folder: each section's heading and entries, or the branches' list.
+    static func rows(git: StartGit, folder: StartProject, listing: Bool) -> Int {
+        if listing { return 2 + git.branches.count + (git.branchesTruncated ? 1 : 0) }
         let others = git.others(than: folder.path).count
-        return (git.checkout(at: folder.path) == nil ? 0 : 2) + (others == 0 ? 0 : 1 + others) + 1 + git.branches.count
-            + (git.branchesTruncated ? 1 : 0) + 1
+        return (git.checkout(at: folder.path) == nil ? 0 : 2) + 2 + (git.branches.isEmpty ? 0 : 1)
+            + (others == 0 ? 0 : 1 + others) + 1
     }
 
     /// The menu's height showing `rows` lines.
@@ -229,61 +256,118 @@ struct BranchMenu: View {
     }
 
     /// The lines that never scroll.
-    private var foot: Int { git.branchesTruncated ? 2 : 1 }
+    private var foot: Int { listing ? (git.branchesTruncated ? 1 : 0) : 1 }
 
     var body: some View {
-        // To the keys the entries are rows in reading order (`panelRow`), "New branch…" the last.
-        let here = git.checkout(at: folder.path)
-        let others = git.others(than: folder.path)
-        let first = here == nil ? 0 : 1
-        let branchesFrom = first + others.count
-        return VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             PanelScroll {
                 VStack(alignment: .leading, spacing: 0) {
-                    if let here {
-                        header(StartWords.thisFolder, divided: false)
-                        row(.folder, index: 0, title: here.title, detail: here.notes(running: running))
-                    }
-                    if !others.isEmpty {
-                        header(StartWords.worktrees, divided: true)
-                        ForEach(Array(others.enumerated()), id: \.element.path) { offset, checkout in
-                            row(
-                                .existing(checkout), index: first + offset, title: checkout.title,
-                                detail: checkout.notes(running: running), disabled: checkout.missing)
-                        }
-                    }
-                    header(StartWords.newWorktree, divided: here != nil || !others.isEmpty)
-                    ForEach(Array(git.branches.enumerated()), id: \.element) { offset, branch in
-                        row(.branch(branch), index: branchesFrom + offset, title: branch, detail: nil)
-                    }
+                    if listing { branches } else { places }
                 }
             }
             .frame(height: CGFloat(shownRows - foot) * Self.rowHeight)
-            // The sections' hairline over the foot: the lines above it are a list that goes on, the foot stays.
-            VStack(alignment: .leading, spacing: 0) {
+            if listing {
                 if git.branchesTruncated {
                     Text(StartWords.olderBranches).font(Theme.ui(12)).foregroundStyle(Theme.text3)
                         .padding(.horizontal, 12)
                         .frame(height: Self.rowHeight)
                 }
-                item(
-                    index: branchesFrom + git.branches.count, id: "start.branch.new", name: StartWords.newBranch,
-                    checked: place == nil, choose: { choose(nil) }
-                ) {
-                    Text(StartWords.newBranch).font(Theme.ui(12.5)).foregroundStyle(Theme.text).fixedSize()
-                    ModelDetail(text: StartWords.newBranchDetail)
+            } else {
+                // The sections' hairline over the foot: the lines above it are a list that goes on, the foot stays.
+                VStack(alignment: .leading, spacing: 0) {
+                    let index = Self.rows(git: git, folder: folder, listing: false) - 1
+                    item(
+                        index: index, id: "start.branch.new", name: StartWords.newBranch.titleStyle,
+                        checked: naming != nil, choose: { choose(.name) }
+                    ) {
+                        Text(StartWords.newBranch.titleStyle).font(Theme.ui(12.5)).foregroundStyle(Theme.text).fixedSize()
+                    }
+                    if let naming {
+                        naming
+                            .padding(.horizontal, 10)
+                            .padding(.bottom, 6)
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { namingHeight = $0 }
+                    }
                 }
-                if let naming {
-                    naming
-                        .padding(.horizontal, 10)
-                        .padding(.bottom, 6)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { namingHeight = $0 }
-                }
+                .overlay(alignment: .top) { MenuDivider() }
             }
-            .overlay(alignment: .top) { MenuDivider() }
         }
         .frame(width: width - 2 * MenuMetrics.inset, alignment: .leading)
         .menuCard()
+    }
+
+    /// The menu's own rows, in screen 34's sections. Entries are numbered in reading order for the keys (`panelRow`).
+    @ViewBuilder private var places: some View {
+        let here = git.checkout(at: folder.path)
+        let others = git.others(than: folder.path)
+        let first = here == nil ? 0 : 1
+        let fromBranch = git.branches.isEmpty ? 0 : 1
+        if let here {
+            header(StartWords.thisFolder, divided: false)
+            row(.folder, index: 0, title: here.title, detail: StartWords.ownCheckout)
+        }
+        header(StartWords.newWorktree, divided: here != nil)
+        item(
+            index: first, id: "start.branch.task", name: StartWords.newWorktree,
+            checked: place == nil && naming == nil, choose: { choose(.task) }
+        ) {
+            Text(StartWords.newWorktree).font(Theme.ui(12.5)).foregroundStyle(Theme.text).fixedSize()
+            ModelDetail(text: StartWords.namedFromTask)
+        }
+        if fromBranch == 1 {
+            item(
+                index: first + 1, id: "start.branch.from", name: StartWords.fromABranch, checked: false,
+                choose: { listing = true }
+            ) {
+                Text(StartWords.fromABranch).font(Theme.ui(12.5)).foregroundStyle(Theme.text).fixedSize()
+                ModelDetail(text: StartWords.branchList(git.branches))
+            }
+        }
+        if !others.isEmpty {
+            header(StartWords.worktrees, divided: true)
+            ForEach(Array(others.enumerated()), id: \.element.path) { offset, checkout in
+                row(
+                    .existing(checkout), index: first + 1 + fromBranch + offset, title: checkout.title,
+                    detail: Self.shortPath(checkout.path), disabled: checkout.missing)
+            }
+        }
+    }
+
+    /// The branches a new worktree can start from, under a line naming the list, ".." back first.
+    @ViewBuilder private var branches: some View {
+        Text(verbatim: StartWords.fromABranch.trimmingCharacters(in: CharacterSet(charactersIn: "…")))
+            .font(Theme.mono(11))
+            .foregroundStyle(Theme.text2)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: Self.rowHeight, maxHeight: Self.rowHeight, alignment: .leading)
+            .accessibilityIdentifier("start.branch.list")
+        VStack(alignment: .leading, spacing: 0) {
+            item(index: 0, id: "start.branch.back", name: "..", checked: nil, choose: { listing = false }) {
+                Text(verbatim: "..").font(Theme.mono(12)).foregroundStyle(Theme.text)
+            }
+            ForEach(Array(git.branches.enumerated()), id: \.element) { offset, branch in
+                row(.branch(branch), index: 1 + offset, title: branch, detail: nil)
+            }
+        }
+        // ← and ⌫ go back, as they go up in the folder browser; ↓ ↑ and Return stay the menu's.
+        .focusable()
+        .focusEffectDisabled()
+        .focused($backKeys)
+        .onAppear { backKeys = true }
+        .onKeyPress(.leftArrow) {
+            listing = false
+            return .handled
+        }
+        // ⌫ sends DEL (U+007F) on a Mac, not SwiftUI's `.delete` (U+0008).
+        .onKeyPress(KeyEquivalent("\u{7F}")) {
+            listing = false
+            return .handled
+        }
+    }
+
+    /// A worktree's folder by its last two parts, as `worktrees/<name>`.
+    static func shortPath(_ path: String) -> String {
+        path.split(separator: "/").suffix(2).joined(separator: "/")
     }
 
     /// A section's heading, a hairline over it after the first.
@@ -295,23 +379,26 @@ struct BranchMenu: View {
             }
     }
 
-    /// A checkout or branch by its name, in a terminal's type, with what a start there would share or meet beside it.
+    /// A checkout or branch by its name, in a terminal's type, with what it is beside it.
     private func row(_ choice: StartPlace, index: Int, title: String, detail: String?, disabled: Bool = false)
         -> some View
     {
-        item(index: index, id: "start.branch.\(title)", name: title, checked: place == choice, choose: { choose(choice) }) {
+        item(
+            index: index, id: "start.branch.\(title)", name: title, checked: naming == nil && place == choice,
+            choose: { choose(.place(choice)) }
+        ) {
             // Cut in the middle when the menu is narrower than the name, where a branch's prefix and its end both show.
             Text(verbatim: title).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1)
                 .truncationMode(.middle).layoutPriority(1)
             if let detail { ModelDetail(text: detail) }
         }
         .disabled(disabled)
-        .opacity(disabled ? 0.45 : 1)
+        .opacity(disabled ? Theme.disabledOpacity : 1)
     }
 
-    /// Entry `index`, by `name` to accessibility, its words as `content` draws them.
+    /// Entry `index`, by `name` to accessibility, its words as `content` draws them; `checked` nil has no check slot.
     private func item(
-        index: Int, id: String, name: String, checked: Bool, choose: @escaping () -> Void,
+        index: Int, id: String, name: String, checked: Bool?, choose: @escaping () -> Void,
         @ViewBuilder content: () -> some View
     ) -> some View {
         Button(action: choose) {
@@ -321,6 +408,6 @@ struct BranchMenu: View {
         .panelRow(index, id: id, choose: choose)
         .accessibilityLabel(name)
         .accessibilityIdentifier(id)
-        .accessibilityAddTraits(checked ? .isSelected : [])
+        .accessibilityAddTraits(checked == true ? .isSelected : [])
     }
 }

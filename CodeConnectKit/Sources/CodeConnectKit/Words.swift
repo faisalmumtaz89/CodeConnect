@@ -96,6 +96,8 @@ public enum FleetWords {
 /// Settings › Folders, where its answers are kept.
 public enum FolderWords {
     public static let title = "Do you trust the authors of the files in this folder?"
+    /// The Mac's card above the start form, which names the folder (screen 35).
+    public static func question(_ folder: String) -> String { "Do you trust the authors of the files in \(folder)?" }
     public static func body(_ computer: String) -> String {
         "If you do, the agent loads the folder’s own scripts, tools and instructions, and its scripts can run on "
             + "\(computer) without asking you. If you don’t, the agent starts with nothing from the folder."
@@ -105,7 +107,6 @@ public enum FolderWords {
     public static let distrust = "No, I don’t trust the authors"
     public static let distrustDetail = "Start with nothing from the folder"
     public static let footnote = "Asked once for this folder. You can change it in Settings › Folders."
-    public static func then(_ agent: String, _ folder: String) -> String { "Then \(agent) starts in \(folder)." }
 
     public static let paneTitle = "Folders"
     public static let paneIntro =
@@ -284,6 +285,16 @@ public enum StartWords {
     public static let olderBranches = "Older branches aren’t listed."
     public static let newBranch = "New branch…"
     public static let newBranchDetail = "A worktree of its own, by name"
+    /// The Mac's branch menu (screen 34): the folder's checkout, the default new worktree, and the branches to start one
+    /// from, named by the first two and how many more.
+    public static let ownCheckout = "The folder’s own checkout"
+    public static let namedFromTask = "Branch named from the task"
+    public static let fromABranch = "From a branch…"
+    public static func branchList(_ branches: [String]) -> String {
+        branches.count <= 2
+            ? branches.joined(separator: ", ")
+            : branches.prefix(2).joined(separator: ", ") + ", \(branches.count - 2) more"
+    }
     public static let worktreeName = "Name"
     public static let worktreeNameExample = "fix-login"
     public static let worktreeNameRule = "Letters, digits, . _ and -, with / between parts. Up to 64."

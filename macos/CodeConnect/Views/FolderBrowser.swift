@@ -44,6 +44,17 @@ struct FolderBrowser: View {
 
     private var request: StartFolderRequest { StartFolderRequest(path: path, showHidden: showsHidden) }
     private var listing: StartFolderListing? { context.listing(request) }
+    /// The folder shown, under the computer's home as "~"; elsewhere whole.
+    private var shownPath: String? {
+        guard let shown = listing?.path ?? path else { return nil }
+        return home.map { StartProject.shown(shown, home: $0) } ?? shown
+    }
+
+    /// The computer's home folder, as it listed it: the folder the browser opens on.
+    private var home: String? {
+        (context.listing(StartFolderRequest(path: nil, showHidden: false))
+            ?? context.listing(StartFolderRequest(path: nil, showHidden: true)))?.path
+    }
 
     /// The rows as shown, by the folder each opens: ".." first, then the folders in name order.
     private func targets(_ listing: StartFolderListing) -> [(name: String, path: String)] {
@@ -55,7 +66,8 @@ struct FolderBrowser: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Text(verbatim: listing?.path ?? path ?? " ")
+                // As a shell prints it, "~/models" (screen 33), under the home the computer listed; else whole.
+                Text(verbatim: shownPath ?? " ")
                     .font(Theme.mono(11))
                     .foregroundStyle(Theme.text2)
                     .lineLimit(1)
@@ -69,6 +81,10 @@ struct FolderBrowser: View {
                     .fixedSize()
                     .accessibilityIdentifier("start.browse.hidden")
             }
+            // In from the card's side as a menu's header is (`MenuHeader`), with the card's divider under it.
+            .padding(.horizontal, 10)
+            .padding(.top, 6)
+            MenuDivider()
             ScrollViewReader { list in
                 ScrollView {
                     VStack(spacing: 0) { rows }
@@ -90,6 +106,7 @@ struct FolderBrowser: View {
             .onKeyPress(.leftArrow) { up() }
             // ⌫ sends DEL (U+007F) on a Mac, not SwiftUI's `.delete` (U+0008).
             .onKeyPress(KeyEquivalent("\u{7F}")) { up() }
+            MenuDivider()
             bar
         }
         .task(id: request) { context.listFolder(request) }
@@ -153,17 +170,26 @@ struct FolderBrowser: View {
         }
     }
 
+    /// A folder by its name, its mark before it (".." has none), lit while the keys are on it: a click or the pointer
+    /// puts them there, and the list has that one fill (screen 33). It chooses nothing: Use This Folder takes the folder
+    /// shown.
     private func row(name: String, opens target: String) -> some View {
         Button {
             selected = target
             focused = true
         } label: {
-            MenuRow(chosen: selected == target) {
-                Text(verbatim: name).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1)
+            MenuRow {
+                if name != ".." {
+                    Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.text2)
+                        .accessibilityHidden(true)
+                }
+                Text(verbatim: name).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
                     .truncationMode(.middle)
             }
+            .environment(\.menuRowLit, selected == target)
         }
-        .buttonStyle(.menuRow(id: "start.browse.folder.\(name)"))
+        .buttonStyle(.plain)
+        .onHover { if $0 { selected = target } }
         .simultaneousGesture(TapGesture(count: 2).onEnded { go(target) })
         .focusable(false)
         .accessibilityIdentifier("start.browse.folder.\(name)")

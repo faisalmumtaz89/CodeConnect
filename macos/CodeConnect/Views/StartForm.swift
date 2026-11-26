@@ -39,7 +39,6 @@ struct StartForm: View {
     /// How tall the folder panel stands, and its list in it, as drawn.
     @State private var folderPanelHeight: CGFloat = 0
     @State private var listShown: CGFloat = 0
-    @Environment(\.startHeight) private var startHeight
     /// The first message has the keyboard: as the form appears, and when New Agent asks for it.
     @FocusState private var messageFocused: Bool
     /// The first message's caret, which the form sets when New Agent gives it the keyboard (`giveKeyboard`).
@@ -49,8 +48,6 @@ struct StartForm: View {
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
     /// this Mac. Nil without one, as in a test launch with no rig of its own.
     @State private var thisMac: String?
-    /// The search field has the keyboard, and with it the folders under it.
-    @FocusState private var searchFocused: Bool
     /// The folder list's rows, measured: the list is as tall as they are, up to its most (`listMost`).
     @State private var listHeight: CGFloat = 0
 
@@ -64,9 +61,9 @@ struct StartForm: View {
 
     /// The chosen computer's choices, from the draft.
     private var choices: StartDraft.Choices { context.map { draft.choices(on: $0.id) } ?? StartDraft.Choices() }
-    private var query: String { choices.query }
     private var folderPath: String? { choices.folderPath }
-    private var place: StartPlace { choices.place }
+    /// The place chosen; nil is the default (`startPlace`).
+    private var place: StartPlace? { choices.place }
     private var newName: String? { choices.newName }
 
     /// One of the chosen computer's choices, as a binding the form's controls write to the draft through.
@@ -90,7 +87,7 @@ struct StartForm: View {
     private var ask: StartDraft.Ask? {
         guard let context, let folder, let pick else { return nil }
         return StartDraft.Ask(
-            computerID: context.id, folderPath: folder.path, place: startPlace, agent: pick.agent, model: pick.model,
+            computerID: context.id, folderPath: folder.path, place: chosenPlace, agent: pick.agent, model: pick.model,
             message: draft.message, files: draft.files.map(\.id))
     }
 
@@ -127,7 +124,9 @@ struct StartForm: View {
         guard let context else { return "Choose a computer." }
         if context.startAgents.contains(where: { context.models($0) == .checking }) { return context.checkingModels }
         guard pick != nil else { return context.noAgent }
-        guard folder != nil else { return "Choose a folder." }
+        guard let folder else { return "Choose a folder." }
+        // Where in the repository it goes is known once the computer has read it (screen 34's default needs it).
+        if context.branchAhead(folder), context.git(folder.path) == nil { return StartWords.readingBranches(folder.name) }
         // Files alone are a first message.
         if draft.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, draft.files.isEmpty {
             return StartWords.writeTheFirstMessage
@@ -146,16 +145,25 @@ struct StartForm: View {
     /// the first message starts at one line and the rows stand closer.
     private var short: Bool { room < 600 }
 
-    /// The place Start sends: a new worktree by the name typed, else the one chosen.
-    private var startPlace: StartPlace {
+    /// The place the person chose: a new worktree by the name typed, else the one chosen; nil is the default.
+    private var chosenPlace: StartPlace? {
         newName.map { .new($0.trimmingCharacters(in: .whitespaces)) } ?? place
+    }
+
+    /// The place Start sends: the one chosen, else in a repository a new worktree named from the first message
+    /// (screen 34's default), else the folder as it is. Resolved only here, as the start is sent: the ask holds the
+    /// choice, so a withdrawn start asked again is the same ask whatever the repository lists by then.
+    private var startPlace: StartPlace {
+        if let chosenPlace { return chosenPlace }
+        guard let context, let folder, let pick, let git = context.git(folder.path) ?? nil else { return .folder }
+        return .new(StartPlace.named(fromTask: draft.message, for: pick.agent, in: git))
     }
 
     var body: some View {
         Group {
-            // The draft's page: the form while composing, else the sent start's page in the form's column, as tall as
-            // its content.
-            if let sentStart, phase != .composing {
+            // The draft's page: the form while composing or while its folder question is asked (the card above the
+            // box), else the sent start's page in the form's column, as tall as its content.
+            if let sentStart, phase != .composing, !asksTrust {
                 sent(sentStart.start, on: sentStart.owner)
                     .frame(maxWidth: Self.column)
                     .fixedSize(horizontal: false, vertical: true)
@@ -235,24 +243,24 @@ struct StartForm: View {
         .onChange(of: draft.wantsKeyboard) { takeKeyboard(formShown: true) }
     }
 
-    /// A sent start: the folder question when its computer asked it, else its progress.
-    @ViewBuilder private func sent(_ start: SessionStart, on owner: AppModel) -> some View {
-        if case .needsTrust(let path) = start.outcome {
-            FolderStep(
-                start: start, path: path, computer: start.machineName,
-                answer: { answer(start, $0, in: StartContext(model: owner)) }, back: { backToForm(from: start) })
-        } else {
-            StartProgress(
-                start: start,
-                shown: { owner.shown(for: $0) != nil },
-                again: { backToForm(from: start) },
-                stopRetrying: {
-                    owner.starter.stopRetrying(start.requestID)
-                    draft.withdraw()
-                },
-                close: { backToForm(from: start) },
-                started: { started($0) })
-        }
+    /// The sent start's computer asked the folder question: the card above the box asks it.
+    private var asksTrust: Bool {
+        if case .trust = phase { return true }
+        return false
+    }
+
+    /// A sent start's progress, and Kit's words when it couldn't start.
+    private func sent(_ start: SessionStart, on owner: AppModel) -> some View {
+        StartProgress(
+            start: start,
+            shown: { owner.shown(for: $0) != nil },
+            again: { backToForm(from: start) },
+            stopRetrying: {
+                owner.starter.stopRetrying(start.requestID)
+                draft.withdraw()
+            },
+            close: { backToForm(from: start) },
+            started: { started($0) })
     }
 
     /// The box: the first message, and in its bar the computer, the folder and where in the repository, the model and
@@ -260,9 +268,22 @@ struct StartForm: View {
     /// its placeholder), and why Start can't be pressed is Start's tooltip.
     private var form: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // The folder question, above the box it asks about (screen 35), 30 pt over its rim: the start's own, whatever
+            // the box shows meanwhile, and the folder its computer asked about (a link's target, as it keeps the answer).
+            if let sentStart, case .trust(let path) = phase {
+                TrustCard(
+                    folder: URL(fileURLWithPath: path).lastPathComponent, computer: sentStart.start.machineName,
+                    keys: !asks.isAsking,
+                    start: { answer(sentStart.start, $0, in: StartContext(model: sentStart.owner)) },
+                    cancel: { backToForm(from: sentStart.start) }
+                )
+                .padding(.bottom, 20)
+            }
             if let context {
                 AgentNotice(context: context, elsewhere: !isThisMac(context))
                 composer(context)
+                    // What the question asks about stays as it was asked while it is open.
+                    .disabled(asksTrust)
                     // Its menus open over what is above and below it: the last modifier, so they draw over the rest.
                     .zIndex(folderOpen || computerMenuOpen || branchMenuOpen || menuOpen ? 1 : 0)
             } else {
@@ -354,7 +375,7 @@ struct StartForm: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "folder").font(.system(size: 11)).accessibilityHidden(true)
-                Text(folder?.name ?? "Choose folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.tail)
+                Text(folder?.name ?? Self.chooseFolder).font(InputBoxChip.font).lineLimit(1).truncationMode(.tail)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             // While none is chosen, the folder is the piece still missing: the bar's one lit, bordered chip.
@@ -362,28 +383,29 @@ struct StartForm: View {
             .inputBoxChip(open: folderOpen, bordered: folder == nil)
         }
         .buttonStyle(.hover(radius: 8, id: "start.folder"))
-        .help(folder?.path ?? "Choose folder")
+        .help(folder?.path ?? Self.chooseFolder)
         .accessibilityIdentifier("start.folder")
         .accessibilityValue(folderOpen ? "open" : "closed")
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { folderChip = $0 }
-        .overlay(alignment: .topLeading) {
+        // Above the chip, as every menu of the box's bar opens (screen 32).
+        .overlay(alignment: .bottomLeading) {
             if folderOpen {
                 let placed = PanelPlace.place(widest: 520, leading: folderChip.minX, box: box)
                 folderPanel(context, width: placed.width).openPanel()
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { folderPanelHeight = $0 }
-                    .offset(x: placed.x - folderChip.minX, y: InputBoxChip.height + Theme.panelGap)
+                    .offset(x: placed.x - folderChip.minX, y: -(InputBoxChip.height + Theme.panelGap))
             }
         }
         .closesPanel($folderOpen)
         .onChange(of: folderOpen) { _, open in if !open { browsing = false } }
     }
 
-    /// The most the folder list stands: 260 pt, or less where the pane ends sooner, so the whole panel, its foot rows
-    /// included, stays inside the pane; at least one folder's row. Before the panel is measured, 260.
+    /// The most the folder list stands: 260 pt, or less where the pane's top comes sooner, so the whole panel, its foot
+    /// row included, stays inside the pane above the chip; at least one folder's row. Before the panel is measured, 260.
     private var listMost: CGFloat {
         guard folderPanelHeight > 0 else { return 260 }
         let others = folderPanelHeight - listShown
-        let room = startHeight - PanelPlace.margin - folderChip.maxY - Theme.panelGap - others
+        let room = folderChip.minY - Theme.panelGap - PanelPlace.margin - others
         return min(260, max(room, 44))
     }
 
@@ -414,38 +436,32 @@ struct StartForm: View {
                 }
             } else if context.projects.isEmpty {
                 Text("No recent folders on \(context.machineName) yet.").font(Theme.ui(12)).foregroundStyle(Theme.text2)
-                if let picked = picked(context) { pickedRow(picked) }
+                if let picked = picked(context) { folderRow(picked, index: 0) }
             } else {
-                TextField("", text: choice(\.query), prompt: Text("Search recent folders").foregroundStyle(Theme.text3))
-                    .accessibilityLabel("Search recent folders")
-                    .accessibilityIdentifier("start.search")
-                    // The field and the folders under it are one stop for the keyboard: ↑ and ↓ move the chosen
-                    // folder through the folders as shown while the cursor stays here, so typing goes on; Return
-                    // keeps it and closes the panel.
-                    .focused($searchFocused)
-                    // The panel opens with the keyboard here, so the first keys typed search and the arrows choose.
-                    .onAppear { DispatchQueue.main.async { searchFocused = true } }
-                    .onKeyPress(.downArrow) { moveFolder(context, down: true) }
-                    .onKeyPress(.upArrow) { moveFolder(context, down: false) }
-                    .onSubmit { folderOpen = false }
-                    .textFieldStyle(.plain)
-                    .font(Theme.ui(12.5))
-                    .menuField()
-                MenuHeader(text: "Recent")
+                MenuHeader(text: "Recent on \(context.machineName)")
+                let picked = picked(context)
                 ScrollViewReader { list in
-                    ScrollView {
+                    // The row the keys light comes into sight (`PanelScroll`).
+                    PanelScroll {
                         // Not lazy: every folder is in the accessibility tree, scrolled to or not.
-                        VStack(spacing: 0) {
-                            if let picked = picked(context) { pickedRow(picked) }
-                            ForEach(startFilter(context.projects, query)) { project in folderRow(project) }
+                        VStack(spacing: MenuMetrics.rowGap) {
+                            if let picked { folderRow(picked, index: 0) }
+                            ForEach(Array(context.projects.enumerated()), id: \.element.path) { offset, project in
+                                folderRow(project, index: offset + (picked == nil ? 0 : 1))
+                            }
                         }
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                     }
                     // The chosen folder is always in view: scrolled to, the least that shows it, when the panel opens
-                    // or the choice or the list changes, so a click on a row in view moves nothing.
-                    .task(id: [folderPath ?? "", "\(context.projects.count)"]) { list.scrollTo(folderPath) }
+                    // or the choice or the list changes, so a click on a row in view moves nothing. Rows go by their
+                    // index in the menu (`panelRow`).
+                    .task(id: [folderPath ?? "", "\(context.projects.count)"]) {
+                        guard picked == nil, let row = context.projects.firstIndex(where: { $0.path == folderPath })
+                        else { return }
+                        list.scrollTo(row)
+                    }
                 }
-                // As tall as its rows, up to 260 pt or the room the pane has under the panel, then it scrolls. An exact
+                // As tall as its rows, up to 260 pt or the room the pane has above the panel, then it scrolls. An exact
                 // height: a panel is drawn over its button, which offers it only the button's own height, so a range
                 // would collapse the list to its least.
                 .frame(height: min(max(listHeight, 1), listMost))
@@ -455,60 +471,53 @@ struct StartForm: View {
             // computer's by browsing it.
             if !browsing && (isThisMac(context) || context.browses) {
                 MenuDivider().padding(.vertical, 5)
-                if isThisMac(context) { chooseButton } else { browseButton }
+                chooseRow(context)
             }
         }
     }
 
-    /// One arrow-key step through the folders as shown, the picked one first.
-    private func moveFolder(_ context: StartContext, down: Bool) -> KeyPress.Result {
-        let shown = (picked(context).map { [$0.path] } ?? []) + startFilter(context.projects, query).map(\.path)
-        draft.chooseFolder(ListStep.step(from: folderPath, in: shown, down: down), on: context.id)
-        return .handled
-    }
-
-    private func folderRow(_ project: StartProject) -> some View {
-        Button {
-            choose(project.path)
-        } label: {
+    /// A folder on one line, as screen 32 draws it: its mark, its name, and its path after it, cut at its head. Row
+    /// `index` of the menu's light: ↓ ↑ move it, Return chooses.
+    private func folderRow(_ project: StartProject, index: Int) -> some View {
+        let choose = { self.choose(project.path) }
+        return Button(action: choose) {
             MenuRow(chosen: folderPath == project.path) {
-                Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 8)
-                AgeText(since: project.lastUsed) { startProjectMeta(project, now: $0) }
-                    .font(Theme.ui(11)).foregroundStyle(Theme.text3).lineLimit(1)
-            } second: {
-                Text(project.shownPath).font(Theme.mono(11.5)).truncationMode(.head)
+                Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.text2).accessibilityHidden(true)
+                Text(project.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1).fixedSize()
+                Text(project.shownPath).font(Theme.mono(11.5)).foregroundStyle(Theme.text2).lineLimit(1)
+                    .truncationMode(.head)
             }
         }
-        .buttonStyle(.menuRow(id: "start.folder.\(project.path)"))
+        .buttonStyle(.panelRow)
+        .panelRow(index, id: "start.folder.\(project.path)", choose: choose)
         .focusable(false)
+        .accessibilityLabel(project.name)
+        .accessibilityValue(project.shownPath)
         .accessibilityIdentifier("start.folder.\(project.path)")
         .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
-        .id(project.path)
     }
 
-    /// Any folder on this Mac, from the standard folder panel.
-    private var chooseButton: some View {
-        Button(action: chooseFolder) {
-            MenuRow(chosen: false) { Text("Choose a folder\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
+    /// "Choose Folder…": this Mac's standard folder panel, or another computer's folders browsed in the menu (a
+    /// computer below minor 30 lists only its recent ones). The menu's last row.
+    private func chooseRow(_ context: StartContext) -> some View {
+        let index = context.projects.count + (picked(context) == nil ? 0 : 1)
+        let choose = {
+            if isThisMac(context) {
+                chooseFolder()
+            } else {
+                branchMenuOpen = false
+                browsing = true
+            }
         }
-        .buttonStyle(.menuRow(id: "start.choose"))
+        return Button(action: choose) {
+            MenuRow { Text(Self.chooseFolder + "\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
+        }
+        .buttonStyle(.panelRow)
+        .panelRow(index, id: "start.choose", choose: choose)
         .accessibilityIdentifier("start.choose")
     }
 
-    /// Any folder on a computer that is not this Mac, browsed in the Folder box (a computer below minor 30 lists only
-    /// its recent ones).
-    private var browseButton: some View {
-        Button {
-            branchMenuOpen = false
-            browsing = true
-        } label: {
-            MenuRow(chosen: false) { Text("Browse\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
-        }
-        .buttonStyle(.menuRow(id: "start.browse"))
-        .accessibilityIdentifier("start.browse")
-    }
+    private static let chooseFolder = "Choose Folder"
 
     private func chooseFolder() {
         #if DEBUG
@@ -535,23 +544,10 @@ struct StartForm: View {
     /// The selected folder when no row below shows it: one chosen that is not a recent one, or a recent one the search
     /// hides. So the folder Start starts in is always one of the list's rows.
     private func picked(_ context: StartContext) -> StartProject? {
-        guard let folder, !startFilter(context.projects, query).contains(where: { $0.path == folder.path }) else {
+        guard let folder, !context.projects.contains(where: { $0.path == folder.path }) else {
             return nil
         }
         return folder
-    }
-
-    /// The selected folder above the rows when none of them shows it: its name and its path, selected.
-    private func pickedRow(_ project: StartProject) -> some View {
-        MenuRow(chosen: true) {
-            Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                .truncationMode(.middle)
-        } second: {
-            Text(project.path).font(Theme.mono(11.5)).truncationMode(.head)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("start.picked")
-        .accessibilityAddTraits(.isSelected)
     }
 
     // MARK: First message and model
@@ -567,7 +563,7 @@ struct StartForm: View {
                 }
                 TextField(
                     "", text: $draft.message, selection: $messageSelection,
-                    prompt: Text("What do you want to work on?").foregroundStyle(Theme.text.opacity(0.5)), axis: .vertical
+                    prompt: Text("What do you want to work on?").foregroundStyle(Theme.text3), axis: .vertical
                 )
                     .accessibilityLabel("First message")
                     .accessibilityIdentifier("start.message")
@@ -789,76 +785,80 @@ private struct StartProgress: View {
     }
 }
 
-/// A start the computer answered with the folder question: nothing ran. The question is the form's own page; an
-/// answer sends the start again with it, and Back returns to the form.
-private struct FolderStep: View {
-    let start: SessionStart
-    /// The folder's real path, as the computer gave it.
-    let path: String
+/// The folder question (screen 35), asked once for a folder on a computer, before anything starts there: the card
+/// above the box names the folder, says what each answer means, and offers them as radio rows, the first chosen as
+/// the agents' own folder prompts do. Start (↩) sends the start again with the answer; Cancel (Esc) goes back to the
+/// form with nothing started.
+private struct TrustCard: View {
+    let folder: String
     let computer: String
-    let answer: (FolderTrust) -> Void
-    let back: () -> Void
+    /// Return and Esc are the card's; not while another ask is up, whose keys they are.
+    let keys: Bool
+    let start: (FolderTrust) -> Void
+    let cancel: () -> Void
+    @State private var trust = FolderTrust.trusted
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(FolderWords.title).font(Theme.ui(17, .semibold)).foregroundStyle(Theme.text)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(path).font(Theme.mono(11.5)).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.head)
-                    .padding(.leading, 10)
-                    .padding(.trailing, CopyButton.slot)
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
-                    .accessibilityIdentifier("folder.path")
-                    .overlay(alignment: .trailing) { CopyButton(text: path, id: "folder.path.copy") }
-                Text(FolderWords.body(computer)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
-                    .fixedSize(horizontal: false, vertical: true)
-                VStack(spacing: 6) {
-                    choice(.trusted)
-                    choice(.notTrusted)
-                }
-                Text(FolderWords.footnote).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
-                    .fixedSize(horizontal: false, vertical: true)
+            Text(FolderWords.question(folder)).font(Theme.ui(14, .semibold)).foregroundStyle(Theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(FolderWords.body(computer)).font(Theme.ui(12.5)).foregroundStyle(Theme.text2).lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 8)
+            VStack(alignment: .leading, spacing: 2) {
+                choice(.trusted)
+                choice(.notTrusted)
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 9)  // as much room above as the bar keeps under its buttons
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("folder.question")
-            Color.clear.frame(height: 18)
-            SheetBar(
-                action: nil, actionID: "", blocked: true, perform: {}, cancel: back, cancelID: "start.folder.back",
-                cancelTitle: "Back"
-            ) {
-                Text(FolderWords.then(start.agent.displayName, start.project.name)).font(Theme.ui(11.5))
-                    .foregroundStyle(Theme.text3)
+            .padding(.top, 10)
+            HStack(spacing: 8) {
+                Text(FolderWords.footnote).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                ActionButton(title: "Cancel", key: "Esc", prominent: false, id: "start.folder.back", action: cancel)
+                    .keyboardShortcut(keys ? .cancelAction : nil)
+                ActionButton(title: "Start", key: "\u{21A9}", prominent: true, id: "folder.start") { start(trust) }
+                    .keyboardShortcut(keys ? .defaultAction : nil)
             }
+            .padding(.top, 12)
         }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.sheet, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.hairline))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("folder.question")
     }
 
-    private func choice(_ trust: FolderTrust) -> some View {
-        let trusts = trust == .trusted
-        let id = "folder.\(trusts ? "trust" : "distrust")"
+    /// An answer as a radio row: its dot, its words and what they mean, on one line.
+    private func choice(_ answer: FolderTrust) -> some View {
+        let trusts = answer == .trusted
+        let chosen = trust == answer
         return Button {
-            answer(trust)
+            trust = answer
         } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(trusts ? FolderWords.trust : FolderWords.distrust).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text)
-                Text(trusts ? FolderWords.trustDetail : FolderWords.distrustDetail).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle().strokeBorder(chosen ? Theme.text : Theme.text3, lineWidth: 1.2)
+                    if chosen { Circle().fill(Theme.text).padding(3.5) }
+                }
+                .frame(width: 13, height: 13)
+                .accessibilityHidden(true)
+                Text(trusts ? FolderWords.trust : FolderWords.distrust).font(Theme.ui(12.5, .medium))
+                    .foregroundStyle(Theme.text)
+                Text(trusts ? FolderWords.trustDetail : FolderWords.distrustDetail).font(Theme.ui(12))
+                    .foregroundStyle(Theme.text3).lineLimit(1)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 7, id: id))
-        .accessibilityIdentifier(id)
+        .buttonStyle(.hover(radius: 7, id: "folder.\(trusts ? "trust" : "distrust")"))
+        .accessibilityIdentifier("folder.\(trusts ? "trust" : "distrust")")
+        .accessibilityAddTraits(chosen ? .isSelected : [])
     }
 }
 
-/// The one computer a start can go to, by name, green while it answers.
 /// The computer a start goes to: a button and its panel, the model button's kind, so one form has one kind of menu.
 /// The chosen computer carries the check; the lit row, by the pointer or the keys, is filled (`panelRow`).
 private struct ComputerButton: View {
@@ -879,9 +879,8 @@ private struct ComputerButton: View {
             open.toggle()
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "desktopcomputer").font(.system(size: 11)).accessibilityHidden(true)
+                ComputerMark(os: chosen.machineOS)
                 Text(chosen.machineName).font(InputBoxChip.font).lineLimit(1).truncationMode(.tail)
-                Circle().fill(Theme.green).frame(width: 6, height: 6).accessibilityHidden(true)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(Theme.text2)
@@ -892,8 +891,9 @@ private struct ComputerButton: View {
         .accessibilityIdentifier("start.computer")
         .accessibilityValue(open ? "open" : "closed")
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(StartForm.space)).minX } action: { minX = $0 }
-        .overlay(alignment: .topLeading) {
-            if open { panel.openPanel().offset(x: placed.x - minX, y: InputBoxChip.height + Theme.panelGap) }
+        // Above the chip, as every menu of the box's bar opens.
+        .overlay(alignment: .bottomLeading) {
+            if open { panel.openPanel().offset(x: placed.x - minX, y: -(InputBoxChip.height + Theme.panelGap)) }
         }
         .closesPanel($open)
     }
@@ -907,6 +907,7 @@ private struct ComputerButton: View {
                 }
                 Button(action: pick) {
                     MenuRow(chosen: context.id == chosen.id) {
+                        ComputerMark(os: context.machineOS).foregroundStyle(Theme.text2)
                         Text(context.machineName).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
                     }
                 }
@@ -924,7 +925,7 @@ private struct ComputerButton: View {
                 MenuRow {
                     Image(systemName: "plus").font(.system(size: 9.5, weight: .bold)).frame(width: 12)
                         .accessibilityHidden(true)
-                    Text("Add a computer\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
+                    Text(AddKind.computer.title).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
                 }
             }
             .buttonStyle(.panelRow)

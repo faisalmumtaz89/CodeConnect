@@ -19,6 +19,20 @@ final class StartBranchWordsTests: XCTestCase {
         XCTAssertEqual(StartWords.newBranchDetail, "A worktree of its own, by name")
     }
 
+    /// The Mac's branch menu (screen 34), and its words for the branches a new worktree can start from.
+    func testTheMacBranchMenusWords() {
+        XCTAssertEqual(StartWords.ownCheckout, "The folder’s own checkout")
+        XCTAssertEqual(StartWords.namedFromTask, "Branch named from the task")
+        XCTAssertEqual(StartWords.fromABranch, "From a branch…")
+        XCTAssertEqual(StartWords.newBranch.titleStyle, "New Branch…")
+        XCTAssertEqual(StartWords.branchList([]), "")
+        XCTAssertEqual(StartWords.branchList(["a"]), "a")
+        XCTAssertEqual(StartWords.branchList(["a", "b"]), "a, b")
+        XCTAssertEqual(
+            StartWords.branchList(["accounts-reset-countdown", "fleet-tap-and-remove", "c", "d", "e"]),
+            "accounts-reset-countdown, fleet-tap-and-remove, 3 more")
+    }
+
     func testTheNewWorktreeStepsWords() {
         XCTAssertEqual(StartWords.worktreeName, "Name")
         XCTAssertEqual(StartWords.worktreeNameExample, "fix-login")

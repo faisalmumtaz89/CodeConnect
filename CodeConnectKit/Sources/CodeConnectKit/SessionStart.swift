@@ -75,9 +75,10 @@ public enum StartPlace: Hashable, Sendable {
     case new(String)
 
     /// The branch a new worktree of this name gets: Claude Code's own
-    /// `worktree-<name>`, Codex's the name as typed.
+    /// `worktree-<name>`, each `/` written `+` as in its folder; Codex's and
+    /// Antigravity's the name as typed.
     public static func newBranch(_ name: String, for agent: StartAgent) -> String {
-        agent == .claude ? "worktree-\(name)" : name
+        agent == .claude ? "worktree-" + name.replacingOccurrences(of: "/", with: "+") : name
     }
 
     /// Claude Code's rule for a worktree's name, which both agents' follow:
@@ -89,6 +90,48 @@ public enum StartPlace: Hashable, Sendable {
         return name.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { part in
             !part.isEmpty && part != "." && part != ".." && part.allSatisfy(allowed.contains)
         }
+    }
+
+    /// A new worktree's name from a run's first message: its words in lower case, accents dropped, joined by "-", as
+    /// many whole words as fit in 40 bytes (a first word longer than that cut to it), "run" when the task has no Latin
+    /// letter or digit; one the repository already has gets "-2", "-3", … (`free`).
+    public static func named(fromTask task: String, for agent: StartAgent, in git: StartGit) -> String {
+        let most = 40
+        let words = task.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil).lowercased()
+            .split { !($0.isASCII && ($0.isLetter || $0.isNumber)) }
+        var base = ""
+        for word in words {
+            let next = base.isEmpty ? String(word.prefix(most)) : base + "-" + word
+            guard next.utf8.count <= most else { break }
+            base = next
+        }
+        return free(base.isEmpty ? "run" : base, for: agent, in: git)
+    }
+
+    /// A new worktree's name the repository doesn't have, as the computer makes it: `name`, else "-2", "-3", … while
+    /// the branch the new worktree would get is a branch or a folder of one's path (`fix` beside `fix/login`), or its
+    /// folder (each "/" written "+") is already among the main checkout's `.claude/worktrees/`. The computer sees
+    /// every branch and has the last word; this is what the form can say from the ones it was listed.
+    public static func free(_ name: String, for agent: StartAgent, in git: StartGit) -> String {
+        let branches = Set(git.branches + git.worktrees.compactMap(\.branch))
+        let made = git.worktrees.first.map { $0.path + "/.claude/worktrees/" }
+        let folders = Set(
+            git.worktrees.compactMap { checkout -> String? in
+                guard let made, checkout.path.hasPrefix(made) else { return nil }
+                return String(checkout.path.dropFirst(made.count))
+            })
+        func taken(_ name: String) -> Bool {
+            let branch = newBranch(name, for: agent)
+            return branches.contains(branch) || branches.contains { $0.hasPrefix(branch + "/") }
+                || folders.contains(name.replacingOccurrences(of: "/", with: "+"))
+        }
+        var free = name
+        var number = 2
+        while taken(free) {
+            free = "\(name)-\(number)"
+            number += 1
+        }
+        return free
     }
 }
 
@@ -143,7 +186,18 @@ public struct StartProject: Identifiable, Hashable, Sendable {
     public var id: String { path }
 
     /// The folder as a shell prints it: `~/code/infra`.
-    public var shownPath: String {
+    public var shownPath: String { Self.shown(path) }
+
+    /// A folder under `home`, the home folder the computer itself listed, from "~"; any other as it is.
+    public static func shown(_ path: String, home: String) -> String {
+        guard home != "/" else { return path }
+        if path == home { return "~" }
+        let prefix = home.hasSuffix("/") ? home : home + "/"
+        return path.hasPrefix(prefix) ? "~/" + path.dropFirst(prefix.count) : path
+    }
+
+    /// Any folder as a shell prints it: under a home folder, a Mac's (/Users) or a Linux computer's (/home), from "~".
+    public static func shown(_ path: String) -> String {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count >= 3, parts[0].isEmpty, parts[1] == "Users" || parts[1] == "home"
         else { return path }

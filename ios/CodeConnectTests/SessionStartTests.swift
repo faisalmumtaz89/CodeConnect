@@ -282,7 +282,7 @@ final class SessionStartTests: XCTestCase {
         for bad in ["", "has space", "ünï", "..", "a/../b", "a//b", "/a", "a/", "semi;", String(repeating: "a", count: 65)] {
             XCTAssertFalse(StartPlace.isValidName(bad), bad)
         }
-        XCTAssertEqual(StartPlace.newBranch("fix/login", for: .claude), "worktree-fix/login")
+        XCTAssertEqual(StartPlace.newBranch("fix/login", for: .claude), "worktree-fix+login")
         XCTAssertEqual(StartPlace.newBranch("fix/login", for: .codex), "fix/login")
     }
 

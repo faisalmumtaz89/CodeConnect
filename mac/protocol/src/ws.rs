@@ -1021,8 +1021,11 @@ pub enum StartWorktree {
     /// In a new worktree for a local branch [`ProjectGit::branches`] listed.
     Branch { branch: String },
     /// In a new worktree named `name`: Claude makes it (`claude --worktree <name>`,
-    /// on its branch `worktree-<name>`); for Codex it is made in the same place, on
-    /// a new branch named `name`.
+    /// on its branch `worktree-<name>`, each `/` written `+`); for Codex and Antigravity it is made in the
+    /// same place, on a new branch named `name`. A name the repository already has
+    /// (that branch, a branch clashing with its path, or the worktree's folder) goes
+    /// as `<name>-2`, `<name>-3`, …: the computer sees every branch, the app only
+    /// the newest [`MAX_PROJECT_BRANCHES`].
     New { name: String },
 }
 

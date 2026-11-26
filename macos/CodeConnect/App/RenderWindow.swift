@@ -74,6 +74,8 @@
         static var opensComputerPicker: Bool { UserDefaults.standard.bool(forKey: "CC_COMPUTER_PICKER") }
         /// `-CC_BRANCH_MENU YES`: the start form's Branch menu open.
         static var opensBranchMenu: Bool { UserDefaults.standard.bool(forKey: "CC_BRANCH_MENU") }
+        /// `-CC_BRANCH_LIST YES`: the branch menu opens on "From a branch…"'s list of branches.
+        static var opensBranchList: Bool { UserDefaults.standard.bool(forKey: "CC_BRANCH_LIST") }
         /// `-CC_BROWSE <path>`: the start form opens browsing that folder of a computer that is not this Mac; `~` is
         /// its home. `-CC_BROWSE_HIDDEN YES` shows hidden folders, `-CC_BROWSE_UNASKED YES` with fixtures leaves the
         /// listing unanswered (the Kit's `listFolder`), so the form stays on reading it, and `-CC_NEW_FOLDER <name>` opens
@@ -92,7 +94,7 @@
         static var newFolderName: String? { UserDefaults.standard.string(forKey: "CC_NEW_FOLDER") }
         /// `-CC_BRANCH_PLACE <branch>`: the start form's place, the repository's worktree on that branch.
         /// `-CC_BRANCH_NAME <name>`: a new worktree being named, as typed.
-        static func branch(in git: StartGit?, place: inout StartPlace, newName: inout String?) {
+        static func branch(in git: StartGit?, place: inout StartPlace?, newName: inout String?) {
             let defaults = UserDefaults.standard
             if let branch = defaults.string(forKey: "CC_BRANCH_PLACE"),
                 let checkout = git?.others(than: "").first(where: { $0.branch == branch })

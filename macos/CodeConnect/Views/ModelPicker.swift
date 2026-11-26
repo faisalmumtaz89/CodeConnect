@@ -1,7 +1,8 @@
 import CodeConnectKit
 import SwiftUI
 
-/// The model button at the composer's bottom left, and its menu: a section an agent, opening upward over the form.
+/// The model button at the bar's end, and its menu: a section an agent, opening upward over the form with its trailing
+/// edge on the button's (screen 31), as a menu at the window's edge does.
 /// What each section holds and every word the app adds are Kit's (`StartContext.models`); a model's label is the
 /// agent's own name for it, shown as sent.
 struct ModelButton: View {
@@ -11,11 +12,12 @@ struct ModelButton: View {
     let choose: (StartModelChoice) -> Void
 
     @Environment(\.startBox) private var startBox
-    /// The button's top leading corner, in `StartForm.space`.
-    @State private var minX: CGFloat = 0
-    @State private var minY: CGFloat = 0
+    /// The button, in `StartForm.space`.
+    @State private var chip: CGRect = .zero
+    /// The menu, 440 pt or the box's width, its trailing edge on the button's and inside the box.
     private var placed: (x: CGFloat, width: CGFloat) {
-        PanelPlace.place(widest: 440, leading: minX, box: startBox)
+        let width = startBox.width > 0 ? min(440, startBox.width) : 440
+        return (max(startBox.minX, chip.maxX - width), width)
     }
 
     private var checking: Bool { context.startAgents.contains { context.models($0) == .checking } }
@@ -34,17 +36,14 @@ struct ModelButton: View {
         }
         .buttonStyle(.hover(radius: 8, id: "start.model"))
         .help(label)
-        .disabled(checking)
+        // Nothing to choose while the computer is asked, or when no agent can start here (the form says why).
+        .disabled(checking || context.modelChoices.isEmpty)
         .accessibilityIdentifier("start.model")
         .accessibilityValue(open ? "open" : "closed")
-        // Above the button, clear of it by the panels' one gap, inside the box by the start form's one rule
-        // (`PanelPlace`).
-        .onGeometryChange(for: CGPoint.self) { $0.frame(in: .named(StartForm.space)).origin } action: {
-            minX = $0.x
-            minY = $0.y
-        }
+        // Above the button, clear of it by the panels' one gap.
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(StartForm.space)) } action: { chip = $0 }
         .overlay(alignment: .bottomLeading) {
-            if open { menu.openPanel().offset(x: placed.x - minX, y: -(InputBoxChip.height + Theme.panelGap)) }
+            if open { menu.openPanel().offset(x: placed.x - chip.minX, y: -(InputBoxChip.height + Theme.panelGap)) }
         }
         .closesPanel($open)
     }
@@ -63,18 +62,29 @@ struct ModelButton: View {
         }
     }
 
+    /// The agents the menu has a section for: each that offers its models, or hasn't answered yet.
+    private var shownAgents: [StartAgent] {
+        context.startAgents.filter {
+            switch context.models($0) {
+            case .checking, .choices: true
+            case .missing, .signedOut: false
+            }
+        }
+    }
+
     /// As tall as its entries, up to what fits above the composer; longer, it scrolls.
     private var menu: some View {
         let order = rows
         return PanelScroll {
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(context.startAgents.enumerated()), id: \.element) { index, agent in
+                // An agent that can't start here is left out (screen 31); the form says why under the folder where it
+                // concerns the person (`AgentNotice`).
+                ForEach(Array(shownAgents.enumerated()), id: \.element) { index, agent in
                     if index > 0 { divider }
                     header(agent.displayName)
-                    switch context.models(agent) {
-                    case .checking: note(StartContext.checkingTitle)
-                    case .missing(let reason), .signedOut(let reason): note(reason)
-                    case .choices:
+                    if context.models(agent) == .checking {
+                        note(StartContext.checkingTitle)
+                    } else {
                         ForEach(context.modelChoices.filter { $0.agent == agent }, id: \.self) { choice in
                             row(choice, index: order.firstIndex(of: choice) ?? 0)
                         }
@@ -85,7 +95,7 @@ struct ModelButton: View {
         // The card's own inset each side within its width, as every panel's.
         .frame(width: placed.width - 2 * MenuMetrics.inset)
         // Its top 8 pt inside the pane (before the button is measured, its tallest).
-        .frame(maxHeight: minY > 0 ? min(360, minY - Theme.panelGap - PanelPlace.margin) : 360)
+        .frame(maxHeight: chip.minY > 0 ? min(360, chip.minY - Theme.panelGap - PanelPlace.margin) : 360)
         .fixedSize(horizontal: false, vertical: true)
         .menuCard()
     }
