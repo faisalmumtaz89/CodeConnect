@@ -81,6 +81,10 @@ struct FolderBrowser: View {
                     .fixedSize()
                     .accessibilityIdentifier("start.browse.hidden")
             }
+            // In from the card's side as a menu's header is (`MenuHeader`), with the card's divider under it.
+            .padding(.horizontal, 10)
+            .padding(.top, 6)
+            MenuDivider()
             ScrollViewReader { list in
                 ScrollView {
                     VStack(spacing: 0) { rows }
@@ -102,6 +106,7 @@ struct FolderBrowser: View {
             .onKeyPress(.leftArrow) { up() }
             // ⌫ sends DEL (U+007F) on a Mac, not SwiftUI's `.delete` (U+0008).
             .onKeyPress(KeyEquivalent("\u{7F}")) { up() }
+            MenuDivider()
             bar
         }
         .task(id: request) { context.listFolder(request) }
