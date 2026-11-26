@@ -705,13 +705,6 @@ final class CatchUpTests: XCTestCase {
         XCTAssertEqual(model.shown(for: a)?.drawnThrough, 60)
     }
 
-    // MARK: "Not sent: stopped" — the hand-back fires on a live arrival, never a replay
-
-    /// A Stop cancels a send **live**: its text is offered back to the composer (the view takes it only
-    /// when empty). The daemon's real order (claude_host.rs: `a_stop_aborts_…`) is the send answering
-    /// `.sent` FIRST — which clears the send's identity — then the person's row, then, after the Stop,
-    /// the notice. So the hand-back rides on live arrival, not on a held identity. Driving the real
-    /// `.sent` answer is the point: an identity-gated hand-back would never fire here (must-fail).
     /// **A message the daemon takes for a run that is moving to another account asks for the list again, once**, so
     /// the run shows its new account without waiting for the next refresh; a message to any other run asks nothing.
     func testAMessageToAMovingRunAsksForTheListOnce() async throws {
@@ -734,6 +727,13 @@ final class CatchUpTests: XCTestCase {
         XCTAssertEqual(wire.sessionsAsked, before + 1, "the moving run's refused message asks for the list once")
     }
 
+    // MARK: "Not sent: stopped" — the hand-back fires on a live arrival, never a replay
+
+    /// A Stop cancels a send **live**: its text is offered back to the composer (the view takes it only
+    /// when empty). The daemon's real order (claude_host.rs: `a_stop_aborts_…`) is the send answering
+    /// `.sent` FIRST — which clears the send's identity — then the person's row, then, after the Stop,
+    /// the notice. So the hand-back rides on live arrival, not on a held identity. Driving the real
+    /// `.sent` answer is the point: an identity-gated hand-back would never fire here (must-fail).
     func testALiveStoppedSendOffersItsTextToTheComposer() async throws {
         let (model, _) = await caughtUp([Row(uid: a, lastSeq: 2)])
         // The send answers `.sent`, exactly as the daemon's canonical stop sequence does, so its
