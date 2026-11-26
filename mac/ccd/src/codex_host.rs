@@ -11056,6 +11056,7 @@ mod tests {
         rig.daemon.account_facts.read(
             &key,
             Some(protocol::ws::AccountFacts {
+                grouped_windows: Vec::new(),
                 limits_available: None,
                 email: Some("default@example.test".into()),
                 plan: Some("plus".into()),

@@ -59,6 +59,7 @@ public struct AccountFacts: Decodable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case email, plan, windows
+        case groupedWindows = "grouped_windows"
         case limitsAvailable = "limits_available"
         case readAt = "read_at"
     }
@@ -67,7 +68,11 @@ public struct AccountFacts: Decodable, Hashable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         email = try c.decodeIfPresent(String.self, forKey: .email)
         plan = try c.decodeIfPresent(String.self, forKey: .plan)
-        windows = try c.decodeIfPresent([UsageWindow].self, forKey: .windows) ?? []
+        // Windows by model group (minor 52, Antigravity's) come in a field of their own, which an older app ignores;
+        // here they are windows like any other, each naming its group.
+        windows =
+            (try c.decodeIfPresent([UsageWindow].self, forKey: .windows) ?? [])
+            + (try c.decodeIfPresent([UsageWindow].self, forKey: .groupedWindows) ?? [])
         limitsAvailable = try c.decodeIfPresent(Bool.self, forKey: .limitsAvailable)
         readAt = try c.decode(String.self, forKey: .readAt)
     }

@@ -579,6 +579,7 @@ pub(crate) fn keep_antigravity(facts: &Facts, said: Option<(bool, Option<String>
     facts.read(
         &key,
         signed_in.then(|| protocol::ws::AccountFacts {
+            grouped_windows: Vec::new(),
             email: None,
             plan,
             windows: Vec::new(),
@@ -637,6 +638,7 @@ pub(crate) async fn read_claude_facts(
         return None;
     }
     Some(protocol::ws::AccountFacts {
+        grouped_windows: Vec::new(),
         limits_available: None,
         email: status["email"].as_str().map(str::to_string),
         plan: status["subscriptionType"].as_str().map(str::to_string),
@@ -755,6 +757,7 @@ pub(crate) async fn read_facts(
         drop(stdin);
         let (account, limits) = (said_account?, said_limits?);
         Some(protocol::ws::AccountFacts {
+            grouped_windows: Vec::new(),
             limits_available: None,
             email: account["account"]["email"].as_str().map(str::to_string),
             plan: account["account"]["planType"].as_str().map(str::to_string),
@@ -2280,7 +2283,8 @@ done
                 (signed_in == Some(true)).then(|| protocol::ws::AccountFacts {
                     email: None,
                     plan: plan.map(str::to_string),
-                    windows: if plan == Some("Google AI Ultra") {
+                    windows: Vec::new(),
+                    grouped_windows: if plan == Some("Google AI Ultra") {
                         usage.clone()
                     } else {
                         Vec::new()

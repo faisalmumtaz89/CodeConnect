@@ -304,7 +304,7 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
                     // FACTS_FRESH, however many apps and turns ask.
                     let mut facts = offer.as_ref().and_then(agy_default_facts);
                     if let (Some(facts), Some(agy)) = (facts.as_mut(), agy) {
-                        facts.windows = agy_usage(environment, agy).await;
+                        facts.grouped_windows = agy_usage(environment, agy).await;
                     }
                     daemon.account_facts.read(key, facts);
                     return;
@@ -2041,6 +2041,7 @@ async fn ask(
 /// exactly as agy gives it (none when agy names none); signed out or not known, nothing.
 pub(crate) fn agy_default_facts(offer: &Offer) -> Option<protocol::ws::AccountFacts> {
     (offer.signed_in == Some(true)).then(|| protocol::ws::AccountFacts {
+        grouped_windows: Vec::new(),
         email: None,
         plan: offer.tier.clone(),
         windows: Vec::new(),
@@ -3187,7 +3188,7 @@ mod tests {
 
     /// **Antigravity's plan limits are read at most once a FACTS_FRESH, however many ask**: ten refreshes in a row and
     /// ten more at once (an app's accounts call and an Antigravity turn's end each ask one) run agy's `/usage` once;
-    /// the listing then carries its four windows on Antigravity's Default.
+    /// the listing then carries its four windows, by group, on Antigravity's Default (`grouped_windows`, never `windows`).
     #[tokio::test]
     async fn antigravity_limits_are_read_once_however_many_ask() {
         let _env = crate::ProcessEnvRead::take();
@@ -3236,7 +3237,7 @@ mod tests {
             .unwrap()
             .iter()
             .find(|d| d["agent"] == "antigravity")
-            .map(|d| d["facts"]["windows"].clone());
+            .map(|d| d["facts"]["grouped_windows"].clone());
         assert_eq!(
             windows.and_then(|w| w.as_array().map(|w| w.len())),
             Some(4),

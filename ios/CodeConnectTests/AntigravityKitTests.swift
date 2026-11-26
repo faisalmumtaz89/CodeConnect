@@ -231,14 +231,14 @@ final class AntigravityKitTests: XCTestCase {
     func testAntigravitysWindowsAreCaptionedByTheirGroupAndTheBarShowsTheFullest() throws {
         func facts(_ windows: String) throws -> AccountFacts {
             try JSONDecoder().decode(
-                AccountFacts.self, from: Data(#"{"read_at": "2026-11-26T04:10:00.000Z", "windows": [\#(windows)]}"#.utf8))
+                AccountFacts.self, from: Data(#"{"read_at": "2026-11-26T04:10:00.000Z", \#(windows)}"#.utf8))
         }
         let agy = try facts(
             """
-            {"used_percent": 30, "window_minutes": 10080, "resets_at": 1796258851, "group": "Gemini Models"},
+            "grouped_windows": [{"used_percent": 30, "window_minutes": 10080, "resets_at": 1796258851, "group": "Gemini Models"},
             {"used_percent": 55, "window_minutes": 300, "resets_at": 1795672051, "group": "Gemini Models"},
             {"used_percent": 0, "window_minutes": 10080, "resets_at": 0, "group": "Claude and GPT models"},
-            {"used_percent": 0, "window_minutes": 300, "resets_at": 0, "group": "Claude and GPT models"}
+            {"used_percent": 0, "window_minutes": 300, "resets_at": 0, "group": "Claude and GPT models"}]
             """)
         XCTAssertEqual(agy.windows.first?.group, "Gemini Models")
         let now = Date(timeIntervalSince1970: 1_795_660_000)
@@ -252,7 +252,7 @@ final class AntigravityKitTests: XCTestCase {
         XCTAssertEqual(limits.first?.resets, "resets in 3h 20m")
         XCTAssertEqual(limits.last?.resets, "not started")
         XCTAssertEqual(ReplyBar.figures(agy, now: now).map(\.caption), ["Gemini Models · 5-hour"], "the fullest")
-        let claude = try facts(#"{"used_percent": 10, "window_minutes": 300, "resets_at": 1795670000}"#)
+        let claude = try facts(#""windows": [{"used_percent": 10, "window_minutes": 300, "resets_at": 1795670000}]"#)
         XCTAssertEqual(ReplyBar.limits(claude, now: now).map(\.caption), ["5-hour"], "no group: its length alone")
         XCTAssertEqual(ReplyBar.figures(claude, now: now).count, 1, "no group: the bar shows every window")
     }
