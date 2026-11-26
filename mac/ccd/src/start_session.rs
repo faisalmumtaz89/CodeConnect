@@ -55,17 +55,19 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
         message,
         ClientMessage::SignInAccount { .. } | ClientMessage::RemoveAccount { .. }
     );
-    let (codex, claude) = if runs_agent {
+    let (codex, claude, agy) = if runs_agent {
         (
             codex_path(&environment, daemon.config.codex_bin.as_deref()).await,
             claude_path(&environment, daemon.config.claude_bin.as_deref()).await,
+            agy_path(&environment, daemon.config.agy_bin.as_deref()).await,
         )
     } else {
-        (None, None)
+        (None, None, None)
     };
     let agents = crate::accounts::Agents {
         codex: codex.as_deref(),
         claude: claude.as_deref(),
+        agy: agy.as_deref(),
     };
     let changes = !matches!(message, ClientMessage::ListAccounts { .. });
     // An account added or removed: the sign-ins are read again behind the answer.
@@ -282,6 +284,7 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
         let agents = crate::accounts::Agents {
             codex: codex.as_deref(),
             claude: claude.as_deref(),
+            agy: agy.as_deref(),
         };
         let store = daemon.store.clone();
         if let Ok(listing) =
@@ -2107,7 +2110,8 @@ pub(crate) fn agy_usage_windows(text: &str) -> Vec<protocol::ws::UsageWindow> {
 }
 
 /// One `agy acp` ccd talks to itself (the start box's ask, a sign-in, a sign-out), started as an agent is
-/// ([`agent_command`], the user's environment, in the home folder, its own process group), its stderr dropped. Its
+/// ([`agent_command`], the user's environment, in the home folder, its own process group), its stderr dropped; on an
+/// account of CodeConnect's, with that account's folder as agy's home (`--gemini-dir`). Its
 /// calls are numbered from 1; a call's answer is agy's reply to it, its notifications and anything else skipped.
 pub(crate) struct Agy {
     child: tokio::process::Child,
@@ -2117,8 +2121,16 @@ pub(crate) struct Agy {
 }
 
 impl Agy {
-    pub(crate) fn start(environment: &HashMap<OsString, OsString>, agy: &Path) -> Option<Agy> {
-        let mut command = agent_command(environment, None, &[agy.as_os_str(), OsStr::new("acp")]);
+    pub(crate) fn start(
+        environment: &HashMap<OsString, OsString>,
+        agy: &Path,
+        home: Option<&Path>,
+    ) -> Option<Agy> {
+        let mut args = vec![agy.as_os_str(), OsStr::new("acp")];
+        if let Some(home) = home {
+            args.extend([OsStr::new("--gemini-dir"), home.as_os_str()]);
+        }
+        let mut command = agent_command(environment, None, &args);
         command
             .current_dir(home_in(environment))
             .stdin(Stdio::piped())
@@ -2184,7 +2196,7 @@ pub(crate) async fn agy_offer(
         return Some(kept);
     }
     let home = home_in(environment);
-    let mut asking = Agy::start(environment, agy)?;
+    let mut asking = Agy::start(environment, agy, None)?;
     let asked = async {
         asking
             .call(
