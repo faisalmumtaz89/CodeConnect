@@ -468,7 +468,7 @@ private struct AgentSignInGroup: View {
             HStack(alignment: .firstTextBaseline, spacing: 0) {
                 Text(agent.displayName).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
                 Spacer()
-                ForEach(columns, id: \.self) { caption in AccountRow.heading(caption) }
+                AccountRow.headings(columns)
                 Color.clear.frame(width: AccountRow.trailing, height: 1)
             }
             .padding(.leading, 4)
@@ -530,7 +530,7 @@ private struct AgentAccounts: View {
             HStack(alignment: .firstTextBaseline, spacing: 0) {
                 Text(agent.displayName).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
                 Spacer()
-                ForEach(columns, id: \.self) { caption in AccountRow.heading(caption) }
+                AccountRow.headings(columns)
                 Color.clear.frame(width: AccountRow.trailing, height: 1)
             }
             .padding(.leading, 4)
@@ -634,16 +634,37 @@ private struct AccountRow: View {
     let remove: () -> Void
     /// Sign Out… of an agent's own sign-in: asks first, by its group's card.
     var signOut: () -> Void = {}
-    /// A column's heading on its group's title line: "<length> used", under its model group where the agent names one
-    /// (the group on its own line, so two groups' windows fit their columns).
-    static func heading(_ caption: String) -> some View {
-        let parts = caption.components(separatedBy: " · ")
-        return VStack(alignment: .trailing, spacing: 1) {
-            if parts.count == 2 { Text(parts[0]).lineLimit(1) }
-            Text("\(parts.last ?? caption) used").lineLimit(1)
+    /// The columns' headings on the group's title line: "<length> used" over each, and over a model group's columns,
+    /// where the agent names groups, the group's name once, above them at the trailing edge of its last.
+    static func headings(_ columns: [String]) -> some View {
+        var runs: [[String]] = []
+        for caption in columns {
+            if let last = runs.last?.last, parts(last).group == parts(caption).group {
+                runs[runs.count - 1].append(caption)
+            } else {
+                runs.append([caption])
+            }
+        }
+        return HStack(alignment: .bottom, spacing: 0) {
+            ForEach(runs, id: \.self) { run in
+                VStack(alignment: .trailing, spacing: 1) {
+                    if let group = parts(run[0]).group { Text(group).lineLimit(1) }
+                    HStack(spacing: 0) {
+                        ForEach(run, id: \.self) { caption in
+                            Text("\(parts(caption).length) used").lineLimit(1)
+                                .frame(width: column, alignment: .trailing)
+                        }
+                    }
+                }
+            }
         }
         .font(Theme.ui(10.5)).foregroundStyle(Theme.text3)
-        .frame(width: column, alignment: .trailing)
+    }
+
+    /// A caption's model group, where it names one ("<group> · <length>"), and its length.
+    private static func parts(_ caption: String) -> (group: String?, length: String) {
+        guard let dot = caption.range(of: " · ", options: .backwards) else { return (nil, caption) }
+        return (String(caption[..<dot.lowerBound]), String(caption[dot.upperBound...]))
     }
 
     /// The windows `all` name, in the order they name them, by caption (a model group's own, where the agent names
