@@ -12,6 +12,9 @@ enum Theme {
     static let raised = Color(themeHex: 0x1C1C1F)
     static let sheet = Color(themeHex: 0x19191C)
     static let code = Color(themeHex: 0x0E0E10)
+    /// The run's terminal: its ground, darker than `code`, and the words a program prints in no colour of its own.
+    static let terminal = Color(themeHex: 0x0B0B0D)
+    static let terminalText = Color(themeHex: 0xB4B4BA)
     /// Inline `code`'s ground inside prose: enough to mark the span on the pane, not a box.
     static let codeGround = Color.white.opacity(0.075)
     static let hairline = Color.white.opacity(0.07)
