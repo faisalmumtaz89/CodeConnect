@@ -2699,7 +2699,7 @@ done
     /// Antigravity's sign-in as each listing carries it (S2), built as ccd builds one (its sign-in slot's mark, then
     /// what is held): signed in with agy's tier "Google AI Pro", signed in with no tier named, signed out, and signing
     /// in; and signed in with its plan's limits, read by agy's own /usage as ccd reads them (records shaped as agy 1.5.15
-    /// prints them; of them, its Gemini week, partly used); and, beside that Default, an added account (minor 56), signed
+    /// prints them; of them, its Gemini week, partly used); and, beside that Default, an added account (minor 57), signed
     /// in in its own folder with its own plan and no windows, the one in use. Its read time is fixed, and the added
     /// account's id written as one fixed id, so the frames are the same at every build.
     fn antigravity_sign_in_frames() -> serde_json::Value {

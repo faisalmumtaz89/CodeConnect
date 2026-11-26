@@ -414,7 +414,7 @@ final class AccountsWireTests: XCTestCase {
     }
 
     /// An Antigravity run moving to another account is counted for Antigravity, as Claude Code's and Codex's are (minor
-    /// 56), from the daemon's recorded move, and for no other agent.
+    /// 57), from the daemon's recorded move, and for no other agent.
     func testAnAntigravityRunsMoveIsCountedForAntigravity() async throws {
         let (model, _) = try model()
         let url = try XCTUnwrap(Bundle(for: type(of: self)).url(forResource: "switch-antigravity-wire", withExtension: "json"))
