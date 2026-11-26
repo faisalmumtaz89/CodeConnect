@@ -122,6 +122,7 @@ private struct Composer: View {
     @State private var selection: TextSelection?
     @Environment(\.replyFocusRequest) private var replyFocusRequest
     @Environment(\.agentsShown) private var agentsShown
+    @Environment(\.filesDragged) private var filesDragged
     /// The Compact command typed last, and where it stands. The run's (`RunDrafts.command`).
     private var running: Running? {
         get { kept.command }
@@ -389,8 +390,10 @@ private struct Composer: View {
             sendButton
         }
         .coordinateSpace(.named(Self.space))
-        // Files dropped on the box, or a picture pasted into it, go with the message, where the computer takes them.
-        .takesFiles(model.canUpload(key), pasting: fieldFocused, takeFile)
+        // Files or a picture pasted into it go with the message, where the computer takes them (a drop lands on the
+        // whole conversation: `SessionPane`).
+        .pastesFiles(model.canUpload(key) && fieldFocused, takeFile)
+        .environment(\.filesOver, filesDragged && model.canUpload(key))
         .onGeometryChange(for: CGFloat.self) { $0.size.width - 2 * InputBoxLayout.barInset } action: { rowWidth = $0 }
         // The slash palette above the box, clear of it by the panels' one gap, as wide as the box.
         .overlay(alignment: .topLeading) {

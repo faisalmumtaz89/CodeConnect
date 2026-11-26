@@ -1,7 +1,6 @@
 import AppKit
 import CodeConnectKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// The box's paperclip, first in its bar, where the computer takes files: it opens the Mac's file panel, and each file
 /// chosen goes to `take`.
@@ -25,8 +24,8 @@ struct AttachButton: View {
     }
 }
 
-/// How files reach a tray: the file panel, a drop on the box, and a picture pasted into it. Each file goes to `take` by
-/// its name and size, and is read only if `take` keeps it (Kit's limits).
+/// How files reach a tray: the file panel, a drop on the conversation, and a picture pasted into the box. Each file
+/// goes to `take` by its name and size, and is read only if `take` keeps it (Kit's limits); a folder is refused unread.
 @MainActor
 enum FileIntake {
     typealias Take = (_ name: String, _ size: Int, _ read: () throws -> Data) -> Void
@@ -42,64 +41,84 @@ enum FileIntake {
 
     static func add(_ urls: [URL], _ take: Take) {
         for url in urls {
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            take(url.lastPathComponent, size) { try Data(contentsOf: url) }
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+            if values?.isDirectory == true {
+                take(url.lastPathComponent, 0) { throw Attachment.Folder() }
+            } else {
+                take(url.lastPathComponent, values?.fileSize ?? 0) { try Data(contentsOf: url) }
+            }
         }
     }
 
-    /// What a drop on the box carries: files by their URLs, or a picture with none.
-    static func drop(_ providers: [NSItemProvider], _ take: @escaping Take) -> Bool {
-        var taken = false
-        for provider in providers {
-            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                taken = true
-                Task {
-                    // The provider answers on a queue of its own; only what it read crosses back.
-                    let url: URL? = await withCheckedContinuation { answer in
-                        _ = provider.loadObject(ofClass: URL.self) { url, _ in answer.resume(returning: url) }
-                    }
-                    if let url { add([url], take) }
-                }
-            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-                taken = true
-                Task {
-                    let data: Data? = await withCheckedContinuation { answer in
-                        _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.png.identifier) { data, _ in
-                            answer.resume(returning: data)
-                        }
-                    }
-                    if let data { take("image.png", data.count) { data } }
-                }
-            }
+    /// The files a pasteboard carries: its file URLs, or else a picture with none (dragged out of a browser, or
+    /// copied), as PNG bytes.
+    static func files(on board: NSPasteboard) -> (urls: [URL], picture: Data?) {
+        if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+            !urls.isEmpty
+        {
+            return (urls, nil)
         }
-        return taken
+        guard let image = NSImage(pasteboard: board), let tiff = image.tiffRepresentation,
+            let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+        else { return ([], nil) }
+        return ([], png)
+    }
+
+    /// The names a drag's files go by, for the drop plate, read without decoding a picture: none when it carries no
+    /// file.
+    static func names(on board: NSPasteboard) -> [String] {
+        if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+            !urls.isEmpty
+        {
+            return urls.map(\.lastPathComponent)
+        }
+        return board.availableType(from: [.png, .tiff]) == nil ? [] : ["image.png"]
+    }
+
+    /// Whatever files a pasteboard carries go to `take`; false when it carries none.
+    static func take(from board: NSPasteboard, _ take: Take) -> Bool {
+        let (urls, picture) = files(on: board)
+        if let picture {
+            take("image.png", picture.count) { picture }
+            return true
+        }
+        add(urls, take)
+        return !urls.isEmpty
     }
 
     /// ⌘V with files on the pasteboard (Finder's copy, which carries their names as words too), or a picture and no
     /// words: they go to the tray, and the paste is taken. Words alone paste into the field as ever.
     static func paste(_ take: Take) -> Bool {
         let board = NSPasteboard.general
-        if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
-            !urls.isEmpty
+        if board.string(forType: .string) != nil,
+            (board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) ?? []).isEmpty
         {
-            add(urls, take)
-            return true
+            return false
         }
-        if board.string(forType: .string) != nil { return false }
-        guard let image = NSImage(pasteboard: board), let tiff = image.tiffRepresentation,
-            let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
-        else { return false }
-        take("image.png", png.count) { png }
-        return true
+        return self.take(from: board, take)
     }
 }
 
+extension EnvironmentValues {
+    /// Files are being dragged over the view that takes them.
+    @Entry var filesDragged = false
+    /// Files are being dragged over where this box's files land: its rim lights. Set by the box that takes them only,
+    /// so no other box under the drag lights.
+    @Entry var filesOver = false
+}
+
 extension View {
-    /// The box takes files dropped on it while `on`, and files or a picture pasted into it while `on` and its field has
-    /// the keyboard (`pasting`).
-    func takesFiles(_ on: Bool, pasting: Bool, _ take: @escaping FileIntake.Take) -> some View {
-        onDrop(of: [.fileURL, .image], isTargeted: nil) { providers in on && FileIntake.drop(providers, take) }
-            .modifier(PastesFiles(active: on && pasting, take: take))
+    /// The box takes files or a picture pasted into it while `on` and its field has the keyboard.
+    func pastesFiles(_ on: Bool, _ take: @escaping FileIntake.Take) -> some View {
+        modifier(PastesFiles(active: on, take: take))
+    }
+
+    /// The whole of this view takes files dropped on it while `on`: while they are over it, a dashed plate covers it,
+    /// `plateBottom` short of its foot (the box the files land in), counting them against the `held` already going.
+    func takesDroppedFiles(_ on: Bool, held: Int, plateBottom: CGFloat, _ take: @escaping FileIntake.Take)
+        -> some View
+    {
+        modifier(DroppedFiles(on: on, held: held, plateBottom: plateBottom, take: take))
     }
 }
 
@@ -134,28 +153,201 @@ private struct PastesFiles: ViewModifier {
     }
 }
 
-/// The files going with the next message, above its words, in a row: a picture as a 64 pt square of itself, any other
-/// file as a tile of its icon, whole name and size, each with its ×. One on its way shows how far it has got in its
-/// icon's place; one that failed offers Retry there. Under them, in one line, why they hold the message back.
+/// Files over the view, read from the drag's own pasteboard as they enter, so the plate can name and count them
+/// before they land; a drag that carries no file or picture (words, a link) is not this view's, shows nothing, and
+/// goes on to whatever under it takes it (a field types the words in). One AppKit view over the whole of it takes the
+/// drag: AppKit finds a drag's destination by the types each view takes, front to back, so it stands in front of a
+/// focused field's editor for files while letting clicks, the cursor and words through (`hitTest` is nil).
+private struct DroppedFiles: ViewModifier {
+    let on: Bool
+    let held: Int
+    let plateBottom: CGFloat
+    let take: FileIntake.Take
+    @State private var over: [String]?
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.filesDragged, over != nil)
+            .overlay {
+                Receiver(on: on, over: $over, take: take)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            .overlay {
+                if let over {
+                    DropPlate(names: over, held: held)
+                        .padding(12)
+                        .padding(.bottom, plateBottom)
+                        .allowsHitTesting(false)
+                }
+            }
+            #if DEBUG
+                .task(id: on) { if on, !RenderWindow.droppedNames.isEmpty { over = RenderWindow.droppedNames } }
+            #endif
+    }
+
+    private struct Receiver: NSViewRepresentable {
+        let on: Bool
+        @Binding var over: [String]?
+        let take: FileIntake.Take
+
+        func makeNSView(context: Context) -> Target { Target() }
+
+        func updateNSView(_ view: Target, context: Context) {
+            view.take = take
+            view.show = { over = $0 }
+            view.taking(on)
+        }
+
+        static func dismantleNSView(_ view: Target, coordinator: ()) { view.taking(false) }
+    }
+
+    private final class Target: NSView {
+        var take: FileIntake.Take = { _, _, _ in }
+        var show: ([String]?) -> Void = { _ in }
+        private var on = false
+        private var holding = false
+
+        /// Registered for files only while the view takes them.
+        func taking(_ next: Bool) {
+            guard next != on else { return }
+            on = next
+            if on { registerForDraggedTypes([.fileURL, .png, .tiff]) } else { unregisterDraggedTypes(); clear() }
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+            let names = on ? FileIntake.names(on: sender.draggingPasteboard) : []
+            holding = !names.isEmpty
+            show(holding ? names : nil)
+            return holding ? .copy : []
+        }
+
+        override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation { holding ? .copy : [] }
+
+        override func draggingExited(_ sender: (any NSDraggingInfo)?) { clear() }
+
+        override func draggingEnded(_ sender: any NSDraggingInfo) { clear() }
+
+        override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+            let taken = on && holding
+            clear()
+            return taken && FileIntake.take(from: sender.draggingPasteboard, take)
+        }
+
+        private func clear() {
+            guard holding else { return }
+            holding = false
+            show(nil)
+        }
+    }
+}
+
+/// While files are over the conversation: their type marks, what dropping does, counted, and the limits, on a dashed
+/// plate.
+private struct DropPlate: View {
+    let names: [String]
+    let held: Int
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                // Fanned, as a stack of papers: at most three.
+                let angles: [Double] = names.count == 1 ? [0] : names.count == 2 ? [-8, 8] : [-8, 0, 8]
+                ForEach(Array(names.prefix(3).enumerated()), id: \.offset) { index, name in
+                    FileTypeMark(name: name, height: 32).rotationEffect(.degrees(angles[index]))
+                }
+            }
+            .padding(.bottom, 16)
+            Text("Drop to attach").font(Theme.ui(14, .semibold)).foregroundStyle(Theme.text)
+                .padding(.bottom, 8)
+            Text(Attachment.dropLine(dragged: names.count, held: held)).font(Theme.ui(13)).foregroundStyle(Theme.text2)
+                .padding(.bottom, 8)
+            Text(Attachment.dropLimits).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.window.opacity(0.86), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.22), style: StrokeStyle(lineWidth: 1, dash: [4, 4])))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("session.drop.plate")
+    }
+}
+
+/// A file's type mark: a page with a folded corner and, for a type the app knows, its extension in small capitals on a
+/// plate at its foot; any other file is the plain page. Neutral, as colour is kept for state.
+struct FileTypeMark: View {
+    let name: String
+    var height: CGFloat = 24
+
+    var body: some View {
+        Image(systemName: "doc")
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .fontWeight(.light)
+            .foregroundStyle(Theme.text2)
+            .frame(height: height)
+            .overlay(alignment: .bottom) {
+                if let label = Attachment.typeLabel(name) {
+                    Text(label)
+                        .font(.system(size: 7 * height / 24, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 2)
+                        .background(Theme.raised, in: RoundedRectangle(cornerRadius: 2))
+                        .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5))
+                        .padding(.bottom, height / 8)
+                }
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+/// The files going with the next message, above its words, in one row that scrolls sideways once it outgrows the
+/// box: no bar, the cut-off edge fades, and the newest scrolls into view as it is added. Under them, in one line, why
+/// they hold the message back.
 struct FileTray: View {
     let files: [Attachment]
     let reason: String?
     let remove: (String) -> Void
     let retry: (String) -> Void
+    @State private var cut = (leading: false, trailing: false)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ScrollView(.horizontal) {
-                HStack(spacing: 10) {
-                    ForEach(files) { file in
-                        FileTile(file: file) { remove(file.id) } retry: { retry(file.id) }
+            ScrollViewReader { reader in
+                ScrollView(.horizontal) {
+                    HStack(spacing: 10) {
+                        ForEach(files) { file in
+                            FileTile(file: file) { remove(file.id) } retry: { retry(file.id) }.id(file.id)
+                        }
+                    }
+                    // Room for each tile's ×, which stands half outside it.
+                    .padding(.top, 6)
+                    .padding(.trailing, 6)
+                }
+                .scrollIndicators(.never)
+                .onScrollGeometryChange(for: [Bool].self) { geometry in
+                    [geometry.contentOffset.x > 0.5,
+                     geometry.contentOffset.x + geometry.containerSize.width < geometry.contentSize.width - 0.5]
+                } action: { _, edges in
+                    cut = (edges[0], edges[1])
+                }
+                .mask {
+                    HStack(spacing: 0) {
+                        LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: cut.leading ? 28 : 0)
+                        Rectangle()
+                        LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: cut.trailing ? 28 : 0)
                     }
                 }
-                // Room for each tile's ×, which stands half outside it.
-                .padding(.top, 6)
-                .padding(.trailing, 6)
+                .onChange(of: files.last?.id, initial: true) { _, newest in
+                    guard let newest else { return }
+                    withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo(newest, anchor: .trailing) }
+                }
             }
-            .scrollIndicators(.never)
             if let reason {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.amber).accessibilityHidden(true)
@@ -182,6 +374,9 @@ private struct FileTile: View {
         face
             .frame(height: Self.side)
             .background(Theme.raised)
+            .overlay(alignment: .bottom) {
+                if case .uploading(let sent) = file.state { Progress(fraction: Double(sent) / Double(max(file.size, 1))) }
+            }
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(trouble ? Theme.red.opacity(0.5) : Card.border))
             .overlay(alignment: .topTrailing) {
@@ -200,39 +395,57 @@ private struct FileTile: View {
                 .frame(width: Self.side, height: Self.side)
         } else {
             HStack(spacing: 10) {
-                mark.frame(width: 28, height: 28)
-                VStack(alignment: .leading, spacing: 3) {
-                    FileName(name: file.name)
-                    Text(Attachment.sizeText(file.size)).font(Theme.ui(11)).foregroundStyle(Theme.text3).lineLimit(1)
+                mark
+                VStack(alignment: .leading, spacing: 2) {
+                    FileName(name: file.name).frame(height: 15)
+                    Text(sizeLine).font(Theme.ui(11)).foregroundStyle(Theme.text3).lineLimit(1).frame(height: 14)
                 }
             }
-            .padding(.leading, 12)
+            .padding(.leading, 14)
             .padding(.trailing, 16)
         }
     }
 
-    /// The icon's place: the file's icon, how far it has got while on its way, Retry once it failed, or the mark of a
-    /// file over a limit.
-    @ViewBuilder private var mark: some View {
-        switch file.state {
-        case .uploading(let sent):
-            Ring(fraction: Double(sent) / Double(max(file.size, 1)))
-        case .failed:
-            Button(action: retry) {
-                Image(systemName: "arrow.clockwise").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
-                    .frame(width: 28, height: 28)
-                    .background(Theme.selected, in: Circle())
-                    .contentShape(Circle())
+    /// The file's mark in every state: dimmed with a red ! once refused, and with Retry over its folded corner once it
+    /// failed.
+    private var mark: some View {
+        FileTypeMark(name: file.name)
+            .opacity(isRefused ? 0.4 : 1)
+            .overlay(alignment: .topTrailing) {
+                switch file.state {
+                case .failed:
+                    Button(action: retry) {
+                        Image(systemName: "arrow.clockwise").font(.system(size: 7.5, weight: .bold)).foregroundStyle(Theme.text)
+                            .frame(width: 14, height: 14)
+                            .background(Theme.sheet, in: Circle())
+                            .overlay(Circle().strokeBorder(Color.white.opacity(0.18)))
+                            .contentShape(Circle().inset(by: -4))
+                    }
+                    .buttonStyle(.hover(radius: 7, over: true, id: "session.composer.file.\(file.id).retry"))
+                    .offset(x: 5, y: -4)
+                    .help("Send it again")
+                    .accessibilityLabel("Retry \(file.name)")
+                    .accessibilityIdentifier("session.composer.file.\(file.id).retry")
+                case .refused:
+                    Image(systemName: "exclamationmark.circle.fill").font(.system(size: 12))
+                        .foregroundStyle(Theme.red, Theme.sheet)
+                        .offset(x: 5, y: -4)
+                        .accessibilityHidden(true)
+                default:
+                    EmptyView()
+                }
             }
-            .buttonStyle(.hover(radius: 14, over: true, id: "session.composer.file.\(file.id).retry"))
-            .help("Send it again")
-            .accessibilityLabel("Retry \(file.name)")
-            .accessibilityIdentifier("session.composer.file.\(file.id).retry")
-        case .refused:
-            Image(systemName: "exclamationmark.circle").font(.system(size: 17)).foregroundStyle(Theme.red)
-        case .arrived:
-            Image(systemName: file.isImage ? "photo" : "doc").font(.system(size: 17)).foregroundStyle(Theme.text2)
-        }
+    }
+
+    /// Its size, or how far it has got on its way: "62% of 1.4 MB".
+    private var sizeLine: String {
+        guard case .uploading(let sent) = file.state else { return Attachment.sizeText(file.size) }
+        return "\(Int(Double(sent) / Double(max(file.size, 1)) * 100))% of \(Attachment.sizeText(file.size))"
+    }
+
+    private var isRefused: Bool {
+        if case .refused = file.state { return true }
+        return false
     }
 
     private var trouble: Bool {
@@ -244,10 +457,25 @@ private struct FileTile: View {
 
     private var spoken: String {
         switch file.state {
-        case .uploading(let sent): "\(file.name), sending, \(Int(Double(sent) / Double(max(file.size, 1)) * 100)) percent"
+        case .uploading: "\(file.name), sending, \(sizeLine)"
         case .arrived: "\(file.name), \(Attachment.sizeText(file.size))"
         case .refused(let reason), .failed(let reason): "\(file.name), \(reason)"
         }
+    }
+}
+
+/// How far a file on its way has got: a 3 pt bar along the tile's foot, on a faint track.
+private struct Progress: View {
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { space in
+            ZStack(alignment: .leading) {
+                Rectangle().fill(Color.white.opacity(0.08))
+                Rectangle().fill(Theme.text).frame(width: space.size.width * min(1, max(0, fraction)))
+            }
+        }
+        .frame(height: 3)
     }
 }
 
@@ -287,33 +515,26 @@ private struct CornerButton: View {
     }
 }
 
-/// How far a file on its way has got, in its icon's place.
-private struct Ring: View {
-    let fraction: Double
-
-    var body: some View {
-        ZStack {
-            Circle().stroke(Color.white.opacity(0.15), lineWidth: 2.5)
-            Circle().trim(from: 0, to: max(0.04, fraction))
-                .stroke(Theme.text, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-        }
-        .padding(3)
-    }
-}
-
-/// A sent message's files, read back from its text (Kit's `AttachedFiles`): each a tile of its icon and whole name, as
-/// in the box; the bytes stay on the computer.
+/// A sent message's files, read back from its text (Kit's `AttachedFiles`): each a 40 pt tile of its type mark and
+/// whole name; the bytes stay on the computer.
 struct SentFiles: View {
     let paths: [String]
 
     var body: some View {
+        // One row, sideways past the conversation's width, so every name stays whole.
+        ScrollView(.horizontal) {
+            row
+        }
+        .scrollIndicators(.never)
+    }
+
+    private var row: some View {
         HStack(spacing: 8) {
             ForEach(paths, id: \.self) { path in
                 let name = (path as NSString).lastPathComponent
                 HStack(spacing: 10) {
-                    Image(systemName: "doc").font(.system(size: 15)).foregroundStyle(Theme.text2).frame(width: 22)
-                    FileName(name: name)
+                    FileTypeMark(name: name, height: 20)
+                    Text(name).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text).lineLimit(1)
                 }
                 .padding(.horizontal, 12)
                 .frame(height: 40)

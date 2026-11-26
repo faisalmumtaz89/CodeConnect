@@ -10,6 +10,7 @@ struct InputBox<Field: View, Leading: View, Trailing: View>: View {
     @ViewBuilder let field: Field
     @ViewBuilder let leading: Leading
     @ViewBuilder let trailing: Trailing
+    @Environment(\.filesOver) private var filesOver
 
     static var radius: CGFloat { 16 }
 
@@ -48,15 +49,16 @@ struct InputBox<Field: View, Leading: View, Trailing: View>: View {
         }
     }
 
-    /// The lit rim: a fine line 4 pt outside the box all round, brightest at its top. It takes no clicks.
+    /// The lit rim: a fine line 4 pt outside the box all round, brightest at its top, and brighter while files are
+    /// dragged over where they would land. It takes no clicks.
     private var rim: some View {
         RoundedRectangle(cornerRadius: Self.radius + 4)
             .strokeBorder(
                 LinearGradient(
                     stops: [
-                        .init(color: .white.opacity(0.30), location: 0),
-                        .init(color: .white.opacity(0.05), location: 0.6),
-                        .init(color: .white.opacity(0.12), location: 1),
+                        .init(color: .white.opacity(filesOver ? 0.7 : 0.30), location: 0),
+                        .init(color: .white.opacity(filesOver ? 0.35 : 0.05), location: 0.6),
+                        .init(color: .white.opacity(filesOver ? 0.5 : 0.12), location: 1),
                     ],
                     startPoint: .top, endPoint: .bottom),
                 lineWidth: 1)
