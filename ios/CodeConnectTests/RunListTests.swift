@@ -51,6 +51,30 @@ final class RunListTests: XCTestCase {
         XCTAssertEqual(other.done, [])
     }
 
+    /// A run still starting, nothing drawn yet, is Working; one whose start failed before its agent existed is Failed,
+    /// in Needs you: from the daemon's lifecycle, never hidden behind "N ended ›".
+    @MainActor func testAStartingRunWorksAndOneThatFailedToStartNeedsYou() throws {
+        func summary(_ id: String, _ lifecycle: String) throws -> SessionSummary {
+            let json = """
+                {"session_uid":"\(id)","session_id":"\(id)","cwd":"/web","lifecycle":"\(lifecycle)","link":"detached",\
+                "last_seq":1,"created_at":"2026-07-31T09:14:00.000Z","updated_at":"2026-07-31T09:14:00.000Z"}
+                """
+            return try JSONDecoder().decode(SessionSummary.self, from: Data(json.utf8))
+        }
+        let starting = try summary("starting", "starting")
+        let failed = try summary("failed", "failed")
+        XCTAssertEqual(FleetStatusRule.status(summary: starting, shown: nil, reviewedSeq: 0), .running)
+        XCTAssertEqual(FleetStatusRule.status(summary: failed, shown: nil, reviewedSeq: 0), .failed)
+        let rows = [
+            row("starting", FleetStatusRule.status(summary: starting, shown: nil, reviewedSeq: 0), on: "m1"),
+            row("failed", FleetStatusRule.status(summary: failed, shown: nil, reviewedSeq: 0), on: "m1"),
+        ]
+        let list = RunList(rows, computer: nil)
+        XCTAssertEqual(ids(list.working), ["starting"])
+        XCTAssertEqual(ids(list.needsYou), ["failed"])
+        XCTAssertEqual(list.ended, [])
+    }
+
     /// The head's menu counts a computer's runs that have not ended, the ones the list shows of it.
     func testAComputersCountIsItsRunsNotEnded() {
         XCTAssertEqual(RunList.activeCount(fleet, on: "m1"), 4)
