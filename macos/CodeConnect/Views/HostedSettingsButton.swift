@@ -230,7 +230,7 @@ struct HostedSettingsButton: View {
     private func card<Content: View>(_ which: SettingsPanel, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) { content() }
             .disabled(settings.inFlight)
-            .frame(width: placed(which).width - 12)
+            .frame(width: placed(which).width - 2 * MenuMetrics.inset)
             .fixedSize(horizontal: false, vertical: true)
             .menuCard()
             // The card takes every click inside it: one on its checked or disabled rows, a header or a gap does

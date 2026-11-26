@@ -390,7 +390,7 @@ struct StartForm: View {
     /// Up to 520 pt wide, inside the box (`PanelPlace.place`).
     private func folderPanel(_ context: StartContext, width: CGFloat) -> some View {
         folderRows(context)
-            .frame(width: width - 12)
+            .frame(width: width - 2 * MenuMetrics.inset)
             .menuCard()
     }
 
@@ -931,7 +931,7 @@ private struct ComputerButton: View {
             .panelRow(contexts.count, id: "start.addComputer", choose: adding)
             .accessibilityIdentifier("start.addComputer")
         }
-        .frame(width: placed.width - 12)
+        .frame(width: placed.width - 2 * MenuMetrics.inset)
         .menuCard()
     }
 }

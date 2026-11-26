@@ -488,7 +488,7 @@ extension EnvironmentValues {
 
 extension View {
     /// Row `index` of an open panel, in reading order, which `choose` chooses as a click does: lit when it is the panel's
-    /// light, by a plate or, on a track's segment, by lightening (`lifts`). A disabled row, or one `choosable` says
+    /// light, its `MenuRow` filled or, on a track's segment, by lightening (`lifts`). A disabled row, or one `choosable` says
     /// isn't, never lights. A test launch's `-CC_HOVER id` lights it as the pointer does.
     func panelRow(_ index: Int, id: String, choosable: Bool = true, lifts: Bool = false, choose: @escaping () -> Void)
         -> some View
@@ -509,7 +509,8 @@ private struct PanelRow: ViewModifier {
     func body(content: Content) -> some View {
         let lit = light?.light.lit == index
         content
-            .background(lit && !lifts ? PanelLight.fill : .clear, in: RoundedRectangle(cornerRadius: 8))
+            // A menu's row draws its own light inside its gap (`MenuRow`); a track's segment lightens.
+            .environment(\.menuRowLit, lit && !lifts)
             .brightness(lit && lifts ? Theme.segmentLift : 0)
             .onHover { if $0 { light?.enter(index) } }
             .onAppear {
@@ -524,34 +525,47 @@ private struct PanelRow: ViewModifier {
     private func register() { light?.register(index, id: id, enabled: choosable && isEnabled, choose: choose) }
 }
 
+/// The one menu's measures: its card's inset and corners, and its rows' heights, gap and lit corners.
+enum MenuMetrics {
+    /// The card's padding round its rows.
+    static let inset: CGFloat = 5
+    static let cardRadius: CGFloat = 9
+    /// A row of one line; one with a second line under it.
+    static let rowHeight: CGFloat = 28
+    static let twoLineHeight: CGFloat = 40
+    /// Between a row and the one above it, so two lit rows never touch.
+    static let rowGap: CGFloat = 2
+    static let rowRadius: CGFloat = 5
+}
+
 extension View {
-    /// Every menu's card, whatever it holds: a near-black fill, a fine border, corners of 14, 6 pt in from its edge,
-    /// and the input box's shadows.
+    /// Every menu's card, whatever it holds: the sheet's fill, a fine border, corners of 9, its rows 5 pt in, and one
+    /// deep shadow.
     func menuCard() -> some View {
-        padding(6)
+        padding(MenuMetrics.inset)
             .background {
-                BoxShadow(radius: 14)
-                RoundedRectangle(cornerRadius: 14).fill(Card.fill)
+                RoundedRectangle(cornerRadius: MenuMetrics.cardRadius).fill(Theme.sheet)
+                    .shadow(color: .black.opacity(0.6), radius: 25, y: 18)
             }
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Card.border))
+            .overlay(RoundedRectangle(cornerRadius: MenuMetrics.cardRadius).strokeBorder(Color.white.opacity(0.1)))
     }
 }
 
-/// A menu card's section heading: 11 pt medium, muted, 8 pt above it, 10 in, 6 below.
+/// A menu card's section heading: 11 pt medium in the third text colour, 8 pt above it, 10 in, 4 below.
 struct MenuHeader: View {
     let text: String
 
     var body: some View {
-        Text(text).font(Theme.ui(11, .medium)).foregroundStyle(Card.muted)
+        Text(text).font(Theme.ui(11, .medium)).foregroundStyle(Theme.text3)
             .padding(.top, 8)
             .padding(.horizontal, 10)
-            .padding(.bottom, 6)
+            .padding(.bottom, 4)
     }
 }
 
-/// A menu card's divider: a fine white line.
+/// A menu card's divider: a fine white line, 4 pt in from the card's sides.
 struct MenuDivider: View {
-    var body: some View { Rectangle().fill(Theme.hairline).frame(height: 1) }
+    var body: some View { Rectangle().fill(Theme.hairline).frame(height: 1).padding(.horizontal, 4) }
 }
 
 extension View {
@@ -564,42 +578,59 @@ extension View {
     }
 }
 
-/// A menu card's row: what it says on one line, and under it, where the row has one, a second line in 11.5 pt, muted;
-/// at least 32 pt tall and 10 pt in at its sides; the chosen one filled white 7%, with a check at its trailing end.
+/// The one menu's row: what it says on one line, and under it, where the row has one, a second line in 11.5 pt, muted;
+/// 28 pt tall, 40 with the second line, 10 pt in at its sides, 2 pt below the row above. In a menu that chooses
+/// (`chosen` given) a check slot leads every row, checked on the chosen one; what is chosen is never filled. The row the
+/// pointer or keys light (`panelRow`) is filled, at corners of 5.
 struct MenuRow<Content: View, Second: View>: View {
-    var chosen = false
+    var chosen: Bool?
     let content: Content
     let second: Second
+    private let twoLines: Bool
+    @Environment(\.menuRowLit) private var lit
 
-    init(chosen: Bool = false, @ViewBuilder content: () -> Content, @ViewBuilder second: () -> Second) {
+    init(chosen: Bool? = nil, @ViewBuilder content: () -> Content, @ViewBuilder second: () -> Second) {
+        self.init(chosen: chosen, twoLines: true, content: content(), second: second())
+    }
+
+    private init(chosen: Bool?, twoLines: Bool, content: Content, second: Second) {
         self.chosen = chosen
-        self.content = content()
-        self.second = second()
+        self.twoLines = twoLines
+        self.content = content
+        self.second = second
     }
 
     var body: some View {
         HStack(spacing: 8) {
+            if let chosen {
+                Image(systemName: "checkmark").font(.system(size: 9.5, weight: .bold)).foregroundStyle(Theme.text)
+                    .frame(width: 12)
+                    .opacity(chosen ? 1 : 0)
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) { content }
-                second.font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
+                if twoLines { second.font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1) }
             }
             Spacer(minLength: 0)
-            if chosen {
-                Image(systemName: "checkmark").font(.system(size: 9.5, weight: .bold)).accessibilityHidden(true)
-            }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .frame(minHeight: 32)
-        .background(chosen ? Color.white.opacity(0.07) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .frame(minHeight: twoLines ? MenuMetrics.twoLineHeight : MenuMetrics.rowHeight)
+        .background(lit ? PanelLight.fill : .clear, in: RoundedRectangle(cornerRadius: MenuMetrics.rowRadius))
         .contentShape(Rectangle())
+        .padding(.top, MenuMetrics.rowGap)
     }
 }
 
 extension MenuRow where Second == EmptyView {
-    init(chosen: Bool = false, @ViewBuilder content: () -> Content) {
-        self.init(chosen: chosen, content: content, second: { EmptyView() })
+    init(chosen: Bool? = nil, @ViewBuilder content: () -> Content) {
+        self.init(chosen: chosen, twoLines: false, content: content(), second: EmptyView())
     }
+}
+
+extension EnvironmentValues {
+    /// The `MenuRow` under it is its panel's lit row (`panelRow`).
+    @Entry var menuRowLit = false
 }
 
 /// A panel row's button: the panel's light is its only plate (`panelRow`); disabled it dims, pressed it fades.
@@ -656,9 +687,8 @@ enum PanelSymbol {
     static let signOut = "rectangle.portrait.and.arrow.right"
 }
 
-/// One act in a "…" panel, on the Model and Mode panels' row: a quiet icon and the 12.5 pt label in a `MenuRow` (10 pt
-/// in, 5 above and below, at least 32 tall), lit at corners of 8 inside the card's 6 (`panelRow`, row `index`). A
-/// destructive act's icon and label are red.
+/// One act in a "…" panel, on the Model and Mode panels' row: an 11 pt mark in a 14 pt slot and the 12.5 pt label in a
+/// `MenuRow`, lit as every panel's row is (`panelRow`, row `index`). A destructive act's mark and label are red.
 struct PanelItem: View {
     let index: Int
     let title: String
@@ -797,7 +827,7 @@ private struct RowMenuHost: ViewModifier {
                             }
                         }
                         .padding(.vertical, 5)
-                        .frame(minWidth: Self.minWidth - 12)
+                        .frame(minWidth: Self.minWidth - 2 * MenuMetrics.inset)
                         .fixedSize()
                         .menuCard()
                         .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
@@ -815,7 +845,7 @@ private struct RowMenuHost: ViewModifier {
     /// the window's bottom, inside the window's sides. A right-click's point: its top leading corner there.
     private func place(_ rect: CGRect, in bounds: CGRect) -> CGPoint {
         let point = rect.size == .zero
-        let gap = point ? 0 : Theme.rowMenuGap
+        let gap = point ? 0 : Theme.panelGap
         let below = rect.maxY + gap
         let above = rect.minY - gap - size.height
         let y = below + size.height <= bounds.maxY || above < bounds.minY ? below : above

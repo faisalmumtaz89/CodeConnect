@@ -204,7 +204,7 @@ enum InputBoxChip {
     static let floor: CGFloat = 40
 }
 
-/// A card's colours, the menus' (`menuCard`) and the usage tip's: its fill, its fine border, and its muted words.
+/// The usage tip's card: its fill, its fine border (a file tile's too), and its muted words.
 enum Card {
     static let fill = Color(themeHex: 0x141418)
     static let border = Color.white.opacity(0.09)
