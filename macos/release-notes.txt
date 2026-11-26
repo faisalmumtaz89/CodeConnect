@@ -1,1 +1,1 @@
-Set Up now shows an agent that isn’t installed in grey rather than amber while another agent can start, since one agent is enough.
+Choosing another account now stops nothing: new sessions use it at once, and an open session moves to it when you next send it a message, going on with the same conversation and looking just as it did. A session that is still busy sends that message on its current account and moves at a later one. Sessions already open when you update keep their account until they end; new ones use the chosen account.

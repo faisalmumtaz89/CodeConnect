@@ -5,6 +5,14 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.28
 
+- On the Mac, choosing another account in Settings › Accounts stops nothing: new sessions use it at once, and an open
+  session moves to it when you next send it a message, going on with the same conversation. A session with something
+  still running (a turn, a command, a subagent or a background job) sends that message on its current account and
+  moves at a later one.
+- A session that moves looks as it did: its conversation shows no "Switched to" line and no restart, and its menus and
+  settings stay as they are. A command it started outside the agent's own tracking (a `cmd &`) stops when it moves.
+- Sessions already open when you update keep their account until they end; new ones use the chosen account.
+
 ## CodeConnect 0.19.27
 
 - On the Mac, Set Up shows an agent that isn't installed in grey, not amber, while another agent can start: one
