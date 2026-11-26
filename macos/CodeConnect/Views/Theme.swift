@@ -35,6 +35,9 @@ enum Theme {
     static let segmentLift = 0.15
     /// How far a panel opened by a button stands off it, above or below: a clear gap, never touching.
     static let panelGap: CGFloat = 6
+    /// How far a menu opened by a list row's "…" stands off it: close enough that it covers the row's second line whole
+    /// rather than cutting through its text.
+    static let rowMenuGap: CGFloat = 1
 
     // The meaning colours and the text greys are the Kit's, shared with the iPhone; the grounds are the Mac's own.
     static let text = CC.text.primary

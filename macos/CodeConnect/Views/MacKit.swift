@@ -873,7 +873,7 @@ private struct RowMenuHost: ViewModifier {
     /// the window's bottom, inside the window's sides. A right-click's point: its top leading corner there.
     private func place(_ rect: CGRect, in bounds: CGRect) -> CGPoint {
         let point = rect.size == .zero
-        let gap = point ? 0 : Theme.panelGap
+        let gap = point ? 0 : Theme.rowMenuGap
         let below = rect.maxY + gap
         let above = rect.minY - gap - size.height
         let y = below + size.height <= bounds.maxY || above < bounds.minY ? below : above
