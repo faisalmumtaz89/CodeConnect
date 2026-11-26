@@ -1275,9 +1275,13 @@ async fn link(
                 // Claude ended without ccd stopping it, so the person's next message
                 // relaunches it, as when the watch finds its host gone.
                 let (from, payload) = if switched {
+                    let agent = match daemon.db.get_session(uid.clone()).await {
+                        Ok(Some(row)) => row.agent,
+                        _ => AgentKind::Claude,
+                    };
                     (
                         Lifecycle::Live,
-                        crate::switch::switched_end(&daemon, &AgentKind::Claude),
+                        crate::switch::switched_end(&daemon, &agent),
                     )
                 } else if stopping {
                     (Lifecycle::Stopping, stopped_end())
@@ -3903,6 +3907,39 @@ mod tests {
             }
         );
         (started_uid(&result), played)
+    }
+
+    /// **An Antigravity run its switch ended names Antigravity's account, not Claude Code's** (306): with a Claude
+    /// Code account active and Antigravity on its Default, the end of an Antigravity run its move stopped says it goes
+    /// on Antigravity's Default.
+    #[tokio::test]
+    async fn an_antigravity_runs_switched_end_names_its_own_agents_account() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        on_a_with_b(&mut rig);
+        let (uid, mut played) = antigravity_run(&rig).await;
+        rig.daemon
+            .store
+            .set_switch_state(&uid, Some(Store::SWITCH_MOVED))
+            .unwrap();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 3, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        let ends: Vec<_> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_end")
+            .map(|event| event["payload"].clone())
+            .collect();
+        assert_eq!(ends.len(), 1, "{ends:?}");
+        assert_eq!(
+            ends[0]["switched_to"],
+            serde_json::json!({"account_id": null, "label": "Default"}),
+            "{ends:?}"
+        );
+        stop(&played.dir);
     }
 
     /// **An Antigravity run's settings are agy's own** (S1): a live run's menus are its model families with their
