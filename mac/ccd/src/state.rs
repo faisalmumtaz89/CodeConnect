@@ -5213,9 +5213,7 @@ impl Daemon {
             let urls = match &read {
                 Ok(git) => match &git.branch {
                     Some(branch) => {
-                        let other = git.base.as_ref().map(|base| base.remote.as_str());
-                        crate::git::push_remote_urls(&row.cwd, git_bin, branch, other, timeout)
-                            .await
+                        crate::git::push_remote_urls(&row.cwd, git_bin, branch, timeout).await
                     }
                     None => None,
                 },
@@ -5543,9 +5541,7 @@ impl Daemon {
         if git.ahead == Some(0) {
             return ActionOutcome::Refused(code::NOTHING_TO_PROPOSE, None);
         }
-        let other = git.base.as_ref().map(|base| base.remote.as_str());
-        let remotes =
-            crate::git::push_remote_urls(&row.cwd, git_bin, &branch, other, timeout).await;
+        let remotes = crate::git::push_remote_urls(&row.cwd, git_bin, &branch, timeout).await;
         let Some((remotes, head, target)) = remotes.and_then(|remotes| {
             let head = crate::github::parse_remote(&remotes.head)?;
             let target = crate::github::parse_remote(&remotes.target)?;
@@ -9220,6 +9216,50 @@ mod tests {
         );
         assert_eq!(refs(&bare), "");
         assert_eq!(gh_calls(&gh).len(), 1, "only the lookup");
+        done(&gh, &dir, &bare);
+
+        // A triangle (`remote.pushDefault=fork`, the parent as `origin`): after `push -u fork`
+        // the branch tracks the fork, and the pull request is still looked for on the parent.
+        let gh = stand_in_gh();
+        std::fs::write(
+            gh.with_file_name("create.out"),
+            "https://github.com/cli/cli/pull/15400\n",
+        )
+        .unwrap();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP40";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-tri");
+        git_in(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "fork",
+                "ssh://git@github.com/lazerg/cli-2.git",
+            ],
+        );
+        git_in(&dir, &["update-ref", "refs/remotes/fork/main", "main"]);
+        git_in(
+            &dir,
+            &[
+                "symbolic-ref",
+                "refs/remotes/fork/HEAD",
+                "refs/remotes/fork/main",
+            ],
+        );
+        git_in(&dir, &["config", "remote.pushDefault", "fork"]);
+        assert_eq!(daemon.git_action(uid, "p-13", &create).await, pr(15400));
+        let calls = gh_calls(&gh);
+        assert!(
+            calls[1].contains("pr create --repo cli/cli --head lazerg:w2-tri"),
+            "{calls:?}"
+        );
+        daemon.run_git(uid).await.unwrap().unwrap();
+        let read = gh_calls(&gh);
+        assert!(
+            read[2].contains("repos/cli/cli/pulls") && read[2].contains("head=lazerg:w2-tri"),
+            "the parent, after the push made the fork the branch's upstream: {read:?}"
+        );
         done(&gh, &dir, &bare);
 
         // No base known (a repository made by `git init` and pushed has no `origin/HEAD`):

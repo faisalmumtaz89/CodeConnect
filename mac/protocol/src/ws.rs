@@ -1459,7 +1459,7 @@ pub struct RunGit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_read_at: Option<String>,
     /// The repository on `gh_host` a pull request from this branch goes into, `owner/name`: the
-    /// remote named `upstream` (a fork's parent), else the base's remote, else the push remote
+    /// remote named `upstream` (a fork's parent), else `origin`, else the push remote
     /// (minor 61). Absent when no remote names a github.com repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_repo: Option<String>,
