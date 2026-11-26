@@ -1058,7 +1058,7 @@ pub struct AccountFacts {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<UsageWindow>,
     /// Its windows by model group (minor 53: Antigravity's), each naming its group: in a field of their own, so an app
-    /// below 52, which tells windows apart by their length, never meets two of one length.
+    /// below 53, which tells windows apart by their length, never meets two of one length.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grouped_windows: Vec<UsageWindow>,
     /// Whether plan limits apply to this sign-in, where the agent says (Claude Code's `rate_limits_available`): false
