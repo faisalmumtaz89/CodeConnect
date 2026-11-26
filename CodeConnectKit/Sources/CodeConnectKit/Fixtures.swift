@@ -1118,6 +1118,7 @@ enum Fixtures {
         /// `-CC_FIXTURE_USAGE YES|limits`, on whichever fixture is active: every run names its own agent's Default
         /// account, so the limits `-CC_ACCOUNTS_WIRE`'s `defaults` give that agent are its; with `YES` each run also
         /// reports its context once, after its last event ("390k / 1M"), its listing's `last_seq` raised to match.
+        /// `-CC_FIXTURE_LIMIT <which>` (a `LimitKind`'s wire name): the run `-CC_OPEN` names stopped at that limit.
         static func withUsage(_ frames: [ServerMessage], context: Bool, now: Date = Fixtures.now) -> [ServerMessage] {
             var next: [String: UInt64] = [:]
             for frame in frames {
@@ -1135,6 +1136,11 @@ enum Fixtures {
                     var object = (try? JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(run)))?
                         .objectValue ?? [:]
                     object["account"] = .object(["id": .null, "label": .string("Default")])
+                    if let which = UserDefaults.standard.string(forKey: "CC_FIXTURE_LIMIT"),
+                        run.sessionKey == UserDefaults.standard.string(forKey: "CC_OPEN")
+                    {
+                        object["limit"] = .object(["which": .string(which), "at": .string(rfc3339(now))])
+                    }
                     if context, let seq = next[run.sessionKey] { object["last_seq"] = .int(Int64(seq)) }
                     let decoded = (try? JSONDecoder().decode(
                         SessionSummary.self, from: Data(JSONValue.object(object).canonicalJSONString.utf8))) ?? run
