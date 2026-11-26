@@ -111,7 +111,7 @@ struct MainWindow: View {
                     SettingsList(section: Binding(get: { section }, set: { settings = $0 })) { settings = nil }
                         .frame(width: 216)
                     Rectangle().fill(Theme.hairline).frame(width: 1)
-                    SettingsPage(section: section) { adding = .computer }
+                    SettingsPage(section: section, add: { adding = .computer }, pairAgain: pairAgain)
                 }
                 .background(Theme.window)
             }

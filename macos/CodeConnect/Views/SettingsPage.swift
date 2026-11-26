@@ -134,13 +134,14 @@ struct SettingsList: View {
 struct SettingsPage: View {
     let section: SettingsSection
     let add: () -> Void
+    let pairAgain: (String) -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 switch section {
                 case .general: titled(section.title) { GeneralSettings() }
-                case .computers: titled(section.title) { ComputerSettings(add: add) }
+                case .computers: titled(section.title) { ComputerSettings(add: add, pairAgain: pairAgain) }
                 case .devices: DevicesPane()
                 case .folders: FoldersPane()
                 case .accounts: titled(section.title) { AccountSettings() }
@@ -213,24 +214,12 @@ struct SettingsRow<Control: View>: View {
     }
 }
 
-/// A state in words beside a dot: green for what works, an open grey ring for anything else.
+/// A state in words, quiet: no dot, for none is coloured.
 struct SettingsState: View {
     let words: String
-    let good: Bool
 
     var body: some View {
-        HStack(spacing: 6) {
-            Group {
-                if good {
-                    Circle().fill(Theme.green)
-                } else {
-                    Circle().strokeBorder(Theme.text3, lineWidth: 1.2)
-                }
-            }
-            .frame(width: 7, height: 7)
-            .accessibilityHidden(true)
-            Text(words).font(Theme.ui(12)).foregroundStyle(Theme.text2)
-        }
+        Text(words).font(Theme.ui(12)).foregroundStyle(Theme.text2)
     }
 }
 
@@ -325,8 +314,8 @@ private struct GeneralSettings: View {
 
     @ViewBuilder private func tailscaleControl(_ status: TailscaleNote.Status) -> some View {
         switch status {
-        case .signedIn: SettingsState(words: "Connected", good: true)
-        case .moving: SettingsState(words: "Connecting", good: false)
+        case .signedIn: SettingsState(words: "Connected")
+        case .moving: SettingsState(words: "Connecting")
         default:
             if let action = TailscaleNote.action(status) {
                 ActionButton(title: action.title, key: nil, prominent: false, id: "settings.tailscale") {
@@ -339,16 +328,20 @@ private struct GeneralSettings: View {
 
 // MARK: - Computers
 
-/// The paired computers, each with how its link is, and Remove… for every one but this Mac; then Add Computer….
+/// The paired computers, each with how its link is, why and the one thing to do while it is not working, and Remove…
+/// for every one but this Mac; the computers Tailscale lists that have not joined, each with why and Try Again; then
+/// Add Computer….
 private struct ComputerSettings: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
     let add: () -> Void
+    let pairAgain: (String) -> Void
     @State private var removing: AppModel?
     @State private var address: LocalDaemon.Address?
 
     var body: some View {
         let computers = machines.models.filter(\.showsFleet)
+        let unjoined = machines.unjoinedComputers
         let thisMac = setup.thisMac(at: address)
         VStack(alignment: .leading, spacing: 24) {
             SettingsGroup(title: "Paired with this Mac") {
@@ -357,10 +350,24 @@ private struct ComputerSettings: View {
                 }
                 ForEach(computers, id: \.machineID) { computer in
                     let id = computer.machineID ?? ""
-                    let link = computer.linkHealth
-                    SettingsRow(title: computer.machineName ?? id, line: id == thisMac ? "This Mac" : nil) {
+                    let connected = computer.linkHealth.actionsEnabled
+                    let state = connected ? "Connected" : "Offline"
+                    let seen = connected ? nil : computer.connection.lastContactAt.map { "last seen \(Format.clock($0, now: Date()))" }
+                    let line = [id == thisMac ? "This Mac" : nil, computer.machineSystem, seen].compactMap { $0 }
+                    // A plain Offline notice says what the state already says: its action alone.
+                    let why = computer.linkHealth.notice?.title
+                    SettingsComputerRow(
+                        os: computer.machineSystem?.lowercased(), name: computer.machineName ?? id,
+                        line: line.isEmpty ? nil : line.joined(separator: " · "), connected: connected,
+                        why: connected || why == state ? nil : why,
+                        action: connected
+                            ? nil
+                            : computer.linkAction(pairAgain: pairAgain).map {
+                                ($0.title, "settings.computer.\(id).\($0.name)", $0.run)
+                            }
+                    ) {
                         HStack(spacing: 12) {
-                            SettingsState(words: link.word, good: link.machineWord == nil)
+                            Text(state).font(Theme.ui(12)).foregroundStyle(connected ? Theme.text2 : Theme.text3)
                             if id != thisMac {
                                 ActionButton(
                                     title: "Remove…", key: nil, prominent: false, destructive: true,
@@ -371,12 +378,74 @@ private struct ComputerSettings: View {
                     }
                 }
             }
+            if !unjoined.isEmpty {
+                SettingsGroup(title: PeerWords.onYourTailscale) {
+                    ForEach(unjoined) { peer in
+                        let id = "settings.unjoined.\(peer.computer.host)"
+                        SettingsComputerRow(
+                            os: nil, name: peer.computer.name, line: nil, connected: false, why: peer.reason,
+                            action: (PeerWords.tryAgain, "\(id).tryAgain", { machines.tryAgain(peer) })
+                        ) { EmptyView() }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier(id)
+                    }
+                }
+            }
             ActionButton(title: "Add Computer…", key: "⇧⌘N", prominent: false, id: "settings.computers.add", action: add)
         }
         .removesComputer($removing)
         .task(id: computers.map(\.machineID)) {
             guard let root = setup.installer?.root else { return }
             address = await Task.detached { LocalDaemon.address(root: root) }.value ?? address
+        }
+    }
+}
+
+/// A computer's row: its mark, its name and line, and while its link is not working, why and the one thing to do under
+/// them; one control on the right. One not connected is quiet: its mark and name in the lighter greys.
+private struct SettingsComputerRow<Control: View>: View {
+    let os: String?
+    let name: String
+    let line: String?
+    let connected: Bool
+    let why: String?
+    let action: (title: String, id: String, run: () -> Void)?
+    @ViewBuilder let control: Control
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                ComputerMark(os: os, size: 12).foregroundStyle(connected ? Theme.text2 : Theme.text3)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(name).font(Theme.ui(13)).foregroundStyle(connected ? Theme.text : Theme.text2)
+                        .lineLimit(1).truncationMode(.middle)
+                    if let line { Text(line).font(Theme.ui(11.5)).foregroundStyle(Theme.text3) }
+                    if why != nil || action != nil { notice }
+                }
+            }
+            Spacer(minLength: 12)
+            control
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+
+    /// Why, quiet, and the one thing to do beside it; where why says what the action says, the action alone.
+    private var notice: some View {
+        let words = why.flatMap { LinkNotice.words($0, beside: action?.title) }
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if let words {
+                Text(words).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let action {
+                Button(action.title.titleStyle, action: action.run)
+                    .buttonStyle(.hover(bare: true, id: action.id))
+                    .font(Theme.ui(11.5))
+                    .foregroundStyle(Theme.text2)
+                    .fixedSize()
+                    .accessibilityIdentifier(action.id)
+            }
         }
     }
 }
@@ -429,9 +498,7 @@ private struct AccountSettings: View {
                             let installed = model.starter.availableAgents.contains(status.agent)
                             // A missing agent's own sentence says why; a signed-in state needs none.
                             SettingsRow(title: status.agent.displayName, line: installed ? nil : status.detail) {
-                                SettingsState(
-                                    words: AccountWords.state(status, installed: installed),
-                                    good: installed && status.signedIn == true)
+                                SettingsState(words: AccountWords.state(status, installed: installed))
                             }
                         }
                     } else if model == nil, setup.settled {
@@ -904,4 +971,23 @@ struct SettingsCommands: Commands {
 extension EnvironmentValues {
     /// The app's updater, for Settings' Updates row (CodeConnect › Check for Updates…); nil when this build has none.
     @Entry var updates: Updates?
+}
+
+extension AppModel {
+    /// The one thing to do about a link that is not working (`LinkNotice.macAction`): Try Again where the link can be
+    /// asked again, Open Tailscale where Tailscale is off and its app is here, Pair Again where the pairing or its
+    /// address has to change. `name` ends the control's id.
+    fileprivate func linkAction(pairAgain: @escaping (String) -> Void) -> (title: String, name: String, run: () -> Void)? {
+        let app = TailscaleApp.url
+        switch LinkNotice.macAction(linkHealth.notice?.action, tailscaleFound: app != nil) {
+        case .tryAgain: return (PeerWords.tryAgain, "tryAgain", { self.connection.retryNow() })
+        case .openTailscale:
+            guard let app else { return nil }
+            return (LinkNotice.openTailscale, "openTailscale", { NSWorkspace.shared.open(app) })
+        case .pairAgain:
+            guard let address = endpoint?.typedAddress else { return nil }
+            return (LinkHealth.pairAgain, "pairAgain", { pairAgain(address) })
+        case nil: return nil
+        }
+    }
 }
