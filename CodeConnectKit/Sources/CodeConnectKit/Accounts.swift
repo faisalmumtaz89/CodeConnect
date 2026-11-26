@@ -68,7 +68,7 @@ public struct AccountFacts: Decodable, Hashable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         email = try c.decodeIfPresent(String.self, forKey: .email)
         plan = try c.decodeIfPresent(String.self, forKey: .plan)
-        // Windows by model group (minor 53, Antigravity's) come in a field of their own, which an older app ignores;
+        // Windows by model group (minor 54, Antigravity's) come in a field of their own, which an older app ignores;
         // here they are windows like any other, each naming its group.
         windows =
             (try c.decodeIfPresent([UsageWindow].self, forKey: .windows) ?? [])
@@ -82,9 +82,9 @@ public struct AccountFacts: Decodable, Hashable, Sendable {
 public struct UsageWindow: Decodable, Hashable, Sendable {
     public let usedPercent: Int
     public let windowMinutes: Int
-    /// Unix seconds; 0 for a window the agent has not opened yet (minor 53: Antigravity's, unused).
+    /// Unix seconds; 0 for a window the agent has not opened yet (minor 54: Antigravity's, unused).
     public let resetsAt: Int
-    /// The models it counts, in the agent's own words (minor 53: Antigravity's "Gemini Models"); nil where one window
+    /// The models it counts, in the agent's own words (minor 54: Antigravity's "Gemini Models"); nil where one window
     /// counts all the agent's models.
     public let group: String?
 

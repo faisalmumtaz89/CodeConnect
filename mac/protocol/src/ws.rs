@@ -1057,8 +1057,8 @@ pub struct AccountFacts {
     /// figure from its own `window_minutes`, never from a guess.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<UsageWindow>,
-    /// Its windows by model group (minor 53: Antigravity's), each naming its group: in a field of their own, so an app
-    /// below 53, which tells windows apart by their length, never meets two of one length.
+    /// Its windows by model group (minor 54: Antigravity's), each naming its group: in a field of their own, so an app
+    /// below 54, which tells windows apart by their length, never meets two of one length.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grouped_windows: Vec<UsageWindow>,
     /// Whether plan limits apply to this sign-in, where the agent says (Claude Code's `rate_limits_available`): false
@@ -1078,7 +1078,7 @@ pub struct UsageWindow {
     pub window_minutes: u64,
     /// When the window resets (Unix seconds); 0 for a window the agent has not opened yet (Antigravity's, unused).
     pub resets_at: i64,
-    /// The models the window counts, in the agent's own words (minor 53: Antigravity's "Gemini Models", "Claude and
+    /// The models the window counts, in the agent's own words (minor 54: Antigravity's "Gemini Models", "Claude and
     /// GPT models"); absent where one window counts all the agent's models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,

@@ -225,7 +225,7 @@ final class AntigravityKitTests: XCTestCase {
         XCTAssertFalse(lacking(false, [false, true, true]), "a ready agent is never lacking")
     }
 
-    /// **Antigravity's plan limits, by model group, as agy names them** (minor 53): each window carries its group; the
+    /// **Antigravity's plan limits, by model group, as agy names them** (minor 54): each window carries its group; the
     /// Accounts page captions each by its group and length, in agy's order; a window agy has not opened reads "not
     /// started"; the reply bar shows the one nearest its limit. A window with no group is captioned by its length alone.
     func testAntigravitysWindowsAreCaptionedByTheirGroupAndTheBarShowsTheFullest() throws {
