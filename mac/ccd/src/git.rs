@@ -316,27 +316,32 @@ pub(crate) async fn push_remote_urls(
     let push = Some(named.stdout.trim().to_string())
         .filter(|remote| !remote.is_empty())
         .unwrap_or_else(|| "origin".to_string());
-    let head = remote_url(&git, cwd, &["get-url", "--push", "--", &push], timeout).await?;
-    let target = match remote_url(&git, cwd, &["get-url", "--", "upstream"], timeout).await {
+    let head = remote_url(&git, cwd, &push, true, timeout).await?;
+    let target = match remote_url(&git, cwd, "upstream", false, timeout).await {
         Some(parent) => parent,
-        None => {
-            remote_url(
-                &git,
-                cwd,
-                &["get-url", "--", other.unwrap_or(&push)],
-                timeout,
-            )
-            .await?
-        }
+        None => remote_url(&git, cwd, other.unwrap_or(&push), false, timeout).await?,
     };
     Some((head, target))
 }
 
-/// `git remote <args>`'s one URL.
-async fn remote_url(git: &Path, cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
-    let args: Vec<&str> = std::iter::once("remote")
-        .chain(args.iter().copied())
-        .collect();
+/// The URL `remote` pushes to (`push`) or fetches from. A name holding a `:` is itself the URL:
+/// git refuses one in a remote's name, and `gh pr checkout` of a fork's PR sets the fork's URL
+/// as the branch's remote.
+async fn remote_url(
+    git: &Path,
+    cwd: &str,
+    remote: &str,
+    push: bool,
+    timeout: Duration,
+) -> Option<String> {
+    if remote.contains(':') {
+        return Some(remote.to_string());
+    }
+    let mut args = vec!["remote", "get-url"];
+    if push {
+        args.push("--push");
+    }
+    args.extend(["--", remote]);
     run(git, cwd, &args, timeout, PROBE_CAP)
         .await
         .ok()

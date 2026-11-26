@@ -72,7 +72,8 @@ pub fn parse_remote(url: &str) -> Option<Repo> {
 pub struct Read {
     pub gh: GhState,
     pub pr: Option<PullRequest>,
-    /// When GitHub was asked; `None` when it was not: no gh, or the host's reads paused.
+    /// When GitHub was asked; `None` when it was not: no gh, no account in it, or the host's
+    /// reads paused.
     pub read_at: Option<String>,
 }
 
@@ -199,7 +200,15 @@ async fn read_github(
     };
     match pull_request(&gh, environment, head, target, branch, head_oid).await {
         Ok(pr) => (read(GhState::SignedIn, pr), false),
-        Err(Failed::SignedOut) => (read(GhState::SignedOut, None), false),
+        Err(Failed::TokenRefused) => (read(GhState::SignedOut, None), false),
+        Err(Failed::NoAccount) => {
+            let signed_out = Read {
+                gh: GhState::SignedOut,
+                pr: None,
+                read_at: None,
+            };
+            (signed_out, false)
+        }
         Err(Failed::RateLimited) => (read(GhState::Unknown, None), true),
         Err(Failed::Other) => (read(GhState::Unknown, None), false),
     }
@@ -212,9 +221,10 @@ fn said(out: &crate::git::Output, words: &[&str]) -> bool {
 
 /// Why a pulls call gave no answer.
 enum Failed {
-    /// gh has no account for the host (it says to run `gh auth login`), or GitHub refused its
-    /// token (HTTP 401).
-    SignedOut,
+    /// gh has no account for the host: it says to run `gh auth login` without asking GitHub.
+    NoAccount,
+    /// GitHub refused gh's token (HTTP 401).
+    TokenRefused,
     RateLimited,
     /// Anything else: GitHub unreachable, slow, or an answer that is not the pulls list.
     Other,
@@ -315,8 +325,10 @@ async fn pulls(
     }
     Err(if said(&out, &["rate limit"]) {
         Failed::RateLimited
-    } else if said(&out, &["gh auth login", "http 401"]) {
-        Failed::SignedOut
+    } else if said(&out, &["http 401"]) {
+        Failed::TokenRefused
+    } else if said(&out, &["gh auth login"]) {
+        Failed::NoAccount
     } else {
         Failed::Other
     })

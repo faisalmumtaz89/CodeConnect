@@ -8496,9 +8496,11 @@ mod tests {
             let _ = std::fs::remove_dir_all(gh.parent().unwrap());
         };
 
-        for (capture, state) in [
-            ("api-signed-out", GhState::SignedOut),
-            ("api-offline", GhState::Unknown),
+        // gh signed out stops before asking GitHub; offline and a refused token did ask it.
+        for (capture, state, asked) in [
+            ("api-signed-out", GhState::SignedOut, false),
+            ("api-offline", GhState::Unknown, true),
+            ("api-token-refused", GhState::SignedOut, true),
         ] {
             let gh = stand_in_gh();
             gh_answers_as(&gh, capture);
@@ -8515,7 +8517,7 @@ mod tests {
                     read.pr,
                     read.gh_read_at.is_some()
                 ),
-                (Some(state), Some("github.com"), None, true),
+                (Some(state), Some("github.com"), None, asked),
                 "{capture}"
             );
             done(&gh, &dir);
@@ -8627,6 +8629,57 @@ mod tests {
             calls[0].contains("repos/cli/cli/pulls")
                 && calls[0].contains(&format!("head=lazerg:{fork}")),
             "the PR is looked for on the parent: {calls:?}"
+        );
+        done(&gh, &dir);
+
+        // `gh pr checkout` of a fork's PR: the branch's remote is the fork's URL, not a remote's name,
+        // in a clone of the parent (which has `origin/HEAD`).
+        let gh = stand_in_gh();
+        let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP26", fork);
+        git_in(&dir, &["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+        git_in(
+            &dir,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        );
+        git_in(
+            &dir,
+            &[
+                "config",
+                &format!("branch.{fork}.remote"),
+                "https://github.com/lazerg/cli-2.git",
+            ],
+        );
+        git_in(
+            &dir,
+            &[
+                "config",
+                &format!("branch.{fork}.merge"),
+                &format!("refs/heads/{fork}"),
+            ],
+        );
+        let read = daemon
+            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP26")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read.pr.as_ref().map(|pr| pr.number),
+            Some(15111),
+            "{:?}",
+            read.gh
+        );
+        let calls = gh_calls(&gh);
+        assert!(
+            calls[0].contains("repos/cli/cli/pulls"),
+            "the PR is looked for on the parent: {calls:?}"
+        );
+        assert!(
+            calls[0].contains(&format!("head=lazerg:{fork}")),
+            "the fork's owner: {calls:?}"
         );
         done(&gh, &dir);
 

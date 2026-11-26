@@ -1346,7 +1346,9 @@ to probe credentials.
   outside the folder's git lock, one read at a time and at most once per branch
   and commit every 30 seconds whatever asks, and not for 5 minutes after GitHub
   refuses a read for its rate limit. `gh_read_at` is when GitHub was asked for the
-  answer; it is absent when GitHub was not asked (no gh, or the pause).
+  answer; it is absent when GitHub was not asked (no gh, no account in gh, or
+  the pause). A branch whose remote is a URL (as `gh pr checkout` sets for a
+  fork's PR) is read from that URL.
 * **`git_action{request_id, session_uid, action}`** (`>= 59`, `git_actions` names
   each action; paired devices only) → `git_action_result{request_id, session_uid,
   result}`, `done{sha}` or `refused{code, detail?}`. `action` is
