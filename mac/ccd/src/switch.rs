@@ -198,6 +198,9 @@ pub(crate) async fn switched(daemon: &Daemon, uid: &str) -> bool {
 /// on any run is filed, so it reads ended and takes no message, as any run End run ended.
 pub(crate) async fn ended(daemon: &Arc<Daemon>, uid: &str) {
     set(daemon, uid, None).await;
+    daemon
+        .terminals
+        .end(uid, protocol::ws::terminal_closed::RUN_ENDED);
     let Ok(id) = protocol::uid::uuid_v4() else {
         return;
     };

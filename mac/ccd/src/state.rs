@@ -203,6 +203,8 @@ pub struct Daemon {
     pub(crate) starts: crate::start_session::Starts,
     /// Files sent for runs' agents, by upload id ([`crate::uploads`]).
     pub(crate) uploads: crate::uploads::Uploads,
+    /// The runs' shells (`run_terminal`).
+    pub(crate) terminals: crate::terminal::Terminals,
     /// Which agents could start, as last checked.
     pub(crate) agents: crate::start_session::KnownAgents,
     /// The account sign-in this computer is running, if any ([`crate::accounts::sign_in`]).
@@ -547,6 +549,7 @@ impl Daemon {
             actuation_gates: Mutex::new(HashMap::new()),
             starts: crate::start_session::Starts::default(),
             uploads: crate::uploads::Uploads::default(),
+            terminals: crate::terminal::Terminals::default(),
             agents: crate::start_session::KnownAgents::default(),
             sign_ins: Arc::default(),
             account_facts: crate::accounts::Facts::default(),
@@ -950,7 +953,7 @@ impl Daemon {
     /// Same eviction rule as [`Daemon::publish_gate`]: an entry nobody holds is
     /// dropped, so this map is bounded by live sessions rather than by every session
     /// ever seen.
-    async fn registration_gate(&self, session_uid: &str) -> Arc<Mutex<()>> {
+    pub(crate) async fn registration_gate(&self, session_uid: &str) -> Arc<Mutex<()>> {
         let mut gates = self.registration_gates.lock().await;
         gates.retain(|_, gate| Arc::strong_count(gate) > 1);
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
@@ -3542,6 +3545,19 @@ impl Daemon {
         }
         self.published(session_uid, &events).await;
         self.end_mail(session_uid).await;
+        // The run's shell ends with it, unless this end is an account switch's: the run is moved, not ended, and
+        // keeps its shell (`switch::ended` ends it when that run is ended in its turn).
+        if self
+            .db
+            .switch_state(session_uid.to_string())
+            .await
+            .ok()
+            .flatten()
+            != Some(crate::store::Store::SWITCH_MOVED)
+        {
+            self.terminals
+                .end(session_uid, protocol::ws::terminal_closed::RUN_ENDED);
+        }
         self.after_the_end(&session, commit).await;
         Ok(true)
     }

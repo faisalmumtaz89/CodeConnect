@@ -281,7 +281,13 @@ where
         | ClientMessage::SignInAgent { .. }
         | ClientMessage::SignOutAgent { .. }
         | ClientMessage::RemoveAccount { .. }
-        | ClientMessage::PutFile { .. } => {
+        | ClientMessage::PutFile { .. }
+        // Not advertised (`run_terminal` is false) either.
+        | ClientMessage::TerminalOpen { .. }
+        | ClientMessage::TerminalInput { .. }
+        | ClientMessage::TerminalResize { .. }
+        | ClientMessage::TerminalCredit { .. }
+        | ClientMessage::TerminalDetach { .. } => {
             send(
                 sink,
                 &ServerMessage::Error {
@@ -553,6 +559,7 @@ fn capabilities() -> Capabilities {
         claude_interrupt: false,
         accounts: false,
         uploads: false,
+        run_terminal: false,
     }
 }
 

@@ -89,6 +89,7 @@
     "push_relay": false,
     "question_card": true,
     "risk_class": true,
+    "run_terminal": true,
     "send_text": true,
     "send_text_idempotent": true,
     "session_uid": true,

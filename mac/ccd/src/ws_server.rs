@@ -436,6 +436,15 @@ where
     let mut peers_refresh = tokio::time::interval(PEERS_REFRESH);
     peers_refresh.tick().await;
     let (peers_reader, mut peers_read) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
+    // This connection's view of a run's shell (`crate::terminal`), one at a time, and the open in flight, by its
+    // attachment id: an open waits on the run's gate and starts a shell, so it finishes off this loop and comes back
+    // on `terminal_opened`. One finishing for an id no longer asked for is dropped, letting its shell go.
+    let mut terminal: Option<crate::terminal::Attachment> = None;
+    let mut terminal_opening: Option<String> = None;
+    let (terminal_open_done, mut terminal_opened) = tokio::sync::mpsc::unbounded_channel::<(
+        String,
+        std::result::Result<crate::terminal::Opened, &'static str>,
+    )>();
 
     let auth_deadline = tokio::time::sleep(HANDSHAKE_TIMEOUT);
     tokio::pin!(auth_deadline);
@@ -663,6 +672,25 @@ where
                             captured_at: protocol::time::now_rfc3339(),
                         });
                     });
+                    continue;
+                }
+
+                // A run's shell: a paired device, and only over a transport nothing on the path can read, since what
+                // it carries is a shell's keystrokes and output.
+                if let Some(attachment_id) = terminal_frame(&parsed) {
+                    if device_id.is_none() || !private_transport {
+                        send(&mut sink, &terminal_closed(attachment_id, protocol::ws::terminal_closed::NOT_AUTHORISED)).await?;
+                        continue;
+                    }
+                    if let Some(reason) = handle_terminal(
+                        &daemon,
+                        parsed,
+                        &mut terminal,
+                        &mut terminal_opening,
+                        &terminal_open_done,
+                    ) {
+                        send(&mut sink, &reason).await?;
+                    }
                     continue;
                 }
 
@@ -912,6 +940,60 @@ where
 
             Some(reply) = replies.recv() => send(&mut sink, &reply).await?,
 
+            Some((attachment_id, opened)) = terminal_opened.recv() => {
+                if terminal_opening.as_deref() != Some(attachment_id.as_str()) {
+                    continue;
+                }
+                terminal_opening = None;
+                match opened {
+                    Ok(opened) => {
+                        send(&mut sink, &ServerMessage::TerminalOpened {
+                            attachment_id,
+                            input_credit: protocol::ws::TERMINAL_INPUT_CREDIT,
+                            max_chunk_bytes: protocol::ws::MAX_TERMINAL_CHUNK_BYTES,
+                            max_outstanding_credit: protocol::ws::TERMINAL_MAX_OUTSTANDING_CREDIT,
+                            folder: opened.folder,
+                            replay_end: opened.replay_end,
+                        }).await?;
+                        terminal = Some(opened.attachment);
+                    }
+                    Err(reason) => send(&mut sink, &terminal_closed(&attachment_id, reason)).await?,
+                }
+            }
+
+            // One step of the shell this connection views: one bounded chunk, a credit, or its close.
+            () = async {
+                match terminal.as_mut() {
+                    Some(attachment) => attachment.ready().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(attachment) = terminal.as_mut() else { continue };
+                match attachment.next() {
+                    Some(crate::terminal::Step::Output { data, reset, offset }) => {
+                        use base64::Engine as _;
+                        send(&mut sink, &ServerMessage::TerminalOutput {
+                            attachment_id: attachment.id.clone(),
+                            data: base64::engine::general_purpose::STANDARD.encode(data),
+                            reset,
+                            offset,
+                        }).await?;
+                    }
+                    Some(crate::terminal::Step::InputCredit(bytes)) => {
+                        send(&mut sink, &ServerMessage::TerminalCredit {
+                            attachment_id: attachment.id.clone(),
+                            bytes,
+                        }).await?;
+                    }
+                    Some(crate::terminal::Step::Closed(reason)) => {
+                        let closed = terminal_closed(&attachment.id, reason);
+                        terminal = None;
+                        send(&mut sink, &closed).await?;
+                    }
+                    None => {}
+                }
+            }
+
             _ = peers_refresh.tick(), if device_id.is_some() => {
                 let daemon = Arc::clone(&daemon);
                 let peers_reader = peers_reader.clone();
@@ -1014,6 +1096,14 @@ where
         // A second hello does not re-authenticate, and there is nothing else for
         // it to do.
         ClientMessage::Hello { .. } => {}
+        // A shell's frames are this connection's stream, served in `handle_client` (`handle_terminal`).
+        ClientMessage::TerminalOpen { .. }
+        | ClientMessage::TerminalInput { .. }
+        | ClientMessage::TerminalResize { .. }
+        | ClientMessage::TerminalCredit { .. }
+        | ClientMessage::TerminalDetach { .. } => {
+            unreachable!("a terminal frame is served by handle_terminal")
+        }
         ClientMessage::Ping => {
             send(sink, &ServerMessage::Pong).await?;
             // Each ping is the device reaching this computer. The apps send one every ten
@@ -2280,6 +2370,141 @@ pub(crate) fn capabilities(
         accounts: paired,
         // Files for a run's agent: sent by a paired device, as starting is.
         uploads: paired,
+        // A run's shell: a paired device, over a transport nothing on the path can read.
+        run_terminal: paired && private_transport,
+    }
+}
+
+/// The attachment a terminal frame names, `None` for any other frame.
+fn terminal_frame(message: &ClientMessage) -> Option<&str> {
+    match message {
+        ClientMessage::TerminalOpen { attachment_id, .. }
+        | ClientMessage::TerminalInput { attachment_id, .. }
+        | ClientMessage::TerminalResize { attachment_id, .. }
+        | ClientMessage::TerminalCredit { attachment_id, .. }
+        | ClientMessage::TerminalDetach { attachment_id } => Some(attachment_id),
+        _ => None,
+    }
+}
+
+fn terminal_closed(attachment_id: &str, reason: &str) -> ServerMessage {
+    ServerMessage::TerminalClosed {
+        attachment_id: attachment_id.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+/// One terminal frame from a paired device on a private transport, against this connection's attachment and the open
+/// in flight. What it answers at once, if anything (a refusal or a close); everything else comes on the loop's
+/// terminal arms. A frame for an attachment already gone is dropped: the client sent it before it learnt.
+fn handle_terminal(
+    daemon: &Arc<Daemon>,
+    message: ClientMessage,
+    terminal: &mut Option<crate::terminal::Attachment>,
+    opening: &mut Option<String>,
+    opened: &tokio::sync::mpsc::UnboundedSender<(
+        String,
+        std::result::Result<crate::terminal::Opened, &'static str>,
+    )>,
+) -> Option<ServerMessage> {
+    use base64::Engine as _;
+    use protocol::ws::terminal_closed::PROTOCOL_ERROR;
+    // The attachment this connection holds, if `attachment_id` names it.
+    fn held<'a>(
+        terminal: &'a mut Option<crate::terminal::Attachment>,
+        attachment_id: &str,
+    ) -> Option<&'a mut crate::terminal::Attachment> {
+        terminal
+            .as_mut()
+            .filter(|attachment| attachment.id == attachment_id)
+    }
+    // A frame that broke the rules ends the attachment it names.
+    let broken = |terminal: &mut Option<crate::terminal::Attachment>, attachment_id: &str| {
+        *terminal = None;
+        Some(terminal_closed(attachment_id, PROTOCOL_ERROR))
+    };
+    match message {
+        ClientMessage::TerminalOpen {
+            attachment_id,
+            session_id,
+            cols,
+            rows,
+            output_credit,
+            resume_after,
+            takeover,
+        } => {
+            if attachment_id.is_empty()
+                || attachment_id.len() > protocol::ws::MAX_ATTACHMENT_ID_BYTES
+            {
+                return Some(terminal_closed(&attachment_id, PROTOCOL_ERROR));
+            }
+            // One terminal per connection: this open replaces the one before, which lets its shell go first.
+            *terminal = None;
+            *opening = Some(attachment_id.clone());
+            let daemon = Arc::clone(daemon);
+            let opened = opened.clone();
+            tokio::spawn(async move {
+                let request = crate::terminal::OpenRequest {
+                    attachment_id: attachment_id.clone(),
+                    session_uid: session_id,
+                    cols,
+                    rows,
+                    output_credit,
+                    resume_after,
+                    takeover,
+                };
+                let result = crate::terminal::open(&daemon, request).await;
+                let _ = opened.send((attachment_id, result));
+            });
+            None
+        }
+        ClientMessage::TerminalInput {
+            attachment_id,
+            data,
+        } => {
+            let attachment = held(terminal, &attachment_id)?;
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+                return broken(terminal, &attachment_id);
+            };
+            if attachment.input(bytes).is_err() {
+                return broken(terminal, &attachment_id);
+            }
+            None
+        }
+        ClientMessage::TerminalResize {
+            attachment_id,
+            cols,
+            rows,
+        } => {
+            let attachment = held(terminal, &attachment_id)?;
+            if !protocol::ws::TERMINAL_COLS.contains(&cols)
+                || !protocol::ws::TERMINAL_ROWS.contains(&rows)
+            {
+                return broken(terminal, &attachment_id);
+            }
+            attachment.resize(cols, rows);
+            None
+        }
+        ClientMessage::TerminalCredit {
+            attachment_id,
+            bytes,
+        } => {
+            let attachment = held(terminal, &attachment_id)?;
+            if attachment.credit(bytes).is_err() {
+                return broken(terminal, &attachment_id);
+            }
+            None
+        }
+        ClientMessage::TerminalDetach { attachment_id } => {
+            if held(terminal, &attachment_id).is_some() {
+                *terminal = None;
+            }
+            if opening.as_deref() == Some(attachment_id.as_str()) {
+                *opening = None;
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -6523,6 +6748,45 @@ mod tests {
         );
         assert_eq!(reply["agents"][0]["signed_in"], true, "{reply}");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// **A run's shell is offered, and served, only to a paired device on a private transport**: never to the
+    /// bootstrap token, never over the plaintext LAN the operator allowed, and an open the gate lets through still
+    /// names a run the daemon has, or is closed `not_live`.
+    #[tokio::test]
+    async fn a_runs_shell_is_only_for_a_paired_device_on_a_private_transport() {
+        let open = Message::Text(
+            r#"{"type":"terminal_open","attachment_id":"t1","session_id":"01NOSUCHRUN","cols":80,"rows":24,"output_credit":65536,"takeover":true}"#.into(),
+        );
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(ack["capabilities"]["run_terminal"], false, "{ack}");
+        bootstrap.send(open.clone()).await.unwrap();
+        let refused = next_json(&mut bootstrap).await.unwrap();
+        assert_eq!(refused["type"], "terminal_closed", "{refused}");
+        assert_eq!(refused["reason"], "not_authorised", "{refused}");
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["run_terminal"], true, "{ack}");
+        phone.send(open.clone()).await.unwrap();
+        let unknown = next_json(&mut phone).await.unwrap();
+        assert_eq!(unknown["type"], "terminal_closed", "{unknown}");
+        assert_eq!(unknown["reason"], "not_live", "{unknown}");
+
+        let (lan, _) = live_server_on(
+            protocol::config::Config::default(),
+            Arc::new(crate::apns::LoggingPushSender::new()),
+            PlaintextTrust::OperatorAllowed,
+        )
+        .await;
+        let (mut phone, ack) = lan
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["run_terminal"], false, "{ack}");
+        phone.send(open).await.unwrap();
+        let refused = next_json(&mut phone).await.unwrap();
+        assert_eq!(refused["reason"], "not_authorised", "{refused}");
     }
 
     /// A stub claude for a list test, signed out, and a live server whose check asks

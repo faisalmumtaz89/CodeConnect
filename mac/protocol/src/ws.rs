@@ -37,6 +37,52 @@ pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
 /// [`MAX_CLIENT_MESSAGE_BYTES`].
 pub const MAX_UPLOAD_CHUNK_BYTES: usize = 512 * 1024;
 
+/// Ceiling on one terminal chunk, decoded, in either direction ([`ClientMessage::TerminalInput`],
+/// [`ServerMessage::TerminalOutput`]): its base64 is 21,848 characters, far under [`MAX_CLIENT_MESSAGE_BYTES`].
+pub const MAX_TERMINAL_CHUNK_BYTES: u32 = 16 * 1024;
+
+/// The input a terminal's viewer may have sent and not yet had written to the shell: granted at
+/// [`ServerMessage::TerminalOpened`] and given back by [`ServerMessage::TerminalCredit`] as it is written.
+pub const TERMINAL_INPUT_CREDIT: u32 = 32 * 1024;
+
+/// The most output credit a terminal's viewer may hold at once ([`ClientMessage::TerminalOpen`]'s
+/// `output_credit` plus every [`ClientMessage::TerminalCredit`] not yet spent). A grant past it closes the
+/// terminal `protocol_error`.
+pub const TERMINAL_MAX_OUTSTANDING_CREDIT: u32 = 256 * 1024;
+
+/// A terminal's columns, at least and at most.
+pub const TERMINAL_COLS: std::ops::RangeInclusive<u16> = 2..=512;
+
+/// A terminal's rows, at least and at most.
+pub const TERMINAL_ROWS: std::ops::RangeInclusive<u16> = 2..=256;
+
+/// Ceiling on an `attachment_id`.
+pub const MAX_ATTACHMENT_ID_BYTES: usize = 64;
+
+/// Why a terminal's viewer was closed ([`ServerMessage::TerminalClosed`]'s `reason`).
+pub mod terminal_closed {
+    /// The shell exited by itself. The next open starts a fresh one.
+    pub const EXITED: &str = "exited";
+    /// The run ended, and its shell with it.
+    pub const RUN_ENDED: &str = "run_ended";
+    /// The daemon is stopping, and the shell with it.
+    pub const STOPPING: &str = "stopping";
+    /// Another viewer took the shell (an open with `takeover`), or held it when this open did not take over.
+    pub const SUPERSEDED: &str = "superseded";
+    /// The run is not live: ended, or not known here.
+    pub const NOT_LIVE: &str = "not_live";
+    /// The run is live but has not said which folder it is in yet: a Claude run before its first report.
+    pub const NOT_READY: &str = "not_ready";
+    /// This computer has as many shells as it keeps, or the shell could not be started.
+    pub const UNAVAILABLE: &str = "unavailable";
+    /// Output waited on spent credit for longer than the daemon waits.
+    pub const SLOW_CONSUMER: &str = "slow_consumer";
+    /// Only a paired device, on a connection nothing on the path can read, opens a terminal.
+    pub const NOT_AUTHORISED: &str = "not_authorised";
+    /// A frame broke the terminal's rules: credit, size, an unknown attachment.
+    pub const PROTOCOL_ERROR: &str = "protocol_error";
+}
+
 /// The most uploads one `send_text` or `compose` attaches.
 pub const MAX_ATTACHMENTS: usize = 10;
 
@@ -373,6 +419,52 @@ pub enum ClientMessage {
         offset: u64,
         /// The chunk, base64, at most [`MAX_UPLOAD_CHUNK_BYTES`] decoded.
         data: String,
+    },
+
+    /// **A shell in a run's folder, on this computer** (minor 56, `run_terminal`): opened or attached to,
+    /// answered with a [`ServerMessage::TerminalOpened`] and then its output, or with a
+    /// [`ServerMessage::TerminalClosed`]. The shell is the run's: one per run, started by the first open,
+    /// in the folder the daemon holds for the run, as its own user's login shell; it ends with the run, never
+    /// with a viewer. `session_id` is the run's uid; nothing in this frame names a path, a program or a user.
+    /// One terminal per connection: an open replaces the connection's earlier one.
+    TerminalOpen {
+        /// The client's name for this attachment, at most [`MAX_ATTACHMENT_ID_BYTES`]; every later frame of it
+        /// carries it.
+        attachment_id: String,
+        session_id: String,
+        cols: u16,
+        rows: u16,
+        /// Output bytes the client is ready for, at most [`TERMINAL_MAX_OUTSTANDING_CREDIT`].
+        output_credit: u32,
+        /// The output offset this client already shows, when it still holds the screen ([`ServerMessage::TerminalOutput`]'s
+        /// `offset`): output resumes after it, with no reset, while the daemon still holds what follows it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_after: Option<u64>,
+        /// The person asked for this shell (they opened it, or typed in a view another one had taken): it takes
+        /// the shell from any other viewer. Without it, an open finding another viewer is closed `superseded`.
+        #[serde(default)]
+        takeover: bool,
+    },
+    /// Bytes typed or pasted into an open terminal, base64, at most [`MAX_TERMINAL_CHUNK_BYTES`] decoded and
+    /// never more than the input credit left.
+    TerminalInput {
+        attachment_id: String,
+        data: String,
+    },
+    /// The terminal's view changed size.
+    TerminalResize {
+        attachment_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// The client fed `bytes` more of the output and is ready for as many again.
+    TerminalCredit {
+        attachment_id: String,
+        bytes: u32,
+    },
+    /// The client stopped viewing (the bar folded, the panel closed): the shell keeps running.
+    TerminalDetach {
+        attachment_id: String,
     },
 
     /// **The folders sessions have run in on this computer** (minor 28,
@@ -712,6 +804,41 @@ pub enum ServerMessage {
     PutFileResult {
         upload_id: String,
         result: PutFileResult,
+    },
+
+    /// A [`ClientMessage::TerminalOpen`] took the run's shell. Output follows as [`ServerMessage::TerminalOutput`].
+    TerminalOpened {
+        attachment_id: String,
+        /// Input the client may send before a [`ServerMessage::TerminalCredit`] gives more back.
+        input_credit: u32,
+        max_chunk_bytes: u32,
+        max_outstanding_credit: u32,
+        /// The shell's folder: the run's, as the daemon holds it.
+        folder: String,
+        /// The offset the output already held reaches: what comes before it is replayed, so a client sends no
+        /// answer of its own to it (a terminal answers some sequences it is fed).
+        replay_end: u64,
+    },
+    /// The shell's output, base64, at most [`MAX_TERMINAL_CHUNK_BYTES`] decoded and never more than the output
+    /// credit left. The first after [`ServerMessage::TerminalOpened`] has `reset` unless the open resumed:
+    /// the client clears its screen before feeding it.
+    TerminalOutput {
+        attachment_id: String,
+        data: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reset: bool,
+        /// The output offset after this chunk: what a later open's `resume_after` names.
+        offset: u64,
+    },
+    /// `bytes` of the client's input were written to the shell: it may send as many more.
+    TerminalCredit {
+        attachment_id: String,
+        bytes: u32,
+    },
+    /// The attachment is over, `reason` one of [`terminal_closed`]. Nothing more of it follows.
+    TerminalClosed {
+        attachment_id: String,
+        reason: String,
     },
 
     /// The answer to [`ClientMessage::ListProjects`]: most recently used first.
@@ -1455,6 +1582,12 @@ pub struct Capabilities {
     /// `bad_request`, so a client sends neither unless this is advertised.
     #[serde(default)]
     pub uploads: bool,
+    /// **This daemon serves a run's shell** ([`ClientMessage::TerminalOpen`] and the terminal frames, minor 56),
+    /// to a paired device on a connection nothing on the path can read (`private_transport`) only. Absent decodes
+    /// `false`: an older daemon answers `terminal_open` with `bad_request`, so a client sends none unless this is
+    /// advertised.
+    #[serde(default)]
+    pub run_terminal: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -2423,9 +2556,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 55,
             "Antigravity's one window, Gemini's week, as a plain window (no `group`, no `grouped_windows`) is minor 55"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 56,
+            "a run's shell (`terminal_open`, `run_terminal`) is minor 56"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 55);
+        assert_eq!(crate::PROTOCOL_MINOR, 56);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2757,6 +2894,112 @@ mod tests {
         );
     }
 
+    /// **A run's shell, as an app and the daemon write its frames** (minor 56): every tag and field the Mac app
+    /// matches by hand, and an open that names no resume and takes nothing over reads that way.
+    #[test]
+    fn the_terminal_frames_read_and_write_as_the_app_matches_them() {
+        let open: ClientMessage = serde_json::from_str(
+            r#"{"type":"terminal_open","attachment_id":"t1","session_id":"01RUN","cols":80,"rows":24,
+                "output_credit":65536}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            open,
+            ClientMessage::TerminalOpen {
+                cols: 80,
+                rows: 24,
+                output_credit: 65536,
+                resume_after: None,
+                takeover: false,
+                ..
+            }
+        ));
+        let resumed: ClientMessage = serde_json::from_str(
+            r#"{"type":"terminal_open","attachment_id":"t2","session_id":"01RUN","cols":80,"rows":24,
+                "output_credit":65536,"resume_after":4096,"takeover":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            resumed,
+            ClientMessage::TerminalOpen {
+                resume_after: Some(4096),
+                takeover: true,
+                ..
+            }
+        ));
+        for (json, expected) in [
+            (
+                r#"{"type":"terminal_input","attachment_id":"t1","data":"bHMK"}"#,
+                "terminal_input",
+            ),
+            (
+                r#"{"type":"terminal_resize","attachment_id":"t1","cols":100,"rows":30}"#,
+                "terminal_resize",
+            ),
+            (
+                r#"{"type":"terminal_credit","attachment_id":"t1","bytes":16384}"#,
+                "terminal_credit",
+            ),
+            (
+                r#"{"type":"terminal_detach","attachment_id":"t1"}"#,
+                "terminal_detach",
+            ),
+        ] {
+            let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_value(&parsed).unwrap()["type"], expected);
+        }
+        assert_eq!(
+            serde_json::to_value(ServerMessage::TerminalOpened {
+                attachment_id: "t1".into(),
+                input_credit: TERMINAL_INPUT_CREDIT,
+                max_chunk_bytes: MAX_TERMINAL_CHUNK_BYTES,
+                max_outstanding_credit: TERMINAL_MAX_OUTSTANDING_CREDIT,
+                folder: "/r/.claude/worktrees/x".into(),
+                replay_end: 12,
+            })
+            .unwrap(),
+            serde_json::json!({"type": "terminal_opened", "attachment_id": "t1", "input_credit": 32768,
+                               "max_chunk_bytes": 16384, "max_outstanding_credit": 262144,
+                               "folder": "/r/.claude/worktrees/x", "replay_end": 12})
+        );
+        assert_eq!(
+            serde_json::to_value(ServerMessage::TerminalOutput {
+                attachment_id: "t1".into(),
+                data: "aGk=".into(),
+                reset: false,
+                offset: 14,
+            })
+            .unwrap(),
+            serde_json::json!({"type": "terminal_output", "attachment_id": "t1", "data": "aGk=", "offset": 14})
+        );
+        assert_eq!(
+            serde_json::to_value(ServerMessage::TerminalOutput {
+                attachment_id: "t1".into(),
+                data: String::new(),
+                reset: true,
+                offset: 0,
+            })
+            .unwrap()["reset"],
+            true
+        );
+        assert_eq!(
+            serde_json::to_value(ServerMessage::TerminalCredit {
+                attachment_id: "t1".into(),
+                bytes: 3
+            })
+            .unwrap(),
+            serde_json::json!({"type": "terminal_credit", "attachment_id": "t1", "bytes": 3})
+        );
+        assert_eq!(
+            serde_json::to_value(ServerMessage::TerminalClosed {
+                attachment_id: "t1".into(),
+                reason: terminal_closed::RUN_ENDED.into(),
+            })
+            .unwrap(),
+            serde_json::json!({"type": "terminal_closed", "attachment_id": "t1", "reason": "run_ended"})
+        );
+    }
+
     /// **A file's chunk and a message's attachments, as an app sends them** (minor 50): a
     /// `send_text` or `compose` attaching nothing is written exactly as before.
     #[test]
@@ -3031,6 +3274,7 @@ mod tests {
             claude_interrupt: true,
             accounts: true,
             uploads: true,
+            run_terminal: true,
         }
     }
 
