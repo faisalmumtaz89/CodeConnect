@@ -2942,9 +2942,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 64,
             "merging a pull request (`merge`, `merge_state`, `merge_methods`) is minor 64"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 65,
+            "a run's usage limit (`limit`) is minor 65"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 64);
+        assert_eq!(crate::PROTOCOL_MINOR, 65);
     }
 
     /// **The tags, pinned on this side too.**

@@ -1000,7 +1000,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     An open [`ws::PullRequest`] carries `merge_state` ([`ws::MergeState`]) and `merge_methods` ([`ws::MergeMethod`]),
 ///     read with its checks in the same request; [`ws::GitAction::Merge`] merges it by a method the repository allows, only
 ///     at the head the panel showed. `git_actions` names `merge`; a daemon below 64 does not.
-pub const PROTOCOL_MINOR: u32 = 64;
+///   * `65` — **A run says the usage limit it stopped at.**
+///
+///     [`event::SessionSummary::limit`] ([`event::RunLimit`]): set when Claude Code's `rate_limit_event` says
+///     `rejected`, or a Codex turn fails with `usageLimitExceeded`; gone once the run's next turn starts. It names the
+///     limit ([`event::LimitKind`]), not its reset, which is the run's account's held window of that length. A daemon
+///     below 65 sends none.
+pub const PROTOCOL_MINOR: u32 = 65;
 
 #[cfg(test)]
 mod ledger_tests {

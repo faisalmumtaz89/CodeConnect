@@ -254,6 +254,7 @@ mod tests {
             switching: None,
             account: None,
             title: None,
+            limit: None,
         }
     }
 

@@ -869,6 +869,19 @@ impl Db {
         self.run(move |store| store.switching_runs()).await
     }
 
+    pub async fn set_run_limit(
+        &self,
+        session_uid: String,
+        limit: Option<protocol::event::RunLimit>,
+    ) -> Result<()> {
+        self.run(move |store| store.set_run_limit(&session_uid, limit.as_ref()))
+            .await
+    }
+
+    pub async fn run_limits(&self) -> Result<Vec<(String, protocol::event::RunLimit)>> {
+        self.run(move |store| store.run_limits()).await
+    }
+
     pub async fn switch_state(&self, session_uid: String) -> Result<Option<i64>> {
         self.run(move |store| store.switch_state(&session_uid))
             .await
