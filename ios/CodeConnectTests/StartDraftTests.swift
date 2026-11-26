@@ -7,7 +7,7 @@ import XCTest
 @MainActor
 final class StartDraftTests: XCTestCase {
 
-    private func ask(_ computer: String = "a", message: String = "Fix the parser.", place: StartPlace = .folder)
+    private func ask(_ computer: String = "a", message: String = "Fix the parser.", place: StartPlace? = .folder)
         -> StartDraft.Ask
     {
         StartDraft.Ask(
@@ -54,6 +54,17 @@ final class StartDraftTests: XCTestCase {
         XCTAssertEqual(draft.phase(outcome: .started(sessionUID: "s1"), asking: ask(), computerKnown: true), .started(sessionUID: "s1"))
         // Answered: Start makes a new start, never the answered one again.
         XCTAssertEqual(draft.send(for: ask(), outcome: .started(sessionUID: "s1"), computerKnown: true), .new)
+    }
+
+    /// The default place (nothing chosen) is asked as nothing chosen, not as the name the Mac makes from the task when it
+    /// sends: a withdrawn start asked again is the same ask, and goes again under its own id, whatever the repository
+    /// lists by then (a new worktree named "fix-the-parser" made by the first send would make the name "-2").
+    func testAWithdrawnDefaultStartGoesAgainUnderItsOwnId() {
+        let draft = StartDraft()
+        draft.didSend("r1", asking: ask(place: nil))
+        draft.withdraw()
+        XCTAssertEqual(draft.send(for: ask(place: nil), outcome: nil, computerKnown: true), .resume(requestID: "r1"))
+        XCTAssertEqual(draft.send(for: ask(place: .new("fix-the-parser-2")), outcome: nil, computerKnown: true), .new)
     }
 
     /// Withdrawn, and answered with a start that never ran: the form, quietly.

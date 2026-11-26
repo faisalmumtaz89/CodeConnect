@@ -16,7 +16,6 @@ public final class StartDraft {
     /// What is chosen on one computer.
     public struct Choices: Hashable, Sendable {
         public var folderPath: String?
-        public var query = ""
         public var model: StartModelChoice?
         /// Where in the folder's repository it starts, as the person chose; nil until they choose, which each app's
         /// form reads as its own default.
@@ -31,7 +30,9 @@ public final class StartDraft {
     public struct Ask: Hashable, Sendable {
         public let computerID: String
         public let folderPath: String
-        public let place: StartPlace
+        /// The place the person chose; nil is the form's default, which the form resolves only as it sends, so a
+        /// start sent again asks the same whatever the repository lists by then.
+        public let place: StartPlace?
         public let agent: StartAgent
         public let model: String?
         public let message: String
@@ -39,7 +40,7 @@ public final class StartDraft {
         public let files: [String]
 
         public init(
-            computerID: String, folderPath: String, place: StartPlace, agent: StartAgent, model: String?, message: String,
+            computerID: String, folderPath: String, place: StartPlace?, agent: StartAgent, model: String?, message: String,
             files: [String] = []
         ) {
             self.computerID = computerID
@@ -119,7 +120,6 @@ public final class StartDraft {
         guard choices(on: computer).folderPath != path else { return }
         edit(on: computer) {
             $0.folderPath = path
-            $0.query = ""
             $0.place = nil
             $0.newName = nil
         }

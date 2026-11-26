@@ -68,7 +68,8 @@ struct BranchRow: View {
         let rows = BranchMenu.rows(git: git, folder: folder, listing: listing)
         let gap = Theme.panelGap
         let highest = max(top, Self.margin)
-        let naming = newName == nil ? 0 : namingHeight
+        // The naming shows under the menu's own rows, not under the branches' list.
+        let naming = newName == nil || listing ? 0 : namingHeight
         let above = frame.minY - gap - highest - naming
         let shown = BranchMenu.rows(fitting: above, of: rows)
         let placed = PanelPlace.place(widest: BranchMenu.width, leading: frame.minX, box: startBox)
@@ -372,7 +373,7 @@ struct BranchMenu: View {
         -> some View
     {
         item(
-            index: index, id: "start.branch.\(title)", name: title, checked: place == choice,
+            index: index, id: "start.branch.\(title)", name: title, checked: naming == nil && place == choice,
             choose: { choose(.place(choice)) }
         ) {
             // Cut in the middle when the menu is narrower than the name, where a branch's prefix and its end both show.

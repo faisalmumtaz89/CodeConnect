@@ -36,7 +36,8 @@ struct ModelButton: View {
         }
         .buttonStyle(.hover(radius: 8, id: "start.model"))
         .help(label)
-        .disabled(checking)
+        // Nothing to choose while the computer is asked, or when no agent can start here (the form says why).
+        .disabled(checking || context.modelChoices.isEmpty)
         .accessibilityIdentifier("start.model")
         .accessibilityValue(open ? "open" : "closed")
         // Above the button, clear of it by the panels' one gap.

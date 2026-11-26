@@ -39,7 +39,6 @@ struct StartForm: View {
     /// How tall the folder panel stands, and its list in it, as drawn.
     @State private var folderPanelHeight: CGFloat = 0
     @State private var listShown: CGFloat = 0
-    @Environment(\.startHeight) private var startHeight
     /// The first message has the keyboard: as the form appears, and when New Agent asks for it.
     @FocusState private var messageFocused: Bool
     /// The first message's caret, which the form sets when New Agent gives it the keyboard (`giveKeyboard`).
@@ -88,7 +87,7 @@ struct StartForm: View {
     private var ask: StartDraft.Ask? {
         guard let context, let folder, let pick else { return nil }
         return StartDraft.Ask(
-            computerID: context.id, folderPath: folder.path, place: startPlace, agent: pick.agent, model: pick.model,
+            computerID: context.id, folderPath: folder.path, place: chosenPlace, agent: pick.agent, model: pick.model,
             message: draft.message, files: draft.files.map(\.id))
     }
 
@@ -125,7 +124,9 @@ struct StartForm: View {
         guard let context else { return "Choose a computer." }
         if context.startAgents.contains(where: { context.models($0) == .checking }) { return context.checkingModels }
         guard pick != nil else { return context.noAgent }
-        guard folder != nil else { return "Choose a folder." }
+        guard let folder else { return "Choose a folder." }
+        // Where in the repository it goes is known once the computer has read it (screen 34's default needs it).
+        if context.branchAhead(folder), context.git(folder.path) == nil { return StartWords.readingBranches(folder.name) }
         // Files alone are a first message.
         if draft.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, draft.files.isEmpty {
             return StartWords.writeTheFirstMessage
@@ -144,12 +145,16 @@ struct StartForm: View {
     /// the first message starts at one line and the rows stand closer.
     private var short: Bool { room < 600 }
 
-    /// The place Start sends: a new worktree by the name typed, else the one chosen, else in a repository a new
-    /// worktree named from the first message (screen 34's default), and the folder as it is outside one or while its
-    /// repository is still being read.
+    /// The place the person chose: a new worktree by the name typed, else the one chosen; nil is the default.
+    private var chosenPlace: StartPlace? {
+        newName.map { .new($0.trimmingCharacters(in: .whitespaces)) } ?? place
+    }
+
+    /// The place Start sends: the one chosen, else in a repository a new worktree named from the first message
+    /// (screen 34's default), else the folder as it is. Resolved only here, as the start is sent: the ask holds the
+    /// choice, so a withdrawn start asked again is the same ask whatever the repository lists by then.
     private var startPlace: StartPlace {
-        if let newName { return .new(newName.trimmingCharacters(in: .whitespaces)) }
-        if let place { return place }
+        if let chosenPlace { return chosenPlace }
         guard let context, let folder, let pick, let git = context.git(folder.path) ?? nil else { return .folder }
         return .new(StartPlace.named(fromTask: draft.message, for: pick.agent, in: git))
     }
@@ -421,11 +426,12 @@ struct StartForm: View {
                 if let picked = picked(context) { folderRow(picked, index: 0) }
             } else {
                 MenuHeader(text: "Recent on \(context.machineName)")
+                let picked = picked(context)
                 ScrollViewReader { list in
-                    ScrollView {
+                    // The row the keys light comes into sight (`PanelScroll`).
+                    PanelScroll {
                         // Not lazy: every folder is in the accessibility tree, scrolled to or not.
                         VStack(spacing: MenuMetrics.rowGap) {
-                            let picked = picked(context)
                             if let picked { folderRow(picked, index: 0) }
                             ForEach(Array(context.projects.enumerated()), id: \.element.path) { offset, project in
                                 folderRow(project, index: offset + (picked == nil ? 0 : 1))
@@ -434,8 +440,13 @@ struct StartForm: View {
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                     }
                     // The chosen folder is always in view: scrolled to, the least that shows it, when the panel opens
-                    // or the choice or the list changes, so a click on a row in view moves nothing.
-                    .task(id: [folderPath ?? "", "\(context.projects.count)"]) { list.scrollTo(folderPath) }
+                    // or the choice or the list changes, so a click on a row in view moves nothing. Rows go by their
+                    // index in the menu (`panelRow`).
+                    .task(id: [folderPath ?? "", "\(context.projects.count)"]) {
+                        guard picked == nil, let row = context.projects.firstIndex(where: { $0.path == folderPath })
+                        else { return }
+                        list.scrollTo(row)
+                    }
                 }
                 // As tall as its rows, up to 260 pt or the room the pane has above the panel, then it scrolls. An exact
                 // height: a panel is drawn over its button, which offers it only the button's own height, so a range
@@ -468,9 +479,9 @@ struct StartForm: View {
         .panelRow(index, id: "start.folder.\(project.path)", choose: choose)
         .focusable(false)
         .accessibilityLabel(project.name)
+        .accessibilityValue(project.shownPath)
         .accessibilityIdentifier("start.folder.\(project.path)")
         .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
-        .id(project.path)
     }
 
     /// "Choose Folder…": this Mac's standard folder panel, or another computer's folders browsed in the menu (a

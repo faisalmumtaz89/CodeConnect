@@ -45,7 +45,6 @@ struct StartPane: View {
         .padding(.top, 44)
         .padding(.bottom, 10)
         .background(Theme.pane)
-        .environment(\.startHeight, height)
         // A start this Mac sent with no answer yet, from before the app last quit: the form opens on it.
         .onAppear {
             guard let start = machines.outstandingStart,

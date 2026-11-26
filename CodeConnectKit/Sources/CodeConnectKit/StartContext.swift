@@ -299,14 +299,7 @@ extension Machines {
     }
 }
 
-/// `main · 4m ago · Claude Code`: the branch, when it was last used and by
-/// which agent. A folder that is not a repository has no branch to show.
-public func startProjectMeta(_ project: StartProject, now: Date = Date()) -> String {
-    ([project.gitBranch].compactMap { $0 } + [startProjectLastUsed(project, now: now)]).joined(separator: " · ")
-}
-
-/// `4m ago · Claude Code`: the meta line after its branch, the part that
-/// never gives way when the line is short of room.
+/// `4m ago · Claude Code`: when a folder was last used, and by which agent.
 public func startProjectLastUsed(_ project: StartProject, now: Date = Date()) -> String {
     ([Format.ago(since: project.lastUsed, now: now)] + [project.lastAgent?.displayName].compactMap { $0 })
         .joined(separator: " · ")

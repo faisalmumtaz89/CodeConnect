@@ -86,8 +86,6 @@ struct AddSheet: View {
 extension EnvironmentValues {
     /// How tall a sheet over the window may be.
     @Entry var sheetRoom: CGFloat = .infinity
-    /// How tall the start form's pane stands, in `StartForm.space`.
-    @Entry var startHeight: CGFloat = 0
     /// Where the start form's box stands, in `StartForm.space`: no panel of the form reaches past its sides.
     @Entry var startBox: CGRect = .zero
 }
