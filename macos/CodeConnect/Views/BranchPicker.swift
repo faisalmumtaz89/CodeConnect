@@ -33,7 +33,11 @@ struct BranchRow: View {
             if let answer = context.git(folder.path), let git = answer {
                 // A new worktree being named is named in the menu (`BranchNaming`); here, its kind.
                 let summary = place.map { startPlaceSummary($0, agent: agent ?? .claude, project: folder, git: git) }
-                button(newName == nil ? summary ?? StartWords.newWorktree : StartWords.newWorktree)
+                if newName == nil, let summary {
+                    button(summary, branch: true)
+                } else {
+                    button(StartWords.newWorktree, branch: false)
+                }
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -102,14 +106,17 @@ struct BranchRow: View {
     }
 
     /// The chosen place, a button that opens the menu.
-    private func button(_ title: String) -> some View {
+    /// `branch`: the title is a branch, in a terminal's type and cut in the middle, where its prefix and its end both
+    /// show; else words ("New worktree"), in the bar's type and cut at their end, as the other chips are.
+    private func button(_ title: String, branch: Bool) -> some View {
         Button {
             open.toggle()
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "arrow.triangle.branch").font(.system(size: 11)).accessibilityHidden(true)
                 // A branch keeps meaning at both ends ("feature/oauth-device-flow"): cut in its middle.
-                Text(verbatim: title).font(Theme.mono(12)).lineLimit(1).truncationMode(.middle)
+                Text(verbatim: title).font(branch ? Theme.mono(12) : InputBoxChip.font).lineLimit(1)
+                    .truncationMode(branch ? .middle : .tail)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(Theme.text)
