@@ -1391,7 +1391,10 @@ where
         }
         ClientMessage::GetDiff { session_id } => match daemon.diff(&session_id).await {
             Ok(diff) => {
-                let (unified, truncated) = fit_diff_in_a_frame(diff.unified, diff.truncated);
+                let (files, files_truncated) =
+                    fit_files_in_a_frame(diff.files, diff.files_truncated);
+                let (unified, truncated) =
+                    fit_diff_in_a_frame(diff.unified, diff.truncated, encoded_len(&files));
                 send(
                     sink,
                     &ServerMessage::Diff {
@@ -1403,6 +1406,8 @@ where
                         // its freshness.
                         captured_at: protocol::time::now_rfc3339(),
                         note: diff.note,
+                        files,
+                        files_truncated,
                     },
                 )
                 .await?;
@@ -1587,10 +1592,12 @@ impl Drop for UploadOwner {
 /// diff into a disconnect loop. Shrinking further and keeping `truncated: true`
 /// is the honest trade:
 /// the phone already knows not to trust an incomplete diff.
-fn fit_diff_in_a_frame(unified: String, truncated: bool) -> (String, bool) {
+/// `reserved` is what the message's `files` take once encoded.
+fn fit_diff_in_a_frame(unified: String, truncated: bool, reserved: usize) -> (String, bool) {
     // Headroom for the rest of the message (session id, timestamp, note, keys).
-    let ceiling = MAX_CLIENT_MESSAGE_BYTES.saturating_sub(4096);
-    let encoded_len = |text: &str| serde_json::to_string(text).map(|s| s.len()).unwrap_or(0);
+    let ceiling = MAX_CLIENT_MESSAGE_BYTES
+        .saturating_sub(4096)
+        .saturating_sub(reserved);
     if encoded_len(&unified) <= ceiling {
         return (unified, truncated);
     }
@@ -1607,6 +1614,39 @@ fn fit_diff_in_a_frame(unified: String, truncated: bool) -> (String, bool) {
     }
     text.push_str("\n… diff truncated by CodeConnect to fit one message\n");
     (text, true)
+}
+
+/// The most a diff's `files` take of its frame once encoded; the rest is the diff's.
+const FILES_FRAME_BUDGET: usize = 256 * 1024;
+
+/// Keep a diff's `files` inside [`FILES_FRAME_BUDGET`] once encoded: the longest run of
+/// files from the start that fits, saying so when any are left out. A thousand deep paths
+/// would otherwise crowd the diff out of its frame.
+fn fit_files_in_a_frame(
+    files: Option<Vec<protocol::ws::DiffFile>>,
+    truncated: bool,
+) -> (Option<Vec<protocol::ws::DiffFile>>, bool) {
+    let Some(mut files) = files else {
+        return (None, truncated);
+    };
+    // `[` and `]`, then each file and the comma before every one but the first.
+    let mut used = 2;
+    let fits = files
+        .iter()
+        .take_while(|file| {
+            used += encoded_len(file) + usize::from(used > 2);
+            used <= FILES_FRAME_BUDGET
+        })
+        .count();
+    let cut = truncated || fits < files.len();
+    files.truncate(fits);
+    (Some(files), cut)
+}
+
+fn encoded_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+    serde_json::to_string(value)
+        .map(|text| text.len())
+        .unwrap_or(0)
 }
 
 /// Build the ack, attaching the new credentials when this hello was a pairing.
@@ -4242,7 +4282,7 @@ mod tests {
         // JSON escaping doubles it. At the 512KB content cap that
         // encodes to ~1MB — past the frame limit — and must be shrunk.
         let nasty = "\n".repeat(protocol::ws::MAX_DIFF_BYTES);
-        let (text, truncated) = fit_diff_in_a_frame(nasty, true);
+        let (text, truncated) = fit_diff_in_a_frame(nasty, true, 0);
         let encoded = serde_json::to_string(&text).unwrap().len();
         assert!(
             encoded <= MAX_CLIENT_MESSAGE_BYTES,
@@ -4255,16 +4295,64 @@ mod tests {
     #[test]
     fn an_ordinary_diff_is_passed_through_untouched() {
         let diff = "diff --git a/x b/x\n+one\n-two\n".to_string();
-        let (text, truncated) = fit_diff_in_a_frame(diff.clone(), false);
+        let (text, truncated) = fit_diff_in_a_frame(diff.clone(), false, 0);
         assert_eq!(text, diff, "a small diff must not be rewritten");
         assert!(!truncated);
         // An already-truncated small diff keeps saying so.
-        assert!(fit_diff_in_a_frame(diff, true).1);
+        assert!(fit_diff_in_a_frame(diff, true, 0).1);
+    }
+
+    /// **A diff with the most files and the largest diff still fits one frame**: a
+    /// thousand deep, escape-heavy paths are cut to the files' budget and say so, and
+    /// the diff fits beside them, so the whole message stays under the frame limit.
+    #[test]
+    fn a_diff_with_many_deep_paths_still_fits_one_frame() {
+        let deep = |n: usize| protocol::ws::DiffFile {
+            path: format!("{}/{n}", "\\\"/".repeat(400)),
+            old_path: Some("\n".repeat(400)),
+            status: protocol::ws::DiffFileStatus::Renamed,
+            added: Some(u64::MAX),
+            removed: Some(u64::MAX),
+            binary: false,
+        };
+        let many: Vec<_> = (0..protocol::ws::MAX_DIFF_FILES).map(deep).collect();
+        let (files, cut) = fit_files_in_a_frame(Some(many.clone()), false);
+        assert!(cut, "a list past its budget says it was cut");
+        assert!(encoded_len(&files) <= FILES_FRAME_BUDGET);
+        let kept = files.as_ref().unwrap().len();
+        assert!(
+            encoded_len(&many[..=kept]) > FILES_FRAME_BUDGET,
+            "the longest prefix that fits is kept, not fewer: {kept}"
+        );
+        let (unified, _) = fit_diff_in_a_frame(
+            "\n".repeat(protocol::ws::MAX_DIFF_BYTES),
+            true,
+            encoded_len(&files),
+        );
+        let message = ServerMessage::Diff {
+            session_id: "s".repeat(64),
+            unified,
+            truncated: true,
+            captured_at: protocol::time::now_rfc3339(),
+            note: Some("n".repeat(200)),
+            files,
+            files_truncated: cut,
+        };
+        let encoded = serde_json::to_string(&message).unwrap().len();
+        assert!(encoded <= MAX_CLIENT_MESSAGE_BYTES, "{encoded} bytes");
+
+        let few = vec![deep(1)];
+        assert_eq!(
+            fit_files_in_a_frame(Some(few.clone()), false),
+            (Some(few), false),
+            "a list inside its budget passes untouched"
+        );
+        assert_eq!(fit_files_in_a_frame(None, false), (None, false));
     }
 
     #[test]
     fn an_empty_diff_survives_the_fitting() {
-        let (text, truncated) = fit_diff_in_a_frame(String::new(), false);
+        let (text, truncated) = fit_diff_in_a_frame(String::new(), false, 0);
         assert_eq!(text, "");
         assert!(!truncated);
     }
@@ -4274,7 +4362,7 @@ mod tests {
         // Emoji are 4 bytes and escape to 12; the shrink loop must still land
         // on a character boundary or `String::truncate` panics.
         let nasty = "🔥".repeat(protocol::ws::MAX_DIFF_BYTES / 4);
-        let (text, _) = fit_diff_in_a_frame(nasty, true);
+        let (text, _) = fit_diff_in_a_frame(nasty, true, 0);
         assert!(text.is_char_boundary(0));
         assert!(
             serde_json::to_string(&text).unwrap().len() <= MAX_CLIENT_MESSAGE_BYTES,

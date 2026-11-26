@@ -668,6 +668,15 @@ pub enum ServerMessage {
         captured_at: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        /// Every changed file (minor 53): the tracked ones against `HEAD` and the untracked
+        /// ones, each with its lines, whole even when `unified` was cut. Absent when git could
+        /// not list them, outside a repository, and from an older daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files: Option<Vec<DiffFile>>,
+        /// `files` stops short of the tree's changes: more than [`MAX_DIFF_FILES`], more
+        /// untracked names than the daemon lists at once, or more than one message carries.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        files_truncated: bool,
     },
     Error {
         code: String,
@@ -1200,6 +1209,44 @@ pub enum ComposeResult {
 /// Ceiling on a `diff` payload. A phone screen cannot use more, and an
 /// unbounded diff would blow past the client message limit on the way out.
 pub const MAX_DIFF_BYTES: usize = 512 * 1024;
+
+/// Ceiling on the files one `diff` lists ([`ServerMessage::Diff`]'s `files`).
+pub const MAX_DIFF_FILES: usize = 1000;
+
+/// One changed file of a [`ServerMessage::Diff`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffFile {
+    /// From the repository's top folder.
+    pub path: String,
+    /// Where a renamed or copied file came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub status: DiffFileStatus,
+    /// Lines added and removed, as `git diff --numstat` counts them; an untracked file's
+    /// every line is added. Absent for a binary file, for an untracked one that is not a
+    /// regular file, and for one past the daemon's reading budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
+}
+
+/// What happened to a [`DiffFile`], from git's own status letter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    /// A file became a symlink, or the other way round.
+    TypeChanged,
+    /// Not tracked by git yet, and not ignored.
+    Untracked,
+}
 
 /// What CodeConnect can actually do, reported honestly rather than assumed.
 /// Mirrors ACP's capability shape; the iPhone disables affordances it does not
@@ -2364,9 +2411,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 52,
             "a switch of account moving a run at its next message, a moving run's `menus` offered, is minor 52"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 53,
+            "a diff listing its files (`files`, `files_truncated`) is minor 53"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 52);
+        assert_eq!(crate::PROTOCOL_MINOR, 53);
     }
 
     /// **The tags, pinned on this side too.**
@@ -4101,11 +4152,69 @@ mod tests {
             truncated: false,
             captured_at: "2026-07-31T10:00:00.000Z".into(),
             note: None,
+            files: None,
+            files_truncated: false,
         };
         let encoded = serde_json::to_string(&reply).unwrap();
         assert!(encoded.contains("\"type\":\"diff\""), "{encoded}");
         assert!(!encoded.contains("note"), "an absent note must not be sent");
-        let _: ServerMessage = serde_json::from_str(&encoded).unwrap();
+        assert!(!encoded.contains("files"), "{encoded}");
+        match serde_json::from_str(&encoded).unwrap() {
+            ServerMessage::Diff {
+                files,
+                files_truncated,
+                ..
+            } => assert_eq!(
+                (files, files_truncated),
+                (None, false),
+                "a minor-51 diff decodes with no files"
+            ),
+            other => panic!("wrong message: {other:?}"),
+        }
+    }
+
+    /// **A diff's files on the wire**: snake-case statuses, a rename's old path, a
+    /// binary file with no counts and no `binary: false` noise on a text one.
+    #[test]
+    fn a_diffs_files_encode_as_the_apps_read_them() {
+        let files = vec![
+            DiffFile {
+                path: "b.txt".into(),
+                old_path: Some("a.txt".into()),
+                status: DiffFileStatus::Renamed,
+                added: Some(0),
+                removed: Some(0),
+                binary: false,
+            },
+            DiffFile {
+                path: "img.png".into(),
+                old_path: None,
+                status: DiffFileStatus::TypeChanged,
+                added: None,
+                removed: None,
+                binary: true,
+            },
+        ];
+        let reply = ServerMessage::Diff {
+            session_id: "cc-1".into(),
+            unified: String::new(),
+            truncated: false,
+            captured_at: "t".into(),
+            note: None,
+            files: Some(files),
+            files_truncated: true,
+        };
+        let encoded = serde_json::to_value(&reply).unwrap();
+        assert_eq!(
+            encoded["files"],
+            serde_json::json!([
+                {"path": "b.txt", "old_path": "a.txt", "status": "renamed", "added": 0, "removed": 0},
+                {"path": "img.png", "status": "type_changed", "binary": true},
+            ])
+        );
+        assert_eq!(encoded["files_truncated"], true);
+        let decoded: ServerMessage = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded);
     }
 
     #[test]
@@ -4116,6 +4225,8 @@ mod tests {
             truncated: false,
             captured_at: "t".into(),
             note: Some("not a git repository".into()),
+            files: None,
+            files_truncated: false,
         })
         .unwrap();
         assert!(encoded.contains("not a git repository"), "{encoded}");

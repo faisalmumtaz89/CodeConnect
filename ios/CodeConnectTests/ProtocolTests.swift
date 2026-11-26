@@ -130,6 +130,37 @@ final class ProtocolTests: XCTestCase {
         XCTAssertNotNil(diff.capturedDate)
     }
 
+    /// The files a minor-53 daemon lists, as it encodes them: a rename with its old path, a binary file with no
+    /// counts, an untracked file with every line added; and a minor-51 frame with no `files` at all.
+    func testDiffFrameDecodesItsFiles() throws {
+        let message = try decodeServer(
+            """
+            {"type":"diff","session_id":"cc-1","unified":"","truncated":false,"captured_at":"2026-11-26T09:14:02.104Z",
+             "files":[{"path":"b.txt","old_path":"a.txt","status":"renamed","added":0,"removed":0},
+                      {"path":"img.png","status":"modified","binary":true},
+                      {"path":"sub/new.txt","status":"untracked","added":2,"removed":0},
+                      {"path":"link","status":"type_changed"}],
+             "files_truncated":true}
+            """)
+        guard case .diff(let diff) = message else { return XCTFail("wrong message") }
+        let files = try XCTUnwrap(diff.files)
+        XCTAssertEqual(files.map(\.status), [.renamed, .modified, .untracked, .typeChanged])
+        XCTAssertEqual(files[0].oldPath, "a.txt")
+        XCTAssertEqual(files[1].added, nil)
+        XCTAssertTrue(files[1].binary)
+        XCTAssertEqual(files[2].added, 2)
+        XCTAssertFalse(files[2].binary)
+        XCTAssertTrue(diff.filesTruncated)
+
+        let older = try decodeServer(
+            """
+            {"type":"diff","session_id":"cc-1","unified":"","truncated":false,"captured_at":"2026-11-26T09:14:02.104Z"}
+            """)
+        guard case .diff(let olderDiff) = older else { return XCTFail("wrong message") }
+        XCTAssertNil(olderDiff.files)
+        XCTAssertFalse(olderDiff.filesTruncated)
+    }
+
     func testGetDiffEncoding() throws {
         let fields = try encodeClient(.getDiff(session: "cc-2"))
         XCTAssertEqual(fields["type"]?.stringValue, "get_diff")
