@@ -254,8 +254,8 @@ struct MainWindow: View {
                 }
             }
         #endif
-        .sheet(item: $adding, onDismiss: { repairing = nil }) { kind in
-            AddSheet(kind: kind, address: $repairing)
+        .sheet(item: $adding, onDismiss: { repairing = nil }) { _ in
+            AddSheet(address: $repairing)
             // A sheet stands in the middle of the window: clear of the 52-point header above it, so as far from the
             // bottom edge.
             .environment(\.sheetRoom, height - 2 * 52)
