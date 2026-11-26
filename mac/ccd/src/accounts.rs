@@ -687,6 +687,7 @@ pub(crate) async fn read_claude_usage(
                 used_percent: window["utilization"].as_f64()?.round().clamp(0.0, 100.0) as u32,
                 window_minutes: minutes,
                 resets_at: window["resets_at"].as_i64()?,
+                group: None,
             })
         })
         .collect();
@@ -775,6 +776,7 @@ pub(crate) fn codex_windows(limits: &serde_json::Value) -> Vec<protocol::ws::Usa
             used_percent: u32::try_from(window["usedPercent"].as_u64()?).ok()?,
             window_minutes: window["windowDurationMins"].as_u64()?,
             resets_at: window["resetsAt"].as_i64()?,
+            group: None,
         })
     };
     ["primary", "secondary"]
@@ -1875,7 +1877,8 @@ pub(crate) mod tests {
                 vec![protocol::ws::UsageWindow {
                     used_percent: 42,
                     window_minutes: 7 * 24 * 60,
-                    resets_at: 1_795_928_400
+                    resets_at: 1_795_928_400,
+                    group: None,
                 }]
             ))
         );

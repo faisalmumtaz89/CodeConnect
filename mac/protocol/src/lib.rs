@@ -928,7 +928,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     more; an untracked file is listed with every line added. [`event::SessionSummary::diff_stat`] is their counted
 ///     lines' sum, so it counts untracked files' lines too. A daemon below 53 sends no `files`, and its `diff_stat` counts tracked
 ///     files only.
-pub const PROTOCOL_MINOR: u32 = 53;
+///   * `54` — **Antigravity's plan limits, by model group.**
+///
+///     [`ws::UsageWindow::group`] names the group of models a window counts, in the agent's own words (Antigravity's
+///     "Gemini Models", "Claude and GPT models"), absent for an agent whose windows cover all its models (Claude Code,
+///     Codex). Antigravity's Default carries its windows in its facts, read from agy's own `/usage`; a window agy has
+///     not opened yet has `resets_at` 0. A daemon below 54 sends Antigravity no windows.
+pub const PROTOCOL_MINOR: u32 = 54;
 
 #[cfg(test)]
 mod ledger_tests {

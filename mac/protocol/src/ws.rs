@@ -1072,8 +1072,12 @@ pub struct UsageWindow {
     pub used_percent: u32,
     /// The window's length, in minutes.
     pub window_minutes: u64,
-    /// When the window resets (Unix seconds).
+    /// When the window resets (Unix seconds); 0 for a window the agent has not opened yet (Antigravity's, unused).
     pub resets_at: i64,
+    /// The models the window counts, in the agent's own words (minor 53: Antigravity's "Gemini Models", "Claude and
+    /// GPT models"); absent where one window counts all the agent's models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// An agent's Default account (the agent as it is on the computer), with what it says of it.
@@ -2415,9 +2419,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 53,
             "a diff listing its files (`files`, `files_truncated`) is minor 53"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 54,
+            "a usage window's model group (`group`) is minor 54"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 53);
+        assert_eq!(crate::PROTOCOL_MINOR, 54);
     }
 
     /// **The tags, pinned on this side too.**
