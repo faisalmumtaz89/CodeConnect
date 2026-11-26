@@ -63,11 +63,11 @@ struct SessionPane: View {
         // What waits on you sits at the foot, outside the conversation's scroll, in at most half the pane with
         // the reply box when that shows, so the window holds them both at its smallest; its answers take the
         // reply box's place. Not while the reply field holds the keyboard: the box stays the writer's until it
-        // lets go. Once a request has the box, the field can't take the keyboard back, so what holds it then is
-        // the request's own field.
+        // lets go (a hunk's comment field, which holds Esc too, is not the reply's). Once a request has the box,
+        // the field can't take the keyboard back, so what holds it then is the request's own field.
         PendingRequests(
             model: model, key: row.id, maxHeight: max(0, size.height / 2 - replyHeight),
-            held: composerHolds == true && !boxTaken,
+            held: composerHolds == true && changesFieldFocused != true && !boxTaken,
             keysElsewhere: adding.map { $0.wrappedValue != nil } ?? false || setup.shown || changesFieldFocused == true)
         // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its way are
         // kept. It takes no room, no click, no keyboard (Tab can't reach it) and no reading. Not clipped: its
