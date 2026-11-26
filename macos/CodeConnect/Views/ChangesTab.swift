@@ -1,13 +1,13 @@
 import CodeConnectKit
 import SwiftUI
 
-/// A run's changes as its computer read them (`git diff HEAD` and the untracked names), opened at the top. Kit asks
-/// for them when the tab is shown and nothing has been read yet, again on "Check again", and again when the link comes
-/// back after it failed them: a diff is read when you are about to read it, and says how old it is rather than passing
-/// for live. Who said what decides the state: the computer's own words are quoted as they came, the app's account of
-/// its link is never passed off as them, and an empty diff is called clean only when the computer added no note saying
-/// why it is empty.
-struct ChangesTab: View {
+/// A run's Changes panel: the branch it is on, how its changes stand, the files it changed and each file's diff, as
+/// its computer read them (`git diff HEAD` and the untracked files). Kit asks for them when the panel opens, again when
+/// the run's line count changes, and again when the link comes back after it failed them: a diff is read when you are
+/// about to read it, and says how old it is rather than passing for live. Who said what decides the state: the
+/// computer's own words are quoted as they came, the app's account of its link is never passed off as them, and an
+/// empty diff is called clean only when the computer added no note saying why it is empty.
+struct ChangesPanel: View {
     let model: AppModel
     let key: String
     @State private var hunks: HunkActions
@@ -20,45 +20,34 @@ struct ChangesTab: View {
 
     var body: some View {
         let state = model.diffState(for: key)
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                if case .loaded(let raw, let parsed, let fetchedAt) = state {
-                    if !parsed.isEmpty { Summary(diff: parsed) }
-                    let read = raw.capturedDate ?? fetchedAt
-                    AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
-                        .font(Theme.ui(12))
-                        .foregroundStyle(Theme.text3)
-                        .monospacedDigit()
-                        .accessibilityIdentifier("changes.age")
-                }
-                Spacer(minLength: 0)
-                ActionButton(title: ChangesWords.checkAgain, key: nil, prominent: false, id: "changes.refresh") {
-                    model.loadDiff(key: key, force: true)
-                }
-                .disabled(state.isLoading)
+        VStack(alignment: .leading, spacing: 0) {
+            if let branch = model.shownSummary(for: key)?.gitBranch?.displaySafe {
+                BranchLine(branch: branch)
             }
-            .padding(.horizontal, 28)
-            .frame(height: 44)
-            .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             switch state {
             case .idle, .loading:
                 Message(id: "changes.loading", title: ChangesWords.reading)
             case .failed(.app(let reason)):
-                Message(id: "changes.offline", title: "The changes could not be read", sentence: reason)
+                Message(id: "changes.offline", title: "The changes could not be read", sentence: reason) {
+                    model.loadDiff(key: key, force: true)
+                }
             case .failed(.daemon(let reason)):
                 Message(
                     id: "changes.failed", title: ChangesWords.couldNotRead,
                     sentence: ChangesWords.itsReason, quote: (reason, "changes.failed.reason"))
-            case .loaded(let raw, let parsed, _) where parsed.isEmpty && raw.note == nil:
+            case .loaded(let raw, let parsed, _) where parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil:
                 Message(
                     id: "changes.clean", title: ChangesWords.noUncommitted,
                     sentence: ChangesWords.clean)
-            case .loaded(let raw, let parsed, _) where parsed.isEmpty:
+            case .loaded(let raw, let parsed, _) where parsed.isEmpty && raw.files?.isEmpty != false:
                 Message(
                     id: "changes.empty", title: ChangesWords.noDiff,
                     sentence: ChangesWords.computersReason, quote: (raw.note ?? "", "changes.note"))
-            case .loaded(let raw, let parsed, _):
-                Document(raw: raw, diff: parsed).environment(hunks)
+            case .loaded(let raw, let parsed, let fetchedAt):
+                let files = ChangedFile.rows(raw, parsed)
+                StateLine(files: files, cut: raw.truncated || raw.filesTruncated, read: raw.capturedDate ?? fetchedAt)
+                Band(count: files.count)
+                Document(raw: raw, diff: parsed, files: files).environment(hunks)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -68,6 +57,8 @@ struct ChangesTab: View {
         .task(id: key) {
             if case .idle = model.diffState(for: key) { model.loadDiff(key: key) }
         }
+        // Read again when the run's computer counts its lines anew (a turn's end), so the panel follows the run.
+        .onChange(of: model.shownSummary(for: key)?.diffStat) { _, _ in model.loadDiff(key: key, force: true) }
         // Asked again the moment the link is back, as the iPhone does: only after the app's own link failure, never
         // after a refusal the computer made.
         .onChange(of: model.daemonProfile.isConnected) { _, connected in
@@ -84,23 +75,81 @@ struct ChangesTab: View {
     /// How many files the run's last read diff changes, for the tab: only from a diff already read, never asked for
     /// to fill the count, and none when it changes no file.
     static func fileCount(model: AppModel, key: String) -> Int? {
-        guard case .loaded(_, let parsed, _) = model.diffState(for: key), !parsed.files.isEmpty else { return nil }
-        return parsed.files.count
+        guard case .loaded(let raw, let parsed, _) = model.diffState(for: key) else { return nil }
+        let count = ChangedFile.rows(raw, parsed).count
+        return count == 0 ? nil : count
     }
 }
 
-/// Lines added and removed across the diff, and how many files: one reading, as drawn.
-private struct Summary: View {
-    let diff: UnifiedDiff
+/// The branch the run's folder has checked out, as git names it.
+private struct BranchLine: View {
+    let branch: String
 
     var body: some View {
-        let files = ChangesWords.files(diff.files.count)
-        let added = Text(verbatim: "+\(diff.additions)").foregroundStyle(Theme.green)
-        let removed = Text(verbatim: "−\(diff.deletions)").foregroundStyle(Theme.red)
-        Text("\(added) \(removed) · \(files)")
-        .font(Theme.mono(11.5))
-        .foregroundStyle(Theme.text2)
-        .accessibilityIdentifier("changes.summary")
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.triangle.branch").font(.system(size: 11)).foregroundStyle(Theme.text3)
+                .accessibilityHidden(true)
+            Text(verbatim: branch).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 14)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("changes.branch")
+    }
+}
+
+/// How the run's changes stand: the files and lines it changed, then when they were read, and that the computer cut
+/// them short when it did.
+private struct StateLine: View {
+    let files: [ChangedFile]
+    let cut: Bool
+    let read: Date?
+
+    var body: some View {
+        let added = files.reduce(0) { $0 + ($1.added ?? 0) }
+        let removed = files.reduce(0) { $0 + ($1.removed ?? 0) }
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text("\(ChangesWords.files(files.count)) changed ·").font(Theme.ui(13, .medium)).foregroundStyle(Theme.text)
+                LineDelta(added: added, removed: removed)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("changes.summary")
+            HStack(spacing: 0) {
+                AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
+                    .foregroundStyle(Theme.text3)
+                    .monospacedDigit()
+                    .accessibilityIdentifier("changes.age")
+                if cut {
+                    Text(" · Cut short by your computer").foregroundStyle(Theme.amber)
+                        .accessibilityIdentifier("changes.truncated")
+                }
+            }
+            .font(Theme.ui(12))
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+    }
+}
+
+/// The panel's one tab before the run has a pull request: its changes, and how many files.
+private struct Band: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Changes").font(Theme.ui(13, .medium)).foregroundStyle(Theme.text)
+            Text(ChangesWords.files(count)).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .frame(height: 38)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("changes.band")
     }
 }
 
@@ -111,6 +160,8 @@ private struct Message: View {
     let title: String
     var sentence: String?
     var quote: (text: String, id: String)?
+    /// Asks again, where only the app's link failed.
+    var retry: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 10) {
@@ -132,6 +183,9 @@ private struct Message: View {
                     .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
                     .accessibilityIdentifier(quote.id)
             }
+            if let retry {
+                ActionButton(title: ChangesWords.checkAgain, key: nil, prominent: false, id: "changes.refresh", action: retry)
+            }
         }
         .frame(maxWidth: 460)
         .padding(28)
@@ -139,62 +193,107 @@ private struct Message: View {
     }
 }
 
-/// The diff itself: the computer's note when it qualified a diff it did send, a banner when it cut the capture, each
-/// file, and the lines that belong to no file (the untracked names). Lazy in its files.
+/// The files the run changed, each a click from its diff, then each file's diff folded to its header or open: the
+/// computer's note when it qualified a diff it did send, each file the capture holds, and from an older computer the
+/// lines that belong to no file (the untracked names). Lazy in its files.
 private struct Document: View {
     let raw: SessionDiff
     let diff: UnifiedDiff
+    let files: [ChangedFile]
+    /// The files whose diffs are folded to their headers.
+    @State private var folded: Set<String> = []
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                if let note = raw.note {
-                    Text(verbatim: note)
-                        .font(Theme.mono(11.5))
-                        .foregroundStyle(Theme.text2)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("changes.note")
-                }
-                if raw.truncated {
-                    HStack(spacing: 6) {
-                        Image(systemName: "scissors").accessibilityHidden(true)
-                        Text("Cut short by your computer. This is not the whole diff.")
+        ScrollViewReader { reader in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(files) { file in
+                        FileRow(file: file) {
+                            guard file.diff != nil else { return }
+                            folded.remove(file.id)
+                            withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo(file.id, anchor: .top) }
+                        }
                     }
-                    .font(Theme.ui(12))
-                    .foregroundStyle(Theme.amber)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("changes.truncated")
                 }
-                ForEach(diff.files) { file in
-                    FileBlock(file: file)
-                }
-                let extra = (diff.preamble + diff.trailing).filter { !$0.allSatisfy(\.isWhitespace) }
-                if !extra.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Also reported").font(Theme.ui(12, .medium)).foregroundStyle(Theme.text2)
-                        // Not selectable: a selectable text is dropped from the combined element, so the names would
-                        // be drawn but never read.
-                        // Each as a file header names its file: the path, then its kind in a word.
-                        ForEach(Array(UnifiedDiff.reported(extra).enumerated()), id: \.offset) { _, reported in
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Text(verbatim: reported.text.displaySafe).font(Theme.mono(11.5)).foregroundStyle(Theme.text2)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                if let label = reported.label {
-                                    Text(label).font(Theme.ui(11)).foregroundStyle(Theme.text3)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 8)
+                Rectangle().fill(Theme.hairline).frame(height: 1)
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    if let note = raw.note {
+                        Text(verbatim: note)
+                            .font(Theme.mono(11.5))
+                            .foregroundStyle(Theme.text2)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("changes.note")
+                    }
+                    ForEach(files) { file in
+                        if let fileDiff = file.diff {
+                            FileBlock(
+                                file: fileDiff,
+                                expanded: Binding(
+                                    get: { !folded.contains(file.id) },
+                                    set: { open in if open { folded.remove(file.id) } else { folded.insert(file.id) } })
+                            )
+                            .id(file.id)
+                        }
+                    }
+                    let extra = raw.files == nil ? (diff.preamble + diff.trailing).filter { !$0.allSatisfy(\.isWhitespace) } : []
+                    if !extra.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Also reported").font(Theme.ui(12, .medium)).foregroundStyle(Theme.text2)
+                            // Not selectable: a selectable text is dropped from the combined element, so the names would
+                            // be drawn but never read.
+                            // Each as a file header names its file: the path, then its kind in a word.
+                            ForEach(Array(UnifiedDiff.reported(extra).enumerated()), id: \.offset) { _, reported in
+                                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                    Text(verbatim: reported.text.displaySafe).font(Theme.mono(11.5)).foregroundStyle(Theme.text2)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    if let label = reported.label {
+                                        Text(label).font(Theme.ui(11)).foregroundStyle(Theme.text3)
+                                    }
                                 }
                             }
                         }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("changes.extra")
                     }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("changes.extra")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .defaultScrollAnchor(.top)
+        }
+    }
+}
+
+/// One changed file in the panel's list: its folder quiet, its name plain, and its lines when they were counted. A
+/// click opens its diff and brings it up, where the capture holds one.
+private struct FileRow: View {
+    let file: ChangedFile
+    let open: () -> Void
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 8) {
+                Image(systemName: "doc").font(.system(size: 10)).foregroundStyle(Theme.text3).accessibilityHidden(true)
+                (Text(verbatim: file.folder.displaySafe).foregroundStyle(Theme.text3)
+                    + Text(verbatim: file.name.displaySafe).foregroundStyle(Theme.text))
+                    .font(Theme.mono(11.5))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                Spacer(minLength: 8)
+                if let added = file.added, let removed = file.removed {
+                    LineDelta(added: added, removed: removed)
                 }
             }
-            .padding(.horizontal, 28)
-            .padding(.vertical, 18)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .contentShape(Rectangle())
         }
-        .defaultScrollAnchor(.top)
+        .buttonStyle(.hover(id: "changes.row.\(file.id)"))
+        .accessibilityIdentifier("changes.row.\(file.id)")
     }
 }
 
@@ -202,6 +301,7 @@ private struct Document: View {
 /// otherwise be built whole before the tab could draw at all.
 private struct FileBlock: View {
     let file: UnifiedDiff.FileDiff
+    let expanded: Binding<Bool>
     @State private var limit = Self.step
 
     /// Lines a file draws before it stops and says how many it holds back; each click draws this many more.
@@ -210,8 +310,8 @@ private struct FileBlock: View {
     var body: some View {
         let total = file.hunks.reduce(0) { $0 + $1.lines.count }
         VStack(alignment: .leading, spacing: 6) {
-            FileDiffView(file: file, lineLimit: limit)
-            if total > limit {
+            FileDiffView(file: file, lineLimit: limit, expanded: expanded)
+            if expanded.wrappedValue, total > limit {
                 Button(ChangesWords.showMoreLines(min(total - limit, Self.step))) { limit += Self.step }
                     .buttonStyle(.hover(bare: true, flush: .leading, id: "changes.file.\(file.id).more"))
                     .font(Theme.ui(12))
