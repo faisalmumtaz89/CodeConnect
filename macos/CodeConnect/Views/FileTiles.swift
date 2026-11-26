@@ -65,10 +65,15 @@ enum FileIntake {
         return ([], png)
     }
 
-    /// The names a drag's files go by, for the drop plate: none when it carries no file.
+    /// The names a drag's files go by, for the drop plate, read without decoding a picture: none when it carries no
+    /// file.
     static func names(on board: NSPasteboard) -> [String] {
-        let (urls, picture) = files(on: board)
-        return picture == nil ? urls.map(\.lastPathComponent) : ["image.png"]
+        if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+            !urls.isEmpty
+        {
+            return urls.map(\.lastPathComponent)
+        }
+        return board.availableType(from: [.png, .tiff]) == nil ? [] : ["image.png"]
     }
 
     /// Whatever files a pasteboard carries go to `take`; false when it carries none.
@@ -300,7 +305,7 @@ struct FileTray: View {
                             .frame(width: cut.trailing ? 28 : 0)
                     }
                 }
-                .onChange(of: files.last?.id) { _, newest in
+                .onChange(of: files.last?.id, initial: true) { _, newest in
                     guard let newest else { return }
                     withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo(newest, anchor: .trailing) }
                 }
@@ -478,6 +483,14 @@ struct SentFiles: View {
     let paths: [String]
 
     var body: some View {
+        // One row, sideways past the conversation's width, so every name stays whole.
+        ScrollView(.horizontal) {
+            row
+        }
+        .scrollIndicators(.never)
+    }
+
+    private var row: some View {
         HStack(spacing: 8) {
             ForEach(paths, id: \.self) { path in
                 let name = (path as NSString).lastPathComponent

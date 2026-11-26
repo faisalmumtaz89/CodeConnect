@@ -144,9 +144,11 @@ public struct Attachment: Identifiable, Hashable, Sendable {
 }
 
 extension AppModel {
-    /// This run's computer takes files: no file control is drawn otherwise.
+    /// This run's computer takes files, and the run takes a reply they could go with: no file control is drawn, and
+    /// no drop taken, otherwise.
     public func canUpload(_ key: String) -> Bool {
         !sampleFleetActive && connection.capabilities?.takesUploads == true && drafts(for: key) != nil
+            && shownSummary(for: key)?.takesNoReply != true
     }
 
     /// The files going with this run's next message, in order.

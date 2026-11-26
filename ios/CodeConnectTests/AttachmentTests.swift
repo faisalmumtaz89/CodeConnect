@@ -130,6 +130,27 @@ final class AttachmentTests: XCTestCase {
         }
     }
 
+    /// A run that has ended takes no reply, so it takes no file either: no paperclip, no drop.
+    func testAnEndedRunTakesNoFiles() async throws {
+        let (model, _) = try await model()
+        XCTAssertTrue(model.canUpload("u-1"))
+        model.connection.injectForTesting(
+            .sessions([
+                try JSONDecoder().decode(
+                    SessionSummary.self,
+                    from: Data(
+                        """
+                        {"session_uid":"u-1","session_id":"cc-1",
+                         "cwd":"/work","project_label":"work","lifecycle":"exited","link":"attached",
+                         "last_seq":0,"created_at":"2026-08-18T09:00:00.000Z",
+                         "updated_at":"2026-08-18T09:00:00.000Z","blocked_on":[],"agent":"claude"}
+                        """.utf8))
+            ]))
+        try await XCTUnwrap(model.statesForTesting["u-1"]).settleForTesting()
+        XCTAssertEqual(model.shownSummary(for: "u-1")?.takesNoReply, true)
+        XCTAssertFalse(model.canUpload("u-1"))
+    }
+
     // MARK: Limits
 
     /// Over 10 MiB, the tile is refused on its size alone: its bytes are never read, and nothing leaves. An eleventh
