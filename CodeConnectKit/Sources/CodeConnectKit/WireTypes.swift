@@ -1094,6 +1094,11 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// This daemon answers `get_run_git` (minor 58) for this paired device. An older one answers it with
     /// `bad_request`, so nothing is sent unless this is set.
     public var readsRunGit: Bool { advertises(["changes"]) }
+    /// This daemon commits a run's changes from its Changes panel for this paired device (`git_actions` naming
+    /// `commit`, minor 59). An older one answers `git_action` with `bad_request`, so nothing is sent unless this is set.
+    public var commitsChanges: Bool {
+        advertised["git_actions"]?.arrayValue?.contains { $0.stringValue == "commit" } == true
+    }
     /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
     /// 21): its question cards carry `question_hold` and it takes the
     /// `answers` and `decline` decisions. Absent is false — an older daemon
@@ -1575,6 +1580,34 @@ public enum PutFileResult: Decodable, Sendable, Hashable {
         case "received": self = .received(try c.decode(Int.self, forKey: .received))
         case "refused": self = .refused(try c.decode(String.self, forKey: .reason))
         default: self = .refused("The computer answered “\(status)”.")
+        }
+    }
+}
+
+/// What became of an action on a run's repository (`git_action`, minor 59).
+public enum GitActionResult: Decodable, Sendable, Hashable {
+    /// Done; for a commit, the commit it made.
+    case done(sha: String)
+    /// Not done: `code` is one of the computer's codes (`busy`, `unmerged`, `nothing_to_commit`, `git_failed`,
+    /// `indeterminate`, …), and `detail`, for some, git's own words, to be shown verbatim.
+    case refused(code: String, detail: String?)
+    /// A status this build has never seen: it claims neither that it was done nor that it was not.
+    case unknown(status: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case status, sha, code, detail
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let status = try c.decode(String.self, forKey: .status)
+        switch status {
+        case "done": self = .done(sha: try c.decode(String.self, forKey: .sha))
+        case "refused":
+            self = .refused(
+                code: try c.decode(String.self, forKey: .code),
+                detail: try c.decodeIfPresent(String.self, forKey: .detail))
+        default: self = .unknown(status: status)
         }
     }
 }
@@ -2208,6 +2241,9 @@ public enum ClientMessage: Sendable {
     /// **End a run CodeConnect started**, Claude's or Codex's. Minor 35, sent only when
     /// `Capabilities.endsRuns`. `session` is the run's `session_uid`.
     case stopRun(session: String, requestID: String)
+    /// Commit every change in a run's folder (minor 59, `git_actions` naming `commit`), by `session_uid`, answered with
+    /// `gitActionResult` carrying `requestID`. The same id again replays the first answer.
+    case commit(requestID: String, sessionUID: String, message: String)
     /// **Say something to a Codex session.** Minor 18, and the one message an
     /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
     case compose(
@@ -2304,6 +2340,7 @@ extension ClientMessage: Encodable {
         case deviceName = "device_name"
         case sessionID = "session_id"
         case sessionUID = "session_uid"
+        case action
         case afterSeq = "after_seq"
         case beforeSeq = "before_seq"
         case limit
@@ -2439,6 +2476,11 @@ extension ClientMessage: Encodable {
             try c.encode("stop_run", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encode(requestID, forKey: .requestID)
+        case .commit(let requestID, let sessionUID, let message):
+            try c.encode("git_action", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(sessionUID, forKey: .sessionUID)
+            try c.encode(["kind": "commit", "message": message], forKey: .action)
         case .compose(let session, let requestID, let text, let payloadHash, let attachments):
             try c.encode("compose", forKey: .type)
             try c.encode(session, forKey: .sessionID)
@@ -2820,6 +2862,8 @@ public enum ServerMessage: Sendable {
     case interruptResult(sessionID: String, requestID: String, result: InterruptResult)
     /// The answer to one `stop_run`, same correlation.
     case stopRunResult(sessionID: String, requestID: String, result: StopRunResult)
+    /// The answer to a `commit` (`git_action`), by its request.
+    case gitActionResult(requestID: String, sessionUID: String, result: GitActionResult)
     /// The answer to one `compose`, same correlation.
     case composeResult(sessionID: String, requestID: String, result: ComposeResult)
     /// The answer to one `put_file` chunk, by its upload.
@@ -3012,6 +3056,11 @@ extension ServerMessage: Decodable {
             self = .putFileResult(
                 uploadID: try c.decode(String.self, forKey: .uploadID),
                 result: try c.decode(PutFileResult.self, forKey: .result))
+        case "git_action_result":
+            self = .gitActionResult(
+                requestID: try c.decode(String.self, forKey: .requestID),
+                sessionUID: try c.decode(String.self, forKey: .sessionUID),
+                result: try c.decode(GitActionResult.self, forKey: .result))
         case "stop_run_result":
             self = .stopRunResult(
                 sessionID: try c.decode(String.self, forKey: .sessionID),

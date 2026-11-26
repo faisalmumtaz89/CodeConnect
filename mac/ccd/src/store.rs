@@ -1135,6 +1135,12 @@ pub const OPERATION_INTERRUPT: &str = "interrupt";
 /// shape where a retry replays what actually happened.
 pub const OPERATION_COMPOSE: &str = "compose";
 
+/// **The `operation_kind` an action on a run's repository is claimed under**
+/// ([`protocol::ws::ClientMessage::GitAction`]): one kind for every action, the action in
+/// [`ClaimedMaterial::route`], so an id used for a commit and then for another action is a
+/// conflict, never a second actuation.
+pub const OPERATION_GIT_ACTION: &str = "git_action";
+
 /// A compose that began a turn on an idle thread.
 pub const COMPOSE_ROUTE_START: &str = "turn_start";
 /// A compose that joined the turn the session was already running.

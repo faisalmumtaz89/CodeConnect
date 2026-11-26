@@ -1697,6 +1697,7 @@ async fn heard(daemon: &Daemon, uid: &str, sends: &mut Vec<WaitingSend>, frame: 
                             notice,
                         )
                         .await
+                        .map(|_| ())
                 } else {
                     daemon
                         .db

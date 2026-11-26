@@ -51,6 +51,9 @@
     "command_catalog": true,
     "delete_session": true,
     "diff": true,
+    "git_actions": [
+      "commit"
+    ],
     "history_pages": true,
     "hook_only_approvals": true,
     "machine_stats": true,

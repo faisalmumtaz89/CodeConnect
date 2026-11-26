@@ -271,6 +271,16 @@ pub enum ClientMessage {
     GetRunGit {
         session_id: String,
     },
+    /// **An action on a run's repository from its Changes panel** (minor 59, `git_actions`
+    /// names the ones this daemon takes), answered with one [`ServerMessage::GitActionResult`]
+    /// carrying the same `request_id`. Paired devices only. By `session_uid`, never by name.
+    /// Kept per `request_id`: the same id again replays the first answer and acts nothing
+    /// twice, and the same id with other arguments is refused `bad_request`.
+    GitAction {
+        request_id: String,
+        session_uid: String,
+        action: GitAction,
+    },
     /// "Which slash commands does this session's Claude Code actually have?"
     ///
     /// Answered from the installed binary's own machine-readable init message,
@@ -786,6 +796,14 @@ pub enum ServerMessage {
         git: Option<RunGit>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+    },
+    /// What became of a [`ClientMessage::GitAction`]. A client reads the run's repository
+    /// again after it ([`ClientMessage::GetRunGit`]): a read answered before this one was
+    /// read before the action.
+    GitActionResult {
+        request_id: String,
+        session_uid: String,
+        result: GitActionResult,
     },
     Error {
         code: String,
@@ -1422,6 +1440,61 @@ pub struct RunGit {
     pub read_at: String,
 }
 
+/// One action of [`ClientMessage::GitAction`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GitAction {
+    /// Every change in the run's folder, tracked and untracked, committed on its branch with
+    /// `message` (at most [`MAX_COMMIT_MESSAGE_BYTES`]), the repository's hooks and signing
+    /// running as they do for the person's own `git commit`. Files a
+    /// [`crate::event::notice::COMMITTED`] notice into the run's conversation.
+    Commit { message: String },
+}
+
+/// Ceiling on a [`GitAction::Commit`]'s message, the same as a typed message's.
+pub const MAX_COMMIT_MESSAGE_BYTES: usize = MAX_SEND_TEXT_BYTES;
+
+/// What became of a [`ClientMessage::GitAction`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum GitActionResult {
+    /// Done; for a commit, `sha` is the commit made.
+    Done { sha: String },
+    /// Not done, with one of [`git_refusal`]'s codes and, for some, git's own words.
+    Refused {
+        code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+}
+
+/// The codes of a refused [`GitActionResult`]; an app words each itself.
+pub mod git_refusal {
+    /// The request was malformed, named another action under an id already used, or a
+    /// message that is empty, too long or holds a NUL.
+    pub const BAD_REQUEST: &str = "bad_request";
+    /// No such run on this computer.
+    pub const UNKNOWN_SESSION: &str = "unknown_session";
+    /// The run is working, or waits on a card.
+    pub const BUSY: &str = "busy";
+    /// The run's folder is not in a git repository.
+    pub const NOT_A_REPOSITORY: &str = "not_a_repository";
+    /// No branch is checked out.
+    pub const DETACHED: &str = "detached";
+    /// A merge has unresolved files.
+    pub const UNMERGED: &str = "unmerged";
+    /// Nothing changed since the last commit.
+    pub const NOTHING_TO_COMMIT: &str = "nothing_to_commit";
+    /// Git refused or failed; `detail` is its first line (a hook's, a signer's).
+    pub const GIT_FAILED: &str = "git_failed";
+    /// A step took past its time; `detail` names it. Nothing was committed.
+    pub const TIMEOUT: &str = "timeout";
+    /// Whether it was done is not known (an earlier try under this id did not finish, or
+    /// git did not answer after it may have committed). Never tried again under this id: the
+    /// run's repository, read again, shows what git has.
+    pub const INDETERMINATE: &str = "indeterminate";
+}
+
 /// A [`RunGit`]'s base branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunGitBase {
@@ -1663,6 +1736,11 @@ pub struct Capabilities {
     /// only. Absent decodes `false`: an older daemon answers it with `bad_request`.
     #[serde(default)]
     pub changes: bool,
+    /// **The [`ClientMessage::GitAction`] kinds this daemon takes** (minor 59, `commit`), to
+    /// paired devices only; absent or empty, none. Named one by one so each later action is
+    /// offered only by a daemon that has it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git_actions: Vec<String>,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -2643,9 +2721,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 58,
             "a run's repository for its Changes panel (`get_run_git`, `run_git`, `changes`) is minor 58"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 59,
+            "a commit from the Changes panel (`git_action`, `git_action_result`, `git_actions`, `committed`) is minor 59"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 58);
+        assert_eq!(crate::PROTOCOL_MINOR, 59);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3359,6 +3441,7 @@ mod tests {
             uploads: true,
             run_terminal: true,
             changes: true,
+            git_actions: vec!["commit".into()],
         }
     }
 

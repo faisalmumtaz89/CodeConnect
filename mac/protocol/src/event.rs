@@ -125,6 +125,10 @@ pub mod notice {
     /// (`{from_model, from_label, to_model, to_label, account: {id, label}}`, and `message` in words, minor 48):
     /// decision 316.
     pub const MODEL_UNAVAILABLE: &str = "model_unavailable";
+    /// The person committed the run's changes from its Changes panel
+    /// (`{oid, files, message}`: the commit, how many files it changed, its message; minor
+    /// 59, [`crate::ws::GitAction::Commit`]).
+    pub const COMMITTED: &str = "committed";
 }
 
 /// Item kinds, following the thread -> turn -> item model.

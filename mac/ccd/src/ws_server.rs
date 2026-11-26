@@ -720,6 +720,40 @@ where
                     continue;
                 }
 
+                // Off the loop: a run's diff waits its turn at the folder's git gate, behind a
+                // commit whose hooks may take minutes.
+                if let ClientMessage::GetDiff { session_id } = parsed {
+                    let daemon = daemon.clone();
+                    let replies = replies_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = replies.send(diff_reply(&daemon, session_id).await);
+                    });
+                    continue;
+                }
+
+                // An action on a run's repository: off the loop and for a paired device, as
+                // the read is; a commit's hooks may take minutes.
+                if let ClientMessage::GitAction { request_id, session_uid, action } = parsed {
+                    if device_id.is_none() {
+                        send(&mut sink, &ServerMessage::Error {
+                            code: "not_authorised".into(),
+                            message: "only a paired device may act on a run's repository".into(),
+                        }).await?;
+                        continue;
+                    }
+                    let daemon = daemon.clone();
+                    let replies = replies_tx.clone();
+                    tokio::spawn(async move {
+                        let result = daemon.git_action(&session_uid, &request_id, &action).await;
+                        let _ = replies.send(ServerMessage::GitActionResult {
+                            request_id,
+                            session_uid,
+                            result,
+                        });
+                    });
+                    continue;
+                }
+
                 // Starting, the folder and project frames that choose where, and the
                 // folders' answers to "trust this folder?": any paired device, on any
                 // transport the listener admits, with the authority that saying and
@@ -1148,7 +1182,9 @@ where
             }
         }
         // Answered off the loop by `handle_client`, which never passes them here.
-        ClientMessage::GetRunGit { .. }
+        ClientMessage::GetDiff { .. }
+        | ClientMessage::GetRunGit { .. }
+        | ClientMessage::GitAction { .. }
         | ClientMessage::ListProjects
         | ClientMessage::GetProjectGit { .. }
         | ClientMessage::ListFolder { .. }
@@ -1506,42 +1542,6 @@ where
             let result = daemon.command_catalog(&session_id).await;
             send(sink, &ServerMessage::CommandCatalog { session_id, result }).await?;
         }
-        ClientMessage::GetDiff { session_id } => match daemon.diff(&session_id).await {
-            Ok(diff) => {
-                let (files, files_truncated) =
-                    fit_files_in_a_frame(diff.files, diff.files_truncated);
-                let (unified, truncated) =
-                    fit_diff_in_a_frame(diff.unified, diff.truncated, encoded_len(&files));
-                send(
-                    sink,
-                    &ServerMessage::Diff {
-                        session_id,
-                        unified,
-                        truncated,
-                        // Stamped when the tree was read, not when the phone
-                        // renders it: a diff without its age is a fact without
-                        // its freshness.
-                        captured_at: protocol::time::now_rfc3339(),
-                        note: diff.note,
-                        files,
-                        files_truncated,
-                    },
-                )
-                .await?;
-            }
-            // Only an unknown session reaches here; everything git could not do
-            // comes back as a `note` on a successful diff.
-            Err(err) => {
-                send(
-                    sink,
-                    &ServerMessage::Error {
-                        code: "unknown_session".into(),
-                        message: format!("{err}"),
-                    },
-                )
-                .await?;
-            }
-        },
 
         // Stop the turn a Codex session, or a Claude run CodeConnect started, is
         // running. Every refusal is a typed `Rejected` naming the reason, so a
@@ -2402,6 +2402,42 @@ pub(crate) fn capabilities(
         // A run's repository for its Changes panel: read for a paired device, as its diff's
         // actions will be.
         changes: paired,
+        // The actions on a run's repository a paired device may send, one by one.
+        git_actions: if paired {
+            vec!["commit".to_string()]
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+/// The answer to a `get_diff`: the run's diff fitted to one frame. Everything git could
+/// not do, and an unknown run, is the diff's `note`, so the reply always names the run it
+/// answers.
+async fn diff_reply(daemon: &Arc<Daemon>, session_id: String) -> ServerMessage {
+    let diff = daemon
+        .diff(&session_id)
+        .await
+        .unwrap_or_else(|err| crate::git::Diff {
+            unified: String::new(),
+            truncated: false,
+            note: Some(format!("{err}")),
+            files: None,
+            files_truncated: false,
+        });
+    let (files, files_truncated) = fit_files_in_a_frame(diff.files, diff.files_truncated);
+    let (unified, truncated) =
+        fit_diff_in_a_frame(diff.unified, diff.truncated, encoded_len(&files));
+    ServerMessage::Diff {
+        session_id,
+        unified,
+        truncated,
+        // Stamped when the tree was read, not when the phone renders it: a diff without its
+        // age is a fact without its freshness.
+        captured_at: protocol::time::now_rfc3339(),
+        note: diff.note,
+        files,
+        files_truncated,
     }
 }
 
@@ -7698,6 +7734,149 @@ mod tests {
             .expect("the ping is answered while git is still reading");
         assert_eq!(first["type"], "pong", "{first}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A commit is made for a paired device only** (minor 59): `git_actions` names `commit`
+    /// to it and nothing to the bootstrap token, which is refused; the paired device's
+    /// commit is answered with its sha.
+    #[tokio::test]
+    async fn a_commit_is_made_for_a_paired_device_only() {
+        let _env = crate::ProcessEnvRead::take();
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let repo = std::env::temp_dir().join(format!(
+            "ccd-commit-ws-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = crate::git::git_bin(None).expect("git must be installed");
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "t"],
+            &["config", "user.email", "t@example.com"],
+            &["commit", "-q", "--allow-empty", "-m", "first"],
+        ] {
+            let status = std::process::Command::new(&git)
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        register_stub_session(&server.store, repo.to_str().unwrap().into());
+        let ask = Message::Text(
+            serde_json::json!({"type": "git_action", "request_id": "c-1",
+                               "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+                               "action": {"kind": "commit", "message": "Add a"}})
+            .to_string(),
+        );
+
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert!(ack["capabilities"].get("git_actions").is_none(), "{ack}");
+        bootstrap.send(ask.clone()).await.unwrap();
+        let reply = next_json(&mut bootstrap).await.unwrap();
+        assert_eq!(reply["code"], "not_authorised", "{reply}");
+
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(
+            ack["capabilities"]["git_actions"],
+            serde_json::json!(["commit"]),
+            "{ack}"
+        );
+        phone.send(ask).await.unwrap();
+        let reply = next_json(&mut phone).await.unwrap();
+        let head = std::process::Command::new(&git)
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            reply,
+            serde_json::json!({"type": "git_action_result", "request_id": "c-1",
+                               "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+                               "result": {"status": "done",
+                                          "sha": String::from_utf8(head.stdout).unwrap().trim()}})
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// **A diff waits for a commit off the loop**: with a pre-commit hook taking two seconds,
+    /// a `get_diff` sent during the commit holds nothing else on the connection.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_diff_behind_a_slow_commit_does_not_hold_the_connection() {
+        let _env = crate::ProcessEnvRead::take();
+        use std::os::unix::fs::PermissionsExt;
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let repo = std::env::temp_dir().join(format!(
+            "ccd-commit-diff-ws-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = crate::git::git_bin(None).expect("git must be installed");
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "t"],
+            &["config", "user.email", "t@example.com"],
+            &["commit", "-q", "--allow-empty", "-m", "first"],
+        ] {
+            let status = std::process::Command::new(&git)
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let hook = repo.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 2\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        register_stub_session(&server.store, repo.to_str().unwrap().into());
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        for frame in [
+            serde_json::json!({"type": "git_action", "request_id": "c-slow",
+                               "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+                               "action": {"kind": "commit", "message": "slow"}}),
+            serde_json::json!({"type": "get_diff", "session_id": "cc-9"}),
+            serde_json::json!({"type": "ping"}),
+        ] {
+            phone.send(Message::Text(frame.to_string())).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let first = next_json_within(&mut phone, Duration::from_secs(1))
+            .await
+            .expect("the ping is answered while the commit's hook runs");
+        assert_eq!(first["type"], "pong", "{first}");
+
+        phone
+            .send(Message::Text(
+                serde_json::json!({"type": "get_diff", "session_id": "no-such-run"}).to_string(),
+            ))
+            .await
+            .unwrap();
+        let mut named = None;
+        for _ in 0..4 {
+            let reply = next_json_within(&mut phone, Duration::from_secs(5))
+                .await
+                .unwrap();
+            if reply["session_id"] == "no-such-run" {
+                named = Some(reply);
+                break;
+            }
+        }
+        let named = named.expect("an unknown run's diff is answered by name");
+        assert_eq!(named["type"], "diff", "{named}");
+        assert!(named["note"].is_string(), "{named}");
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     /// **Accounts are kept and chosen by a paired device only** (minor 48): advertised to it and not to the bootstrap

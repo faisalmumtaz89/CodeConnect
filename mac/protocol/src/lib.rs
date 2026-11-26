@@ -965,7 +965,14 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     the changed files' lines (untracked included), commits ahead of the base, whether it is pushed and whether a
 ///     merge is unresolved ([`ws::RunGit`]). Paired devices only, advertised as `changes`. A daemon below 58 answers
 ///     `get_run_git` with `bad_request` and advertises no `changes`.
-pub const PROTOCOL_MINOR: u32 = 58;
+///   * `59` — **A commit from the Changes panel.**
+///
+///     [`ws::ClientMessage::GitAction`] with [`ws::GitAction::Commit`] commits every change in a run's folder,
+///     answered with [`ws::ServerMessage::GitActionResult`] (`done {sha}`, or `refused` with a [`ws::git_refusal`]
+///     code), kept per `request_id`, and files a [`event::notice::COMMITTED`] notice into the run's conversation.
+///     Paired devices only; `git_actions` names the actions a daemon takes. A daemon below 59 answers `git_action`
+///     with `bad_request` and advertises no `git_actions`.
+pub const PROTOCOL_MINOR: u32 = 59;
 
 #[cfg(test)]
 mod ledger_tests {

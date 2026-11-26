@@ -297,8 +297,9 @@ where
             )
             .await?
         }
-        // Not advertised (`changes` is false): answered as a daemon below minor 58 answers it.
-        ClientMessage::GetRunGit { .. } => {
+        // Not advertised (`changes` is false, `git_actions` empty): answered as a daemon below
+        // minors 58 and 59 answers them.
+        ClientMessage::GetRunGit { .. } | ClientMessage::GitAction { .. } => {
             send(
                 sink,
                 &ServerMessage::Error {
@@ -572,6 +573,7 @@ fn capabilities() -> Capabilities {
         uploads: false,
         run_terminal: false,
         changes: false,
+        git_actions: Vec::new(),
     }
 }
 

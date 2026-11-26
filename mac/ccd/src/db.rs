@@ -898,7 +898,7 @@ impl Db {
         operation_kind: &'static str,
         session_uid: String,
         client_request_id: String,
-        outcome: &'static str,
+        outcome: String,
         settled_at: String,
         event: PendingEvent,
     ) -> Result<Vec<Event>> {
@@ -907,7 +907,7 @@ impl Db {
                 operation_kind,
                 &session_uid,
                 &client_request_id,
-                outcome,
+                &outcome,
                 &settled_at,
                 &event,
             )

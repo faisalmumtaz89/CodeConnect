@@ -325,6 +325,7 @@ public final class DaemonConnection {
     private var accountsWaiters: [String: [Waiter<AccountBook>]] = [:]
     private var diffWaiters: [String: [Waiter<SessionDiff>]] = [:]
     private var runGitWaiters: [String: [Waiter<RunGitReply>]] = [:]
+    private var gitActionWaiters: [String: [Waiter<GitActionResult>]] = [:]
     /// Keyed by the phone's own `request_id`, not by session: the reply echoes
     /// it back, and a phone may hold a stop and a message in flight on one run.
     private var interruptWaiters: [String: [Waiter<InterruptResult>]] = [:]
@@ -341,6 +342,12 @@ public final class DaemonConnection {
     /// produces traffic — and a fresh `lastContactAt` — every few seconds.
     private static let pingInterval: Duration = .seconds(10)
     private static let requestTimeout: Duration = .seconds(20)
+    /// How long a commit is waited for: the computer gives staging and the commit 120 s each, for the repository's
+    /// hooks, then names and counts it.
+    static let commitTimeout: Duration = .seconds(300)
+    /// A read of a run's repository waits its turn behind a commit on a computer that commits, so it is waited for as
+    /// long.
+    var repositoryReadTimeout: Duration { capabilities?.commitsChanges == true ? Self.commitTimeout : Self.requestTimeout }
     /// How long a handshaken link may go without a single frame before it is
     /// declared dead and dialled again: the 20s request wait plus one ping.
     ///
@@ -1192,7 +1199,23 @@ public final class DaemonConnection {
         try await request(
             key: session,
             store: \.diffWaiters,
-            send: .getDiff(session: session))
+            send: .getDiff(session: session),
+            timeout: repositoryReadTimeout)
+    }
+
+    /// Commit every change in the run `sessionUID`'s folder with `message`. `requestID` is the commit's identity: a retry
+    /// of the same commit reuses it and the computer replays its answer, committing nothing twice.
+    public func commit(sessionUID: String, message: String, requestID: String) async throws -> GitActionResult {
+        guard capabilities?.commitsChanges == true else {
+            throw ConnectionError.incompatible(
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can’t commit a run’s changes on this connection."
+            )
+        }
+        return try await request(
+            key: requestID,
+            store: \.gitActionWaiters,
+            send: .commit(requestID: requestID, sessionUID: sessionUID, message: message),
+            timeout: Self.commitTimeout)
     }
 
     /// A run's repository for its Changes panel (`get_run_git`), correlated by the reference as `diff` is.
@@ -1205,7 +1228,8 @@ public final class DaemonConnection {
         return try await request(
             key: session,
             store: \.runGitWaiters,
-            send: .getRunGit(session: session))
+            send: .getRunGit(session: session),
+            timeout: repositoryReadTimeout)
     }
 
     // MARK: - Codex mutations
@@ -1342,7 +1366,7 @@ public final class DaemonConnection {
     /// `send_text_result` carries only a `session_id`, so in both
     /// cases replies for one key arrive in the order the requests were sent.
     private func request<T: Sendable>(
-        key: String, store: WaiterTable<T>, send message: ClientMessage
+        key: String, store: WaiterTable<T>, send message: ClientMessage, timeout: Duration = requestTimeout
     ) async throws -> T {
         guard phase.isConnected else { throw ConnectionError.notConnected }
         // One live request per key, enforced here rather than trusted to every
@@ -1371,7 +1395,7 @@ public final class DaemonConnection {
                         store: store, key: key, ticket: ticket, with: error, keepTombstone: false)
                     return
                 }
-                try? await Task.sleep(for: Self.requestTimeout)
+                try? await Task.sleep(for: timeout)
                 // Sent but unanswered: a late reply must not be misread as the
                 // next request's — and the *caller* must not report this as
                 // "nothing was sent", because the frame did leave.
@@ -1437,6 +1461,10 @@ public final class DaemonConnection {
         let runGits = runGitWaiters
         runGitWaiters = [:]
         for queue in runGits.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
+        let gitActions = gitActionWaiters
+        gitActionWaiters = [:]
+        for queue in gitActions.values { for w in queue { w.continuation?.resume(throwing: error) } }
 
         // Every waiter store belongs in here. One left out does not just leak: it
         // becomes a tombstone after its timeout, and the *next* good answer for
@@ -1587,6 +1615,8 @@ public final class DaemonConnection {
             deliver(store: \.diffWaiters, key: diff.sessionID, value: diff)
         case .runGit(let reply):
             deliver(store: \.runGitWaiters, key: reply.sessionID, value: reply)
+        case .gitActionResult(let requestID, _, let result):
+            deliver(store: \.gitActionWaiters, key: requestID, value: result)
         // **The echoed session is checked, not ignored.** Correlation is by
         // request id, which is this phone's own UUID, so a collision is
         // negligible — but a daemon bug that answered one session's request with

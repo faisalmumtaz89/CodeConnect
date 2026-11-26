@@ -286,6 +286,206 @@ async fn run_git_inner(
     })
 }
 
+/// The longest a commit's staging or the commit itself may take: a repository's hooks
+/// (a formatter, a test run) work inside it.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// What [`commit`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// Committed as `sha`, changing `files` files, with `message` as the commit has it (a
+    /// `commit-msg` hook may have rewritten the one asked for).
+    Committed {
+        sha: String,
+        files: u64,
+        message: String,
+    },
+    /// Nothing committed: a [`protocol::ws::git_refusal`] code and, for some, git's words.
+    Refused {
+        code: &'static str,
+        detail: Option<String>,
+    },
+    /// It may have committed, and git could not say: never tried again.
+    Unknown(String),
+}
+
+fn refused(code: &'static str, detail: Option<String>) -> CommitOutcome {
+    CommitOutcome::Refused { code, detail }
+}
+
+/// The first line git, or a hook, said: its error, else what it printed.
+fn first_words(out: &Output) -> Option<String> {
+    [&out.stderr, &out.stdout]
+        .into_iter()
+        .flat_map(|text| text.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(300).collect())
+}
+
+/// Commit every change at `cwd`, tracked and untracked, with `message`, on the branch
+/// checked out. Refused without staging anything on a detached head or while a merge has
+/// unresolved files (`git add` would mark them resolved), and when nothing changed. The
+/// repository's hooks and signing run as for the person's own `git commit`; staging and
+/// the commit each have [`COMMIT_TIMEOUT`], the probes `timeout`.
+pub async fn commit(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    message: &str,
+    timeout: Duration,
+    environment: &std::collections::HashMap<std::ffi::OsString, std::ffi::OsString>,
+) -> CommitOutcome {
+    use protocol::ws::git_refusal as code;
+    if cwd.is_empty() || !Path::new(cwd).is_dir() {
+        return refused(
+            code::NOT_A_REPOSITORY,
+            Some(format!("{cwd:?} is not readable")),
+        );
+    }
+    let Some(git) = git_bin(configured_bin) else {
+        return refused(
+            code::GIT_FAILED,
+            Some("git is not installed at a known location".into()),
+        );
+    };
+    let failed = |err: anyhow::Error| refused(code::GIT_FAILED, Some(format!("{err:#}")));
+    let inside = match run(
+        &git,
+        cwd,
+        &["rev-parse", "--is-inside-work-tree"],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    {
+        Ok(out) => out,
+        Err(err) => return failed(err),
+    };
+    if !inside.ok || inside.stdout.trim() != "true" {
+        return refused(code::NOT_A_REPOSITORY, None);
+    }
+    if branch(cwd, configured_bin, timeout).await.is_none() {
+        return refused(code::DETACHED, None);
+    }
+    // One byte of output is the proof; nothing more is read.
+    match run(
+        &git,
+        cwd,
+        &["ls-files", "--unmerged", "-z", "--", ":/"],
+        timeout,
+        0,
+    )
+    .await
+    {
+        Ok(out) if out.stdout_truncated => return refused(code::UNMERGED, None),
+        Ok(out) if out.ok => {}
+        Ok(out) => return refused(code::GIT_FAILED, first_words(&out)),
+        Err(err) => return failed(err),
+    }
+    match run_write(
+        &git,
+        cwd,
+        &["-c", "core.fsmonitor=false", "add", "-A", "--", ":/"],
+        COMMIT_TIMEOUT,
+        environment,
+    )
+    .await
+    {
+        Ok(out) if out.ok => {}
+        Ok(out) => return refused(code::GIT_FAILED, first_words(&out)),
+        Err(_) => return refused(code::TIMEOUT, Some("add".into())),
+    }
+    match run(
+        &git,
+        cwd,
+        &[
+            "diff",
+            "--cached",
+            "--no-relative",
+            "--ignore-submodules=none",
+            "--name-only",
+            "-z",
+        ],
+        timeout,
+        0,
+    )
+    .await
+    {
+        Ok(out) if out.stdout_truncated => {}
+        Ok(out) if out.ok => return refused(code::NOTHING_TO_COMMIT, None),
+        Ok(out) => return refused(code::GIT_FAILED, first_words(&out)),
+        Err(err) => return failed(err),
+    }
+    match run_write(
+        &git,
+        cwd,
+        &["commit", "-q", "-m", message],
+        COMMIT_TIMEOUT,
+        environment,
+    )
+    .await
+    {
+        Ok(out) if out.ok => {}
+        Ok(out) => return refused(code::GIT_FAILED, first_words(&out)),
+        // Killed at the deadline, a commit may have written its ref already.
+        Err(err) => return CommitOutcome::Unknown(format!("{err:#}")),
+    }
+    let unnamed = || CommitOutcome::Unknown("committed, but git did not name the commit".into());
+    let named = match run(
+        &git,
+        cwd,
+        // A person's `log.showSignature` would print the signature's check before the sha.
+        &[
+            "log",
+            "-1",
+            "--no-show-signature",
+            "--format=%H%x00%B",
+            "HEAD",
+        ],
+        timeout,
+        LISTING_CAP,
+    )
+    .await
+    {
+        Ok(out) if out.ok && !out.stdout_truncated => out.stdout,
+        _ => return unnamed(),
+    };
+    let Some((sha, message)) = named.split_once('\0') else {
+        return unnamed();
+    };
+    let (sha, message) = (sha.to_string(), message.trim_end().to_string());
+    // A count, not a listing: a commit of many thousand files is one line.
+    let counted = run(
+        &git,
+        cwd,
+        &[
+            "diff-tree",
+            "--root",
+            "--diff-merges=first-parent",
+            "--no-commit-id",
+            "-r",
+            "--shortstat",
+            &sha,
+        ],
+        timeout,
+        PROBE_CAP,
+    )
+    .await;
+    match counted {
+        Ok(out) if out.ok => CommitOutcome::Committed {
+            files: out
+                .stdout
+                .split_whitespace()
+                .next()
+                .and_then(|count| count.parse().ok())
+                .unwrap_or(0),
+            sha,
+            message,
+        },
+        _ => CommitOutcome::Unknown(format!("committed {sha}, but git did not count its files")),
+    }
+}
+
 /// The branch header and the unresolved entries, tracked files only, no fsmonitor run.
 const STATUS_ARGS: &[&str] = &[
     "-c",
@@ -931,12 +1131,15 @@ fn truncate_on_char_boundary(text: &mut String, max: usize) {
 /// is not diagnostics, and it only ever reaches a log or a `note`.
 const MAX_STDERR_BYTES: usize = 8 * 1024;
 
-/// Read at most `cap` bytes from a pipe, then **close it**.
+/// Keep at most `cap` bytes from a pipe, then **close it**, or, `drain`ing, read the
+/// rest to its end and drop it.
 ///
 /// The close is the mechanism, not a side effect: the reader owns the pipe, so
 /// returning drops it, the child takes `EPIPE` on its next write, and everything
-/// else unblocks without anybody having to hold a kill handle.
-async fn read_capped<R>(mut pipe: R, cap: usize) -> std::io::Result<Vec<u8>>
+/// else unblocks without anybody having to hold a kill handle. A write (a commit,
+/// whose hooks may print at length) drains instead: a hook killed by `EPIPE` would
+/// fail the commit, or leave it half done.
+async fn read_capped<R>(mut pipe: R, cap: usize, drain: bool) -> std::io::Result<Vec<u8>>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -946,6 +1149,9 @@ where
         .take(cap as u64)
         .read_to_end(&mut buffer)
         .await?;
+    if drain {
+        tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await?;
+    }
     Ok(buffer)
 }
 
@@ -987,6 +1193,56 @@ async fn run(
 ) -> Result<Output> {
     let mut command = tokio::process::Command::new(git);
     command.arg("-C").arg(cwd).args(args);
+    run_child(command, args, timeout, stdout_cap, false).await
+}
+
+/// Output kept from a git child that writes (a commit): its hooks' words for a refusal.
+const WRITE_OUTPUT_CAP: usize = 64 * 1024;
+
+/// How long a write's output is still read once git has exited.
+const WRITE_OUTPUT_GRACE: Duration = Duration::from_secs(1);
+
+/// What a pipe's reader has within [`WRITE_OUTPUT_GRACE`]; past it the reader is stopped,
+/// dropping the pipe, and what it had is lost.
+async fn read_within_grace(
+    task: &mut tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> Vec<u8> {
+    match tokio::time::timeout(WRITE_OUTPUT_GRACE, &mut *task).await {
+        Ok(Ok(Ok(bytes))) => bytes,
+        _ => {
+            task.abort();
+            Vec::new()
+        }
+    }
+}
+
+/// [`run`] for a git child that changes the repository, run through the person's login
+/// shell with `environment` ([`crate::start_session::login_shell_command`]), so its hooks
+/// find the tools a terminal finds (a `cargo fmt` or `npm` hook), as `git worktree add`
+/// does. Every byte it prints is read (past [`WRITE_OUTPUT_CAP`], read and dropped), so it
+/// is never cut off part way, and its exit status alone is the answer.
+async fn run_write(
+    git: &Path,
+    cwd: &str,
+    args: &[&str],
+    timeout: Duration,
+    environment: &std::collections::HashMap<std::ffi::OsString, std::ffi::OsString>,
+) -> Result<Output> {
+    use std::ffi::OsStr;
+    let mut argv: Vec<&OsStr> = vec![git.as_os_str(), OsStr::new("-C"), OsStr::new(cwd)];
+    argv.extend(args.iter().map(OsStr::new));
+    let command = crate::start_session::login_shell_command(environment, None, &argv);
+    run_child(command, args, timeout, WRITE_OUTPUT_CAP, true).await
+}
+
+/// Run `command`, a git child (`args` names it in errors), as [`run`] describes.
+async fn run_child(
+    mut command: tokio::process::Command,
+    args: &[&str],
+    timeout: Duration,
+    stdout_cap: usize,
+    drain: bool,
+) -> Result<Output> {
     // Git will happily block on a credential prompt or a pager. Neither has a
     // terminal here, and either would hang the request until the timeout.
     command
@@ -1017,8 +1273,33 @@ async fn run(
     // `cap + 1` is the whole trick: one byte past the cap proves there was
     // more, and it is the only extra byte ever allocated. A truncated diff that
     // does not know it is truncated is the one result that must not be produced.
-    let out_task = tokio::spawn(read_capped(stdout, stdout_cap.saturating_add(1)));
-    let err_task = tokio::spawn(read_capped(stderr, MAX_STDERR_BYTES));
+    let mut out_task = tokio::spawn(read_capped(stdout, stdout_cap.saturating_add(1), drain));
+    let mut err_task = tokio::spawn(read_capped(stderr, MAX_STDERR_BYTES, drain));
+
+    if drain {
+        // A write is over when git exits, not when its pipes close: a hook may leave a
+        // background job holding them. What was printed by then is read for a moment more.
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => status.ok(),
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                out_task.abort();
+                err_task.abort();
+                anyhow::bail!("git {} timed out", args.join(" "));
+            }
+        };
+        let mut out_bytes = read_within_grace(&mut out_task).await;
+        let err_bytes = read_within_grace(&mut err_task).await;
+        let stdout_truncated = out_bytes.len() > stdout_cap;
+        out_bytes.truncate(stdout_cap);
+        return Ok(Output {
+            ok: status.is_some_and(|status| status.success()),
+            stdout: String::from_utf8_lossy(&out_bytes).into_owned(),
+            stderr: String::from_utf8_lossy(&err_bytes).into_owned(),
+            stdout_truncated,
+        });
+    }
 
     let collected = tokio::time::timeout(timeout, async {
         let out = out_task.await;
@@ -1874,6 +2155,344 @@ mod tests {
         let _ = std::fs::remove_file(&racing);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    async fn commit_in(dir: &Path, message: &str) -> CommitOutcome {
+        commit(
+            dir.to_str().unwrap(),
+            None,
+            message,
+            Duration::from_secs(30),
+            &login_environment(dir, "/usr/bin:/bin"),
+        )
+        .await
+    }
+
+    /// A login shell's environment for a test: a temporary home inside `dir`, `/bin/sh`,
+    /// and `path`.
+    fn login_environment(
+        dir: &Path,
+        path: &str,
+    ) -> std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> {
+        let home = dir.join(".git").join("test-home");
+        std::fs::create_dir_all(&home).unwrap();
+        [
+            ("HOME", home.into_os_string()),
+            ("SHELL", "/bin/sh".into()),
+            ("PATH", path.into()),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.into(), value))
+        .collect()
+    }
+
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new(git_bin(None).unwrap())
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// A repository on `main` with one commit, its own identity, and nothing else.
+    fn committable(tag: &str) -> PathBuf {
+        let dir = temp_dir(tag);
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        git_sync(&dir, &["config", "user.name", "t"]);
+        git_sync(&dir, &["config", "user.email", "t@example.com"]);
+        std::fs::write(dir.join("a.txt"), "1\n").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "first"]);
+        dir
+    }
+
+    /// **Commit takes every change**: a modified and an untracked file, committed as HEAD
+    /// with the message, two files, and a clean tree after; the first commit of a new
+    /// repository too.
+    #[tokio::test]
+    async fn a_commit_takes_every_change_and_names_its_commit() {
+        let dir = committable("commit");
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "n\n").unwrap();
+        let CommitOutcome::Committed {
+            sha,
+            files,
+            message,
+        } = commit_in(&dir, "Fix the thing").await
+        else {
+            panic!("not committed");
+        };
+        assert_eq!(message, "Fix the thing");
+        assert_eq!(sha, head_of(&dir));
+        assert_eq!(files, 2);
+        assert_eq!(
+            git_out(&dir, &["log", "-1", "--format=%s"]).trim(),
+            "Fix the thing"
+        );
+        assert_eq!(
+            git_out(&dir, &["status", "--porcelain"]),
+            "",
+            "nothing left"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let fresh = temp_dir("commit-unborn");
+        git_sync(&fresh, &["init", "-q", "-b", "main"]);
+        git_sync(&fresh, &["config", "user.name", "t"]);
+        git_sync(&fresh, &["config", "user.email", "t@example.com"]);
+        std::fs::write(fresh.join("a.txt"), "1\n").unwrap();
+        assert!(matches!(
+            commit_in(&fresh, "first").await,
+            CommitOutcome::Committed { files: 1, .. }
+        ));
+        let _ = std::fs::remove_dir_all(&fresh);
+    }
+
+    /// **What git commits is what is told**: a change outside the run's subfolder counts with
+    /// `diff.relative` set, a `commit-msg` hook's rewritten message is the one named, a commit
+    /// of more files than a listing holds is counted, and a `post-commit` hook's background
+    /// job holding the output does not hold the answer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_commit_tells_what_git_committed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = committable("commit-told");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        git_sync(&dir, &["config", "diff.relative", "true"]);
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        let sub = dir.join("sub");
+        assert!(
+            matches!(
+                commit_in(&sub, "outside the subfolder").await,
+                CommitOutcome::Committed { files: 1, .. }
+            ),
+            "a relative diff hides nothing that was staged"
+        );
+
+        let hook = dir.join(".git/hooks/commit-msg");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf '[T-1] %s' \"$(cat \"$1\")\" > \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "3\n").unwrap();
+        let CommitOutcome::Committed { message, .. } = commit_in(&dir, "Fix it").await else {
+            panic!("not committed");
+        };
+        assert_eq!(message, "[T-1] Fix it");
+        std::fs::remove_file(&hook).unwrap();
+
+        let many = dir.join("node_modules/a-package-with-a-rather-long-name/lib");
+        std::fs::create_dir_all(&many).unwrap();
+        for at in 0..16_000 {
+            std::fs::write(many.join(format!("index-file-number-{at:05}.js")), "x\n").unwrap();
+        }
+        assert!(
+            matches!(
+                commit_in(&dir, "many").await,
+                CommitOutcome::Committed { files: 16_000, .. }
+            ),
+            "counted past what one listing holds"
+        );
+
+        let post = dir.join(".git/hooks/post-commit");
+        std::fs::write(&post, "#!/bin/sh\n( sleep 5 ) &\nexit 0\n").unwrap();
+        std::fs::set_permissions(&post, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "4\n").unwrap();
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            commit_in(&dir, "bg").await,
+            CommitOutcome::Committed { .. }
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A commit's hooks find what the person's login shell finds**: a pre-commit hook
+    /// running a tool that only the person's `~/.profile` puts on `PATH` (as `cargo` or
+    /// `npm` are in a terminal, not in the service's environment) lets it commit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_commits_hooks_find_the_login_shells_tools() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = committable("commit-path");
+        let tools = dir.join(".git/test-tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let tool = tools.join("fmtcheck-only-in-a-terminal");
+        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hook = dir.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nfmtcheck-only-in-a-terminal\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        let environment = login_environment(&dir, "/usr/bin:/bin");
+        // A login shell's own profile may set PATH outright (Debian's does); the person's
+        // `~/.profile` is read after it.
+        std::fs::write(
+            Path::new(&environment[std::ffi::OsStr::new("HOME")]).join(".profile"),
+            format!("PATH=\"{}:$PATH\"\nexport PATH\n", tools.display()),
+        )
+        .unwrap();
+        let outcome = commit(
+            dir.to_str().unwrap(),
+            None,
+            "with the tool",
+            Duration::from_secs(30),
+            &environment,
+        )
+        .await;
+        assert!(
+            matches!(outcome, CommitOutcome::Committed { .. }),
+            "{outcome:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A signed commit is named with `log.showSignature` set**: git's check of the signature
+    /// is not read as the sha.
+    #[tokio::test]
+    async fn a_signed_commit_is_named_whatever_the_log_shows() {
+        let dir = committable("commit-signed");
+        let key = dir.join(".git/test-signing-key");
+        let made = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", "t@example.com", "-f"])
+            .arg(&key)
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            eprintln!("no ssh-keygen here: a signed commit is not made");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        let signers = dir.join(".git/allowed-signers");
+        std::fs::write(&signers, format!("t@example.com {public}")).unwrap();
+        for (name, value) in [
+            ("gpg.format", "ssh"),
+            (
+                "user.signingkey",
+                key.with_extension("pub").to_str().unwrap(),
+            ),
+            ("commit.gpgsign", "true"),
+            ("gpg.ssh.allowedSignersFile", signers.to_str().unwrap()),
+            ("log.showSignature", "true"),
+        ] {
+            git_sync(&dir, &["config", name, value]);
+        }
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        let outcome = commit_in(&dir, "signed").await;
+        assert_eq!(
+            outcome,
+            CommitOutcome::Committed {
+                sha: head_of(&dir),
+                files: 1,
+                message: "signed".into()
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Refused without staging anything**: nothing changed, a merge with unresolved files
+    /// (its index left as it was), and a detached head.
+    #[tokio::test]
+    async fn a_commit_is_refused_before_it_stages_anything() {
+        use protocol::ws::git_refusal as code;
+        let dir = committable("commit-refused");
+        assert_eq!(
+            commit_in(&dir, "m").await,
+            CommitOutcome::Refused {
+                code: code::NOTHING_TO_COMMIT,
+                detail: None
+            }
+        );
+
+        git_sync(&dir, &["switch", "-q", "-c", "other"]);
+        std::fs::write(dir.join("a.txt"), "other\n").unwrap();
+        git_sync(&dir, &["commit", "-qam", "other"]);
+        git_sync(&dir, &["switch", "-q", "main"]);
+        std::fs::write(dir.join("a.txt"), "main\n").unwrap();
+        git_sync(&dir, &["commit", "-qam", "main"]);
+        let _ = std::process::Command::new(git_bin(None).unwrap())
+            .arg("-C")
+            .arg(&dir)
+            .args(["merge", "-q", "other"])
+            .output();
+        let unresolved = git_out(&dir, &["ls-files", "--unmerged"]);
+        assert!(!unresolved.is_empty(), "the merge conflicts");
+        std::fs::write(dir.join("loose.txt"), "x\n").unwrap();
+        assert_eq!(
+            commit_in(&dir, "m").await,
+            CommitOutcome::Refused {
+                code: code::UNMERGED,
+                detail: None
+            }
+        );
+        assert_eq!(
+            git_out(&dir, &["ls-files", "--unmerged"]),
+            unresolved,
+            "the index is as it was"
+        );
+        assert_eq!(
+            git_out(&dir, &["ls-files", "--", "loose.txt"]),
+            "",
+            "nothing staged"
+        );
+        git_sync(&dir, &["merge", "--abort"]);
+
+        git_sync(&dir, &["checkout", "-q", "--detach"]);
+        assert_eq!(
+            commit_in(&dir, "m").await,
+            CommitOutcome::Refused {
+                code: code::DETACHED,
+                detail: None
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The repository's hooks run as for the person's own commit**: a failing pre-commit
+    /// hook refuses it with the hook's words, and one printing far past the runner's cap on
+    /// both streams (git sends a hook's output to its stderr) lets it commit: every byte is
+    /// read, so the hook, stopping at its first failure as hooks do, is never cut short.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_commits_hooks_run_and_a_verbose_one_is_never_cut_short() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = committable("commit-hooks");
+        let hook = dir.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho 'lint: 3 problems' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        assert_eq!(
+            commit_in(&dir, "m").await,
+            CommitOutcome::Refused {
+                code: protocol::ws::git_refusal::GIT_FAILED,
+                detail: Some("lint: 3 problems".into())
+            }
+        );
+
+        let mark = dir.join("hook-finished");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nset -e\nhead -c 2000000 /dev/zero | tr '\\0' o\nhead -c 2000000 /dev/zero | tr '\\0' e >&2\ntouch '{}'\n",
+                mark.display()
+            ),
+        )
+        .unwrap();
+        let outcome = commit_in(&dir, "m").await;
+        assert!(
+            matches!(outcome, CommitOutcome::Committed { files: 1, .. }),
+            "{outcome:?}"
+        );
+        assert!(mark.exists(), "the hook ran to its end");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `git status --porcelain=v2 --branch -z`, read as git writes it: a rename's original

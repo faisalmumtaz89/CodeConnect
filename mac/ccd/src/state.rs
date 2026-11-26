@@ -176,6 +176,9 @@ pub struct Daemon {
     /// behind a write. Kept in its own map so the lock ordering is one-way —
     /// gate, then `inner`, never the reverse.
     publish_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One per run folder: no two of its diff, repository read, session-list refresh and
+    /// action run git at once ([`Daemon::git_gate`]).
+    git_gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// One gate per run, held by a person's message to a run with a switch of account from reading the run through
     /// sending it, and by a mail wake from its claim through its issue ([`Daemon::move_gate`]).
     move_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -542,6 +545,7 @@ impl Daemon {
             launchd_label: launchd_label(),
             inner: Arc::new(Mutex::new(Inner::default())),
             publish_gates: Mutex::new(HashMap::new()),
+            git_gates: Arc::new(Mutex::new(HashMap::new())),
             move_gates: Mutex::new(HashMap::new()),
             registration_gates: Mutex::new(HashMap::new()),
             #[cfg(test)]
@@ -921,6 +925,54 @@ impl Daemon {
         let mut gates = self.publish_gates.lock().await;
         gates.retain(|_, gate| Arc::strong_count(gate) > 1);
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
+    }
+
+    /// Whether the run `row` may be writing to its folder: a card open, or, until it has
+    /// ended, a turn running. Starting or stopping, it may be; live, a Codex run's turn is as
+    /// its link says (a resumed turn's items are not filed, so the log cannot) and a Claude
+    /// run's as its log says; any other live run, and a Codex run not yet linked, cannot be
+    /// told and may be.
+    async fn may_be_working(&self, row: &crate::store::SessionRow) -> bool {
+        let (card, link) = {
+            let inner = self.inner.lock().await;
+            let card = inner.pending.keys().any(|(uid, _)| *uid == row.session_uid);
+            let link = match inner.host_links.get(&row.session_uid) {
+                Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
+                _ => None,
+            };
+            (card, link)
+        };
+        if card {
+            return true;
+        }
+        match row.lifecycle {
+            Lifecycle::Starting | Lifecycle::Stopping => true,
+            Lifecycle::Live => match (&row.agent, link) {
+                (protocol::agent::AgentKind::Codex, Some(commands)) => {
+                    let (reply, told) = tokio::sync::oneshot::channel();
+                    commands
+                        .send(crate::codex_host::LinkCommand::TurnRunning(reply))
+                        .is_err()
+                        || told.await.unwrap_or(true)
+                }
+                (protocol::agent::AgentKind::Claude, _) => self
+                    .db
+                    .turn_running(row.session_uid.clone())
+                    .await
+                    .unwrap_or(true),
+                _ => true,
+            },
+            _ => false,
+        }
+    }
+
+    /// The run folder `cwd`'s git gate. Every reader of a run's repository
+    /// ([`Daemon::diff`], [`Daemon::run_git`], the session list's refresh) and every action on
+    /// it ([`Daemon::git_action`]) holds it for all its git children: a read refreshes the
+    /// index, a commit writes it, and none may meet another; a read answered before an
+    /// action's result was read before it. Same eviction rule as [`Daemon::publish_gate`].
+    async fn git_gate(&self, cwd: &str) -> Arc<Mutex<()>> {
+        git_gate_in(&self.git_gates, cwd).await
     }
 
     /// The run `session_uid`'s move gate (306): a person's message to a run due to move to another account decides
@@ -4310,16 +4362,16 @@ impl Daemon {
 
     /// Settle the run's claim `request_id` of `operation_kind` as `outcome`, with `event`
     /// filed by that settle alone, then fan out what was filed
-    /// ([`crate::store::Store::settle_mutation_with_event`]). A claim already terminal is
-    /// left as it is, and nothing is filed.
+    /// ([`crate::store::Store::settle_mutation_with_event`]), and say whether it was. A claim
+    /// already terminal, or gone with its run, is left as it is, and nothing is filed.
     pub(crate) async fn settle_with_event(
         &self,
         session_uid: &str,
         operation_kind: &'static str,
         request_id: &str,
-        outcome: &'static str,
+        outcome: &str,
         event: PendingEvent,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let gate = self.publish_gate(session_uid).await;
         let events = {
             let _ordered = gate.lock().await;
@@ -4329,7 +4381,7 @@ impl Daemon {
                     operation_kind,
                     session_uid.to_string(),
                     request_id.to_string(),
-                    outcome,
+                    outcome.to_string(),
                     protocol::time::now_rfc3339(),
                     event,
                 )
@@ -4340,7 +4392,7 @@ impl Daemon {
             events
         };
         self.published(session_uid, &events).await;
-        Ok(())
+        Ok(!events.is_empty())
     }
 
     /// Commit the run's start outcome with its cursor and, when it makes the run live,
@@ -5076,6 +5128,8 @@ impl Daemon {
     /// filesystem.
     pub async fn diff(&self, session_ref: &str) -> Result<crate::git::Diff> {
         let row = self.resolve(session_ref).await?;
+        let gate = self.git_gate(&row.cwd).await;
+        let _one_at_a_time = gate.lock().await;
         Ok(crate::git::collect(
             &row.cwd,
             self.config.git_bin.as_deref(),
@@ -5092,12 +5146,212 @@ impl Daemon {
         session_ref: &str,
     ) -> Result<std::result::Result<protocol::ws::RunGit, String>> {
         let row = self.resolve(session_ref).await?;
+        let gate = self.git_gate(&row.cwd).await;
+        let _one_at_a_time = gate.lock().await;
         Ok(crate::git::run_git(
             &row.cwd,
             self.config.git_bin.as_deref(),
             Duration::from_millis(self.config.diff_timeout_ms),
         )
         .await)
+    }
+
+    /// Do `action` on the run `session_uid`'s repository, kept per `request_id`
+    /// ([`protocol::ws::ClientMessage::GitAction`]). The claim is taken under the folder's
+    /// git gate, so a retry arriving while the first try runs waits and replays its answer.
+    pub async fn git_action(
+        &self,
+        session_uid: &str,
+        request_id: &str,
+        action: &protocol::ws::GitAction,
+    ) -> protocol::ws::GitActionResult {
+        use protocol::ws::{git_refusal as code, GitAction, GitActionResult};
+        let refused = |code: &str, detail: Option<String>| GitActionResult::Refused {
+            code: code.to_string(),
+            detail,
+        };
+        let GitAction::Commit { message } = action;
+        let message = message.trim();
+        if request_id.is_empty()
+            || message.is_empty()
+            || message.len() > protocol::ws::MAX_COMMIT_MESSAGE_BYTES
+            || message.contains('\0')
+        {
+            return refused(code::BAD_REQUEST, None);
+        }
+        let row = match self.db.get_session(session_uid.to_string()).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return refused(code::UNKNOWN_SESSION, None),
+            Err(err) => return refused(code::GIT_FAILED, Some(format!("{err:#}"))),
+        };
+        let gate = self.git_gate(&row.cwd).await;
+        let _one_at_a_time = gate.lock().await;
+        let claimed = crate::store::ClaimedMaterial {
+            thread_id: String::new(),
+            generation: 0,
+            route: "commit".into(),
+            target_turn_id: None,
+            claimed_hash: protocol::hash::sha256_hex(
+                format!("codeconnect.git_action.commit.v1\n{message}").as_bytes(),
+            ),
+            question_decision: None,
+        };
+        let claim = self
+            .db
+            .claim_mutation(
+                crate::store::OPERATION_GIT_ACTION,
+                session_uid.to_string(),
+                request_id.to_string(),
+                claimed,
+                protocol::time::now_rfc3339(),
+            )
+            .await;
+        match claim {
+            Ok(crate::store::MutationClaim::Claimed) => {}
+            Ok(crate::store::MutationClaim::Applied { outcome, .. }) => {
+                return serde_json::from_str(&outcome).unwrap_or_else(|_| {
+                    refused(
+                        code::INDETERMINATE,
+                        Some("its answer could not be read again".into()),
+                    )
+                })
+            }
+            Ok(crate::store::MutationClaim::Indeterminate { .. }) => {
+                return refused(
+                    code::INDETERMINATE,
+                    Some("an earlier try did not finish".into()),
+                )
+            }
+            Ok(crate::store::MutationClaim::Conflict) => return refused(code::BAD_REQUEST, None),
+            Ok(crate::store::MutationClaim::NoSession) => {
+                return refused(code::UNKNOWN_SESSION, None)
+            }
+            Err(err) => return refused(code::GIT_FAILED, Some(format!("{err:#}"))),
+        }
+        // Any run in this folder may be writing to it, not only the one committing.
+        let busy = match self.db.list_sessions().await {
+            Ok(rows) => {
+                let mut busy = false;
+                for other in rows.iter().filter(|other| other.cwd == row.cwd) {
+                    if self.may_be_working(other).await {
+                        busy = true;
+                        break;
+                    }
+                }
+                busy
+            }
+            Err(_) => true,
+        };
+        let outcome = if busy {
+            crate::git::CommitOutcome::Refused {
+                code: code::BUSY,
+                detail: None,
+            }
+        } else {
+            crate::git::commit(
+                &row.cwd,
+                self.config.git_bin.as_deref(),
+                message,
+                Duration::from_millis(self.config.diff_timeout_ms),
+                &crate::start_session::phone_environment(),
+            )
+            .await
+        };
+        let result = match outcome {
+            crate::git::CommitOutcome::Committed {
+                sha,
+                files,
+                message,
+            } => {
+                let result = GitActionResult::Done { sha: sha.clone() };
+                let notice = PendingEvent::new(
+                    &SessionKey::new(session_uid, &row.session_id),
+                    EventKind::Notification,
+                    serde_json::json!({
+                        "notification_type": protocol::event::notice::COMMITTED,
+                        "oid": sha,
+                        "files": files,
+                        "message": message,
+                    }),
+                    Source::Daemon,
+                )
+                .with_source_event_id(format!("git_commit:{request_id}"));
+                let settled = self
+                    .settle_with_event(
+                        session_uid,
+                        crate::store::OPERATION_GIT_ACTION,
+                        request_id,
+                        &serde_json::to_string(&result).unwrap_or_default(),
+                        notice,
+                    )
+                    .await;
+                match settled {
+                    Ok(true) => result,
+                    // Settled by no row (its run was removed meanwhile): nothing kept, as below.
+                    Ok(false) => refused(
+                        code::INDETERMINATE,
+                        Some(format!(
+                            "committed {sha}, but the computer could not record it"
+                        )),
+                    ),
+                    // Committed, but neither the answer nor the notice is kept: a retry finds the
+                    // claim unsettled, so this answer says the same.
+                    Err(err) => {
+                        crate::log_error!(
+                            "{session_uid}: committed {sha}, but could not record it: {err:#}"
+                        );
+                        refused(
+                            code::INDETERMINATE,
+                            Some(format!(
+                                "committed {sha}, but the computer could not record it"
+                            )),
+                        )
+                    }
+                }
+            }
+            crate::git::CommitOutcome::Refused { code, detail } => {
+                let result = refused(code, detail);
+                // The refusal stands only once kept: a retry reads what was kept.
+                match self
+                    .db
+                    .settle_mutation(
+                        crate::store::OPERATION_GIT_ACTION,
+                        session_uid.to_string(),
+                        request_id.to_string(),
+                        serde_json::to_string(&result).unwrap_or_default(),
+                        protocol::time::now_rfc3339(),
+                    )
+                    .await
+                {
+                    Ok(true) => result,
+                    settled => {
+                        if let Err(err) = settled {
+                            crate::log_error!(
+                                "{session_uid}: could not record a refused commit: {err:#}"
+                            );
+                        }
+                        refused(code::INDETERMINATE, None)
+                    }
+                }
+            }
+            crate::git::CommitOutcome::Unknown(detail) => {
+                if let Err(err) = self
+                    .db
+                    .settle_mutation_indeterminate(
+                        crate::store::OPERATION_GIT_ACTION,
+                        session_uid.to_string(),
+                        request_id.to_string(),
+                        protocol::time::now_rfc3339(),
+                    )
+                    .await
+                {
+                    crate::log_error!("{session_uid}: could not record an unknown commit: {err:#}");
+                }
+                refused(code::INDETERMINATE, Some(detail))
+            }
+        };
+        self.refresh_tree(session_uid);
+        result
     }
 
     /// Read a run's branch and line counts from git into the session list, on a
@@ -5109,10 +5363,13 @@ impl Daemon {
         let git_bin = self.config.git_bin.clone();
         let timeout = Duration::from_millis(self.config.diff_timeout_ms);
         let session_uid = session_uid.to_string();
+        let gates = Arc::clone(&self.git_gates);
         tokio::spawn(async move {
             let Ok(Some(row)) = db.get_session(session_uid.clone()).await else {
                 return;
             };
+            let gate = git_gate_in(&gates, &row.cwd).await;
+            let _one_at_a_time = gate.lock().await;
             let tree = crate::git::tree_facts(&row.cwd, git_bin.as_deref(), timeout).await;
             inner.lock().await.tree_facts.insert(session_uid, tree);
         });
@@ -6044,6 +6301,13 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// The git gate of the run folder `cwd` in `gates` ([`Daemon::git_gate`]).
+async fn git_gate_in(gates: &Mutex<HashMap<String, Arc<Mutex<()>>>>, cwd: &str) -> Arc<Mutex<()>> {
+    let mut gates = gates.lock().await;
+    gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+    Arc::clone(gates.entry(cwd.to_string()).or_default())
 }
 
 #[cfg(test)]
@@ -7592,6 +7856,505 @@ mod tests {
 
     /// A pending card, hand-built and filed with no host behind it: a Claude card
     /// the computer alone can answer until a test makes it a hosted or a Codex one.
+    /// A run on `main` in a repository of its own, with one commit and its own identity.
+    fn run_in_a_repository(daemon: &Arc<Daemon>, uid: &str) -> std::path::PathBuf {
+        run_in_a_repository_as(
+            daemon,
+            uid,
+            protocol::agent::AgentKind::Claude,
+            Lifecycle::Live,
+        )
+    }
+
+    fn run_in_a_repository_as(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        agent: protocol::agent::AgentKind,
+        lifecycle: Lifecycle,
+    ) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ccd-git-action-{uid}-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "t"],
+            &["config", "user.email", "t@example.com"],
+            &["commit", "-q", "--allow-empty", "-m", "first"],
+        ] {
+            git_in(&dir, args);
+        }
+        seed_run_in(daemon, uid, &dir, agent, lifecycle);
+        dir
+    }
+
+    /// The run `uid` in `dir`, as `agent`, in `lifecycle`.
+    fn seed_run_in(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        dir: &std::path::Path,
+        agent: protocol::agent::AgentKind,
+        lifecycle: Lifecycle,
+    ) {
+        let now = protocol::time::now_rfc3339();
+        let row = SessionRow {
+            session_uid: uid.into(),
+            session_id: "cc-1".into(),
+            cwd: dir.to_str().unwrap().into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle,
+            created_at: now.clone(),
+            updated_at: now,
+            agent,
+            codex_thread_id: None,
+        };
+        assert_eq!(
+            daemon
+                .store
+                .begin_run(&row, &format!("seed-{uid}"), None, None)
+                .unwrap(),
+            None
+        );
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new(crate::git::git_bin(None).unwrap())
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    fn commit(message: &str) -> protocol::ws::GitAction {
+        protocol::ws::GitAction::Commit {
+            message: message.into(),
+        }
+    }
+
+    fn refused(code: &str) -> protocol::ws::GitActionResult {
+        protocol::ws::GitActionResult::Refused {
+            code: code.into(),
+            detail: None,
+        }
+    }
+
+    fn committed_notices(daemon: &Arc<Daemon>, uid: &str) -> Vec<serde_json::Value> {
+        daemon
+            .store
+            .events_after(uid, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|event| {
+                event.payload["notification_type"] == protocol::event::notice::COMMITTED
+            })
+            .map(|event| event.payload)
+            .collect()
+    }
+
+    /// **A commit is kept per request id**: it commits once and files one notice; the same
+    /// id again answers the same commit and commits nothing more; the same id with another
+    /// message is refused.
+    #[tokio::test]
+    async fn a_commit_is_made_once_per_request_and_files_one_notice() {
+        let _env = crate::ProcessEnvRead::take();
+        let daemon = test_daemon();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        let dir = run_in_a_repository(&daemon, uid);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        let first = daemon.git_action(uid, "r-1", &commit("Add a and b")).await;
+        let head = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+        assert_eq!(
+            first,
+            protocol::ws::GitActionResult::Done { sha: head.clone() }
+        );
+        assert_eq!(
+            committed_notices(&daemon, uid),
+            vec![serde_json::json!({
+                "notification_type": "committed", "oid": head, "files": 2, "message": "Add a and b"
+            })]
+        );
+
+        std::fs::write(dir.join("c.txt"), "c\n").unwrap();
+        assert_eq!(
+            daemon.git_action(uid, "r-1", &commit("Add a and b")).await,
+            first
+        );
+        assert_eq!(
+            git_in(&dir, &["rev-parse", "HEAD"]).trim(),
+            head,
+            "nothing committed again"
+        );
+        assert_eq!(committed_notices(&daemon, uid).len(), 1, "one notice");
+        assert_eq!(
+            daemon
+                .git_action(uid, "r-1", &commit("Something else"))
+                .await,
+            refused(protocol::ws::git_refusal::BAD_REQUEST)
+        );
+        assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]).trim(), head);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A run that is working, or waits on a card, is not committed under**, and nothing is
+    /// staged; an empty message, and a run this computer does not have, are refused.
+    #[tokio::test]
+    async fn a_commit_waits_for_a_quiet_run() {
+        let _env = crate::ProcessEnvRead::take();
+        use protocol::ws::git_refusal as code;
+        let daemon = test_daemon();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP02";
+        let dir = run_in_a_repository(&daemon, uid);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+
+        daemon
+            .ingest(PendingEvent::new(
+                &SessionKey::new(uid, "cc-1"),
+                EventKind::SessionStart,
+                serde_json::json!({}),
+                Source::Daemon,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            daemon.git_action(uid, "r-turn", &commit("m")).await,
+            refused(code::BUSY)
+        );
+        assert_eq!(
+            git_in(&dir, &["diff", "--cached", "--name-only"]),
+            "",
+            "nothing staged"
+        );
+        daemon
+            .ingest(PendingEvent::new(
+                &SessionKey::new(uid, "cc-1"),
+                EventKind::TurnComplete,
+                serde_json::json!({}),
+                Source::Daemon,
+            ))
+            .await
+            .unwrap();
+
+        daemon
+            .inner
+            .lock()
+            .await
+            .pending
+            .insert((uid.into(), "r-card".into()), pending_card(uid, "app"));
+        assert_eq!(
+            daemon.git_action(uid, "r-card", &commit("m")).await,
+            refused(code::BUSY)
+        );
+        assert_eq!(git_in(&dir, &["diff", "--cached", "--name-only"]), "");
+        daemon.inner.lock().await.pending.clear();
+
+        assert_eq!(
+            daemon.git_action(uid, "r-empty", &commit("  ")).await,
+            refused(code::BAD_REQUEST)
+        );
+        assert_eq!(
+            daemon
+                .git_action("01K1B3XQ8ZC0DE5FGH7JKMNP99", "r-x", &commit("m"))
+                .await,
+            refused(code::UNKNOWN_SESSION)
+        );
+        assert!(matches!(
+            daemon.git_action(uid, "r-quiet", &commit("m")).await,
+            protocol::ws::GitActionResult::Done { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A Codex run's turn is asked of its live link**, which knows a resumed turn the log
+    /// does not file; a Claude run that ended mid-turn is not working.
+    #[tokio::test]
+    async fn a_commit_asks_a_codex_link_and_passes_an_ended_run() {
+        let _env = crate::ProcessEnvRead::take();
+        use protocol::ws::git_refusal as code;
+        let daemon = test_daemon();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP04";
+        let dir = run_in_a_repository_as(
+            &daemon,
+            uid,
+            protocol::agent::AgentKind::Codex,
+            Lifecycle::Live,
+        );
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        assert_eq!(
+            daemon.git_action(uid, "r-no-link", &commit("m")).await,
+            refused(code::BUSY),
+            "a live Codex run with no link yet cannot say it is quiet"
+        );
+        let (answers, _) = crate::codex_host::answer_channel();
+        let (commands, mut asks) = tokio::sync::mpsc::unbounded_channel();
+        daemon
+            .host_link_attached(uid, HostLink::Codex(answers, commands))
+            .await;
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let answering = Arc::clone(&running);
+        tokio::spawn(async move {
+            while let Some(ask) = asks.recv().await {
+                if let crate::codex_host::LinkCommand::TurnRunning(reply) = ask {
+                    let _ = reply.send(answering.load(std::sync::atomic::Ordering::SeqCst));
+                }
+            }
+        });
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        assert_eq!(
+            daemon.git_action(uid, "r-codex", &commit("m")).await,
+            refused(code::BUSY)
+        );
+        running.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            daemon.git_action(uid, "r-codex-quiet", &commit("m")).await,
+            protocol::ws::GitActionResult::Done { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let ended = "01K1B3XQ8ZC0DE5FGH7JKMNP05";
+        let dir = run_in_a_repository_as(
+            &daemon,
+            ended,
+            protocol::agent::AgentKind::Claude,
+            Lifecycle::Exited,
+        );
+        daemon
+            .ingest(PendingEvent::new(
+                &SessionKey::new(ended, "cc-1"),
+                EventKind::SessionStart,
+                serde_json::json!({}),
+                Source::Daemon,
+            ))
+            .await
+            .unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        assert!(matches!(
+            daemon.git_action(ended, "r-ended", &commit("m")).await,
+            protocol::ws::GitActionResult::Done { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Stopping is not ended: its turn may still be writing.
+        let stopping = "01K1B3XQ8ZC0DE5FGH7JKMNP06";
+        let dir = run_in_a_repository_as(
+            &daemon,
+            stopping,
+            protocol::agent::AgentKind::Claude,
+            Lifecycle::Stopping,
+        );
+        daemon
+            .ingest(PendingEvent::new(
+                &SessionKey::new(stopping, "cc-1"),
+                EventKind::SessionStart,
+                serde_json::json!({}),
+                Source::Daemon,
+            ))
+            .await
+            .unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        assert_eq!(
+            daemon
+                .git_action(stopping, "r-stopping", &commit("m"))
+                .await,
+            refused(code::BUSY)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // An agent whose turns ccd cannot read counts as working until its run ends.
+        for (uid, lifecycle, busy) in [
+            ("01K1B3XQ8ZC0DE5FGH7JKMNP07", Lifecycle::Live, true),
+            ("01K1B3XQ8ZC0DE5FGH7JKMNP08", Lifecycle::Exited, false),
+        ] {
+            let dir = run_in_a_repository_as(
+                &daemon,
+                uid,
+                protocol::agent::AgentKind::Antigravity,
+                lifecycle,
+            );
+            std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+            let answer = daemon.git_action(uid, "r-agy", &commit("m")).await;
+            assert_eq!(answer == refused(code::BUSY), busy, "{answer:?}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    fn turn_started(daemon: &Arc<Daemon>, uid: &str, kind: EventKind) -> PendingEvent {
+        let _ = daemon;
+        PendingEvent::new(
+            &SessionKey::new(uid, "cc-1"),
+            kind,
+            serde_json::json!({}),
+            Source::Daemon,
+        )
+    }
+
+    /// **Any run in the folder working holds a commit**: an ended run's commit waits for a
+    /// live run in the same folder that is mid-turn; a run starting, and a Codex run
+    /// stopping whatever its link says, may be writing too.
+    #[tokio::test]
+    async fn a_commit_waits_for_every_run_in_its_folder() {
+        use protocol::agent::AgentKind;
+        use protocol::ws::git_refusal as code;
+        let _env = crate::ProcessEnvRead::take();
+        let daemon = test_daemon();
+        let ended = "01K1B3XQ8ZC0DE5FGH7JKMNP09";
+        let working = "01K1B3XQ8ZC0DE5FGH7JKMNP10";
+        let dir = run_in_a_repository_as(&daemon, ended, AgentKind::Claude, Lifecycle::Exited);
+        seed_run_in(&daemon, working, &dir, AgentKind::Claude, Lifecycle::Live);
+        daemon
+            .ingest(turn_started(&daemon, working, EventKind::SessionStart))
+            .await
+            .unwrap();
+        std::fs::write(dir.join("half.txt"), "half\n").unwrap();
+        assert_eq!(
+            daemon.git_action(ended, "r-1", &commit("m")).await,
+            refused(code::BUSY)
+        );
+        daemon
+            .ingest(turn_started(&daemon, working, EventKind::TurnComplete))
+            .await
+            .unwrap();
+        assert!(matches!(
+            daemon.git_action(ended, "r-2", &commit("m")).await,
+            protocol::ws::GitActionResult::Done { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let starting = "01K1B3XQ8ZC0DE5FGH7JKMNP11";
+        let dir = run_in_a_repository_as(&daemon, starting, AgentKind::Claude, Lifecycle::Starting);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        assert_eq!(
+            daemon.git_action(starting, "r-3", &commit("m")).await,
+            refused(code::BUSY)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let stopping = "01K1B3XQ8ZC0DE5FGH7JKMNP12";
+        let dir = run_in_a_repository_as(&daemon, stopping, AgentKind::Codex, Lifecycle::Stopping);
+        let (answers, _) = crate::codex_host::answer_channel();
+        let (commands, mut asks) = tokio::sync::mpsc::unbounded_channel();
+        daemon
+            .host_link_attached(stopping, HostLink::Codex(answers, commands))
+            .await;
+        tokio::spawn(async move {
+            while let Some(ask) = asks.recv().await {
+                if let crate::codex_host::LinkCommand::TurnRunning(reply) = ask {
+                    let _ = reply.send(false);
+                }
+            }
+        });
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        assert_eq!(
+            daemon.git_action(stopping, "r-4", &commit("m")).await,
+            refused(code::BUSY)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A commit whose run is removed while it runs says so**: git committed, but neither
+    /// its answer nor its notice could be kept, so it is indeterminate, never done.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_commit_whose_run_is_removed_meanwhile_is_indeterminate() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::ProcessEnvRead::take();
+        let daemon = test_daemon();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP13";
+        let dir = run_in_a_repository_as(
+            &daemon,
+            uid,
+            protocol::agent::AgentKind::Claude,
+            Lifecycle::Exited,
+        );
+        let hook = dir.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        let before = git_in(&dir, &["rev-parse", "HEAD"]);
+        let action = commit("m");
+        let (answer, removed) = tokio::join!(daemon.git_action(uid, "r-gone", &action), async {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            daemon.delete_exited_session(uid).await
+        });
+        assert!(removed.is_ok(), "{removed:?}");
+        assert_ne!(
+            git_in(&dir, &["rev-parse", "HEAD"]),
+            before,
+            "git committed"
+        );
+        assert!(
+            matches!(&answer, protocol::ws::GitActionResult::Refused { code, .. }
+                if code == protocol::ws::git_refusal::INDETERMINATE),
+            "{answer:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A read of a run's repository and a commit in it never run git at once**: started
+    /// together, every git child of one ends before the next begins.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_and_a_commit_take_turns_with_git() {
+        let _env = crate::ProcessEnvRead::take();
+        use std::os::unix::fs::PermissionsExt;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP03";
+        let probe = test_daemon();
+        let dir = run_in_a_repository(&probe, uid);
+        let log = dir.join("..").join(format!("{uid}-git.log"));
+        let _ = std::fs::remove_file(&log);
+        let wrapper = dir.join("..").join(format!("{uid}-git"));
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\necho start >> '{log}'\nsleep 0.05\n'{git}' \"$@\"\ns=$?\necho end >> '{log}'\nexit $s\n",
+                log = log.display(),
+                git = crate::git::git_bin(None).unwrap().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let daemon = daemon_on(
+            Arc::clone(&probe.store),
+            Config {
+                git_bin: Some(wrapper.to_str().unwrap().into()),
+                ..Config::default()
+            },
+        );
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        let action = commit("m");
+        let (read, committed) = tokio::join!(
+            daemon.run_git(uid),
+            daemon.git_action(uid, "r-both", &action)
+        );
+        assert!(read.unwrap().is_ok());
+        assert!(matches!(
+            committed,
+            protocol::ws::GitActionResult::Done { .. }
+        ));
+        let lines: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert!(lines.len() > 4, "{lines:?}");
+        for pair in lines.chunks(2) {
+            assert_eq!(
+                pair,
+                ["start", "end"],
+                "two git children at once: {lines:?}"
+            );
+        }
+        let _ = std::fs::remove_file(&log);
+        let _ = std::fs::remove_file(&wrapper);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn pending_card(uid: &str, label: &str) -> PendingApproval {
         PendingApproval {
             card: serde_json::from_value(json!({

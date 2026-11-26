@@ -2469,7 +2469,7 @@ public final class AppModel {
             // Nothing to do here. `removeSession` awaits the reply itself and does
             // the local clean-up, because only it knows which row asked.
             break
-        case .testPushResult, .runGit:
+        case .testPushResult, .runGit, .gitActionResult:
             // Same shape: the sheet's own request awaits the reply by id, and a run's
             // repository is awaited by the Changes panel that asked for it.
             break

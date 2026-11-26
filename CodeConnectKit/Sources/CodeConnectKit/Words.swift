@@ -230,6 +230,11 @@ public enum ChangesWords {
     public static let noDiff = "No diff to show"
     public static let computersReason = "Your computer’s reason, word for word:"
     public static func files(_ count: Int) -> String { count == 1 ? "1 file" : "\(count) files" }
+    /// A commit made from the panel, as the run's conversation shows it (its `committed` notice): how many files and
+    /// the commit's short sha.
+    public static func committed(files count: Int, sha: String) -> String {
+        "You committed \(files(count)) · \(sha.prefix(7))"
+    }
     public static func showMoreLines(_ count: Int) -> String { "Show \(count) more line\(count == 1 ? "" : "s")" }
     public static func unchangedLines(_ count: Int) -> String {
         count == 1 ? "1 unchanged line" : "\(count) unchanged lines"

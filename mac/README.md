@@ -668,7 +668,7 @@ gate then refuses.
 `codex_compose`, `question_card`, `hook_only_approvals`, `history_pages`, `supported_agents`,
 `can_approve_reliably`, `command_catalog`, `private_transport`, `start_session`,
 `start_worktree`, `browse_folders`, `machine_stats`, `stop_run`, `uploads`, `run_terminal` (a run's
-shell, to a paired device on a private transport only; see [`SECURITY.md`](../SECURITY.md)) and `changes` so the app disables
+shell, to a paired device on a private transport only; see [`SECURITY.md`](../SECURITY.md)), `changes` and `git_actions` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
@@ -1299,7 +1299,8 @@ to probe credentials.
   files only, within one 4 MB reading budget), whole even when `unified` is cut;
   at most 1000 and 256KB of the frame, `files_truncated` when there were more. The client names a session, never a path. A non-git directory returns
   an empty diff *with a `note`* — an empty diff and "this was never a repository"
-  must not look the same on screen.
+  must not look the same on screen. An unknown run is answered the same way, its
+  `note` saying so.
 
   The cap is applied **at the read**, not after it. `Command::output()` reads a
   child to EOF into memory and only then lets the caller trim, so the cap bounded
@@ -1334,6 +1335,28 @@ to probe credentials.
   with `get_diff`, a filter the repository's attributes name (Git LFS) still runs
   and the listing may refresh the index. Outside a repository, or for an unknown
   run, `git` is absent and `note` says why.
+* **`git_action{request_id, session_uid, action}`** (`>= 59`, `git_actions` names
+  each action; paired devices only) → `git_action_result{request_id, session_uid,
+  result}`, `done{sha}` or `refused{code, detail?}`. `action` is
+  `{kind: "commit", message}`: every change in the run's folder, tracked and
+  untracked, is committed on its branch (`git add -A`, `git commit -q -m`, run
+  through the person's login shell as `git worktree add` is, so a hook finds the
+  tools a terminal does), the repository's hooks and signing running as for the
+  person's own commit, and a
+  `committed {oid, files, message}` notice (the message as committed, a
+  `commit-msg` hook's rewrite included) is filed into the run's conversation with
+  the outcome. Refused, nothing staged, while any run in the folder waits on a
+  card or may be working (starting or stopping; live, a Codex run as its live
+  link says, a Claude run from its log, any other, or a Codex run not yet linked,
+  counted as working), on a detached head, while a merge has unresolved files
+  (`unmerged`, checked before staging), and when nothing changed. Kept per
+  `request_id` in the mutation ledger: the same id replays its answer and acts
+  nothing twice, another message under it is `bad_request`, and one whose first
+  try did not finish is `indeterminate`, never tried again. A write's git output
+  is read until git exits, never cut off; staging and the commit each have 120 s.
+  A refused commit leaves what it staged staged. Every git child for a run's folder
+  (`get_diff`, `get_run_git`, the session-list refresh and actions) runs one at a
+  time, and each is answered off the connection's loop.
 * **`EventKind::TurnComplete`** marks the end of a turn. For Claude it is filed
   from the SDK's `result`, which the run's agent host relays as each turn ends.
   `SessionEnd` now means only what it says: the run ended.
