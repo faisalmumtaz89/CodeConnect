@@ -1489,6 +1489,49 @@ pub struct PullRequest {
     pub head_oid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_at: Option<String>,
+    /// An open one's checks at its head (minor 62), sorted failed, pending, cancelled, unknown,
+    /// passed, skipped, then by name; at most 100. Absent when not read: a closed or merged
+    /// pull request, an older daemon, or GitHub not answering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<Vec<Check>>,
+    /// False when there were more than 100, or the head moved while they were read (then
+    /// `checks` is empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_complete: Option<bool>,
+}
+
+/// One of a [`PullRequest`]'s checks: a check run, or a commit status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Check {
+    /// A check run's name, or a status's context.
+    pub name: String,
+    pub state: CheckState,
+    /// A check run's start; a status has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// Absent while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    /// Its log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// A failed check run's first failure annotation's first line, when it says more than the
+    /// runner's "Process completed with exit code N.".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_line: Option<String>,
+}
+
+/// A [`Check`]'s state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    Fail,
+    Pending,
+    Cancelled,
+    /// A state this daemon does not name.
+    Unknown,
+    Pass,
+    Skipped,
 }
 
 /// A [`PullRequest`]'s state.
@@ -2828,9 +2871,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 61,
             "a pull request from the Changes panel (`create_pr`, `pr` on `done`, `gh_repo`) is minor 61"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 62,
+            "a pull request's checks (`checks`, `checks_complete`) are minor 62"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 61);
+        assert_eq!(crate::PROTOCOL_MINOR, 62);
     }
 
     /// **The tags, pinned on this side too.**
@@ -4815,6 +4862,15 @@ mod tests {
                     base: "main".into(),
                     head_oid: "abc".into(),
                     merged_at: None,
+                    checks: Some(vec![Check {
+                        name: "test".into(),
+                        state: CheckState::Fail,
+                        started_at: Some("s".into()),
+                        completed_at: None,
+                        url: Some("l".into()),
+                        failure_line: Some("expected 2, got 3".into()),
+                    }]),
+                    checks_complete: Some(true),
                 }),
                 gh_read_at: Some("u".into()),
                 gh_repo: Some("o/r".into()),
@@ -4833,7 +4889,9 @@ mod tests {
                     "ahead": 1, "pushed": false, "unmerged": false, "read_at": "t",
                     "gh": "signed_in", "gh_host": "github.com", "gh_read_at": "u", "gh_repo": "o/r",
                     "pr": {"number": 7, "url": "https://github.com/o/r/pull/7", "state": "open",
-                           "base": "main", "head_oid": "abc"},
+                           "base": "main", "head_oid": "abc", "checks_complete": true,
+                           "checks": [{"name": "test", "state": "fail", "started_at": "s", "url": "l",
+                                       "failure_line": "expected 2, got 3"}]},
                 },
             })
         );

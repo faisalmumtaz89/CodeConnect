@@ -984,7 +984,12 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     already there; [`ws::GitActionResult::Done`] carries it as `pr` ([`ws::PrLink`]), and `sha` is absent for it.
 ///     [`ws::RunGit`] gains `gh_repo`, the repository the pull request goes into. `git_actions` names `create_pr`; a
 ///     daemon below 61 does not.
-pub const PROTOCOL_MINOR: u32 = 61;
+///   * `62` — **A pull request's checks.**
+///
+///     An open [`ws::PullRequest`] carries `checks` ([`ws::Check`]: name, state, start, end, log URL, and a failed check
+///     run's first failure line) and `checks_complete`, read with it in one more GitHub request. A daemon below 62 sends
+///     neither.
+pub const PROTOCOL_MINOR: u32 = 62;
 
 #[cfg(test)]
 mod ledger_tests {
