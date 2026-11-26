@@ -2104,10 +2104,11 @@ public final class AppModel {
         daemonProfile.machineName ?? machine?.name ?? endpoint?.host
     }
 
+    /// The computer's system as its daemon names it ("macos", "linux"), by the same rule as its name.
+    public var machineOS: String? { daemonProfile.machineOS ?? machine?.os }
+
     /// The computer's system, by the same rule as its name.
-    public var machineSystem: String? {
-        DaemonProfile.system(forOS: daemonProfile.machineOS ?? machine?.os)
-    }
+    public var machineSystem: String? { DaemonProfile.system(forOS: machineOS) }
 
     /// Every card in the fleet still waiting on a human, **urgency-ranked**:
     /// HIGH → MEDIUM → LOW, then oldest first inside a tier.
