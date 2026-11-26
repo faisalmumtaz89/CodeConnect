@@ -1201,7 +1201,7 @@ final class AgentSeamDecodeSafetyTests: XCTestCase {
         XCTAssertEqual(future.sessionUID, "u-1")
     }
 
-    /// A run at its usage limit (minor 54), as the daemon sends it (`run-limit-wire.json`, byte-identical to
+    /// A run at its usage limit (minor 61), as the daemon sends it (`run-limit-wire.json`, byte-identical to
     /// `fixtures/claude/`): its limit decodes with the length of the window whose reset is its own. A word this build
     /// does not know reads `unknown`, with no window; a summary with no limit has none.
     func testSessionSummaryDecodesTheRunsUsageLimit() throws {

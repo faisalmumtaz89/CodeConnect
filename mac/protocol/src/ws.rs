@@ -2788,12 +2788,12 @@ mod tests {
             "a run's GitHub state and its pull request (`gh`, `gh_host`, `pr`, `gh_read_at`) is minor 60"
         );
         const _: () = assert!(
-            crate::PROTOCOL_MINOR >= 64,
-            "a run's usage limit (`limit`) is minor 64"
+            crate::PROTOCOL_MINOR >= 61,
+            "a run's usage limit (`limit`) is minor 61"
         );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 64);
+        assert_eq!(crate::PROTOCOL_MINOR, 61);
     }
 
     /// **The tags, pinned on this side too.**

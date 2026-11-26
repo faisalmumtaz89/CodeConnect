@@ -979,13 +979,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     `gh_host`, `pr` ([`ws::PullRequest`]: the open one from the branch, else the newest closed or merged one at
 ///     the commit checked out, looked up by the branch's owner, so a fork's PR on its parent is found) and
 ///     `gh_read_at`; GitHub is asked at most once per 30 s per branch and commit. A daemon below 60 sends none of them.
-///   * `64` — **A run says the usage limit it stopped at.**
+///   * `61` — **A run says the usage limit it stopped at.**
 ///
 ///     [`event::SessionSummary::limit`] ([`event::RunLimit`]): set when Claude Code's `rate_limit_event` says
 ///     `rejected`, or a Codex turn fails with `usageLimitExceeded`; gone once the run's next turn starts. It names the
 ///     limit ([`event::LimitKind`]), not its reset, which is the run's account's held window of that length. A daemon
-///     below 64 sends none.
-pub const PROTOCOL_MINOR: u32 = 64;
+///     below 61 sends none.
+pub const PROTOCOL_MINOR: u32 = 61;
 
 #[cfg(test)]
 mod ledger_tests {

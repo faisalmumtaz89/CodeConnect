@@ -8543,7 +8543,7 @@ mod tests {
         stop(&played.dir);
     }
 
-    /// **A run claude says a request of was refused at a usage limit says which (minor 54), until its next turn**: a
+    /// **A run claude says a request of was refused at a usage limit says which (minor 61), until its next turn**: a
     /// `rate_limit_event` `rejected` names it by its `rateLimitType` (`seven_day_opus`: the weekly Opus), or credits by
     /// its `errorCode`; an `allowed` one names none, nor a `rejected` one whose extra usage is allowed; the next turn's
     /// init clears it.
@@ -8674,7 +8674,7 @@ mod tests {
         stop(&played.dir);
     }
 
-    /// **A hosted Claude run at its 5-hour limit, as an app is sent it** (minor 54). `fixtures/claude/run-limit-wire.json`
+    /// **A hosted Claude run at its 5-hour limit, as an app is sent it** (minor 61). `fixtures/claude/run-limit-wire.json`
     /// is emitted by this build; a copy of it under `ios/` is kept byte-identical by
     /// `fixtures/check-duplicated-fixtures.sh`.
     #[tokio::test]

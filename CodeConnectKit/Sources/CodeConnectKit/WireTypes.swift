@@ -656,7 +656,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// A move to another account under way (minor 48): its agent's active account changed and this run has not yet
     /// started on it. `nil` when none is pending, from an older daemon, and for a value this build does not know.
     public let switching: RunSwitching?
-    /// The usage limit the run stopped at (minor 54), as its agent said it: `nil` while it is at none, from the run's
+    /// The usage limit the run stopped at (minor 61), as its agent said it: `nil` while it is at none, from the run's
     /// next turn on, and from an older daemon. An ended run keeps its last one.
     public let limit: RunLimit?
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
@@ -848,7 +848,7 @@ public enum RunSwitching: String, Codable, Sendable, Hashable {
     case failed
 }
 
-/// The usage limit a run stopped at (`SessionSummary.limit`, minor 54).
+/// The usage limit a run stopped at (`SessionSummary.limit`, minor 61).
 public struct RunLimit: Codable, Sendable, Hashable {
     public let which: LimitKind
     /// When the agent said so (RFC 3339).

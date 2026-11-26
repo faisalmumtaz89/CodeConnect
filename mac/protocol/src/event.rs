@@ -559,8 +559,8 @@ pub struct SessionSummary {
     /// started; absent on any other, and from a daemon below 48: absent is "not known", never Default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<RunAccount>,
-    /// The usage limit the run stopped at (minor 54), as its agent said it: absent while it is at none, from the
-    /// run's next turn on, and from a daemon below 54. Its reset is the run's account's held window of that length.
+    /// The usage limit the run stopped at (minor 61), as its agent said it: absent while it is at none, from the
+    /// run's next turn on, and from a daemon below 61. Its reset is the run's account's held window of that length.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<RunLimit>,
 }
