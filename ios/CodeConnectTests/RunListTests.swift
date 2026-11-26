@@ -5,10 +5,14 @@ import XCTest
 /// The Mac's run list (W1a, W1-1 and W1-6): Needs you, Working and Done, each in the fleet's order; Needs you whole on
 /// every computer whatever is chosen; the ended runs apart, on every computer; and the list's words.
 final class RunListTests: XCTestCase {
-    private func row(_ id: String, _ status: FleetStatus, on machine: String) -> FleetRow {
+    /// A run in `status`; `limited`: the usage limit its last turn stopped at, as the daemon sends it.
+    private func row(
+        _ id: String, _ status: FleetStatus, on machine: String, limited: Bool = false, lifecycle: String = "running"
+    ) -> FleetRow {
+        let limit = limited ? #","limit":{"which":"five_hour","at":"2026-07-31T09:14:00.000Z"}"# : ""
         let json = """
-            {"session_uid":"\(id)","session_id":"\(id)","cwd":"/web","lifecycle":"running","link":"attached",\
-            "last_seq":3,"created_at":"2026-07-31T09:14:00.000Z","updated_at":"2026-07-31T09:14:00.000Z"}
+            {"session_uid":"\(id)","session_id":"\(id)","cwd":"/web","lifecycle":"\(lifecycle)","link":"attached",\
+            "last_seq":3,"created_at":"2026-07-31T09:14:00.000Z","updated_at":"2026-07-31T09:14:00.000Z"\(limit)}
             """
         // swiftlint:disable:next force_try
         let summary = try! JSONDecoder().decode(SessionSummary.self, from: Data(json.utf8))
@@ -73,6 +77,18 @@ final class RunListTests: XCTestCase {
         XCTAssertEqual(ids(list.working), ["starting"])
         XCTAssertEqual(ids(list.needsYou), ["failed"])
         XCTAssertEqual(list.ended, [])
+    }
+
+    /// W1-2: a run at its usage limit waits on the person, whatever its last turn's status and whichever computer is
+    /// chosen; one that has ended is with the ended runs.
+    func testARunAtItsLimitNeedsYou() {
+        let capped = row("capped", .doneUnreviewed, on: "m2", limited: true)
+        let over = row("capped-over", .ended, on: "m2", limited: true, lifecycle: "exited")
+        let list = RunList(fleet + [capped, over], computer: "m1")
+        XCTAssertEqual(ids(list.needsYou), ["approval", "failed", "idle", "question", "capped"])
+        XCTAssertEqual(ids(list.done), ["seen"])
+        XCTAssertEqual(ids(RunList(fleet + [capped], computer: "m2").done), ["unseen"])
+        XCTAssertEqual(ids(list.ended), ["over", "over-too", "capped-over"])
     }
 
     /// The head's menu counts a computer's runs that have not ended, the ones the list shows of it.
