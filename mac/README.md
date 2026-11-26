@@ -1355,9 +1355,10 @@ to probe credentials.
   `checks_complete` (false past 100, or when the head moved between the two
   reads), read in the same batch with one `gh api graphql` request
   (`statusCheckRollup` of its last commit, each check run with its first
-  annotations): a batch is at most 3 requests. `failure_line` is a failed check
-  run's first failure annotation that says more than the runner's "Process
-  completed with exit code N.", its first line. A branch whose remote is a URL (as `gh pr checkout` sets for a
+  annotations): a batch is at most 3 requests. A check run again on the same
+  commit is listed once, as the run started last. `failure_line` is, among a
+  failed check run's first 10 annotations, the first at failure level that says
+  more than the runner's "Process completed with exit code N.", its first line. A branch whose remote is a URL (as `gh pr checkout` sets for a
   fork's PR) is read from that URL.
 * **`git_action{request_id, session_uid, action}`** (`>= 59`, `git_actions` names
   each action; paired devices only) → `git_action_result{request_id, session_uid,
