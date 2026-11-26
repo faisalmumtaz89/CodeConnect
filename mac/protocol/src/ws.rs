@@ -1597,8 +1597,9 @@ pub enum GitAction {
     /// from the branch already there is the answer, and nothing is pushed.
     CreatePr,
     /// The run's open pull request merged by `method` on GitHub, only while its head is
-    /// `head_oid`, the commit the panel showed (minor 64). Nothing local changes, and no branch
-    /// is deleted.
+    /// `head_oid`, the commit the panel showed, when GitHub accepts the merge (minor 64). On a
+    /// branch whose merge queue is required that is when it is queued: a later push to the queued
+    /// pull request can change what lands. Nothing local changes, and no branch is deleted.
     Merge {
         method: MergeMethod,
         head_oid: String,

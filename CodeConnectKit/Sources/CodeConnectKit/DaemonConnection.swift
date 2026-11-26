@@ -1235,7 +1235,8 @@ public final class DaemonConnection {
     }
 
     /// Merge the run `sessionUID`'s open pull request `number` by `method`, only while its head is `headOID`: the pull
-    /// request and commit the panel showed. `requestID` is its identity: a retry reuses it and the computer replays its
+    /// request and commit the panel showed, when GitHub accepts the merge. On a branch whose merge queue is required
+    /// that is when it is queued, and a later push to the queued pull request can change what lands. `requestID` is its identity: a retry reuses it and the computer replays its
     /// answer, never merging twice.
     public func mergePullRequest(
         sessionUID: String, number: UInt64, method: MergeMethod, headOID: String, requestID: String

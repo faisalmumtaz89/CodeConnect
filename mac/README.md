@@ -1425,7 +1425,8 @@ to probe credentials.
   GitHub is then asked again: merged is `done`, and so is a pull request a merge
   queue holds open. On a branch whose merge queue is required, gh enqueues it
   (GitHub's auto-merge), and the queue merges it later by the method the queue is
-  set to, which may not be `method`. `done` carries no state: the panel's next
+  set to, which may not be `method`; the head is checked when GitHub accepts it, so
+  a later push to the queued pull request can change what lands. `done` carries no state: the panel's next
   `get_run_git` reads it open with `merge_queued`, or merged when the commit
   checked out is its head (with newer local commits it reads no pull request, as
   for any branch with new work). Refused, with nothing merged, when
