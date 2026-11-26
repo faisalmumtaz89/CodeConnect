@@ -37,6 +37,7 @@ struct BranchRow: View {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text(StartWords.readingBranches(folder.name)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                        .lineLimit(1).truncationMode(.tail)
                 }
                 .accessibilityIdentifier("start.branch.reading")
             }
@@ -103,6 +104,7 @@ struct BranchRow: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "arrow.triangle.branch").font(.system(size: 11)).accessibilityHidden(true)
+                // A branch keeps meaning at both ends ("feature/oauth-device-flow"): cut in its middle.
                 Text(verbatim: title).font(Theme.mono(12)).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }

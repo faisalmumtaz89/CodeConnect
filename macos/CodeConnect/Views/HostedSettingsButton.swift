@@ -44,9 +44,10 @@ struct HostedSettingsButton: View {
     private var effort: String? { model.shownSummary(for: key).flatMap(RunSettings.effortName) }
 
     var body: some View {
-        HStack(spacing: 2) {
-            modelButton
-            if !settings.modes.isEmpty { modeButton }
+        BarLayout(spacing: 2) {
+            // Short of room, the model's words cut before the mode's.
+            modelButton.yields(0)
+            if !settings.modes.isEmpty { modeButton.yields(1) }
             if agent == .claude || agent == .antigravity { moreButton }
         }
         .coordinateSpace(.named(Self.space))
@@ -68,14 +69,15 @@ struct HostedSettingsButton: View {
     private var modelButton: some View {
         control(
             .model, id: "session.composer.commands", label: effort.map { "\(name), \($0) effort" } ?? name,
-            help: "Model and effort"
+            help: "Model and effort: " + (effort.map { "\(name) · \($0)" } ?? name)
         ) {
             HStack(spacing: 5) {
                 AgentMark(agent: agent)
                 // The agent's own report of the model (an id) in code type; a menu row's label in the app's.
                 Text(name).font(settings.modelDisplayReported ? Theme.mono(11.5) : InputBoxChip.font)
                     .foregroundStyle(Theme.text)
-                if let effort { Text("· \(effort)").foregroundStyle(Theme.text2) }
+                    .lineLimit(1).truncationMode(.tail)
+                if let effort { Text("· \(effort)").foregroundStyle(Theme.text2).fixedSize() }
                 if settings.inFlight {
                     ProgressView().controlSize(.small).accessibilityHidden(true)
                 } else {
@@ -88,9 +90,12 @@ struct HostedSettingsButton: View {
     /// The run's mode as its fact names it, "Permission mode" when the fact names none of the listed modes.
     private var modeButton: some View {
         let label = settings.selectedMode?.label ?? RunSettingWords.permissionMode
-        return control(.mode, id: "session.composer.modes", label: label, help: RunSettingWords.permissionMode) {
+        return control(
+            .mode, id: "session.composer.modes", label: label, help: "\(RunSettingWords.permissionMode): \(label)"
+        ) {
             HStack(spacing: 5) {
                 Text(label).foregroundStyle(settings.selectedMode?.confirm == true ? Theme.red : Theme.text)
+                    .lineLimit(1).truncationMode(.tail)
                 chevron
             }
         }
@@ -296,10 +301,12 @@ struct ModelFactLabel: View {
             // By its menu's name, or as the run reported it in code type; "Model" while it has reported none.
             Text(fact?.text ?? "Model").font(fact?.reported == true ? Theme.mono(11.5) : InputBoxChip.font)
                 .foregroundStyle(Theme.text)
-            if let effort { Text("· \(effort)").foregroundStyle(Theme.text2) }
+                .lineLimit(1).truncationMode(.tail)
+            if let effort { Text("· \(effort)").foregroundStyle(Theme.text2).fixedSize() }
         }
         .font(InputBoxChip.font)
         .inputBoxChip(open: false)
+        .help(effort.map { "\(fact?.text ?? "Model") · \($0)" } ?? fact?.text ?? "Model")
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("session.composer.model")
     }

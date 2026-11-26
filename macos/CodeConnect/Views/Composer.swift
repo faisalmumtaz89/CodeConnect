@@ -274,7 +274,7 @@ private struct Composer: View {
 
     private var box: some View {
         let agent = summary?.agent.displayName ?? "the agent"
-        return InputBox(barHeight: 46, trailingOpen: usageHovered) {
+        return InputBox(barHeight: 46) {
             // The files going with the message stand above its words.
             VStack(alignment: .leading, spacing: 12) {
                 if !model.files(for: key).isEmpty {
@@ -327,6 +327,7 @@ private struct Composer: View {
             case .hostedReadOnly(let fact):
                 ModelFactLabel(
                     agent: summary?.agent ?? .claude, fact: fact, effort: summary.flatMap(RunSettings.effortName))
+                .yields(0)
             case .hostedLive(let settings):
                 HostedSettingsButton(
                     model: model, key: key, agent: summary?.agent ?? .claude, settings: settings,
@@ -348,11 +349,14 @@ private struct Composer: View {
                         }
                     }
                 #endif
+                // Outermost: a layout value set inside `onGeometryChange` does not reach the bar's layout.
+                .yields(0)
             }
             if isCodex, let counter = ComposeDraft(text: kept.reply).counterText {
                 Text(counter)
                     .font(Theme.mono(11))
                     .foregroundStyle(ComposeDraft(text: kept.reply).isOverCeiling ? Theme.red : Theme.text3)
+                    .fixedSize()
                     .accessibilityIdentifier("session.composer.count")
             }
         } trailing: {
