@@ -4279,8 +4279,8 @@ public final class AppModel {
 
     /// Ask the daemon for this run's working-tree diff.
     ///
-    /// On demand only, and never automatically refreshed: a diff is a thing you
-    /// ask for when you are about to read it. The result is stamped with the
+    /// On demand only: a diff is a thing you ask for when you are about to read
+    /// it, or again while a panel that shows it follows its run. The result is stamped with the
     /// daemon's own `captured_at` so the view can say how old what you are
     /// reading is, rather than implying it is live.
     public func loadDiff(key: String, force: Bool = false) {

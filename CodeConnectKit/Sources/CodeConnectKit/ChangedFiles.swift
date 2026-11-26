@@ -40,12 +40,19 @@ public struct ChangedFile: Identifiable, Hashable, Sendable {
                 return ChangedFile(path: file.path, added: file.added, removed: file.removed, diff: diff)
             }
         } else {
-            rows = parsed.files.map { file in
-                ChangedFile(
-                    path: file.newPath ?? file.oldPath ?? file.id, added: UInt64(file.additions),
-                    removed: UInt64(file.deletions), diff: file)
-            }
+            return blocks(parsed)
         }
         return rows.sorted { ($0.folder, $0.name) < ($1.folder, $1.name) }
+    }
+
+    /// Every file `parsed` holds, in the same order: what the panel draws a diff for, whether or not the computer's
+    /// own list names it (a path git quoted, or printed relative to a subfolder, still shows its diff).
+    public static func blocks(_ parsed: UnifiedDiff) -> [ChangedFile] {
+        parsed.files.map { file in
+            ChangedFile(
+                path: file.newPath ?? file.oldPath ?? file.id, added: UInt64(file.additions),
+                removed: UInt64(file.deletions), diff: file)
+        }
+        .sorted { ($0.folder, $0.name) < ($1.folder, $1.name) }
     }
 }
