@@ -282,7 +282,7 @@ final class PanelFrames {
 
 extension EnvironmentValues {
     @Entry var panelFrames: PanelFrames?
-    /// The agents (the sidebar, the list, a run) are on screen: false while Settings covers them, kept as they were.
+    /// The agents (the run list, a run) are on screen: false while Settings covers them, kept as they were.
     @Entry var agentsShown = true
 }
 

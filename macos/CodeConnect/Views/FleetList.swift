@@ -61,8 +61,8 @@ struct FleetList: View {
         let picked = selectable.filter(chosen.contains)
         VStack(spacing: 0) {
             // The head's controls stand at the end of the list's 256 pt, whatever the list's width, so the computer menu
-            // opens over the list and never past the window; the ended runs are every computer's, so no computer is
-            // offered over them.
+            // opens from the same place, over whatever is beside the list; the ended runs are every computer's, so no
+            // computer is offered over them.
             HStack(spacing: 4) {
                 Spacer(minLength: 0)
                 if scope == .active { ComputerFilter(filter: $filter, addComputer: addComputer) }
@@ -587,7 +587,10 @@ private struct ComputerChoice: View {
         ComputerMark(os: computer.machineOS).foregroundStyle(Theme.text2)
         Text(computer.machineName ?? "Unknown computer").font(Theme.ui(12.5))
             .foregroundStyle(live ? Theme.text : Theme.text3).lineLimit(1)
-        if !live { Text(RunListWords.offline).font(Theme.ui(12.5)).foregroundStyle(Theme.text3).fixedSize() }
+        // A link that is not working says so in its own word ("· Pair again", "· Blocked"), offline in the list's.
+        if let word = computer.linkHealth.machineWord {
+            Text(live ? "· \(word)" : RunListWords.offline).font(Theme.ui(12.5)).foregroundStyle(Theme.text3).fixedSize()
+        }
     }
 
     @ViewBuilder private func meters(_ load: MachineLoad?) -> some View {
@@ -747,7 +750,6 @@ private struct FleetLine: View {
             }
             if let elsewhere {
                 ComputerMark(os: elsewhere, size: 10).foregroundStyle(Theme.text3)
-                    .help(row.machineName ?? "")
             }
             Text(Format.age(since: since, now: AgeTick.renderTime(lastTick: lastTick)))
                 .font(Theme.ui(11.5))
@@ -759,6 +761,8 @@ private struct FleetLine: View {
         .padding(.horizontal, 10)
         .frame(height: 30)
         .background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
+        // Its computer on hover, which tells apart two runs named alike on two computers.
+        .help(row.machineName ?? "")
         .task(id: AgeClock(since: since, scale: .age)) {
             await AgeTick.follow(AgeClock(since: since, scale: .age)) { lastTick = $0 }
         }

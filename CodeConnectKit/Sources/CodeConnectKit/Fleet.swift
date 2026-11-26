@@ -566,7 +566,7 @@ public struct LinkHealth: Sendable, Equatable {
     }
 
     /// What a screen says about a link that is not working, or nil when it is: a short title, the whole sentence,
-    /// and the one thing to do. The iPhone's banner, and the Mac's computer row and list, say it in these words.
+    /// and the one thing to do. The iPhone's banner and the Mac's Settings › Computers say it in these words.
     public var notice: LinkNotice? {
         let device = HostDevice.current.name
         switch level {

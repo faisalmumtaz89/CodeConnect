@@ -4229,8 +4229,8 @@ public final class AppModel {
     private var pollingStats = false
     static let machineStatsInterval: Duration = .seconds(5)
 
-    /// Keep `machineStats` fresh while the calling view's task lives. The sidebar is
-    /// the one caller; a second concurrent call returns at once — one poll per model,
+    /// Keep `machineStats` fresh while the calling view's task lives. The run list's
+    /// computer menu is the one caller; a second concurrent call returns at once — one poll per model,
     /// never a second stream. While the link is up and the computer reports stats it
     /// asks every `machineStatsInterval`; it abstains otherwise, so an old daemon is
     /// never asked and a view that appears before the handshake still polls once it

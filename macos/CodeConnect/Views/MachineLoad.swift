@@ -1,6 +1,6 @@
 import Foundation
 
-/// What a computer's row in the sidebar shows of its latest CPU, memory and disk sample: each figure the sample has,
+/// What a computer's row in the run list's computer menu shows of its latest CPU, memory and disk sample: each figure the sample has,
 /// as a share of its whole for the row's meters, and the same figures in words for the row's hover. A figure the
 /// computer could not read is left out, never shown as 0%.
 struct MachineLoad {
