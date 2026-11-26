@@ -631,11 +631,11 @@ private struct LoadMeter: View {
     }
 }
 
-/// The list's foot: this Mac's Tailscale as its own daemon says it (`peers`), read as the Add sheet reads it, the whole
-/// sign-in, or in its place what is wrong in the words a computer's link uses; then the way into Settings. Nothing
-/// until the daemon has said, but Settings. Where this Mac's daemon answers is read every five seconds, as the Add
-/// sheet reads it, so its move from loopback onto Tailscale shows.
-private struct ListFoot: View {
+/// The list's foot, and Settings' under its own list: this Mac's Tailscale as its own daemon says it (`peers`), read as
+/// the Add sheet reads it, the whole sign-in, or in its place what is wrong in the words a computer's link uses; then
+/// the gear, into Settings or, in Settings, back out. Nothing until the daemon has said, but the gear. Where this Mac's
+/// daemon answers is read every five seconds, as the Add sheet reads it, so its move from loopback onto Tailscale shows.
+struct ListFoot: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
     let openSettings: () -> Void

@@ -39,7 +39,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 }
 
 /// Settings in the main window, in the sidebar's place: a back row to the agents, then the sections under their
-/// headings. One stop for the keyboard: ↑ and ↓ choose the section above or below.
+/// headings, and the run list's foot. One stop for the keyboard: ↑ and ↓ choose the section above or below.
 struct SettingsList: View {
     @Binding var section: SettingsSection
     let close: () -> Void
@@ -92,6 +92,7 @@ struct SettingsList: View {
                 }
             }
             Spacer()
+            ListFoot(openSettings: close)
         }
         .background(Theme.sidebar)
         // The keyboard comes here from whatever had it under Settings.
