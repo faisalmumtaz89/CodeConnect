@@ -70,12 +70,15 @@ pub fn remove_pending(root: &Path) {
     remove_session(root, PENDING);
 }
 
-/// `text` with each attached file's path on a line after "Attached:", as the agent is sent it.
+/// The line before a message's attached files' paths ([`attached`]).
+pub const ATTACHED: &str = "Attached:";
+
+/// `text` with each attached file's path on a line after [`ATTACHED`], as the agent is sent it.
 pub fn attached(text: String, paths: &[PathBuf]) -> String {
     if paths.is_empty() {
         return text;
     }
-    let mut lines = String::from("Attached:");
+    let mut lines = String::from(ATTACHED);
     for path in paths {
         lines.push('\n');
         lines.push_str(&path.to_string_lossy());

@@ -25,6 +25,7 @@
     "relaunchable": true,
     "session_id": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+    "title": "fix the tests",
     "updated_at": "2026-11-15T09:00:00.000Z"
   },
   "session_hosted_relaunched": {
@@ -102,6 +103,7 @@
     "project_label": "cc-rig",
     "session_id": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7RE1A0CH",
+    "title": "fix the tests",
     "updated_at": "2026-11-15T09:00:00.000Z"
   },
   "session_hosted_relaunched_events": [

@@ -110,6 +110,8 @@ db_ops! {
     fn max_seq(session_uid: String) -> u64;
     fn untold_commits(session_uid: String) -> Vec<(u64, String, u64)>;
     fn commits_told(session_uid: String, request_id: String, through: u64) -> ();
+    /// Each run's title ([`Store::run_titles`]).
+    fn run_titles() -> std::collections::HashMap<String, String>;
     fn filed_event(session_uid: String, source: Source, source_event_id: String) -> Option<(u64, Option<String>)>;
     fn session_facts(session_uid: String) -> protocol::facts::SessionFacts;
     /// The settings Codex last named for a Codex run's thread, as filed.

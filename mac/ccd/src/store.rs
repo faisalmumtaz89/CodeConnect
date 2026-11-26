@@ -813,6 +813,7 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "mail_wake",
     "mail_runs",
     "run_hosts",
+    "run_titles",
 ];
 
 /// One run removed by `codeconnect sessions prune`, and what went with it.
@@ -1291,6 +1292,74 @@ pub enum MutationClaim {
 /// (`None` once the account is removed).
 pub type RecordedAccount = Option<(String, Option<String>)>;
 
+/// The longest a run's title is ([`run_title`]), in characters, its ellipsis included.
+pub const RUN_TITLE_MAX_CHARS: usize = 80;
+
+/// The run's title `event` gives it, if it is the kind that does: the first line of a message the person sent the
+/// run through CodeConnect, its start's prompt or a later send, as ccd files it
+/// ([`crate::claude_host::person_row`]) or, for a Codex run, as its app-server files it (`text` alike); never a
+/// command to the agent or a mail wake. Cut to [`RUN_TITLE_MAX_CHARS`] with an ellipsis.
+fn run_title(pending: &PendingEvent) -> Option<String> {
+    if pending.kind != EventKind::UserMessage
+        || !matches!(pending.source, Source::Daemon | Source::Codex)
+    {
+        return None;
+    }
+    title_of(&pending.payload)
+}
+
+/// A person's message's title ([`run_title`]), from its payload: none for a command, a mail wake, or a message of
+/// only files, whose first line is [`crate::uploads::ATTACHED`].
+fn title_of(payload: &serde_json::Value) -> Option<String> {
+    let text = payload["text"].as_str()?;
+    if payload.get("command").is_some() || protocol::ipc::is_mail_nudge(text) {
+        return None;
+    }
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    if line == crate::uploads::ATTACHED {
+        return None;
+    }
+    Some(if line.chars().count() <= RUN_TITLE_MAX_CHARS {
+        line.to_string()
+    } else {
+        line.chars()
+            .take(RUN_TITLE_MAX_CHARS - 1)
+            .chain(['…'])
+            .collect()
+    })
+}
+
+/// Titles for the runs a store holds from before it kept them: each run's first message that gives one, read from
+/// its history once, as the table is made.
+fn fill_run_titles(conn: &Connection) -> Result<()> {
+    let rows = conn
+        .prepare(
+            "SELECT session_uid, payload FROM events
+              WHERE kind = ?1 AND source IN (?2, ?3) ORDER BY session_uid, seq",
+        )?
+        .query_map(
+            params![
+                EventKind::UserMessage.as_str(),
+                Source::Daemon.as_str(),
+                Source::Codex.as_str()
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (uid, payload) in rows {
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            continue;
+        };
+        if let Some(title) = title_of(&payload) {
+            conn.execute(
+                "INSERT OR IGNORE INTO run_titles(session_uid, title) VALUES(?1, ?2)",
+                params![uid, title],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         if let Some(parent) = path.parent() {
@@ -1371,7 +1440,12 @@ impl Store {
         // Asked of the schema, not of `user_version`, which a rollback rewrites.
         let pairings_predate_nodes =
             table_exists(&tx, "devices")? && !column_exists(&tx, "devices", "tailnet_node")?;
+        // Asked before the schema makes it: a store without `run_titles` has its runs' titles filled from history once.
+        let titles_kept = table_exists(&tx, "run_titles")?;
         create_schema(&tx)?;
+        if !titles_kept {
+            fill_run_titles(&tx)?;
+        }
         // **Every run without an engine host record goes, with everything filed under
         // it**: the runs the tmux-era engine made, which nothing in this build can host,
         // end or answer. Every start, so a crash between the drops above and this commit
@@ -1688,6 +1762,19 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(seq as u64)
+    }
+
+    /// Each run's title, by its uid, for the runs that have one ([`run_title`]): kept as the run's first such
+    /// message is filed, so the fleet listing reads it without reading any run's history.
+    pub fn run_titles(&self) -> Result<std::collections::HashMap<String, String>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare_cached("SELECT session_uid, title FROM run_titles")?;
+        let titles = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(titles)
     }
 
     /// What the log holds of the Codex turn `turn_id` of this run: whether its end is
@@ -6628,6 +6715,13 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
         -- a repeated request finds the run instead of starting another. `start`
         -- is the run's `start` line, as ccd sends it, kept so a restarted ccd can
         -- send it again to a host it never reached.
+        -- A run's title (`run_title`): kept with the first message that gives it one, never changed after. A run
+        -- filed before this table has none.
+        CREATE TABLE IF NOT EXISTS run_titles(
+            session_uid TEXT PRIMARY KEY,
+            title       TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS run_hosts(
             session_uid     TEXT PRIMARY KEY,
             request_id      TEXT    NOT NULL UNIQUE,
@@ -7397,6 +7491,12 @@ fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Resul
             pending.item_id,
         ],
     )?;
+    if let Some(title) = run_title(pending) {
+        tx.execute(
+            "INSERT OR IGNORE INTO run_titles(session_uid, title) VALUES(?1, ?2)",
+            params![pending.session_uid, title],
+        )?;
+    }
 
     Ok(Some(Event {
         seq: next as u64,
@@ -10780,6 +10880,155 @@ mod tests {
         let read = store.session_facts(&session.uid).unwrap();
         assert_eq!(read.ended_with, None, "the second process named none");
         assert_eq!(read, live);
+    }
+
+    /// **A store opened before titles were kept names each of its runs by its first message, not a later one**: the
+    /// table is filled from the runs' history once, when it is made; a message of only files names none.
+    #[test]
+    fn a_store_from_before_titles_names_its_runs_by_their_first_messages() {
+        let (store, path) = temp_store();
+        let said = |store: &Store, session: &SessionKey, id: &str, text: &str| {
+            let mut message = PendingEvent::new(
+                session,
+                EventKind::UserMessage,
+                json!({"text": text}),
+                Source::Daemon,
+            );
+            message.source_event_id = Some(id.to_string());
+            store.append_event(&message).unwrap();
+        };
+        let run = key("AA", "cc-1");
+        begin(&store, &run);
+        said(&store, &run, "s1", "Original task");
+        said(&store, &run, "s2", "please continue");
+        let files = key("BB", "cc-2");
+        begin(&store, &files);
+        said(
+            &store,
+            &files,
+            "s1",
+            &crate::uploads::attached(String::new(), &["/tmp/a.png".into()]),
+        );
+        store
+            .write()
+            .execute_batch("DROP TABLE run_titles")
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let titles = store.run_titles().unwrap();
+        assert_eq!(
+            titles.get(&run.uid).map(String::as_str),
+            Some("Original task")
+        );
+        assert_eq!(
+            titles.get(&files.uid),
+            None,
+            "a message of only files names no run"
+        );
+        said(&store, &run, "s3", "and the docs");
+        assert_eq!(
+            store
+                .run_titles()
+                .unwrap()
+                .get(&run.uid)
+                .map(String::as_str),
+            Some("Original task")
+        );
+    }
+
+    /// **A run's title is the first line of the first message the person sent it through CodeConnect**, as ccd or a
+    /// Codex run's app-server filed it: not Claude's transcript lines, a command, or a mail wake filed before it; cut at 80 characters with an ellipsis. A run
+    /// with no such message has none.
+    #[test]
+    fn a_runs_title_is_the_first_line_of_the_persons_first_message() {
+        let (store, _path) = temp_store();
+        let said = |session: &SessionKey, id: &str, payload: serde_json::Value, source: Source| {
+            let mut message = PendingEvent::new(session, EventKind::UserMessage, payload, source);
+            message.source_event_id = Some(id.to_string());
+            store.append_event(&message).unwrap();
+        };
+        let run = key("AA", "cc-1");
+        begin(&store, &run);
+        said(
+            &run,
+            "t1",
+            json!({"message": {"role": "user", "content": "the agent's own line"}}),
+            Source::Transcript,
+        );
+        said(
+            &run,
+            "s1",
+            json!({"text": protocol::ipc::MAIL_NUDGE_ACT}),
+            Source::Daemon,
+        );
+        said(
+            &run,
+            "s2",
+            json!({"text": "/compact", "command": "compact"}),
+            Source::Daemon,
+        );
+        said(
+            &run,
+            "s3",
+            json!({"text": "Retry the router on 5xx\nand keep the tests green"}),
+            Source::Daemon,
+        );
+        said(
+            &run,
+            "s4",
+            json!({"text": "a later message"}),
+            Source::Daemon,
+        );
+        let long = key("BB", "cc-2");
+        begin(&store, &long);
+        said(
+            &long,
+            "s1",
+            json!({"text": "x".repeat(100)}),
+            Source::Daemon,
+        );
+        let codex = key("DD", "cc-4");
+        begin(&store, &codex);
+        said(
+            &codex,
+            "c1",
+            json!({"text": protocol::ipc::MAIL_NUDGE_ACT, "interrupted": false}),
+            Source::Codex,
+        );
+        said(
+            &codex,
+            "c2",
+            json!({"text": "Audit the setup", "interrupted": false}),
+            Source::Codex,
+        );
+        let adopted = key("CC", "cc-3");
+        begin(&store, &adopted);
+        said(
+            &adopted,
+            "t1",
+            json!({"message": {"role": "user", "content": "typed at the computer"}}),
+            Source::Transcript,
+        );
+        let titles = store.run_titles().unwrap();
+        assert_eq!(
+            titles.get(&run.uid).map(String::as_str),
+            Some("Retry the router on 5xx")
+        );
+        assert_eq!(
+            titles.get(&long.uid).map(String::as_str),
+            Some(format!("{}…", "x".repeat(79)).as_str())
+        );
+        assert_eq!(
+            titles.get(&codex.uid).map(String::as_str),
+            Some("Audit the setup"),
+            "a Codex run's own filing"
+        );
+        assert_eq!(
+            titles.get(&adopted.uid),
+            None,
+            "a run started at its computer has no title yet"
+        );
+        assert_eq!(titles.len(), 3);
     }
 
     /// **A run's newest model receipt is read back after a restart as it was folded live**: the

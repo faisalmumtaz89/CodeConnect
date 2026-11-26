@@ -681,6 +681,7 @@ impl Run {
             relaunchable: false,
             switching: None,
             account: None,
+            title: None,
         }
     }
 

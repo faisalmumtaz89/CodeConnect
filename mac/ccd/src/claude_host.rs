@@ -6193,6 +6193,15 @@ mod tests {
         );
         assert_eq!(words(&rig, &uid), ["fix the tests", "and the docs"]);
         assert_eq!(cursor(&rig, &uid), 3);
+        let listed = rig.daemon.sessions().await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .find(|run| run.session_uid == uid)
+                .and_then(|run| run.title.as_deref()),
+            Some("fix the tests"),
+            "the fleet names the run by its start's prompt"
+        );
         let mut live = Vec::new();
         while let Ok(event) = broadcast.try_recv() {
             if event.session_uid == uid && event.kind == EventKind::UserMessage {

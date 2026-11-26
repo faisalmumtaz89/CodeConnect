@@ -84,6 +84,7 @@
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "title": "Reply with the single word amber and nothing else.",
         "updated_at": "2026-11-15T00:00:00Z"
       }
     },
@@ -135,6 +136,7 @@
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "title": "Reply with the single word amber and nothing else.",
         "updated_at": "2026-11-15T00:00:00Z"
       }
     },
@@ -255,6 +257,7 @@
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "title": "Reply with the single word amber and nothing else.",
         "updated_at": "2026-11-15T00:00:00Z"
       }
     },
@@ -286,6 +289,7 @@
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "title": "Reply with the single word amber and nothing else.",
         "updated_at": "2026-11-15T00:00:00Z"
       }
     },
@@ -324,6 +328,7 @@
         "project_label": "project",
         "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
         "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "title": "Reply with the single word amber and nothing else.",
         "updated_at": "2026-11-15T00:00:00Z"
       }
     }
@@ -419,6 +424,7 @@
     "project_label": "project",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "title": "run the shell command: touch marker.txt, then stop",
     "updated_at": "2026-11-15T00:00:00Z"
   },
   "session_summary_ended_by_end_run": {
@@ -438,6 +444,7 @@
     "project_label": "project",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "title": "run the shell command: touch marker.txt, then stop",
     "updated_at": "2026-11-15T00:00:00Z"
   },
   "session_summary_relaunchable": {
@@ -477,6 +484,7 @@
     "project_label": "project",
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
     "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "title": "run the shell command: touch marker.txt, then stop",
     "updated_at": "2026-11-15T00:00:00Z"
   }
 }
