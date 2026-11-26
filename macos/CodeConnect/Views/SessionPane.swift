@@ -55,7 +55,7 @@ struct SessionPane: View {
                 if tab == .changes {
                     // The run's shell at the panel's foot, until the Changes panel gives it its own place there.
                     VStack(spacing: 0) {
-                        ChangesTab(model: model, key: row.id)
+                        ChangesPanel(model: model, key: row.id)
                         TerminalFoot(row: row, model: model)
                     }
                 }
@@ -150,7 +150,7 @@ private struct Heading: View {
                 ForEach(SessionTab.allCases, id: \.self) { each in
                     UnderlineTab(
                         title: each.title, id: each.id, selected: tab == each,
-                        count: each == .changes ? ChangesTab.fileCount(model: model, key: row.id) : nil
+                        count: each == .changes ? ChangesPanel.fileCount(model: model, key: row.id) : nil
                     ) { tab = each }
                 }
             }
