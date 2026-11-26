@@ -496,7 +496,8 @@ fn from_branch(pr: &serde_json::Value, head: &Repo, branch: &str) -> bool {
 const CHECKS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { \
     pullRequest(number: $number) { commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { \
     pageInfo { hasNextPage } nodes { __typename \
-    ... on CheckRun { name status conclusion startedAt completedAt detailsUrl annotations(first: 10) { nodes { annotationLevel message } } } \
+    ... on CheckRun { name status conclusion startedAt completedAt detailsUrl annotations(first: 10) { nodes { annotationLevel message } } \
+    checkSuite { workflowRun { event workflow { name } } } } \
     ... on StatusContext { context state targetUrl } } } } } } } } } }";
 
 /// `pr`'s checks at its head, asked of GitHub with [`CHECKS_QUERY`]; `None` when the answer is
@@ -562,15 +563,24 @@ fn checks_from(
     }
     let complete = contexts["pageInfo"]["hasNextPage"].as_bool() == Some(false);
     let text = |value: &serde_json::Value| value.as_str().map(str::to_string);
-    let mut checks: Vec<protocol::ws::Check> = contexts["nodes"]
+    // Each with what tells its runs apart: a check run's name, workflow and event (`None` for a
+    // status, never merged: GitHub lists one per context).
+    let mut checks: Vec<(Option<RunIdentity>, protocol::ws::Check)> = contexts["nodes"]
         .as_array()?
         .iter()
         .filter_map(|node| {
             Some(match node["__typename"].as_str()? {
                 "CheckRun" => {
                     let state = run_state(node["status"].as_str(), node["conclusion"].as_str());
-                    protocol::ws::Check {
-                        name: node["name"].as_str()?.to_string(),
+                    let name = node["name"].as_str()?.to_string();
+                    let run = &node["checkSuite"]["workflowRun"];
+                    let identity = (
+                        name.clone(),
+                        text(&run["workflow"]["name"]),
+                        text(&run["event"]),
+                    );
+                    let check = protocol::ws::Check {
+                        name,
                         state,
                         started_at: text(&node["startedAt"]),
                         completed_at: text(&node["completedAt"]),
@@ -578,27 +588,35 @@ fn checks_from(
                         failure_line: (state == protocol::ws::CheckState::Fail)
                             .then(|| failure_line(&node["annotations"]["nodes"]))
                             .flatten(),
-                    }
+                    };
+                    (Some(identity), check)
                 }
-                "StatusContext" => protocol::ws::Check {
-                    name: node["context"].as_str()?.to_string(),
-                    state: status_state(node["state"].as_str()),
-                    started_at: None,
-                    completed_at: None,
-                    url: text(&node["targetUrl"]),
-                    failure_line: None,
-                },
+                "StatusContext" => (
+                    None,
+                    protocol::ws::Check {
+                        name: node["context"].as_str()?.to_string(),
+                        state: status_state(node["state"].as_str()),
+                        started_at: None,
+                        completed_at: None,
+                        url: text(&node["targetUrl"]),
+                        failure_line: None,
+                    },
+                ),
                 _ => return None,
             })
         })
         .collect();
-    // A check run again on the same commit (a re-run, a label) is listed once per run: the one
-    // started last stands, as gh's own `pr checks` shows it.
-    checks.sort_by(|a, b| (&a.name, &b.started_at).cmp(&(&b.name, &a.started_at)));
-    checks.dedup_by(|later, kept| later.name == kept.name);
+    // A check run again on the same commit, workflow and event (a re-run, a label) is listed
+    // once per run: the one started last stands, as gh's own `pr checks` shows it.
+    checks.sort_by(|(a, x), (b, y)| (a, &y.started_at).cmp(&(b, &x.started_at)));
+    checks.dedup_by(|(later, _), (kept, _)| later.is_some() && later == kept);
+    let mut checks: Vec<protocol::ws::Check> = checks.into_iter().map(|(_, check)| check).collect();
     checks.sort_by(|a, b| (a.state, &a.name).cmp(&(b.state, &b.name)));
     Some((checks, complete))
 }
+
+/// What tells a check run's runs apart from other checks': its name, workflow and event.
+type RunIdentity = (String, Option<String>, Option<String>);
 
 /// A check run's state from its `status` and `conclusion`.
 fn run_state(status: Option<&str>, conclusion: Option<&str>) -> protocol::ws::CheckState {
@@ -610,7 +628,9 @@ fn run_state(status: Option<&str>, conclusion: Option<&str>) -> protocol::ws::Ch
         Some("SUCCESS") => Pass,
         Some("FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED") => Fail,
         Some("CANCELLED") => Cancelled,
-        Some("SKIPPED" | "NEUTRAL" | "STALE") => Skipped,
+        Some("SKIPPED" | "NEUTRAL") => Skipped,
+        // Left incomplete past GitHub's 14 days: still owed, as gh shows it.
+        Some("STALE") => Pending,
         _ => Unknown,
     }
 }
@@ -804,6 +824,7 @@ mod tests {
                 ("a new kind", Unknown),
                 ("build (ubuntu)", Pass),
                 ("license/cla", Pass),
+                ("lint", Pass),
                 ("docs", Skipped),
             ]
         );
@@ -829,6 +850,11 @@ mod tests {
             by("lint").failure_line,
             None,
             "the runner's exit code says nothing more"
+        );
+        assert_eq!(
+            run_state(Some("COMPLETED"), Some("STALE")),
+            Pending,
+            "left incomplete past 14 days: still owed"
         );
         assert_eq!(by("deploy preview").completed_at, None);
         let status = by("ci/circleci");
@@ -857,7 +883,7 @@ mod tests {
         rollup["contexts"]["pageInfo"]["hasNextPage"] = serde_json::Value::Bool(true);
         let (checks, complete) =
             checks_from(&more, "8a93995195c4e5a299e227a00f236bf88199674a").unwrap();
-        assert_eq!((checks.len(), complete), (9, false));
+        assert_eq!((checks.len(), complete), (10, false));
         let mut none = answer;
         none["data"]["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]
             ["statusCheckRollup"] = serde_json::Value::Null;
