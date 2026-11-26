@@ -103,7 +103,8 @@ struct BranchRow: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "arrow.triangle.branch").font(.system(size: 11)).accessibilityHidden(true)
-                Text(verbatim: title).font(Theme.mono(12)).lineLimit(1).truncationMode(.middle)
+                // A branch keeps meaning at both ends ("feature/oauth-device-flow"): cut in its middle.
+                Text(verbatim: title).font(Theme.mono(12)).barText(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(Theme.text)

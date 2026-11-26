@@ -14,7 +14,9 @@ struct ReplyUsage: View {
     var body: some View {
         TimelineView(.everyMinute) { _ in
             if let bar = model.replyBar(for: key, now: .now), bar.context != nil || !bar.limits.isEmpty {
+                // Never cut: the figures keep their width, and the bar's words give way.
                 figures(bar)
+                    .fixedSize()
                     .contentShape(Rectangle())
                     .onHover { hovered = $0 }
                     // Above the figures, its trailing edge on theirs, clear of them by the panels' one gap: its foot on

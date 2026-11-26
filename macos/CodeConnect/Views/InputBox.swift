@@ -1,15 +1,13 @@
 import SwiftUI
 
 /// The one box a message is written in, the start form's and a run's reply box alike: the message on top, and under it
-/// one bar, its controls on the leading side and Submit (or what stands in its place) on the trailing side, or, where
-/// they do not fit at their full names, two rows of them. It draws only the box: each place hands in its own field and
-/// controls, with their actions, keys and identifiers.
+/// one bar, its controls on the leading side and Submit (or what stands in its place) on the trailing side, always one
+/// row: where the controls do not fit at their full names, their words are cut (`barText`), in the order their
+/// `layoutPriority` gives. It draws only the box: each place hands in its own field and controls, with their actions,
+/// keys and identifiers.
 struct InputBox<Field: View, Leading: View, Trailing: View>: View {
     /// 50 before a run, 46 in one.
     let barHeight: CGFloat
-    /// A trailing control's panel or card is open: on two rows, the trailing one is drawn over the leading one and
-    /// takes the pointer first; else the leading one over the trailing one. An open panel is never under the other row.
-    var trailingOpen = false
     @ViewBuilder let field: Field
     @ViewBuilder let leading: Leading
     @ViewBuilder let trailing: Trailing
@@ -22,30 +20,12 @@ struct InputBox<Field: View, Leading: View, Trailing: View>: View {
                 .padding(.top, 18)
                 .padding(.horizontal, 20)
                 .padding(.bottom, 10)
-            // One row while every control fits at its full name; else the leading ones on a row of their own and the
-            // trailing ones under them, at the trailing side. Names cut only in the second form, when even a row of
-            // their own is too narrow for them.
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 6) {
-                    leading
-                    Spacer(minLength: 8)
-                    trailing
-                }
-                .frame(height: barHeight)
-                VStack(spacing: 0) {
-                    HStack(spacing: 6) {
-                        leading
-                        Spacer(minLength: 0)
-                    }
-                    .frame(height: barHeight)
-                    .zIndex(trailingOpen ? 0 : 1)
-                    HStack(spacing: 6) {
-                        Spacer(minLength: 0)
-                        trailing
-                    }
-                    .frame(height: barHeight)
-                }
+            HStack(spacing: 6) {
+                leading
+                Spacer(minLength: 8)
+                trailing
             }
+            .frame(height: barHeight)
             .padding(.horizontal, InputBoxLayout.barInset)
         }
         // Drawn behind the contents, rim and all: a menu opened from the bar may sit over the box's edge and covers it.
@@ -117,6 +97,15 @@ struct InputBoxSubmit: View {
 }
 
 extension View {
+    /// A bar chip's words, on one line: whole while the bar has room for them, else cut with "…" where `cut` says,
+    /// never narrower than `InputBoxChip.floor`, so a chip is never empty. A short word is never widened.
+    func barText(_ cut: Text.TruncationMode) -> some View {
+        ViewThatFits(in: .horizontal) {
+            lineLimit(1).fixedSize()
+            lineLimit(1).truncationMode(cut).frame(minWidth: InputBoxChip.floor, alignment: .leading)
+        }
+    }
+
     /// A chip in the box's bar, drawn around its label: 8 pt in at the sides, `InputBoxChip.height` tall, corners of 8,
     /// filled while its menu is `open`; `bordered`, the model chip's fine border. Its whole frame takes a click.
     func inputBoxChip(open: Bool, bordered: Bool = false) -> some View {
@@ -137,10 +126,12 @@ enum InputBoxLayout {
     static let lineSpacing: CGFloat = 5
 }
 
-/// The bar's chips' one size: their words 12.5 pt medium, 6 pt above and below.
+/// The bar's chips' one size: their words 12.5 pt medium, 6 pt above and below; cut words keep at least `floor`.
 enum InputBoxChip {
     static let height: CGFloat = 28
     static let font = Theme.ui(12.5, .medium)
+    /// About four letters and "…": a chip cut to it still says which it is.
+    static let floor: CGFloat = 40
 }
 
 /// A card's colours, the menus' (`menuCard`) and the usage tip's: its fill, its fine border, and its muted words.

@@ -274,7 +274,7 @@ private struct Composer: View {
 
     private var box: some View {
         let agent = summary?.agent.displayName ?? "the agent"
-        return InputBox(barHeight: 46, trailingOpen: usageHovered) {
+        return InputBox(barHeight: 46) {
             // The files going with the message stand above its words.
             VStack(alignment: .leading, spacing: 12) {
                 if !model.files(for: key).isEmpty {
@@ -353,6 +353,7 @@ private struct Composer: View {
                 Text(counter)
                     .font(Theme.mono(11))
                     .foregroundStyle(ComposeDraft(text: kept.reply).isOverCeiling ? Theme.red : Theme.text3)
+                    .fixedSize()
                     .accessibilityIdentifier("session.composer.count")
             }
         } trailing: {
