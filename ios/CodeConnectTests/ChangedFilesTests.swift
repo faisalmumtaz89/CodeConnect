@@ -62,6 +62,27 @@ final class ChangedFilesTests: XCTestCase {
         XCTAssertNil(byPath["assets/logo.png"]?.diff)
     }
 
+    /// A file git prints with a quoted path (its default for a name outside ASCII) is in the computer's list but joins
+    /// no parsed file: its row has no diff to open, and its diff is still drawn among the blocks.
+    func testEveryParsedFileIsABlockEvenWhenItsRowCannotJoinIt() throws {
+        let quoted = #"""
+            diff --git "a/caf\303\251.txt" "b/caf\303\251.txt"
+            index 1111111..2222222 100644
+            --- "a/caf\303\251.txt"
+            +++ "b/caf\303\251.txt"
+            @@ -1 +1 @@
+            -a
+            +b
+
+            """#
+        let raw = try diff(files: #"[{"path":"café.txt","status":"modified","added":1,"removed":1}]"#)
+        let parsed = UnifiedDiff.parse(quoted)
+
+        XCTAssertNil(ChangedFile.rows(raw, parsed).first?.diff, "the quoted header names no file the list names")
+        XCTAssertEqual(ChangedFile.blocks(parsed).count, 1, "its diff is still a block")
+        XCTAssertNotNil(ChangedFile.blocks(parsed).first?.diff)
+    }
+
     func testAnOlderComputersRowsAreTheFilesItsDiffHolds() throws {
         let rows = ChangedFile.rows(try diff(files: nil), UnifiedDiff.parse(unified))
 

@@ -11,6 +11,8 @@ struct ChangesPanel: View {
     let model: AppModel
     let key: String
     @State private var hunks: HunkActions
+    /// The diff last read, kept on screen while it is read again, so a reread loses no place, fold or comment.
+    @State private var shown: (raw: SessionDiff, parsed: UnifiedDiff, fetchedAt: Date)?
 
     init(model: AppModel, key: String) {
         self.model = model
@@ -25,6 +27,8 @@ struct ChangesPanel: View {
                 BranchLine(branch: branch)
             }
             switch state {
+            case .loading where shown != nil:
+                if let shown { loaded(shown.raw, shown.parsed, shown.fetchedAt) }
             case .idle, .loading:
                 Message(id: "changes.loading", title: ChangesWords.reading)
             case .failed(.app(let reason)):
@@ -35,30 +39,23 @@ struct ChangesPanel: View {
                 Message(
                     id: "changes.failed", title: ChangesWords.couldNotRead,
                     sentence: ChangesWords.itsReason, quote: (reason, "changes.failed.reason"))
-            case .loaded(let raw, let parsed, _) where parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil:
-                Message(
-                    id: "changes.clean", title: ChangesWords.noUncommitted,
-                    sentence: ChangesWords.clean)
-            case .loaded(let raw, let parsed, _) where parsed.isEmpty && raw.files?.isEmpty != false:
-                Message(
-                    id: "changes.empty", title: ChangesWords.noDiff,
-                    sentence: ChangesWords.computersReason, quote: (raw.note ?? "", "changes.note"))
             case .loaded(let raw, let parsed, let fetchedAt):
-                let files = ChangedFile.rows(raw, parsed)
-                StateLine(files: files, cut: raw.truncated || raw.filesTruncated, read: raw.capturedDate ?? fetchedAt)
-                Band(count: files.count)
-                Document(raw: raw, diff: parsed, files: files).environment(hunks)
+                loaded(raw, parsed, fetchedAt)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.window)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("changes.pane")
-        .task(id: key) {
-            if case .idle = model.diffState(for: key) { model.loadDiff(key: key) }
+        // Read when it opens, and again when the run's computer counts its lines anew (a turn's end), so the panel
+        // follows the run.
+        .task(id: key) { reread() }
+        .onChange(of: model.shownSummary(for: key)?.diffStat) { _, _ in reread() }
+        .onChange(of: loadedAt) { _, _ in
+            if case .loaded(let raw, let parsed, let fetchedAt) = model.diffState(for: key) {
+                shown = (raw, parsed, fetchedAt)
+            }
         }
-        // Read again when the run's computer counts its lines anew (a turn's end), so the panel follows the run.
-        .onChange(of: model.shownSummary(for: key)?.diffStat) { _, _ in model.loadDiff(key: key, force: true) }
         // Asked again the moment the link is back, as the iPhone does: only after the app's own link failure, never
         // after a refusal the computer made.
         .onChange(of: model.daemonProfile.isConnected) { _, connected in
@@ -69,6 +66,35 @@ struct ChangesPanel: View {
             } else if state.failedOnTheLink {
                 model.loadDiff(key: key, force: true)
             }
+        }
+    }
+
+    /// When the diff on hand was read, while one is.
+    private var loadedAt: Date? {
+        if case .loaded(_, _, let fetchedAt) = model.diffState(for: key) { return fetchedAt }
+        return nil
+    }
+
+    /// Asks for the diff again, unless a read is already on its way (the computer takes one at a time).
+    private func reread() {
+        if !model.diffState(for: key).isLoading { model.loadDiff(key: key, force: true) }
+    }
+
+    /// A diff the computer read: clean when it changed nothing and said nothing, its note when it said why it is
+    /// empty, else the state line, the band and the document.
+    @ViewBuilder
+    private func loaded(_ raw: SessionDiff, _ parsed: UnifiedDiff, _ fetchedAt: Date) -> some View {
+        if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil {
+            Message(id: "changes.clean", title: ChangesWords.noUncommitted, sentence: ChangesWords.clean)
+        } else if parsed.isEmpty && raw.files?.isEmpty != false {
+            Message(
+                id: "changes.empty", title: ChangesWords.noDiff,
+                sentence: ChangesWords.computersReason, quote: (raw.note ?? "", "changes.note"))
+        } else {
+            let files = ChangedFile.rows(raw, parsed)
+            StateLine(files: files, cut: raw.truncated || raw.filesTruncated, read: raw.capturedDate ?? fetchedAt)
+            Band(count: files.count)
+            Document(raw: raw, diff: parsed, files: files).environment(hunks)
         }
     }
 
@@ -208,10 +234,9 @@ private struct Document: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(files) { file in
-                        FileRow(file: file) {
-                            guard file.diff != nil else { return }
-                            folded.remove(file.id)
-                            withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo(file.id, anchor: .top) }
+                        FileRow(file: file) { block in
+                            folded.remove(block)
+                            withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo("block:\(block)", anchor: .top) }
                         }
                     }
                 }
@@ -227,16 +252,14 @@ private struct Document: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("changes.note")
                     }
-                    ForEach(files) { file in
-                        if let fileDiff = file.diff {
-                            FileBlock(
-                                file: fileDiff,
-                                expanded: Binding(
-                                    get: { !folded.contains(file.id) },
-                                    set: { open in if open { folded.remove(file.id) } else { folded.insert(file.id) } })
-                            )
-                            .id(file.id)
-                        }
+                    ForEach(ChangedFile.blocks(diff).compactMap(\.diff)) { fileDiff in
+                        FileBlock(
+                            file: fileDiff,
+                            expanded: Binding(
+                                get: { !folded.contains(fileDiff.id) },
+                                set: { open in if open { folded.remove(fileDiff.id) } else { folded.insert(fileDiff.id) } })
+                        )
+                        .id("block:\(fileDiff.id)")
                     }
                     let extra = raw.files == nil ? (diff.preamble + diff.trailing).filter { !$0.allSatisfy(\.isWhitespace) } : []
                     if !extra.isEmpty {
@@ -269,13 +292,24 @@ private struct Document: View {
 }
 
 /// One changed file in the panel's list: its folder quiet, its name plain, and its lines when they were counted. A
-/// click opens its diff and brings it up, where the capture holds one.
+/// click opens its diff and brings it up, where the capture holds one; a file with none (an untracked one) is a plain
+/// row.
 private struct FileRow: View {
     let file: ChangedFile
-    let open: () -> Void
+    /// Opens the diff block with this id and brings it up.
+    let open: (String) -> Void
 
     var body: some View {
-        Button(action: open) {
+        if let block = file.diff?.id {
+            Button { open(block) } label: { row }
+                .buttonStyle(.hover(id: "changes.row.\(file.id)"))
+                .accessibilityIdentifier("changes.row.\(file.id)")
+        } else {
+            row.accessibilityElement(children: .combine).accessibilityIdentifier("changes.row.\(file.id)")
+        }
+    }
+
+    private var row: some View {
             HStack(spacing: 8) {
                 Image(systemName: "doc").font(.system(size: 10)).foregroundStyle(Theme.text3).accessibilityHidden(true)
                 (Text(verbatim: file.folder.displaySafe).foregroundStyle(Theme.text3)
@@ -291,9 +325,6 @@ private struct FileRow: View {
             .padding(.horizontal, 12)
             .frame(height: 30)
             .contentShape(Rectangle())
-        }
-        .buttonStyle(.hover(id: "changes.row.\(file.id)"))
-        .accessibilityIdentifier("changes.row.\(file.id)")
     }
 }
 
