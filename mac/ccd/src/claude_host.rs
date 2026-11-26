@@ -8311,6 +8311,79 @@ mod tests {
         stop(&played.dir);
     }
 
+    /// **A hosted Claude run at its 5-hour limit, as an app is sent it** (minor 54). `fixtures/claude/run-limit-wire.json`
+    /// is emitted by this build; a copy of it under `ios/` is kept byte-identical by
+    /// `fixtures/check-duplicated-fixtures.sh`.
+    #[tokio::test]
+    async fn the_run_limit_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/run-limit-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_run_limit_wire().await,
+            committed,
+            "the committed run-limit wire no longer matches what this build emits. Regenerate it with cargo test -p \
+             ccd --bin ccd -- --ignored regenerate_the_run_limit_wire_fixture, and copy it to \
+             ios/CodeConnectTests/Resources/"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/run-limit-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_run_limit_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_run_limit_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/run-limit-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// A live hosted run whose claude said a request was refused at the 5-hour window: the `sessions` frame an app is
+    /// sent for it, with the run's names, folder and clock reads pinned.
+    async fn derived_run_limit_wire() -> serde_json::Value {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        sdk(
+            &mut played.write,
+            4,
+            serde_json::json!({"type": "rate_limit_event", "uuid": "9d1f0000-0000-4000-8000-0000000003a1",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour"}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let mut summary = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        stop(&played.dir);
+        let pinned = "01K1B3XQ8ZC0DE5FGH7L1M1T00";
+        for (key, value) in [
+            ("session_uid", pinned),
+            ("session_id", pinned),
+            ("cwd", "/Users/person/project"),
+            ("project_label", "project"),
+            ("created_at", "2026-11-26T10:00:00.000Z"),
+            ("updated_at", "2026-11-26T10:05:00.000Z"),
+        ] {
+            summary[key] = value.into();
+        }
+        if summary["transcript_path"].is_string() {
+            summary["transcript_path"] =
+                "/Users/person/.claude/projects/project/session.jsonl".into();
+        }
+        summary["limit"]["at"] = "2026-11-26T10:05:00.000Z".into();
+        serde_json::to_value(protocol::ws::ServerMessage::Sessions {
+            sessions: vec![serde_json::from_value(summary).unwrap()],
+        })
+        .unwrap()
+    }
+
     /// **claude's word that its plan's limits changed reads the run's account at most once a [`FACTS_FRESH`]**
     /// (306 Slice F): claude sends a `rate_limit_event` on every turn, so two runs on one account sending six
     /// between them start one read of the account (one `auth status`, one usage launch through the host), each event
