@@ -525,6 +525,20 @@ private struct PanelRow: ViewModifier {
     private func register() { light?.register(index, id: id, enabled: choosable && isEnabled, choose: choose) }
 }
 
+/// A computer's mark, wherever the app names a computer (a run's header, the run list's filter, Settings): a Mac's
+/// screen, or a Linux server's stacked racks, as the daemon says its system is (`os`, "macos" or "linux"); a computer
+/// that hasn't said draws as a Mac. The words beside it name it; the mark itself is not read out.
+struct ComputerMark: View {
+    let os: String?
+    var size: CGFloat = 11
+
+    var body: some View {
+        Image(systemName: os == "linux" ? "server.rack" : "desktopcomputer")
+            .font(.system(size: size))
+            .accessibilityHidden(true)
+    }
+}
+
 /// The one menu's measures: its card's inset and corners, and its rows' heights, gap and lit corners.
 enum MenuMetrics {
     /// The card's padding round its rows.
