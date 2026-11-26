@@ -35,25 +35,31 @@ struct ChangesPanel: View {
             // computer, the branch the run's summary names and the diff's own count. A read that found no repository
             // names no branch.
             if let git {
+                // A pull request just opened stands for the one the repository has not read yet.
+                let opened: (number: UInt64, url: String)? =
+                    if case .opened(let number, let url) = model.gitActionState(for: key) { (number, url) } else { nil }
                 BranchLine(
                     branch: git.branch?.displaySafe, base: git.base?.name.displaySafe,
-                    pullRequest: git.pullRequest.flatMap { URL(string: $0.url) }, host: git.ghHost ?? "github.com")
+                    pullRequest: (git.pullRequest?.url ?? opened?.url).flatMap { URL(string: $0) },
+                    host: git.ghHost ?? "github.com")
                 // The panel's one action: a commit while there are changes; once they are committed, a pull request
                 // into the repository the computer names, while the branch has none. The line under the state says
                 // whether it can be done now, and the action's row follows.
                 let committable = model.commitsChanges && git.changed.files > 0
                 let target = git.ghRepo.map { ChangesWords.pullRequestTarget(repo: $0, base: git.base?.name) }
                 let proposable =
-                    !committable && model.opensPullRequests && git.pullRequest == nil && (git.ahead ?? 0) > 0
-                    && git.branch != nil && target != nil
+                    !committable && model.opensPullRequests && git.pullRequest == nil && opened == nil
+                    && (git.ahead ?? 0) > 0 && git.branch != nil && target != nil
                 VStack(alignment: .leading, spacing: 0) {
                     StateLine(
-                        text: ChangesWords.state(git), delta: nil, read: ISO8601.parse(git.readAt),
+                        text: git.pullRequest == nil && opened != nil
+                            ? "PR #\(opened?.number ?? 0) · Open" : ChangesWords.state(git),
+                        delta: nil, read: ISO8601.parse(git.readAt),
                         note: committable
                             ? commitWait(git) ?? ChangesWords.commitReady
-                            : proposable ? commitWait(git) ?? target : nil)
+                            : proposable ? pullRequestWait(git) ?? target : nil)
                     if committable { CommitRow(row: row, model: model, ready: commitWait(git) == nil) }
-                    if proposable { PullRequestRow(row: row, model: model, ready: commitWait(git) == nil) }
+                    if proposable { PullRequestRow(row: row, model: model, ready: pullRequestWait(git) == nil) }
                 }
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             } else if reply == nil, let branch = row.summary.gitBranch?.displaySafe {
@@ -105,6 +111,18 @@ struct ChangesPanel: View {
         if git.unmerged { return ChangesWords.commitWaitsMerge }
         if git.branch == nil { return ChangesWords.commitWaitsBranch }
         return nil
+    }
+
+    /// Why Create PR cannot be pressed yet: what holds a commit back, then what the computer would refuse it for (the
+    /// branch is the base itself; gh is missing or signed out); nil when it can.
+    private func pullRequestWait(_ git: RunGit) -> String? {
+        if let wait = commitWait(git) { return wait }
+        if git.base?.name == git.branch { return ChangesWords.pullRequestWaitsBase }
+        switch git.gh {
+        case .signedOut: return ChangesWords.pullRequestWaitsSignIn
+        case .missing: return ChangesWords.pullRequestWaitsGh
+        default: return nil
+        }
     }
 
     /// The diff a read gave, when the state holds one.
@@ -188,13 +206,18 @@ private struct BranchLine: View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.triangle.branch").font(.system(size: 11)).foregroundStyle(Theme.text3)
                 .accessibilityHidden(true)
-            Text(verbatim: branch ?? "Detached HEAD").font(Theme.mono(12)).foregroundStyle(Theme.text)
-                .lineLimit(1).truncationMode(.middle)
-            if let base, base != branch {
-                Image(systemName: "arrow.right").font(.system(size: 9)).foregroundStyle(Theme.text3)
-                    .accessibilityLabel("onto")
-                Text(verbatim: base).font(Theme.mono(12)).foregroundStyle(Theme.text3).lineLimit(1)
+            // The branch and its base read as one; the pull request's link stands on its own.
+            HStack(spacing: 8) {
+                Text(verbatim: branch ?? "Detached HEAD").font(Theme.mono(12)).foregroundStyle(Theme.text)
+                    .lineLimit(1).truncationMode(.middle)
+                if let base, base != branch {
+                    Image(systemName: "arrow.right").font(.system(size: 9)).foregroundStyle(Theme.text3)
+                        .accessibilityLabel("onto")
+                    Text(verbatim: base).font(Theme.mono(12)).foregroundStyle(Theme.text3).lineLimit(1)
+                }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("changes.branch")
             Spacer(minLength: 0)
             if let pullRequest {
                 Link(destination: pullRequest) { Text(verbatim: "\(host) ↗") }
@@ -205,8 +228,6 @@ private struct BranchLine: View {
         }
         .padding(.horizontal, 20)
         .padding(.top, 14)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("changes.branch")
     }
 }
 
@@ -302,6 +323,8 @@ private struct PullRequestRow: View {
     let model: AppModel
     /// The agent is quiet, so the pull request can be opened.
     let ready: Bool
+    /// A confirmation or a sheet covers the window: ⇧⌘P must not act under it.
+    @FocusedValue(\.windowCovered) private var covered
 
     var body: some View {
         let state = model.gitActionState(for: row.id)
@@ -310,7 +333,7 @@ private struct PullRequestRow: View {
                 model.createPullRequest(key: row.id)
             }
             .keyboardShortcut("p", modifiers: [.command, .shift])
-            .disabled(!ready || state == .working)
+            .disabled(!ready || state == .working || covered == true)
             if case .refused(let why, .pullRequest) = state {
                 Text(why)
                     .font(Theme.ui(12))

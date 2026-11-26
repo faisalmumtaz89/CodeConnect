@@ -52,15 +52,15 @@ final class ChangesStateWordsTests: XCTestCase {
     /// an outcome not known (or a code this build does not know) never claimed either way.
     func testACommitsRefusalIsWordedByItsCode() {
         XCTAssertEqual(
-            ChangesWords.actionRefused(code: "nothing_to_commit", detail: nil), "Nothing has changed since the last commit.")
+            ChangesWords.actionRefused(code: "nothing_to_commit", detail: nil, step: .commit), "Nothing has changed since the last commit.")
         XCTAssertEqual(
-            ChangesWords.actionRefused(code: "git_failed", detail: "pre-commit hook: fmtcheck failed"),
+            ChangesWords.actionRefused(code: "git_failed", detail: "pre-commit hook: fmtcheck failed", step: .commit),
             "Git did not commit. pre-commit hook: fmtcheck failed", "git's words, as it gave them")
         XCTAssertEqual(
-            ChangesWords.actionRefused(code: "busy", detail: nil),
+            ChangesWords.actionRefused(code: "busy", detail: nil, step: .commit),
             "A run in this folder is working or waiting for you, so nothing was committed.", "any run in the folder")
-        XCTAssertEqual(ChangesWords.actionRefused(code: "indeterminate", detail: nil), ChangesWords.actionUnknown)
-        XCTAssertEqual(ChangesWords.actionRefused(code: "a_newer_code", detail: "x"), ChangesWords.actionUnknown)
+        XCTAssertEqual(ChangesWords.actionRefused(code: "indeterminate", detail: nil, step: .commit), ChangesWords.actionUnknown)
+        XCTAssertEqual(ChangesWords.actionRefused(code: "a_newer_code", detail: "x", step: .commit), ChangesWords.actionUnknown)
     }
 
     /// A branch with a pull request (minor 60): the line names it first, by its number and what became of it, then any
@@ -73,7 +73,10 @@ final class ChangesStateWordsTests: XCTestCase {
         XCTAssertEqual(
             ChangesWords.state(try git(files: 1, ahead: 2, pushed: true, pr: pr("open"))), "PR #12 · Open · 1 file changed")
         XCTAssertEqual(ChangesWords.state(try git(files: 0, ahead: 0, pr: pr("merged"))), "PR #12 · Merged into main")
-        XCTAssertEqual(ChangesWords.state(try git(files: 0, ahead: 2, pr: pr("closed"))), "PR #12 · Closed")
+        XCTAssertEqual(ChangesWords.state(try git(files: 0, ahead: 2, pushed: true, pr: pr("closed"))), "PR #12 · Closed")
+        XCTAssertEqual(
+            ChangesWords.state(try git(files: 0, ahead: 3, pushed: false, pr: pr("open"))), "PR #12 · Open · not pushed",
+            "commits made since the PR was opened")
     }
 
     /// Before Create PR is pressed, the line names where the pull request goes: the base branch on the repository the
@@ -90,13 +93,17 @@ final class ChangesStateWordsTests: XCTestCase {
     /// Why the computer did not open a pull request, by its code, with gh's own words after where it gave them.
     func testAPullRequestsRefusalIsWordedByItsCode() {
         XCTAssertEqual(
-            ChangesWords.actionRefused(code: "base_unknown", detail: nil),
+            ChangesWords.actionRefused(code: "base_unknown", detail: nil, step: .pullRequest),
             "No base branch is known for this repository, so nothing was pushed.")
         XCTAssertEqual(
-            ChangesWords.actionRefused(code: "gh_signed_out", detail: nil),
+            ChangesWords.actionRefused(code: "gh_signed_out", detail: nil, step: .pullRequest),
             "This computer’s gh isn’t signed in to GitHub, so no PR was opened.")
         XCTAssertEqual(
-            ChangesWords.actionRefused(code: "create_failed", detail: "pushed; a pull request already exists"),
+            ChangesWords.actionRefused(code: "create_failed", detail: "pushed; a pull request already exists", step: .pullRequest),
             "GitHub did not open the PR. pushed; a pull request already exists")
+        XCTAssertEqual(
+            ChangesWords.actionRefused(code: "git_failed", detail: "! [rejected] fix/login (fetch first)", step: .pullRequest),
+            "Git could not push the branch, so no PR was opened. ! [rejected] fix/login (fetch first)",
+            "a refused push is not a refused commit")
     }
 }

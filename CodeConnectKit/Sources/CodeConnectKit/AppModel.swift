@@ -115,6 +115,9 @@ public enum DiffFailure: Sendable, Equatable {
 public enum GitActionState: Sendable, Equatable {
     case idle
     case working
+    /// The computer opened this pull request, or found it open: kept until the run's repository, read again, has it (GitHub
+    /// is asked at most every 30 s).
+    case opened(number: UInt64, url: String)
     /// The computer did not do `step`, or may not have: why, in the app's words.
     case refused(String, step: GitStep)
 }
@@ -4341,17 +4344,19 @@ public final class AppModel {
         gitActions[key] = .working
         Task { [weak self] in
             guard let self else { return }
-            let refusal: String?
+            let after: GitActionState
             do {
                 switch try await request() {
-                case .done, .pullRequest: refusal = nil
-                case .refused(let code, let detail): refusal = ChangesWords.actionRefused(code: code, detail: detail)
-                case .unknown: refusal = ChangesWords.actionUnknown
+                case .done: after = .idle
+                case .pullRequest(let number, let url): after = .opened(number: number, url: url)
+                case .refused(let code, let detail):
+                    after = .refused(ChangesWords.actionRefused(code: code, detail: detail, step: step), step: step)
+                case .unknown: after = .refused(ChangesWords.actionUnknown, step: step)
                 }
             } catch {
-                refusal = ChangesWords.actionUnknown
+                after = .refused(ChangesWords.actionUnknown, step: step)
             }
-            self.gitActions[key] = refusal.map { .refused($0, step: step) } ?? .idle
+            self.gitActions[key] = after
             // A read already on its way waits behind the action on the computer, so it shows the action's result.
             if self.diffs[key]?.isLoading != true { self.loadDiff(key: key, force: true) }
             self.loadRunGit(key: key)
@@ -4371,12 +4376,14 @@ public final class AppModel {
             guard let reply = try? await self.connection.runGit(session: key) else { return }
             self.runGits[key] = reply
             // A clean repository ends what a refused commit said: the next changes are another commit.
-            // A refusal's step has passed: a whole clean repository ends a commit's, a pull request a pull request's.
-            if case .refused(_, let step) = self.gitActions[key], let git = reply.git {
+            // What the panel holds has passed once the repository shows it: a whole clean repository ends a commit's
+            // refusal; a pull request ends a pull request's refusal, and the one just opened.
+            if let git = reply.git {
                 let passed =
-                    switch step {
-                    case .commit: git.changed.files == 0 && git.changed.complete
-                    case .pullRequest: git.pullRequest != nil
+                    switch self.gitActions[key] {
+                    case .refused(_, .commit): git.changed.files == 0 && git.changed.complete
+                    case .refused(_, .pullRequest), .opened: git.pullRequest != nil
+                    default: false
                     }
                 if passed { self.gitActions[key] = nil }
             }

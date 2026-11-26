@@ -247,9 +247,22 @@ public enum ChangesWords {
         base.map { "Pushes the branch, then opens a PR into \($0) on \(repo)" }
             ?? "Pushes the branch, then opens a PR into \(repo)"
     }
-    /// Why the computer did not commit or open a pull request, by its code (`git_refusal`), with git's or gh's own words
-    /// after where it gave them.
-    public static func actionRefused(code: String, detail: String?) -> String {
+    /// Why the computer did not do `step` (commit or open a pull request), by its code (`git_refusal`), with git's or
+    /// gh's own words after where it gave them.
+    public static func actionRefused(code: String, detail: String?, step: GitStep) -> String {
+        let reason: String
+        switch (code, step) {
+        case ("busy", .pullRequest): reason = "A run in this folder is working or waiting for you, so nothing was pushed."
+        case ("git_failed", .pullRequest): reason = "Git could not push the branch, so no PR was opened."
+        case ("timeout", .pullRequest): reason = "Git took too long; the branch may or may not have been pushed, and no PR was opened."
+        default: return actionRefused(code: code, detail: detail)
+        }
+        guard let detail, !detail.isEmpty else { return reason }
+        return "\(reason) \(detail)"
+    }
+
+    /// Why the computer did not act, by its code, in the words every step shares.
+    static func actionRefused(code: String, detail: String?) -> String {
         let reason: String
         switch code {
         case "busy": reason = "A run in this folder is working or waiting for you, so nothing was committed."
@@ -274,6 +287,10 @@ public enum ChangesWords {
         guard let detail, !detail.isEmpty else { return reason }
         return "\(reason) \(detail)"
     }
+    /// Why Create PR waits, before it is pressed, for what the computer would refuse it for.
+    public static let pullRequestWaitsBase = "This is the base branch · a PR comes from another branch"
+    public static let pullRequestWaitsSignIn = "gh isn’t signed in to GitHub on this computer · sign in to open a PR"
+    public static let pullRequestWaitsGh = "This computer has no gh · install it to open a PR"
     /// An action whose outcome is not known: the panel's repository, read again, shows what git and GitHub have now.
     public static let actionUnknown = "It is not known whether it was done; the panel below shows what git and GitHub have now."
     /// A Changes panel's state line from its run's repository: an unresolved merge, the files changed (at least so
@@ -298,6 +315,8 @@ public enum ChangesWords {
             parts.append("Changes not all counted")
         }
         if git.pullRequest != nil {
+            // Commits made since the pull request was opened, not yet on its branch.
+            if !git.pushed, git.branch != nil { parts.append("not pushed") }
             return parts.joined(separator: " · ")
         }
         if let ahead = git.ahead, ahead > 0 {
