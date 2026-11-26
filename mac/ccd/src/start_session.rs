@@ -1765,6 +1765,18 @@ pub(crate) async fn agy_path(
     protocol::claude_bin::first_runnable(not_installed_in_tests(candidates, agy_bin), None)
 }
 
+/// The `gh` a run's Changes panel reads GitHub with: config `gh_bin`, else the first on the
+/// login shell's `PATH`.
+pub(crate) async fn gh_path(
+    environment: &HashMap<OsString, OsString>,
+    gh_bin: Option<&str>,
+) -> Option<PathBuf> {
+    let home = home_in(environment);
+    let mut candidates: Vec<PathBuf> = gh_bin.map(PathBuf::from).into_iter().collect();
+    candidates.extend(login_path_hits(environment, &home, "gh").await);
+    protocol::claude_bin::first_runnable(not_installed_in_tests(candidates, gh_bin), None)
+}
+
 /// Every `name` on the `PATH` the user's login shell in `environment` sets up, in
 /// its order.
 async fn login_path_hits(

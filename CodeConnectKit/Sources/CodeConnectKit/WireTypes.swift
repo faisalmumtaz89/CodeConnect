@@ -2041,6 +2041,58 @@ public struct RunGit: Decodable, Sendable, Hashable {
     /// A merge is unresolved.
     public let unmerged: Bool
     public let readAt: String
+    /// Whether the computer's `gh` can read the repository on GitHub (minor 60); nil from an older daemon and on a
+    /// detached head.
+    public let gh: GhState?
+    /// e.g. `github.com`.
+    public let ghHost: String?
+    /// The branch's pull request: the open one from it, else a closed or merged one whose head is the commit checked out.
+    public let pullRequest: PullRequest?
+    /// When GitHub was last asked; the computer asks at most every 30 s.
+    public let ghReadAt: String?
+
+    public enum GhState: String, Decodable, Sendable, Hashable {
+        case signedIn = "signed_in"
+        case signedOut = "signed_out"
+        /// No `gh` on the computer.
+        case missing
+        /// GitHub could not be reached or asked to wait, and a state this build does not name.
+        case unknown
+        /// The repository's remotes name no GitHub repository.
+        case noGithubRemote = "no_github_remote"
+
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = GhState(rawValue: raw) ?? .unknown
+        }
+    }
+
+    public struct PullRequest: Decodable, Sendable, Hashable {
+        public let number: UInt64
+        public let url: String
+        public let state: State
+        /// The branch it merges into.
+        public let base: String
+        public let headOID: String
+        public let mergedAt: String?
+
+        public enum State: String, Decodable, Sendable, Hashable {
+            case open, merged, closed
+            /// A state this build does not name, from a newer daemon. Said so, never read as one of the others.
+            case unknown
+
+            public init(from decoder: Decoder) throws {
+                let raw = try decoder.singleValueContainer().decode(String.self)
+                self = State(rawValue: raw) ?? .unknown
+            }
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case number, url, state, base
+            case headOID = "head_oid"
+            case mergedAt = "merged_at"
+        }
+    }
 
     public struct Base: Decodable, Sendable, Hashable {
         /// e.g. `main`.
@@ -2066,9 +2118,12 @@ public struct RunGit: Decodable, Sendable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case branch, base, changed, ahead, pushed, unmerged
+        case branch, base, changed, ahead, pushed, unmerged, gh
         case headOID = "head_oid"
         case readAt = "read_at"
+        case ghHost = "gh_host"
+        case pullRequest = "pr"
+        case ghReadAt = "gh_read_at"
     }
 }
 

@@ -1335,6 +1335,15 @@ to probe credentials.
   with `get_diff`, a filter the repository's attributes name (Git LFS) still runs
   and the listing may refresh the index. Outside a repository, or for an unknown
   run, `git` is absent and `note` says why.
+  From `>= 60`, on a branch, `git` also carries `gh` (`signed_in`, `signed_out`,
+  `missing`, `unknown`: GitHub unreachable or rate-limited, `no_github_remote`),
+  `gh_host`, `gh_read_at` and `pr{number, url, state: open|merged|closed, base,
+  head_oid, merged_at?}`: the open pull request from this branch of the push
+  remote's repository, on the base's remote's repository (so a fork's PR on its
+  parent), else the newest closed one from it whose head is `HEAD`. Read through
+  `gh auth status` and `gh api` (no prompt, no pager), outside the folder's git
+  lock, at most once per branch every 30 seconds whatever asks, and not at all for
+  5 minutes after GitHub refuses a read for its rate limit.
 * **`git_action{request_id, session_uid, action}`** (`>= 59`, `git_actions` names
   each action; paired devices only) → `git_action_result{request_id, session_uid,
   result}`, `done{sha}` or `refused{code, detail?}`. `action` is
@@ -1452,6 +1461,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `ws_loopback` | `true` | Also listen on `127.0.0.1`, for tools on this Mac. The token is still required. |
 | `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. A start checks the claude this list finds. |
 | `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
+| `gh_bin` | auto | Explicit path to GitHub's `gh`, which a run's Changes panel reads the branch's pull request with. Unset, it is the first `gh` on `PATH` as your shell finds it. |
 | `agy_bin` | auto | Explicit path to Antigravity's `agy`. Unset, it is the first `agy` on `PATH` as your shell finds it, then `~/.local/bin/agy`, where its installer puts it. |
 | `agent_host_bin` | beside ccd | Explicit path to `cc-agent-host`, the agent host ccd runs for each Claude run started from the app. Unset, it is the `cc-agent-host` next to ccd's own executable, where every install puts it. |
 | `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |

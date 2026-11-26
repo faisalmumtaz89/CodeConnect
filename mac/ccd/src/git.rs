@@ -283,7 +283,55 @@ async fn run_git_inner(
         pushed,
         unmerged: head.unmerged,
         read_at: protocol::time::now_rfc3339(),
+        gh: None,
+        gh_host: None,
+        pr: None,
+        gh_read_at: None,
     })
+}
+
+/// The remote `branch` pushes to (`%(push:remotename)`: its `pushRemote`,
+/// `remote.pushDefault`, or the upstream's), else `origin`, and the URL each of it and
+/// `other` (the push remote again when `None`) fetches from: what [`crate::github`] names
+/// the head and target repositories by.
+pub(crate) async fn push_remote_urls(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    branch: &str,
+    other: Option<&str>,
+    timeout: Duration,
+) -> Option<(String, String)> {
+    let git = git_bin(configured_bin)?;
+    let local = format!("refs/heads/{branch}");
+    let named = run(
+        &git,
+        cwd,
+        &["for-each-ref", "--format=%(push:remotename)", &local],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()
+    .filter(|out| out.ok)?;
+    let push = Some(named.stdout.trim().to_string())
+        .filter(|remote| !remote.is_empty())
+        .unwrap_or_else(|| "origin".to_string());
+    let mut urls = Vec::new();
+    for remote in [push.as_str(), other.unwrap_or(&push)] {
+        let out = run(
+            &git,
+            cwd,
+            &["remote", "get-url", "--", remote],
+            timeout,
+            PROBE_CAP,
+        )
+        .await
+        .ok()
+        .filter(|out| out.ok && !out.stdout_truncated)?;
+        urls.push(out.stdout.trim().to_string());
+    }
+    let other = urls.pop()?;
+    Some((urls.pop()?, other))
 }
 
 /// The longest a commit's staging or the commit itself may take: a repository's hooks
@@ -1156,12 +1204,23 @@ where
 }
 
 #[derive(Debug)]
-struct Output {
-    ok: bool,
-    stdout: String,
-    stderr: String,
+pub(crate) struct Output {
+    pub(crate) ok: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
     /// The child produced more than the cap and was stopped.
-    stdout_truncated: bool,
+    pub(crate) stdout_truncated: bool,
+}
+
+/// Run `command`, any short read-only child of ccd's (`gh`), as [`run`] runs git's: bounded
+/// in time and bytes, stdin closed, killed on drop; `label` names it in errors.
+pub(crate) async fn run_program(
+    command: tokio::process::Command,
+    label: &[&str],
+    timeout: Duration,
+    stdout_cap: usize,
+) -> Result<Output> {
+    run_child(command, label, timeout, stdout_cap, false).await
 }
 
 /// Run one git subcommand against `cwd`, bounded in time **and in bytes**.

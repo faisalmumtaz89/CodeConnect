@@ -1438,6 +1438,59 @@ pub struct RunGit {
     /// The index holds unresolved merge entries.
     pub unmerged: bool,
     pub read_at: String,
+    /// Whether this computer's `gh` is signed in for the repository's GitHub host (minor 60).
+    /// Absent from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh: Option<GhState>,
+    /// The GitHub host the repository is on, e.g. `github.com`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_host: Option<String>,
+    /// The branch's pull request: the open one from this branch, else the newest closed or
+    /// merged one whose head is the commit checked out. Absent when there is none, and when
+    /// `gh` is not signed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PullRequest>,
+    /// When GitHub was last asked: a read within 30 s of one for the same branch is
+    /// answered from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_read_at: Option<String>,
+}
+
+/// Whether `gh` can read a [`RunGit`]'s repository on GitHub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GhState {
+    SignedIn,
+    SignedOut,
+    /// No `gh` on this computer.
+    Missing,
+    /// GitHub could not be reached, or asked to wait (a rate limit).
+    Unknown,
+    /// The repository's remotes name no GitHub repository.
+    NoGithubRemote,
+}
+
+/// A [`RunGit`]'s pull request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequest {
+    pub number: u64,
+    pub url: String,
+    pub state: PrState,
+    /// The branch it would merge into.
+    pub base: String,
+    /// The commit its head is at.
+    pub head_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
+}
+
+/// A [`PullRequest`]'s state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
 }
 
 /// One action of [`ClientMessage::GitAction`].
@@ -2725,9 +2778,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 59,
             "a commit from the Changes panel (`git_action`, `git_action_result`, `git_actions`, `committed`) is minor 59"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 60,
+            "a run's GitHub state and its pull request (`gh`, `gh_host`, `pr`, `gh_read_at`) is minor 60"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 59);
+        assert_eq!(crate::PROTOCOL_MINOR, 60);
     }
 
     /// **The tags, pinned on this side too.**
@@ -4664,6 +4721,17 @@ mod tests {
                 pushed: false,
                 unmerged: false,
                 read_at: "t".into(),
+                gh: Some(GhState::SignedIn),
+                gh_host: Some("github.com".into()),
+                pr: Some(PullRequest {
+                    number: 7,
+                    url: "https://github.com/o/r/pull/7".into(),
+                    state: PrState::Open,
+                    base: "main".into(),
+                    head_oid: "abc".into(),
+                    merged_at: None,
+                }),
+                gh_read_at: Some("u".into()),
             }),
             note: None,
         };
@@ -4677,6 +4745,9 @@ mod tests {
                     "base": {"name": "main", "remote": "origin", "ref": "refs/remotes/origin/main"},
                     "changed": {"files": 2, "added": 5, "removed": 1, "complete": true},
                     "ahead": 1, "pushed": false, "unmerged": false, "read_at": "t",
+                    "gh": "signed_in", "gh_host": "github.com", "gh_read_at": "u",
+                    "pr": {"number": 7, "url": "https://github.com/o/r/pull/7", "state": "open",
+                           "base": "main", "head_oid": "abc"},
                 },
             })
         );

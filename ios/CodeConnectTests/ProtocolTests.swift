@@ -191,6 +191,39 @@ final class ProtocolTests: XCTestCase {
         XCTAssertTrue(git.changed.complete)
         XCTAssertEqual(git.ahead, 1)
         XCTAssertFalse(git.pushed)
+        XCTAssertNil(git.gh, "a minor-57 daemon sends no GitHub state")
+        XCTAssertNil(git.pullRequest)
+
+        let github = try decodeServer(
+            """
+            {"type":"run_git","session_id":"cc-1",
+             "git":{"branch":"feat/x","head_oid":"abc",
+                    "changed":{"files":0,"added":0,"removed":0,"complete":true},
+                    "pushed":true,"unmerged":false,"read_at":"t",
+                    "gh":"signed_in","gh_host":"github.com","gh_read_at":"u",
+                    "pr":{"number":15172,"url":"https://github.com/cli/cli/pull/15172","state":"merged",
+                          "base":"trunk","head_oid":"abc","merged_at":"m"}}}
+            """)
+        guard case .runGit(let read) = github, let pr = read.git?.pullRequest else { return XCTFail("no pr") }
+        XCTAssertEqual(read.git?.gh, .signedIn)
+        XCTAssertEqual(read.git?.ghHost, "github.com")
+        XCTAssertEqual(read.git?.ghReadAt, "u")
+        XCTAssertEqual(pr.number, 15172)
+        XCTAssertEqual(pr.state, .merged)
+        XCTAssertEqual(pr.headOID, "abc")
+        XCTAssertEqual(pr.mergedAt, "m")
+
+        let newer = try decodeServer(
+            """
+            {"type":"run_git","session_id":"cc-1",
+             "git":{"branch":"feat/x","changed":{"files":0,"added":0,"removed":0,"complete":true},
+                    "pushed":true,"unmerged":false,"read_at":"t","gh":"a_later_state",
+                    "pr":{"number":1,"url":"u","state":"a_later_state","base":"main","head_oid":"abc"}}}
+            """)
+        guard case .runGit(let later) = newer else { return XCTFail("wrong message") }
+        XCTAssertEqual(later.git?.gh, .unknown)
+        XCTAssertEqual(later.git?.pullRequest?.state, .unknown)
+        XCTAssertNil(later.git?.pullRequest?.mergedAt)
 
         let bare = try decodeServer(#"{"type":"run_git","session_id":"cc-1","note":"not a git repository"}"#)
         guard case .runGit(let none) = bare else { return XCTFail("wrong message") }

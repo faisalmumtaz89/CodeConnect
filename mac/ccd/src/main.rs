@@ -23,6 +23,7 @@ mod codex_wake;
 mod db;
 mod folder_access;
 mod git;
+mod github;
 mod ipc_server;
 mod legacy_credentials;
 mod log;

@@ -179,6 +179,8 @@ pub struct Daemon {
     /// One per run folder: no two of its diff, repository read, session-list refresh and
     /// action run git at once ([`Daemon::git_gate`]).
     git_gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// The runs' GitHub reads, bounded per branch ([`crate::github::Reads`]).
+    github: crate::github::Reads,
     /// One gate per run, held by a person's message to a run with a switch of account from reading the run through
     /// sending it, and by a mail wake from its claim through its issue ([`Daemon::move_gate`]).
     move_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -546,6 +548,7 @@ impl Daemon {
             inner: Arc::new(Mutex::new(Inner::default())),
             publish_gates: Mutex::new(HashMap::new()),
             git_gates: Arc::new(Mutex::new(HashMap::new())),
+            github: crate::github::Reads::default(),
             move_gates: Mutex::new(HashMap::new()),
             registration_gates: Mutex::new(HashMap::new()),
             #[cfg(test)]
@@ -5201,14 +5204,58 @@ impl Daemon {
         session_ref: &str,
     ) -> Result<std::result::Result<protocol::ws::RunGit, String>> {
         let row = self.resolve(session_ref).await?;
-        let gate = self.git_gate(&row.cwd).await;
-        let _one_at_a_time = gate.lock().await;
-        Ok(crate::git::run_git(
-            &row.cwd,
-            self.config.git_bin.as_deref(),
-            Duration::from_millis(self.config.diff_timeout_ms),
-        )
-        .await)
+        let timeout = Duration::from_millis(self.config.diff_timeout_ms);
+        let git_bin = self.config.git_bin.as_deref();
+        let (read, urls) = {
+            let gate = self.git_gate(&row.cwd).await;
+            let _one_at_a_time = gate.lock().await;
+            let read = crate::git::run_git(&row.cwd, git_bin, timeout).await;
+            let urls = match &read {
+                Ok(git) => match &git.branch {
+                    Some(branch) => {
+                        let other = git.base.as_ref().map(|base| base.remote.as_str());
+                        crate::git::push_remote_urls(&row.cwd, git_bin, branch, other, timeout)
+                            .await
+                    }
+                    None => None,
+                },
+                Err(_) => None,
+            };
+            (read, urls)
+        };
+        let Ok(mut git) = read else {
+            return Ok(read);
+        };
+        let Some(branch) = git.branch.clone() else {
+            return Ok(Ok(git));
+        };
+        // Asked of GitHub outside the folder's gate: it is the network, not the folder.
+        let repos = urls.and_then(|(head, target)| {
+            Some((
+                crate::github::parse_remote(&head)?,
+                crate::github::parse_remote(&target)?,
+            ))
+        });
+        match repos {
+            Some((head, target)) if head.host == target.host => {
+                let read = self
+                    .github
+                    .read(
+                        self.config.gh_bin.as_deref(),
+                        &head,
+                        &target,
+                        &branch,
+                        git.head_oid.as_deref(),
+                    )
+                    .await;
+                git.gh = Some(read.gh);
+                git.gh_host = Some(target.host);
+                git.pr = read.pr;
+                git.gh_read_at = Some(read.read_at);
+            }
+            _ => git.gh = Some(protocol::ws::GhState::NoGithubRemote),
+        }
+        Ok(Ok(git))
     }
 
     /// Do `action` on the run `session_uid`'s repository, kept per `request_id`
@@ -8347,6 +8394,189 @@ mod tests {
             matches!(&answer, protocol::ws::GitActionResult::Refused { code, .. }
                 if code == protocol::ws::git_refusal::INDETERMINATE),
             "{answer:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stand-in `gh` in its own folder, answering from the files beside it, as gh 2.87.3 does:
+    /// `auth.out`/`auth.exit` for `auth status`, `open.json`/`closed.json` and `api.err`/`api.exit`
+    /// for the pulls; every call it is asked is logged to `calls`, after `prompt=` and its
+    /// `GH_PROMPT_DISABLED`.
+    fn stand_in_gh() -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "ccd-gh-{}-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms(),
+            rand_suffix()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gh = dir.join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nd=$(dirname \"$0\")\necho \"prompt=${GH_PROMPT_DISABLED:-on} $*\" >> \"$d/calls\"\ncase \"$*\" in\n\
+             \"auth status\"*) cat \"$d/auth.out\"; exit $(cat \"$d/auth.exit\");;\n\
+             *state=open*) cat \"$d/api.err\" >&2; cat \"$d/open.json\"; exit $(cat \"$d/api.exit\");;\n\
+             *state=closed*) cat \"$d/api.err\" >&2; cat \"$d/closed.json\"; exit $(cat \"$d/api.exit\");;\n\
+             esac\nexit 2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/github");
+        // Signed in: gh's own words, written from its source (no credential captures them).
+        std::fs::write(
+            dir.join("auth.out"),
+            "github.com\n  ✓ Logged in to github.com account a-person (keyring)\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("auth.exit"), "0").unwrap();
+        std::fs::copy(fixtures.join("pulls-open.json"), dir.join("open.json")).unwrap();
+        std::fs::copy(fixtures.join("pulls-closed.json"), dir.join("closed.json")).unwrap();
+        std::fs::write(dir.join("api.err"), "").unwrap();
+        std::fs::write(dir.join("api.exit"), "0").unwrap();
+        gh
+    }
+
+    fn rand_suffix() -> u32 {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn gh_calls(gh: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(gh.with_file_name("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// **A run's GitHub state, read through gh at most once per window**: signed out (gh's own
+    /// capture), signed in with the branch's open PR (GitHub's own answer for cli/cli), a second
+    /// read inside the window asking gh nothing, a rate limit stopping the host's reads, no gh at
+    /// all, and a remote that names no GitHub repository.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_runs_github_state_is_read_through_gh_once_per_window() {
+        use protocol::agent::AgentKind;
+        use protocol::ws::GhState;
+        let _env = crate::ProcessEnvRead::take();
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/github");
+        let branch = "dependabot/go_modules/github.com/sigstore/sigstore-go-1.4.1";
+        let at = |gh: &std::path::Path, uid: &str| {
+            let daemon = daemon_on(
+                shared_store(),
+                Config {
+                    gh_bin: Some(gh.to_str().unwrap().into()),
+                    ..Config::default()
+                },
+            );
+            let dir = run_in_a_repository_as(&daemon, uid, AgentKind::Claude, Lifecycle::Live);
+            git_in(
+                &dir,
+                &["remote", "add", "origin", "https://github.com/cli/cli.git"],
+            );
+            git_in(&dir, &["switch", "-q", "-c", branch]);
+            (daemon, dir)
+        };
+
+        let gh = stand_in_gh();
+        std::fs::copy(
+            fixtures.join("auth-signed-out.stdout"),
+            gh.with_file_name("auth.out"),
+        )
+        .unwrap();
+        std::fs::copy(
+            fixtures.join("auth-signed-out.exit"),
+            gh.with_file_name("auth.exit"),
+        )
+        .unwrap();
+        let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP20");
+        let read = daemon
+            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP20")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (read.gh, read.gh_host.as_deref(), read.pr),
+            (Some(GhState::SignedOut), Some("github.com"), None)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let gh = stand_in_gh();
+        let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP21");
+        let read = daemon
+            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP21")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.gh, Some(GhState::SignedIn));
+        assert_eq!(read.pr.as_ref().map(|pr| pr.number), Some(15173));
+        let calls = gh_calls(&gh);
+        assert_eq!(calls.len(), 2, "auth, then the open pulls: {calls:?}");
+        assert!(
+            calls.iter().all(|call| call.starts_with("prompt=1 ")),
+            "gh never prompts: {calls:?}"
+        );
+        assert!(
+            calls[1].contains("repos/cli/cli/pulls")
+                && calls[1].contains(&format!("head=cli:{branch}")),
+            "{calls:?}"
+        );
+        let again = daemon
+            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP21")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.pr, read.pr);
+        assert_eq!(gh_calls(&gh).len(), 2, "inside the window gh is not asked");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let gh = stand_in_gh();
+        std::fs::write(
+            gh.with_file_name("api.err"),
+            "gh: API rate limit exceeded for 203.0.113.9. (HTTP 403)\n",
+        )
+        .unwrap();
+        std::fs::write(gh.with_file_name("api.exit"), "1").unwrap();
+        let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP22");
+        let read = daemon
+            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP22")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((read.gh, read.pr), (Some(GhState::Unknown), None));
+        git_in(&dir, &["switch", "-q", "-c", "another"]);
+        let calls = gh_calls(&gh).len();
+        let paused = daemon
+            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP22")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(paused.gh, Some(GhState::Unknown));
+        assert_eq!(gh_calls(&gh).len(), calls, "the host's reads stopped");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let gone = gh.with_file_name("no-gh-here");
+        let (daemon, dir) = at(&gone, "01K1B3XQ8ZC0DE5FGH7JKMNP23");
+        let read = daemon
+            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP23")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.gh, Some(GhState::Missing));
+        git_in(&dir, &["remote", "set-url", "origin", "/srv/git/app.git"]);
+        let local = daemon_on(Arc::clone(&daemon.store), Config::default());
+        let read = local
+            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP23")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (read.gh, read.gh_host),
+            (Some(GhState::NoGithubRemote), None)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
