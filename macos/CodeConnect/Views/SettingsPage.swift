@@ -147,7 +147,7 @@ struct SettingsPage: View {
                 case .accounts: titled(section.title) { AccountSettings() }
                 }
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: 640, alignment: .leading)
             .padding(.horizontal, 32)
             .padding(.top, 52)
             .padding(.bottom, 32)
