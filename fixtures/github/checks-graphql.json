@@ -234,8 +234,13 @@
        }
       }
      ]
-    }
-   }
+    },
+    "mergeStateStatus": "BLOCKED",
+    "isDraft": false
+   },
+   "mergeCommitAllowed": true,
+   "squashMergeAllowed": true,
+   "rebaseMergeAllowed": false
   }
  }
 }

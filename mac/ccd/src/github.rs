@@ -207,6 +207,123 @@ pub async fn open_pr(
     }
 }
 
+/// The pull request `number` of `target` as GitHub has it now (no cache).
+pub async fn pull_by_number(
+    gh_bin: Option<&str>,
+    target: &Repo,
+    number: u64,
+) -> Result<PullRequest, Unavailable> {
+    let environment = &crate::start_session::phone_environment();
+    let Some(gh) = crate::start_session::gh_path(environment, gh_bin).await else {
+        return Err(Unavailable::Missing);
+    };
+    let path = format!("repos/{}/{}/pulls/{number}", target.owner, target.name);
+    let args = [
+        "api",
+        "--hostname",
+        target.host.as_str(),
+        "--method",
+        "GET",
+        path.as_str(),
+    ];
+    let out = crate::git::run_program(
+        gh_command(&gh, environment, &args),
+        &args,
+        API_TIMEOUT,
+        API_CAP,
+    )
+    .await
+    .map_err(|_| Unavailable::Down)?;
+    if !out.ok || out.stdout_truncated {
+        return Err(if said(&out, &["http 401", "gh auth login"]) {
+            Unavailable::SignedOut
+        } else {
+            Unavailable::Down
+        });
+    }
+    serde_json::from_str::<serde_json::Value>(&out.stdout)
+        .ok()
+        .as_ref()
+        .and_then(pull)
+        .ok_or(Unavailable::Down)
+}
+
+/// The merge methods `pr`'s repository allows, asked of GitHub now with [`DETAILS_QUERY`].
+pub async fn merge_methods(
+    gh_bin: Option<&str>,
+    target: &Repo,
+    pr: &PullRequest,
+) -> Result<Vec<protocol::ws::MergeMethod>, Unavailable> {
+    let environment = &crate::start_session::phone_environment();
+    let Some(gh) = crate::start_session::gh_path(environment, gh_bin).await else {
+        return Err(Unavailable::Missing);
+    };
+    match details(&gh, environment, target, pr).await {
+        Ok(answer) => merge_from(&answer).1.ok_or(Unavailable::Down),
+        Err(Failed::NoAccount | Failed::TokenRefused) => Err(Unavailable::SignedOut),
+        Err(Failed::RateLimited | Failed::Other) => Err(Unavailable::Down),
+    }
+}
+
+/// How long `gh pr merge` may take.
+const MERGE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What [`merge_pr`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Merged {
+    /// gh says it merged it, or a merge queue took it.
+    Done,
+    /// GitHub refused: the head was not `head_oid`.
+    HeadMoved,
+    /// GitHub refused: its line.
+    Refused(String),
+    /// gh gave no answer in time; GitHub may have merged it.
+    Unknown,
+}
+
+/// `gh pr merge` of `target`'s pull request `number` by `method`, only while its head is
+/// `head_oid`: never deleting a branch, never queued for later (`--auto`), never past the
+/// repository's rules (`--admin`).
+pub async fn merge_pr(
+    cwd: &str,
+    gh_bin: Option<&str>,
+    target: &Repo,
+    number: u64,
+    method: protocol::ws::MergeMethod,
+    head_oid: &str,
+) -> Merged {
+    let environment = &crate::start_session::phone_environment();
+    let Some(gh) = crate::start_session::gh_path(environment, gh_bin).await else {
+        return Merged::Refused("gh is not installed".into());
+    };
+    let repo = format!("{}/{}", target.owner, target.name);
+    let number = number.to_string();
+    let how = match method {
+        protocol::ws::MergeMethod::Merge => "--merge",
+        protocol::ws::MergeMethod::Squash => "--squash",
+        protocol::ws::MergeMethod::Rebase => "--rebase",
+    };
+    let args = [
+        "pr",
+        "merge",
+        number.as_str(),
+        "--repo",
+        repo.as_str(),
+        how,
+        "--match-head-commit",
+        head_oid,
+    ];
+    let mut command = gh_command(&gh, environment, &args);
+    command.current_dir(cwd);
+    match crate::git::run_program(command, &args, MERGE_TIMEOUT, CREATE_CAP).await {
+        Ok(out) if out.ok => Merged::Done,
+        Ok(out) if said(&out, &["head branch was modified"]) => Merged::HeadMoved,
+        Ok(out) => Merged::Refused(crate::git::first_words(&out).unwrap_or_default()),
+        Err(err) if format!("{err:#}").contains("timed out") => Merged::Unknown,
+        Err(err) => Merged::Refused(format!("{err:#}")),
+    }
+}
+
 /// How long `gh pr create` may take.
 const CREATE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -337,14 +454,17 @@ async fn read_github(
     };
     match pull_request(&gh, environment, head, target, branch, head_oid).await {
         Ok(Some(mut pr)) if pr.state == PrState::Open => {
-            match checks(&gh, environment, target, &pr).await {
-                Ok(Some((list, complete))) => {
-                    pr.checks = Some(list);
-                    pr.checks_complete = Some(complete);
+            match details(&gh, environment, target, &pr).await {
+                Ok(answer) => {
+                    if let Some((list, complete)) = checks_from(&answer, &pr.head_oid) {
+                        pr.checks = Some(list);
+                        pr.checks_complete = Some(complete);
+                    }
+                    (pr.merge_state, pr.merge_methods) = merge_from(&answer);
                 }
                 Err(Failed::RateLimited) => return (read(GhState::SignedIn, Some(pr)), true),
                 // Not read: the pull request stands without them.
-                Ok(None) | Err(_) => {}
+                Err(_) => {}
             }
             (read(GhState::SignedIn, Some(pr)), false)
         }
@@ -491,24 +611,25 @@ fn from_branch(pr: &serde_json::Value, head: &Repo, branch: &str) -> bool {
             .is_some_and(|name| name.eq_ignore_ascii_case(&format!("{}/{}", head.owner, head.name)))
 }
 
-/// The checks query: an open pull request's last commit and its checks, each check run with its
-/// first annotations, in one request.
-const CHECKS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { \
-    pullRequest(number: $number) { commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { \
+/// The details query: an open pull request's merge state, the merge methods its repository
+/// allows, and its last commit's checks, each check run with its first annotations: one request.
+const DETAILS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { \
+    mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed \
+    pullRequest(number: $number) { mergeStateStatus isDraft commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { \
     pageInfo { hasNextPage } nodes { __typename \
     ... on CheckRun { name status conclusion startedAt completedAt detailsUrl annotations(first: 10) { nodes { annotationLevel message } } \
     checkSuite { workflowRun { event workflow { name } } } } \
     ... on StatusContext { context state targetUrl } } } } } } } } } }";
 
-/// `pr`'s checks at its head, asked of GitHub with [`CHECKS_QUERY`]; `None` when the answer is
-/// not one this daemon reads.
-async fn checks(
+/// `pr`'s details (its checks, merge state and the merge methods its repository allows), asked of
+/// GitHub with [`DETAILS_QUERY`].
+async fn details(
     gh: &Path,
     environment: &HashMap<OsString, OsString>,
     target: &Repo,
     pr: &PullRequest,
-) -> Result<Option<(Vec<protocol::ws::Check>, bool)>, Failed> {
-    let query = format!("query={CHECKS_QUERY}");
+) -> Result<serde_json::Value, Failed> {
+    let query = format!("query={DETAILS_QUERY}");
     // Owner and name as strings (`-f`): `-F` would read an all-digit name as a number.
     let owner = format!("owner={}", target.owner);
     let name = format!("name={}", target.name);
@@ -542,8 +663,7 @@ async fn checks(
             Failed::Other
         });
     }
-    let answer: serde_json::Value = serde_json::from_str(&out.stdout).map_err(|_| Failed::Other)?;
-    Ok(checks_from(&answer, &pr.head_oid))
+    serde_json::from_str(&out.stdout).map_err(|_| Failed::Other)
 }
 
 /// An open pull request's checks from ccd's checks query's answer, when its commit is
@@ -618,6 +738,53 @@ fn checks_from(
 /// What tells a check run's runs apart from other checks': its name, workflow and event.
 type RunIdentity = (String, Option<String>, Option<String>);
 
+/// An open pull request's merge state and the methods its repository allows, from the checks
+/// query's answer.
+fn merge_from(
+    answer: &serde_json::Value,
+) -> (
+    Option<protocol::ws::MergeState>,
+    Option<Vec<protocol::ws::MergeMethod>>,
+) {
+    use protocol::ws::{MergeMethod, MergeState};
+    let repository = &answer["data"]["repository"];
+    let pr = &repository["pullRequest"];
+    let state = match (pr["isDraft"].as_bool(), pr["mergeStateStatus"].as_str()) {
+        (Some(true), _) => Some(MergeState::Draft),
+        (_, None) => None,
+        (_, Some(status)) => Some(match status {
+            "CLEAN" => MergeState::Clean,
+            "BLOCKED" => MergeState::Blocked,
+            "BEHIND" => MergeState::Behind,
+            "DIRTY" => MergeState::Dirty,
+            "UNSTABLE" => MergeState::Unstable,
+            "DRAFT" => MergeState::Draft,
+            "HAS_HOOKS" => MergeState::HasHooks,
+            _ => MergeState::Unknown,
+        }),
+    };
+    let allowed = [
+        ("mergeCommitAllowed", MergeMethod::Merge),
+        ("squashMergeAllowed", MergeMethod::Squash),
+        ("rebaseMergeAllowed", MergeMethod::Rebase),
+    ];
+    let methods = allowed
+        .iter()
+        .map(|(field, method)| {
+            repository[*field]
+                .as_bool()
+                .map(|allowed| (allowed, *method))
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|read| {
+            read.into_iter()
+                .filter(|(allowed, _)| *allowed)
+                .map(|(_, method)| method)
+                .collect()
+        });
+    (state, methods)
+}
+
 /// A check run's state from its `status` and `conclusion`.
 fn run_state(status: Option<&str>, conclusion: Option<&str>) -> protocol::ws::CheckState {
     use protocol::ws::CheckState::*;
@@ -675,6 +842,8 @@ fn pull(pr: &serde_json::Value) -> Option<PullRequest> {
         merged_at,
         checks: None,
         checks_complete: None,
+        merge_state: None,
+        merge_methods: None,
     })
 }
 
@@ -868,6 +1037,46 @@ mod tests {
             Some("https://github.com/cli/cli/actions/runs/1/job/11"),
             "the run started last, not the earlier failed one"
         );
+    }
+
+    /// **An open pull request's merge state and the methods its repository allows**, from the
+    /// same answer as its checks: GitHub's state one to one, a draft as `draft` whatever GitHub
+    /// says of it, a state this daemon does not name as `unknown`, and the methods in order.
+    #[test]
+    fn a_pull_requests_merge_state_and_methods_are_read() {
+        use protocol::ws::{MergeMethod, MergeState};
+        let mut answer: serde_json::Value = serde_json::from_str(CHECKS).unwrap();
+        assert_eq!(
+            merge_from(&answer),
+            (
+                Some(MergeState::Blocked),
+                Some(vec![MergeMethod::Merge, MergeMethod::Squash])
+            )
+        );
+        for (status, state) in [
+            ("CLEAN", MergeState::Clean),
+            ("BEHIND", MergeState::Behind),
+            ("DIRTY", MergeState::Dirty),
+            ("UNSTABLE", MergeState::Unstable),
+            ("HAS_HOOKS", MergeState::HasHooks),
+            ("UNKNOWN", MergeState::Unknown),
+            ("A_LATER_STATE", MergeState::Unknown),
+        ] {
+            answer["data"]["repository"]["pullRequest"]["mergeStateStatus"] = status.into();
+            assert_eq!(merge_from(&answer).0, Some(state), "{status}");
+        }
+        answer["data"]["repository"]["pullRequest"]["isDraft"] = true.into();
+        assert_eq!(merge_from(&answer).0, Some(MergeState::Draft));
+        answer["data"]["repository"]["rebaseMergeAllowed"] = true.into();
+        assert_eq!(
+            merge_from(&answer).1,
+            Some(vec![
+                MergeMethod::Merge,
+                MergeMethod::Squash,
+                MergeMethod::Rebase
+            ])
+        );
+        assert_eq!(merge_from(&serde_json::json!({"errors": []})), (None, None));
     }
 
     /// **Checks of another commit are not shown, and a list past 100 says so**: the head moved

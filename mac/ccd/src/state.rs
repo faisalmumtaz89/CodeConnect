@@ -5300,6 +5300,15 @@ impl Daemon {
                 "create_pr",
                 "codeconnect.git_action.create_pr.v1".to_string(),
             ),
+            GitAction::Merge { method, head_oid } => {
+                if head_oid.is_empty() || !head_oid.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return refused(code::BAD_REQUEST, None);
+                }
+                (
+                    "merge",
+                    format!("codeconnect.git_action.merge.v1\n{method:?}\n{head_oid}"),
+                )
+            }
         };
         if request_id.is_empty() {
             return refused(code::BAD_REQUEST, None);
@@ -5374,6 +5383,7 @@ impl Daemon {
                         .await
                 }
                 GitAction::CreatePr => self.create_pr(&row).await,
+                GitAction::Merge { method, head_oid } => self.merge(&row, *method, head_oid).await,
             }
         };
         let result = match outcome {
@@ -5523,11 +5533,115 @@ impl Daemon {
         }
     }
 
+    /// `row`'s branch's open pull request merged by `method` at `head_oid`
+    /// ([`protocol::ws::GitAction::Merge`]): refused when there is none, when its head is not
+    /// `head_oid`, or when its repository does not allow `method`; then `gh pr merge`, and GitHub
+    /// asked again for what became of it. Nothing local changes. The branch's GitHub read is
+    /// asked again next time.
+    async fn merge(
+        &self,
+        row: &crate::store::SessionRow,
+        method: protocol::ws::MergeMethod,
+        head_oid: &str,
+    ) -> ActionOutcome {
+        use crate::github::Merged;
+        use protocol::ws::{git_refusal as code, PrState};
+        let timeout = Duration::from_millis(self.config.diff_timeout_ms);
+        let gh_bin = self.config.gh_bin.as_deref();
+        let git = match crate::git::run_git(&row.cwd, self.config.git_bin.as_deref(), timeout).await
+        {
+            Ok(git) => git,
+            Err(note) => return ActionOutcome::Refused(code::NOT_A_REPOSITORY, Some(note)),
+        };
+        let Some(branch) = git.branch else {
+            return ActionOutcome::Refused(code::DETACHED, None);
+        };
+        let (_, head, target) = match self.pr_repositories(row, &branch).await {
+            Ok(repositories) => repositories,
+            Err(refused) => return refused,
+        };
+        let outcome = 'outcome: {
+            let pr = match crate::github::open_pr(gh_bin, &head, &target, &branch).await {
+                Ok(Some(pr)) => pr,
+                Ok(None) => break 'outcome ActionOutcome::Refused(code::NO_PULL_REQUEST, None),
+                Err(unreachable) => break 'outcome unavailable(unreachable),
+            };
+            if pr.head_oid != head_oid {
+                break 'outcome ActionOutcome::Refused(code::HEAD_MOVED, None);
+            }
+            match crate::github::merge_methods(gh_bin, &target, &pr).await {
+                Ok(methods) if methods.contains(&method) => {}
+                Ok(_) => break 'outcome ActionOutcome::Refused(code::METHOD_NOT_ALLOWED, None),
+                Err(unreachable) => break 'outcome unavailable(unreachable),
+            }
+            let merged =
+                crate::github::merge_pr(&row.cwd, gh_bin, &target, pr.number, method, head_oid)
+                    .await;
+            // What GitHub has now: a merge queue may hold it open, and a lost answer may hide a
+            // merge that happened.
+            let now = crate::github::pull_by_number(gh_bin, &target, pr.number).await;
+            let done = ActionOutcome::Done {
+                what: format!("merged pull request #{}", pr.number),
+                result: protocol::ws::GitActionResult::Done {
+                    sha: None,
+                    pr: Some(protocol::ws::PrLink {
+                        number: pr.number,
+                        url: pr.url.clone(),
+                    }),
+                },
+                notice: None,
+            };
+            match (merged, now) {
+                (_, Ok(now)) if now.state == PrState::Merged => done,
+                (Merged::Done, _) => done,
+                (Merged::HeadMoved, _) => ActionOutcome::Refused(code::HEAD_MOVED, None),
+                (Merged::Refused(detail), _) => {
+                    ActionOutcome::Refused(code::MERGE_FAILED, Some(detail))
+                }
+                (Merged::Unknown, _) => ActionOutcome::Unknown(
+                    "GitHub may have merged it: read the run's repository again".into(),
+                ),
+            }
+        };
+        self.github.forget(&head, &target, &branch).await;
+        outcome
+    }
+
+    /// The repository `row`'s `branch` pushes to and the one its pull request goes into, as
+    /// [`Self::run_git`] names them; refused `no_github_remote` when either is not on github.com.
+    async fn pr_repositories(
+        &self,
+        row: &crate::store::SessionRow,
+        branch: &str,
+    ) -> Result<
+        (
+            crate::git::PrRemotes,
+            crate::github::Repo,
+            crate::github::Repo,
+        ),
+        ActionOutcome,
+    > {
+        let timeout = Duration::from_millis(self.config.diff_timeout_ms);
+        let remotes =
+            crate::git::push_remote_urls(&row.cwd, self.config.git_bin.as_deref(), branch, timeout)
+                .await;
+        remotes
+            .and_then(|remotes| {
+                let head = crate::github::parse_remote(&remotes.head)?;
+                let target = crate::github::parse_remote(&remotes.target)?;
+                Some((remotes, head, target))
+            })
+            .ok_or(ActionOutcome::Refused(
+                protocol::ws::git_refusal::NO_GITHUB_REMOTE,
+                None,
+            ))
+    }
+
     /// A pull request from `row`'s branch ([`protocol::ws::GitAction::CreatePr`]): the open one
     /// already there, else the branch pushed (no force) and one
     /// opened with gh. Whatever the outcome, the branch's GitHub read is asked again next time.
     async fn create_pr(&self, row: &crate::store::SessionRow) -> ActionOutcome {
-        use crate::github::{Created, Unavailable};
+        use crate::github::Created;
         use protocol::ws::git_refusal as code;
         let timeout = Duration::from_millis(self.config.diff_timeout_ms);
         let git_bin = self.config.git_bin.as_deref();
@@ -5552,13 +5666,9 @@ impl Daemon {
         if git.ahead == Some(0) {
             return ActionOutcome::Refused(code::NOTHING_TO_PROPOSE, None);
         }
-        let remotes = crate::git::push_remote_urls(&row.cwd, git_bin, &branch, timeout).await;
-        let Some((remotes, head, target)) = remotes.and_then(|remotes| {
-            let head = crate::github::parse_remote(&remotes.head)?;
-            let target = crate::github::parse_remote(&remotes.target)?;
-            Some((remotes, head, target))
-        }) else {
-            return ActionOutcome::Refused(code::NO_GITHUB_REMOTE, None);
+        let (remotes, head, target) = match self.pr_repositories(row, &branch).await {
+            Ok(repositories) => repositories,
+            Err(refused) => return refused,
         };
         let done = |pr: protocol::ws::PrLink| ActionOutcome::Done {
             what: format!("opened pull request #{}", pr.number),
@@ -5576,15 +5686,7 @@ impl Daemon {
             match crate::github::open_pr(gh_bin, &head, &target, &branch).await {
                 Ok(Some(pr)) => break 'outcome done(link(pr)),
                 Ok(None) => {}
-                Err(Unavailable::Missing) => {
-                    break 'outcome ActionOutcome::Refused(code::GH_MISSING, None)
-                }
-                Err(Unavailable::SignedOut) => {
-                    break 'outcome ActionOutcome::Refused(code::GH_SIGNED_OUT, None)
-                }
-                Err(Unavailable::Down) => {
-                    break 'outcome ActionOutcome::Refused(code::GITHUB_UNAVAILABLE, None)
-                }
+                Err(unreachable) => break 'outcome unavailable(unreachable),
             }
             // Always pushed (no force): nothing when the remote has the commit checked out, refused
             // when the branch there moved on, so the pull request is of the commit shown.
@@ -6584,6 +6686,20 @@ async fn git_gate_in(gates: &Mutex<HashMap<String, Arc<Mutex<()>>>>, cwd: &str) 
     let mut gates = gates.lock().await;
     gates.retain(|_, gate| Arc::strong_count(gate) > 1);
     Arc::clone(gates.entry(cwd.to_string()).or_default())
+}
+
+/// The refusal for GitHub not giving an answer before anything was done.
+fn unavailable(why: crate::github::Unavailable) -> ActionOutcome {
+    use crate::github::Unavailable;
+    use protocol::ws::git_refusal as code;
+    ActionOutcome::Refused(
+        match why {
+            Unavailable::Missing => code::GH_MISSING,
+            Unavailable::SignedOut => code::GH_SIGNED_OUT,
+            Unavailable::Down => code::GITHUB_UNAVAILABLE,
+        },
+        None,
+    )
 }
 
 /// What an action on a run's repository came to, before it is kept.
@@ -8610,6 +8726,8 @@ mod tests {
         std::fs::write(
             &gh,
             "#!/bin/sh\nd=$(dirname \"$0\")\necho \"prompt=${GH_PROMPT_DISABLED:-on} $*\" >> \"$d/calls\"\ncase \"$*\" in\n\
+             \"pr merge\"*) touch \"$d/merged\"; cat \"$d/merge.err\" >&2; cat \"$d/merge.out\"; exit $(cat \"$d/merge.exit\");;\n\
+             *\"/pulls/\"[0-9]*) if [ -f \"$d/merged\" ] && [ -f \"$d/pull.after\" ]; then cat \"$d/pull.after\"; else cat \"$d/pull.json\"; fi; exit 0;;\n\
              \"api graphql\"*) cat \"$d/api.err\" >&2; cat \"$d/checks.json\"; exit $(cat \"$d/api.exit\");;\n\
              \"pr create\"*) touch \"$d/created\"; pwd -P > \"$d/create.cwd\"; cat \"$d/create.err\" >&2; cat \"$d/create.out\"; exit $(cat \"$d/create.exit\");;\n\
              *state=open*) cat \"$d/api.err\" >&2; if [ -f \"$d/created\" ] && [ -f \"$d/open.after\" ]; then cat \"$d/open.after\"; else cat \"$d/open.json\"; fi; exit $(cat \"$d/api.exit\");;\n\
@@ -8628,7 +8746,14 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("api.err"), "").unwrap();
         std::fs::write(dir.join("api.exit"), "0").unwrap();
-        for (name, text) in [("create.out", ""), ("create.err", ""), ("create.exit", "0")] {
+        for (name, text) in [
+            ("create.out", ""),
+            ("create.err", ""),
+            ("create.exit", "0"),
+            ("merge.out", ""),
+            ("merge.err", ""),
+            ("merge.exit", "0"),
+        ] {
             std::fs::write(dir.join(name), text).unwrap();
         }
         gh
@@ -9359,6 +9484,201 @@ mod tests {
         );
         assert!(gh_calls(&gh).is_empty(), "{:?}", gh_calls(&gh));
         done(&gh, &dir, &bare);
+    }
+
+    /// **A pull request is merged only as the panel showed it**: by a method its repository
+    /// allows, at the head shown, then read again (merged, or held open by a merge queue); the
+    /// same request answered again without a call; and refused, with nothing merged, when there
+    /// is no pull request, its head moved before or as GitHub merges, the method is not allowed,
+    /// or GitHub refuses. Never deleting a branch, never `--auto`, never `--admin`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pull_request_is_merged_only_as_the_panel_showed_it() {
+        use protocol::agent::AgentKind;
+        use protocol::ws::{git_refusal as code, GitAction, GitActionResult, MergeMethod, PrLink};
+        let _env = crate::ProcessEnvRead::take();
+        let branch = "dependabot/go_modules/github.com/sigstore/sigstore-go-1.4.1";
+        let head = "8a93995195c4e5a299e227a00f236bf88199674a";
+        let open: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../../fixtures/github/pulls-open.json")).unwrap();
+        let mut merged = open[0].clone();
+        merged["state"] = "closed".into();
+        merged["merged_at"] = "2026-11-27T10:00:00Z".into();
+        let at = |uid: &str, branch: &str| {
+            let gh = stand_in_gh();
+            std::fs::write(gh.with_file_name("pull.json"), open[0].to_string()).unwrap();
+            let daemon = daemon_on(
+                shared_store(),
+                Config {
+                    gh_bin: Some(gh.to_str().unwrap().into()),
+                    ..Config::default()
+                },
+            );
+            let dir = run_in_a_repository_as(&daemon, uid, AgentKind::Claude, Lifecycle::Exited);
+            git_in(
+                &dir,
+                &["remote", "add", "origin", "https://github.com/cli/cli.git"],
+            );
+            git_in(&dir, &["switch", "-q", "-c", branch]);
+            (gh, daemon, dir)
+        };
+        let done = |gh: &std::path::Path, dir: &std::path::Path| {
+            let _ = std::fs::remove_dir_all(dir);
+            let _ = std::fs::remove_dir_all(gh.parent().unwrap());
+        };
+        let merge = |method| GitAction::Merge {
+            method,
+            head_oid: head.into(),
+        };
+        let merged_pr = GitActionResult::Done {
+            sha: None,
+            pr: Some(PrLink {
+                number: 15173,
+                url: "https://github.com/cli/cli/pull/15173".into(),
+            }),
+        };
+        let refused = |result: GitActionResult| match result {
+            GitActionResult::Refused { code, detail } => (code, detail),
+            done => panic!("not refused: {done:?}"),
+        };
+
+        // Merged by squash at the head shown, then read again; the same request answers again.
+        let (gh, daemon, dir) = at("01K1B3XQ8ZC0DE5FGH7JKMNP50", branch);
+        std::fs::write(gh.with_file_name("pull.after"), merged.to_string()).unwrap();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP50";
+        assert_eq!(
+            daemon
+                .git_action(uid, "m-1", &merge(MergeMethod::Squash))
+                .await,
+            merged_pr
+        );
+        let calls = gh_calls(&gh);
+        assert_eq!(
+            calls.len(),
+            4,
+            "the open lookup, its details, the merge, the read after: {calls:?}"
+        );
+        assert!(
+            calls[2].contains(&format!(
+                "pr merge 15173 --repo cli/cli --squash --match-head-commit {head}"
+            )),
+            "{calls:?}"
+        );
+        for never in ["--delete-branch", "--auto", "--admin", "-d "] {
+            assert!(!calls[2].contains(never), "{never}: {calls:?}");
+        }
+        assert!(calls[3].contains("repos/cli/cli/pulls/15173"), "{calls:?}");
+        assert_eq!(
+            daemon
+                .git_action(uid, "m-1", &merge(MergeMethod::Squash))
+                .await,
+            merged_pr
+        );
+        assert_eq!(gh_calls(&gh).len(), 4, "a request is answered once");
+        done(&gh, &dir);
+
+        // A merge queue took it: done, and the pull request still open when read.
+        let (gh, daemon, dir) = at("01K1B3XQ8ZC0DE5FGH7JKMNP51", branch);
+        assert_eq!(
+            daemon
+                .git_action(
+                    "01K1B3XQ8ZC0DE5FGH7JKMNP51",
+                    "m-2",
+                    &merge(MergeMethod::Merge)
+                )
+                .await,
+            merged_pr
+        );
+        done(&gh, &dir);
+
+        // Refused before any merge: the method not allowed (rebase), the head moved, no PR.
+        let (gh, daemon, dir) = at("01K1B3XQ8ZC0DE5FGH7JKMNP52", branch);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP52";
+        assert_eq!(
+            refused(
+                daemon
+                    .git_action(uid, "m-3", &merge(MergeMethod::Rebase))
+                    .await
+            )
+            .0,
+            code::METHOD_NOT_ALLOWED
+        );
+        let moved = GitAction::Merge {
+            method: MergeMethod::Squash,
+            head_oid: "0000000000000000000000000000000000000000".into(),
+        };
+        assert_eq!(
+            refused(daemon.git_action(uid, "m-4", &moved).await).0,
+            code::HEAD_MOVED
+        );
+        assert!(
+            !gh_calls(&gh).iter().any(|call| call.contains("pr merge")),
+            "{:?}",
+            gh_calls(&gh)
+        );
+        done(&gh, &dir);
+        let (gh, daemon, dir) = at("01K1B3XQ8ZC0DE5FGH7JKMNP53", "w2-no-pr");
+        assert_eq!(
+            refused(
+                daemon
+                    .git_action(
+                        "01K1B3XQ8ZC0DE5FGH7JKMNP53",
+                        "m-5",
+                        &merge(MergeMethod::Squash)
+                    )
+                    .await
+            )
+            .0,
+            code::NO_PULL_REQUEST
+        );
+        done(&gh, &dir);
+
+        // GitHub refuses (gh's words, written from its source): the head moved as it merged, a rule.
+        for (err, want) in [
+            (
+                "GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)",
+                (code::HEAD_MOVED.to_string(), None),
+            ),
+            (
+                "GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)\nmore",
+                (
+                    code::MERGE_FAILED.to_string(),
+                    Some("GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)".to_string()),
+                ),
+            ),
+        ] {
+            let (gh, daemon, dir) = at("01K1B3XQ8ZC0DE5FGH7JKMNP54", branch);
+            std::fs::write(gh.with_file_name("merge.err"), format!("{err}\n")).unwrap();
+            std::fs::write(gh.with_file_name("merge.exit"), "1").unwrap();
+            assert_eq!(
+                refused(daemon.git_action("01K1B3XQ8ZC0DE5FGH7JKMNP54", "m-6", &merge(MergeMethod::Squash)).await),
+                want
+            );
+            done(&gh, &dir);
+        }
+
+        // gh's answer lost, but GitHub merged it: done, from the read after.
+        let (gh, daemon, dir) = at("01K1B3XQ8ZC0DE5FGH7JKMNP55", branch);
+        std::fs::write(
+            gh.with_file_name("merge.err"),
+            "error connecting to api.github.com\n",
+        )
+        .unwrap();
+        std::fs::write(gh.with_file_name("merge.exit"), "1").unwrap();
+        std::fs::write(gh.with_file_name("pull.after"), merged.to_string()).unwrap();
+        assert_eq!(
+            daemon
+                .git_action(
+                    "01K1B3XQ8ZC0DE5FGH7JKMNP55",
+                    "m-7",
+                    &merge(MergeMethod::Squash)
+                )
+                .await,
+            merged_pr,
+            "the read after: {:?}",
+            gh_calls(&gh)
+        );
+        done(&gh, &dir);
     }
 
     /// **A merged pull request carries no checks, and they are not asked for**: only an open

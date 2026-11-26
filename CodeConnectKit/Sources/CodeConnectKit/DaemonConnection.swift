@@ -1234,6 +1234,23 @@ public final class DaemonConnection {
             timeout: Self.commitTimeout)
     }
 
+    /// Merge the run `sessionUID`'s open pull request by `method`, only while its head is `headOID`, the commit the panel
+    /// showed. `requestID` is its identity: a retry reuses it and the computer replays its answer, never merging twice.
+    public func mergePullRequest(
+        sessionUID: String, method: MergeMethod, headOID: String, requestID: String
+    ) async throws -> GitActionResult {
+        guard capabilities?.mergesPullRequests == true else {
+            throw ConnectionError.incompatible(
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can’t merge a pull request on this connection."
+            )
+        }
+        return try await request(
+            key: requestID,
+            store: \.gitActionWaiters,
+            send: .mergePullRequest(requestID: requestID, sessionUID: sessionUID, method: method, headOID: headOID),
+            timeout: Self.commitTimeout)
+    }
+
     /// A run's repository for its Changes panel (`get_run_git`), correlated by the reference as `diff` is.
     public func runGit(session: String) async throws -> RunGitReply {
         guard capabilities?.readsRunGit == true else {
