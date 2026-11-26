@@ -323,12 +323,29 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
                     if let (Some(offer), None) = (&offer, account) {
                         daemon.account_facts.keep_agent_signed(key, offer.signed_in);
                     }
-                    // The Default signed in, its plan's limits too, from agy's own /usage: one run of agy a read, so at
-                    // most one a FACTS_FRESH, however many apps and turns ask. agy's print mode takes no folder, so an
-                    // account's limits are not read.
+                    // Signed in, its plan's limits too, from agy's own /usage: one run of agy a read, so at most one a
+                    // FACTS_FRESH, however many apps and turns ask. An account's are read in its own folder, through
+                    // the HOME whose .gemini is that folder (agy's print mode takes no folder).
                     let mut facts = offer.as_ref().and_then(agy_default_facts);
-                    if let (Some(facts), Some(agy), None) = (facts.as_mut(), agy, account) {
-                        facts.windows = agy_usage(environment, agy).await;
+                    if let (Some(facts), Some(agy)) = (facts.as_mut(), agy) {
+                        let print_home = match crate::accounts::agy_home(home.as_ref(), environment)
+                        {
+                            Some(folder) if account.is_some() => {
+                                match crate::accounts::agy_print_home(&folder) {
+                                    Ok(print_home) => Some(print_home),
+                                    Err(err) => {
+                                        crate::log_error!(
+                                            "could not make the HOME agy reads {} from: {err}",
+                                            folder.display()
+                                        );
+                                        daemon.account_facts.read(key, Some(facts.clone()));
+                                        return;
+                                    }
+                                }
+                            }
+                            _ => None,
+                        };
+                        facts.windows = agy_usage(environment, agy, print_home.as_deref()).await;
                     }
                     daemon.account_facts.read(key, facts);
                     return;
@@ -2204,17 +2221,28 @@ pub(crate) fn agy_default_facts(offer: &Offer) -> Option<protocol::ws::AccountFa
 const AGY_USAGE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Antigravity's plan limits as agy's own `/usage` prints them (`agy -p "/usage"`, its read-only print mode: no model
-/// turn), run as a start's agy is, on agy's own sign-in; none when it does not answer in time (its process group then
-/// ended, as any agent's read is) or prints none.
+/// turn), run as a start's agy is, on agy's own sign-in, or with `home` (an account's
+/// [`crate::accounts::agy_print_home`]) as agy's HOME alone, the login shell keeping the person's; none when it does
+/// not answer in time (its process group then ended, as any agent's read is) or prints none.
 pub(crate) async fn agy_usage(
     environment: &HashMap<OsString, OsString>,
     agy: &Path,
+    home: Option<&Path>,
 ) -> Vec<protocol::ws::UsageWindow> {
-    let mut command = agent_command(
-        environment,
-        None,
-        &[agy.as_os_str(), OsStr::new("-p"), OsStr::new("/usage")],
-    );
+    let usage = [agy.as_os_str(), OsStr::new("-p"), OsStr::new("/usage")];
+    let as_home = home.map(|home| {
+        let mut variable = OsString::from("HOME=");
+        variable.push(home);
+        variable
+    });
+    let args: Vec<&OsStr> = match &as_home {
+        Some(variable) => [OsStr::new("/usr/bin/env"), variable.as_os_str()]
+            .into_iter()
+            .chain(usage)
+            .collect(),
+        None => usage.to_vec(),
+    };
+    let mut command = agent_command(environment, None, &args);
     command
         .current_dir(home_in(environment))
         .stdin(Stdio::null())
@@ -3384,10 +3412,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&rig.root);
     }
 
-    /// **An added Antigravity account's plan is agy's tier in its own folder, and its limits are not read** (306 #5):
-    /// a refresh asks agy in the account's folder (`--gemini-dir`), whose tier is that account's, and holds it as the
-    /// account's plan with no windows (agy's print mode takes no folder, so `/usage` reads only the person's own agy,
-    /// once, for the Default).
+    /// **An added Antigravity account's plan is agy's tier in its own folder, and its Gemini week is read there too**
+    /// (306 #5, U7): a refresh asks agy in the account's folder (`--gemini-dir`), whose tier is that account's, and runs
+    /// agy's `/usage` with HOME a folder inside the account's whose `.gemini` is the account's folder itself, so the
+    /// account holds its own week, read where its sign-in is, and nothing of agy's lands outside its folder.
     #[tokio::test]
     async fn an_added_antigravity_accounts_plan_is_read_in_its_folder() {
         let _env = crate::ProcessEnvRead::take();
@@ -3397,7 +3425,8 @@ mod tests {
         std::fs::write(
             &agy,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = -p ]; then echo \"$2\" >> \"$0.p\"; exit 0; fi\n\
+                "#!/bin/sh\nif [ \"$1\" = -p ]; then echo \"$2|$HOME|$(cd -P \"$HOME/.gemini\" && pwd)\" >> \"$0.p\"; \
+                 printf '{records}'; exit 0; fi\n\
                  while read -r line; do\n  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n  \
                  case \"$line\" in\n    *'\"initialize\"'*) {init} ;;\n    *'\"session/new\"'*) \
                  if [ \"$2\" = --gemini-dir ]; then {ultra}; else {opened}; fi ;;\n    \
@@ -3408,6 +3437,7 @@ mod tests {
                     r#""result":{"sessionId":"s","configOptions":[{"category":"model","options":[]}],"_meta":{"antigravity":{"tier":{"name":"Google AI Ultra"}}}}"#
                 ),
                 empty = reply(r#""result":{}"#),
+                records = AGY_USAGE.replace('%', "%%").replace('\t', "\\t").replace('\n', "\\n"),
             ),
         )
         .unwrap();
@@ -3427,9 +3457,24 @@ mod tests {
             .cloned()
             .unwrap();
         assert_eq!(account["facts"]["plan"], "Google AI Ultra", "{told}");
-        assert_eq!(account["facts"].get("windows"), None, "{told}");
+        assert_eq!(
+            account["facts"]["windows"].as_array().map(Vec::len),
+            Some(1),
+            "{told}"
+        );
         let runs = std::fs::read_to_string(format!("{}.p", agy.display())).unwrap_or_default();
-        assert_eq!(runs, "/usage\n", "agy's /usage run once, for the Default");
+        let folder = format!("/accounts/antigravity/{}", b.id);
+        let theirs: Vec<&str> = runs.lines().filter(|run| run.contains(&folder)).collect();
+        assert_eq!(theirs.len(), 1, "the account's /usage run once: {runs}");
+        let [command, home, gemini] = theirs[0].split('|').collect::<Vec<_>>()[..] else {
+            panic!("{runs}")
+        };
+        assert_eq!(command, "/usage");
+        assert!(home.ends_with(&format!("{folder}/.home")), "{home}");
+        assert!(
+            gemini.ends_with(&folder),
+            "HOME/.gemini is the account's folder: {gemini}"
+        );
         let _ = std::fs::remove_dir_all(&rig.root);
     }
 

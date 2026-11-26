@@ -253,6 +253,20 @@ pub(crate) fn agy_home(
     }
 }
 
+/// The HOME agy's print mode reads an account's folder from: `<folder>/.home`, whose `.gemini` is a link to the folder
+/// itself (`..`), as agy's print mode takes no folder but `HOME/.gemini` (U7, 2026-11-26). So agy reads the account's
+/// own sign-in, with no copy of it, and all it writes there lands in the account's folder, which goes whole, link and
+/// all, when the account is removed. Made the first time it is asked for.
+pub(crate) fn agy_print_home(folder: &Path) -> std::io::Result<PathBuf> {
+    let home = folder.join(".home");
+    protocol::fsperm::private_dir(&home)?;
+    let gemini = home.join(".gemini");
+    if gemini.symlink_metadata().is_err() {
+        std::os::unix::fs::symlink("..", &gemini)?;
+    }
+    Ok(home)
+}
+
 /// Moves agy's session `id` from the home `from` into the home `to`: `to`'s files of that session are removed, then
 /// `from`'s copied in, so the session resumed in `to` is the one it left in `from`. Nothing else in either home is
 /// touched, and `from` keeps its copy. A link is neither followed nor copied. An id that is not one plain name moves

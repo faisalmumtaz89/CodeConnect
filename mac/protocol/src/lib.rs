@@ -955,8 +955,9 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     The accounts calls take Antigravity as they take Claude Code and Codex: [`ws::ClientMessage::AddAccount`],
 ///     `sign_in_account`, `activate_account` and `remove_account`, and the listing carries its accounts. Each account is a
 ///     home of agy's of its own (its `--gemini-dir`, ccd's folder), signed in and out there by agy's own ACP calls; its
-///     facts carry its sign-in and plan from that home, and no windows (agy's print mode reads only the person's own
-///     agy). A run on an account runs agy in that home; a run moving to another account at its next message takes its
+///     facts carry its sign-in and plan from that home, and its Gemini week as the Default's is (agy's print mode,
+///     run with HOME a folder whose `.gemini` is that home; a daemon of 57 sent an added account none). A run on an
+///     account runs agy in that home; a run moving to another account at its next message takes its
 ///     conversation's files there. Removing an account a run records keeps its folder, signed out, for that run. A
 ///     daemon below 57 refuses Antigravity in `add_account`, so an app offers its accounts only from 57.
 ///   * `58` — **A run's repository, for its Changes panel.**
