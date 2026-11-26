@@ -1091,16 +1091,22 @@ async fn link(
                     sent_command(&start_prompt, &answer.commands).map(str::to_string)
                 });
                 // agy refusing a start as signed out (signed out outside CodeConnect, or Google ended it): what is kept
-                // of its sign-in is old, and is read again, the accounts listing then pushed.
+                // of the sign-in it was launched on, the Default's or an account's, is old, and is read again, the
+                // accounts listing then pushed.
                 if said
                     .as_ref()
                     .is_err_and(|why| why == "Authentication required")
                     && agent_named(&daemon, &uid).await == "Antigravity"
                 {
-                    daemon.agents.forget(&AgentKind::Antigravity);
+                    let account = launched_on.clone().flatten();
                     daemon
-                        .account_facts
-                        .forget(&crate::accounts::default_key(&AgentKind::Antigravity));
+                        .agents
+                        .forget(&AgentKind::Antigravity, account.as_deref());
+                    daemon.account_facts.forget(
+                        &account.unwrap_or_else(|| {
+                            crate::accounts::default_key(&AgentKind::Antigravity)
+                        }),
+                    );
                     let daemon = Arc::clone(&daemon);
                     tokio::spawn(async move { crate::start_session::refresh_facts(&daemon).await });
                 }
@@ -4367,6 +4373,73 @@ mod tests {
         assert!(
             matches!(told, Ok(Ok(protocol::ws::ServerMessage::Accounts { .. }))),
             "the accounts listing is pushed after the refusal: {told:?}"
+        );
+        stop(&played.dir);
+    }
+
+    /// **An added account's start refused as signed out forgets that account's, not the Default's** (306, round 1 C5):
+    /// a start on Antigravity account B that agy refuses ("Authentication required") drops what is held of B, to be read
+    /// again, and leaves the person's own agy's kept sign-in as it was.
+    #[tokio::test]
+    async fn an_antigravity_accounts_start_refused_as_signed_out_forgets_that_account() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        let key = crate::accounts::default_key(&AgentKind::Antigravity);
+        rig.daemon.account_facts.keep_agent_signed(&key, Some(true));
+        let b = rig.daemon.store.add_account("antigravity", "B").unwrap();
+        rig.daemon.account_facts.read(
+            &b.id,
+            Some(protocol::ws::AccountFacts {
+                email: None,
+                plan: Some("Google AI Pro".into()),
+                windows: Vec::new(),
+                grouped_windows: Vec::new(),
+                limits_available: None,
+                read_at: "2026-11-26T12:00:00.000Z".into(),
+            }),
+        );
+        rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &b).unwrap();
+        let host = stub_host(&rig, HOST_PROTOCOL_VERSION, None);
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let (result, played) = tokio::join!(
+            start(
+                &rig.daemon,
+                Run {
+                    agent: AgentKind::Antigravity,
+                    claude_path: "/nonexistent/agy",
+                    ..run(&rig, "req-agy-b-out", &cwd, &host)
+                }
+            ),
+            async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "refused", "detail": "Authentication required"}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        assert_eq!(result, failed("Authentication required".into()));
+        let listing = serde_json::to_value(
+            rig.daemon
+                .account_facts
+                .told(crate::accounts::listing(&rig.daemon.store, None)),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                listing["accounts"][0].get("facts"),
+                &listing["agent_sign_ins"]
+            ),
+            (
+                None,
+                &serde_json::json!([{"agent": "antigravity", "signed_in": true}])
+            ),
+            "B's facts dropped, the Default's sign-in kept: {listing}"
         );
         stop(&played.dir);
     }

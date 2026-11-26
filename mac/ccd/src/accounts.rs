@@ -2518,7 +2518,7 @@ done
         let sign_ins = Arc::new(super::SignIns::default());
         let known = crate::start_session::KnownAgents::default();
         let offered = || async {
-            known.forget(&protocol::agent::AgentKind::Antigravity);
+            known.forget(&protocol::agent::AgentKind::Antigravity, None);
             crate::start_session::agy_offer(&known, &environment, &agy, None)
                 .await
                 .expect("agy answered")

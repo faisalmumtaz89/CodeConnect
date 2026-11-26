@@ -113,7 +113,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                 // Signed in, its plan goes out at once and its limits follow: what is held is aged, so the refresh reads
                 // agy's /usage now rather than a FACTS_FRESH later.
                 move |said| {
-                    ended.agents.forget(&AgentKind::Antigravity);
+                    ended.agents.forget(&AgentKind::Antigravity, None);
                     let known = said.is_some();
                     let signed_in = matches!(said, Some((true, _)));
                     crate::accounts::keep_antigravity(&ended.account_facts, said);
@@ -152,7 +152,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                 request_id,
             )
             .await;
-            daemon.agents.forget(&AgentKind::Antigravity);
+            daemon.agents.forget(&AgentKind::Antigravity, None);
             // Refused, agy's sign-in is not known: read again.
             if !matches!(reply, ServerMessage::Accounts { .. }) {
                 daemon
@@ -622,10 +622,11 @@ impl KnownAgents {
             .map(|(_, offer)| offer.clone())
     }
 
-    /// What `agent` offered is forgotten, so the next list asks it again: its sign-in has changed.
-    pub(crate) fn forget(&self, agent: &AgentKind) {
+    /// What `agent` offered on `account` (an account's id; `None`, its Default) is forgotten, so the next list asks it
+    /// again: its sign-in has changed.
+    pub(crate) fn forget(&self, agent: &AgentKind, account: Option<&str>) {
         let mut offers = self.offers.lock().unwrap_or_else(|p| p.into_inner());
-        offers.remove(&offer_key(agent, None));
+        offers.remove(&account_key(agent, account));
     }
 
     fn keep(
@@ -642,8 +643,13 @@ impl KnownAgents {
 
 /// An offer is `agent`'s on one account: another account's sign-in and models are its own.
 fn offer_key(agent: &AgentKind, account: Option<&crate::accounts::AccountEnv>) -> String {
+    account_key(agent, account.map(crate::accounts::AccountEnv::id))
+}
+
+/// The key of `agent`'s offer on the account whose id is `account` (`None`, its Default).
+fn account_key(agent: &AgentKind, account: Option<&str>) -> String {
     match account {
-        Some(account) => format!("{}/{}", agent.as_str(), account.id()),
+        Some(id) => format!("{}/{}", agent.as_str(), id),
         None => agent.as_str().to_string(),
     }
 }
