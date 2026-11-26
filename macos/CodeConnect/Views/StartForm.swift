@@ -539,7 +539,7 @@ struct StartForm: View {
                 }
                 TextField(
                     "", text: $draft.message, selection: $messageSelection,
-                    prompt: Text("What do you want to work on?").foregroundStyle(Theme.text.opacity(0.5)), axis: .vertical
+                    prompt: Text("What do you want to work on?").foregroundStyle(Theme.text3), axis: .vertical
                 )
                     .accessibilityLabel("First message")
                     .accessibilityIdentifier("start.message")
