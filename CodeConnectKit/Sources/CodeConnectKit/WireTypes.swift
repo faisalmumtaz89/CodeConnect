@@ -660,9 +660,10 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// last ended. `nil` outside a repository, on a detached head, before the
     /// first read, and from an older daemon.
     public let gitBranch: String?
-    /// Lines added and removed in tracked files against `HEAD` (minor 31), read
-    /// at the same moments. `nil` outside a repository, before the first read,
-    /// and from an older daemon.
+    /// Lines added and removed against `HEAD` (minor 31), read at the same moments: from minor 53 the sum of a
+    /// diff's `files`' counted lines, untracked files' included; tracked files only before. `nil` outside a
+    /// repository, before the first read, when there were more untracked files than the daemon lists at once, and
+    /// from an older daemon.
     public let diffStat: DiffStat?
 
     enum CodingKeys: String, CodingKey {
@@ -1991,16 +1992,59 @@ public struct SessionDiff: Sendable, Hashable {
     /// daemon's note is the only thing that tells those apart — rendering "no
     /// changes" for the second would be a claim the app cannot support.
     public let note: String?
+    /// Every changed file with its lines (minor 53), whole even when `unified` was cut. Nil from an older daemon
+    /// and when git could not list them.
+    public let files: [DiffFile]?
+    /// `files` stops short of the tree's changes.
+    public let filesTruncated: Bool
 
-    public init(sessionID: String, unified: String, truncated: Bool, capturedAt: String, note: String?) {
+    public init(
+        sessionID: String, unified: String, truncated: Bool, capturedAt: String, note: String?,
+        files: [DiffFile]? = nil, filesTruncated: Bool = false
+    ) {
         self.sessionID = sessionID
         self.unified = unified
         self.truncated = truncated
         self.capturedAt = capturedAt
         self.note = note
+        self.files = files
+        self.filesTruncated = filesTruncated
     }
 
     public var capturedDate: Date? { ISO8601.parse(capturedAt) }
+}
+
+/// One changed file of a `diff` (minor 53), from the repository's top folder.
+public struct DiffFile: Decodable, Sendable, Hashable {
+    public enum Status: String, Decodable, Sendable {
+        case added, modified, deleted, renamed, copied, untracked
+        case typeChanged = "type_changed"
+    }
+
+    public let path: String
+    /// Where a renamed or copied file came from.
+    public let oldPath: String?
+    public let status: Status
+    /// Lines added and removed; an untracked file's every line is added. Nil for a binary file, an untracked one
+    /// that is not a regular file, and one past the daemon's reading budget.
+    public let added: UInt64?
+    public let removed: UInt64?
+    public let binary: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case path, status, added, removed, binary
+        case oldPath = "old_path"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        oldPath = try c.decodeIfPresent(String.self, forKey: .oldPath)
+        status = try c.decode(Status.self, forKey: .status)
+        added = try c.decodeIfPresent(UInt64.self, forKey: .added)
+        removed = try c.decodeIfPresent(UInt64.self, forKey: .removed)
+        binary = try c.decodeIfPresent(Bool.self, forKey: .binary) ?? false
+    }
 }
 
 extension SessionDiff: Decodable {
@@ -2010,6 +2054,8 @@ extension SessionDiff: Decodable {
         case truncated
         case capturedAt = "captured_at"
         case note
+        case files
+        case filesTruncated = "files_truncated"
     }
 
     public init(from decoder: Decoder) throws {
@@ -2019,6 +2065,8 @@ extension SessionDiff: Decodable {
         truncated = try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
         capturedAt = try c.decodeIfPresent(String.self, forKey: .capturedAt) ?? ""
         note = try c.decodeIfPresent(String.self, forKey: .note)
+        files = try c.decodeIfPresent([DiffFile].self, forKey: .files)
+        filesTruncated = try c.decodeIfPresent(Bool.self, forKey: .filesTruncated) ?? false
     }
 }
 

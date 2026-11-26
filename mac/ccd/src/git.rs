@@ -34,6 +34,10 @@ pub struct Diff {
     pub unified: String,
     pub truncated: bool,
     pub note: Option<String>,
+    /// Every changed file, whole even when `unified` is cut; `None` when git could not list them.
+    pub files: Option<Vec<protocol::ws::DiffFile>>,
+    /// `files` was cut at [`protocol::ws::MAX_DIFF_FILES`].
+    pub files_truncated: bool,
 }
 
 pub fn git_bin(configured: Option<&str>) -> Option<PathBuf> {
@@ -88,11 +92,7 @@ pub async fn collect(
         Ok(diff) => diff,
         // A diff that cannot be produced is a note, not a protocol error: the
         // phone should say why and carry on, not show a failed request.
-        Err(err) => Diff {
-            unified: String::new(),
-            truncated: false,
-            note: Some(format!("could not read the diff: {err:#}")),
-        },
+        Err(err) => note_only(format!("could not read the diff: {err:#}")),
     }
 }
 
@@ -150,11 +150,10 @@ pub async fn tree_facts(cwd: &str, configured_bin: Option<&str>, timeout: Durati
     }
 }
 
-/// Lines added and removed in tracked files against `HEAD`, or against the
-/// index in a repository with no commits yet. `None` outside a repository, or
-/// when git fails or says more than [`LISTING_CAP`]: a partial count would be a
-/// wrong one. Run with the same switches as the diff, so no configured program
-/// runs.
+/// The sum of [`files`]' counted lines: what the open diff's files add up to. A file with
+/// no count (binary, not a regular file, past the reading budget) adds nothing, as a binary
+/// change always has. `None` outside a repository, when git cannot list the tracked files,
+/// and when the untracked names passed [`LISTING_CAP`]: files left out would be lines left out.
 pub async fn diff_stat(
     cwd: &str,
     configured_bin: Option<&str>,
@@ -171,30 +170,228 @@ pub async fn diff_stat(
     .await
     .ok()?
     .ok;
+    let listed = files(&git, cwd, has_head, timeout).await?;
+    if listed.truncated {
+        return None;
+    }
+    Some(protocol::event::DiffStat {
+        added: listed.files.iter().filter_map(|file| file.added).sum(),
+        removed: listed.files.iter().filter_map(|file| file.removed).sum(),
+    })
+}
+
+/// Bytes read from untracked files, all of them together, to count their lines.
+const UNTRACKED_READ_BUDGET: u64 = 4 * 1024 * 1024;
+
+/// Git's own test for a binary file: a NUL in its first 8000 bytes.
+const BINARY_PROBE: u64 = 8000;
+
+/// The untracked files, from the repository's top, with no configured program run.
+const UNTRACKED_ARGS: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "ls-files",
+    "-z",
+    "--others",
+    "--exclude-standard",
+    "--full-name",
+    "--",
+    ":/",
+];
+
+/// A working tree's changed files.
+struct Files {
+    files: Vec<protocol::ws::DiffFile>,
+    /// The untracked listing passed [`LISTING_CAP`]: `files` holds the names that fit.
+    truncated: bool,
+}
+
+/// The changed files at `cwd`, from the repository's top: the tracked ones against `HEAD`
+/// (against the index before the first commit), compared as the diff compares them, then the
+/// untracked ones. `None` when git cannot list them, or lists more tracked files than
+/// [`LISTING_CAP`] holds. Run with the diff's switches, so no configured program runs.
+async fn files(git: &Path, cwd: &str, has_head: bool, timeout: Duration) -> Option<Files> {
     let mut args = diff_args(false);
-    args.push("--numstat");
+    args.extend(["--no-relative", "-z", "--raw", "--numstat"]);
     if has_head {
         args.push("HEAD");
     }
-    let out = run(&git, cwd, &args, timeout, LISTING_CAP).await.ok()?;
-    (out.ok && !out.stdout_truncated).then(|| parse_numstat(&out.stdout))
+    let tracked = run(git, cwd, &args, timeout, LISTING_CAP).await.ok()?;
+    let untracked = run(git, cwd, UNTRACKED_ARGS, timeout, LISTING_CAP)
+        .await
+        .ok()?;
+    let top = run(
+        git,
+        cwd,
+        &["rev-parse", "--show-toplevel"],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()?;
+    if !tracked.ok || tracked.stdout_truncated || !untracked.ok || !top.ok || top.stdout_truncated {
+        return None;
+    }
+    let top = PathBuf::from(top.stdout.trim_end_matches('\n'));
+    let mut names: Vec<String> = untracked.stdout.split('\0').map(String::from).collect();
+    // The last name is whole only when the listing ended with its NUL: a cut one is dropped.
+    names.pop();
+    let new_files = tokio::task::spawn_blocking(move || count_untracked(&top, names))
+        .await
+        .ok()?;
+    let mut files = parse_raw_numstat(&tracked.stdout);
+    files.extend(new_files);
+    Some(Files {
+        files,
+        truncated: untracked.stdout_truncated,
+    })
 }
 
-/// Sum `git diff --numstat`: added and removed counts, a tab, the path. A binary
-/// file's counts are `-` and add nothing.
-fn parse_numstat(listing: &str) -> protocol::event::DiffStat {
-    let mut stat = protocol::event::DiffStat {
-        added: 0,
-        removed: 0,
-    };
-    for line in listing.lines() {
-        let mut columns = line.split('\t');
-        let added = columns.next().and_then(|n| n.parse::<u64>().ok());
-        let removed = columns.next().and_then(|n| n.parse::<u64>().ok());
-        stat.added += added.unwrap_or(0);
-        stat.removed += removed.unwrap_or(0);
+/// `git diff -z --raw --numstat`: every file's raw entry (`:modes shas status`, then its
+/// path, or a rename's or copy's two), then every file's counts (`added\tremoved\tpath`, or
+/// for two paths an empty third column followed by both). A binary file counts `-`.
+fn parse_raw_numstat(listing: &str) -> Vec<protocol::ws::DiffFile> {
+    use protocol::ws::{DiffFile, DiffFileStatus};
+    let tokens: Vec<&str> = listing.split('\0').collect();
+    let mut entries = Vec::new();
+    let mut at = 0;
+    while let Some(header) = tokens.get(at).filter(|token| token.starts_with(':')) {
+        let letter = header
+            .rsplit(' ')
+            .next()
+            .and_then(|code| code.chars().next());
+        let status = match letter {
+            Some('A') => DiffFileStatus::Added,
+            Some('D') => DiffFileStatus::Deleted,
+            Some('R') => DiffFileStatus::Renamed,
+            Some('C') => DiffFileStatus::Copied,
+            Some('T') => DiffFileStatus::TypeChanged,
+            _ => DiffFileStatus::Modified,
+        };
+        let paths = if matches!(letter, Some('R' | 'C')) {
+            2
+        } else {
+            1
+        };
+        let named: Vec<&str> = tokens.iter().skip(at + 1).take(paths).copied().collect();
+        if named.len() < paths {
+            break;
+        }
+        at += 1 + paths;
+        let (old_path, path) = match named.as_slice() {
+            [old, new] => (Some(old.to_string()), new.to_string()),
+            [path] => (None, path.to_string()),
+            _ => break,
+        };
+        entries.push((path, old_path, status));
     }
-    stat
+    let mut counts = std::collections::HashMap::new();
+    while let Some(token) = tokens.get(at) {
+        let mut columns = token.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(path)) =
+            (columns.next(), columns.next(), columns.next())
+        else {
+            at += 1;
+            continue;
+        };
+        let path = if path.is_empty() {
+            at += 2;
+            tokens.get(at).copied().unwrap_or_default()
+        } else {
+            path
+        };
+        at += 1;
+        counts.insert(
+            path,
+            (
+                added.parse::<u64>().ok(),
+                removed.parse::<u64>().ok(),
+                added == "-",
+            ),
+        );
+    }
+    entries
+        .into_iter()
+        .map(|(path, old_path, status)| {
+            let (added, removed, binary) = counts
+                .get(path.as_str())
+                .copied()
+                .unwrap_or((None, None, false));
+            DiffFile {
+                path,
+                old_path,
+                status,
+                added,
+                removed,
+                binary,
+            }
+        })
+        .collect()
+}
+
+/// The untracked files under `top`, each with its lines: every line is added. Only a
+/// regular file is read, never followed through a symlink; a symlink, socket or pipe has no
+/// lines. A file with a NUL in its first [`BINARY_PROBE`] bytes is binary, git's own content
+/// test; a `.gitattributes` `-diff` or `binary` is not read for an untracked file.
+/// Every byte read counts against [`UNTRACKED_READ_BUDGET`]: a file larger than what is left
+/// of it is not opened, and it and a file that cannot be read have no count; later files
+/// still may.
+fn count_untracked(top: &Path, names: Vec<String>) -> Vec<protocol::ws::DiffFile> {
+    use std::io::Read;
+    let mut budget = UNTRACKED_READ_BUDGET;
+    let mut lines_of = |path: &Path| -> (Option<u64>, bool) {
+        if budget == 0 {
+            return (None, false);
+        }
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return (None, false);
+        };
+        if !meta.is_file() || meta.len() > budget {
+            return (None, false);
+        }
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return (None, false);
+        };
+        let mut text = Vec::new();
+        if (&mut file)
+            .take(BINARY_PROBE.min(budget))
+            .read_to_end(&mut text)
+            .is_err()
+        {
+            return (None, false);
+        }
+        budget -= text.len() as u64;
+        if text.contains(&0) {
+            return (None, true);
+        }
+        let probed = text.len();
+        if (&mut file).take(budget + 1).read_to_end(&mut text).is_err() {
+            return (None, false);
+        }
+        let rest = (text.len() - probed) as u64;
+        if rest > budget {
+            budget = 0;
+            return (None, false);
+        }
+        budget -= rest;
+        let breaks = text.iter().filter(|byte| **byte == b'\n').count() as u64;
+        let unended = u64::from(text.last().is_some_and(|byte| *byte != b'\n'));
+        (Some(breaks + unended), false)
+    };
+    names
+        .into_iter()
+        .map(|path| {
+            let (added, binary) = lines_of(&top.join(&path));
+            protocol::ws::DiffFile {
+                path,
+                old_path: None,
+                status: protocol::ws::DiffFileStatus::Untracked,
+                added,
+                removed: added.map(|_| 0),
+                binary,
+            }
+        })
+        .collect()
 }
 
 /// Ceiling for a listing of worktrees or branch names.
@@ -365,7 +562,13 @@ async fn collect_inner(
     let untracked = run(
         &git,
         cwd,
-        &["ls-files", "--others", "--exclude-standard"],
+        &[
+            "-c",
+            "core.fsmonitor=false",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+        ],
         timeout,
         // A name list, not file contents. Capped well below the diff so a
         // directory of a million generated files cannot dominate the reply.
@@ -411,10 +614,21 @@ async fn collect_inner(
         unified.push_str("\n… diff truncated by CodeConnect\n");
     }
 
+    let listed = files(&git, cwd, has_head, timeout).await;
+    let files_truncated = listed.as_ref().is_some_and(|listed| {
+        listed.truncated || listed.files.len() > protocol::ws::MAX_DIFF_FILES
+    });
+    let mut files = listed.map(|listed| listed.files);
+    if let Some(files) = files.as_mut() {
+        files.truncate(protocol::ws::MAX_DIFF_FILES);
+    }
+
     Ok(Diff {
         unified,
         truncated,
         note,
+        files,
+        files_truncated,
     })
 }
 
@@ -452,6 +666,8 @@ fn note_only(note: String) -> Diff {
         unified: String::new(),
         truncated: false,
         note: Some(note),
+        files: None,
+        files_truncated: false,
     }
 }
 
@@ -776,8 +992,8 @@ mod tests {
     }
 
     /// **The session list's branch and line counts**: tracked edits counted
-    /// against `HEAD`, a binary change counted as nothing, an untracked file left
-    /// out (the written miss), and nothing at all outside a repository.
+    /// against `HEAD`, a binary change counted as nothing, an untracked file's
+    /// every line added, and nothing at all outside a repository.
     #[tokio::test]
     async fn tree_facts_count_tracked_lines_on_the_checked_out_branch() {
         let dir = temp_dir("tree");
@@ -806,10 +1022,10 @@ mod tests {
         assert_eq!(
             tree_of(&dir).await.diff_stat,
             Some(protocol::event::DiffStat {
-                added: 2,
+                added: 4,
                 removed: 1
             }),
-            "staged and unstaged tracked edits against HEAD; binary and untracked add nothing"
+            "staged and unstaged tracked edits against HEAD, and each untracked file's line; binary adds nothing"
         );
 
         git_sync(&dir, &["checkout", "-q", "--detach"]);
@@ -845,17 +1061,315 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn file(
+        path: &str,
+        old_path: Option<&str>,
+        status: protocol::ws::DiffFileStatus,
+        counts: Option<(u64, u64)>,
+        binary: bool,
+    ) -> protocol::ws::DiffFile {
+        protocol::ws::DiffFile {
+            path: path.into(),
+            old_path: old_path.map(String::from),
+            status,
+            added: counts.map(|(added, _)| added),
+            removed: counts.map(|(_, removed)| removed),
+            binary,
+        }
+    }
+
+    /// **`git diff -z --raw --numstat`, read as git 2.54 wrote it** for a binary
+    /// change, a deletion, a mode change with edits and a rename: raw entries first,
+    /// then counts, a rename's counts with an empty path column before its two paths.
     #[test]
-    fn numstat_sums_counts_and_skips_binary_rows() {
-        let stat =
-            parse_numstat("3\t1\ta.txt\n-\t-\timg.png\n10\t0\tdir/b c.rs\n0\t4\told => new\n");
+    fn raw_and_numstat_read_as_git_writes_them() {
+        use protocol::ws::DiffFileStatus::*;
+        let listing = ":100644 100644 badc806 0000000 M\0bin.dat\0\
+            :100644 000000 587be6b 0000000 D\0gone.txt\0\
+            :100644 100755 422c2b7 0000000 M\0keep.txt\0\
+            :100644 100644 28ce6a8 28ce6a8 R100\0mv-src.txt\0mv-dst.txt\0\
+            -\t-\tbin.dat\x000\t1\tgone.txt\x002\t1\tkeep.txt\x000\t0\t\0mv-src.txt\0mv-dst.txt\0";
         assert_eq!(
-            stat,
-            protocol::event::DiffStat {
-                added: 13,
-                removed: 5
-            }
+            parse_raw_numstat(listing),
+            [
+                file("bin.dat", None, Modified, None, true),
+                file("gone.txt", None, Deleted, Some((0, 1)), false),
+                file("keep.txt", None, Modified, Some((2, 1)), false),
+                file(
+                    "mv-dst.txt",
+                    Some("mv-src.txt"),
+                    Renamed,
+                    Some((0, 0)),
+                    false
+                ),
+            ]
         );
+        assert_eq!(parse_raw_numstat(""), []);
+    }
+
+    /// **Every changed file, from the repository's top, with its lines**, read from a
+    /// folder below the top: an edit, a deletion, a rename, a binary change, untracked
+    /// text (a last line with no newline counts), untracked binary, an untracked
+    /// symlink with no lines and never followed, and an ignored file left out. The
+    /// session list's count is their sum.
+    #[tokio::test]
+    async fn a_diff_lists_every_changed_file_with_its_lines() {
+        use protocol::ws::DiffFileStatus::*;
+        let dir = temp_dir("files");
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("keep.txt"), "a\nb\n").unwrap();
+        std::fs::write(dir.join("gone.txt"), "x\n").unwrap();
+        std::fs::write(dir.join("mv-src.txt"), "m\n").unwrap();
+        std::fs::write(dir.join("bin.dat"), b"\0one").unwrap();
+        std::fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "base"]);
+        std::fs::write(dir.join("keep.txt"), "a\nB\nc\n").unwrap();
+        std::fs::remove_file(dir.join("gone.txt")).unwrap();
+        git_sync(&dir, &["mv", "mv-src.txt", "mv-dst.txt"]);
+        std::fs::write(dir.join("bin.dat"), b"\0two").unwrap();
+        std::fs::write(dir.join("sub/new.txt"), "one\ntwo").unwrap();
+        std::fs::write(dir.join("sub/new.bin"), b"\0\x01").unwrap();
+        std::fs::write(dir.join("noise.log"), "ignored\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/hosts", dir.join("link")).unwrap();
+
+        let diff = diff_of(&dir.join("sub"), 512 * 1024).await;
+        let mut expected = vec![
+            file("bin.dat", None, Modified, None, true),
+            file("gone.txt", None, Deleted, Some((0, 1)), false),
+            file("keep.txt", None, Modified, Some((2, 1)), false),
+            file(
+                "mv-dst.txt",
+                Some("mv-src.txt"),
+                Renamed,
+                Some((0, 0)),
+                false,
+            ),
+            file("link", None, Untracked, None, false),
+            file("sub/new.bin", None, Untracked, None, true),
+            file("sub/new.txt", None, Untracked, Some((2, 0)), false),
+        ];
+        let mut listed = diff.files.clone().expect("a repository's files are listed");
+        listed.sort_by(|a, b| {
+            (a.status == Untracked, &a.path).cmp(&(b.status == Untracked, &b.path))
+        });
+        expected.sort_by(|a, b| {
+            (a.status == Untracked, &a.path).cmp(&(b.status == Untracked, &b.path))
+        });
+        assert_eq!(listed, expected);
+        assert!(!diff.files_truncated);
+        assert_eq!(
+            tree_of(&dir.join("sub")).await.diff_stat,
+            Some(protocol::event::DiffStat {
+                added: 4,
+                removed: 2
+            }),
+            "the session list's count is the files' sum"
+        );
+
+        let plain = temp_dir("files-plain");
+        assert_eq!(diff_of(&plain, 512 * 1024).await.files, None);
+        let _ = std::fs::remove_dir_all(&plain);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Untracked text past the reading budget is uncounted, never guessed, and costs
+    /// nothing**: the big file is listed with no lines, a smaller one after it still counts,
+    /// and the session list's count is the counted lines, as a binary change's none.
+    #[tokio::test]
+    async fn untracked_text_past_the_budget_is_uncounted_and_later_files_still_count() {
+        let dir = temp_dir("files-budget");
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        git_sync(&dir, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let line = "x".repeat(1023) + "\n";
+        std::fs::write(
+            dir.join("big.txt"),
+            line.repeat((UNTRACKED_READ_BUDGET / 1024) as usize + 1),
+        )
+        .unwrap();
+        std::fs::write(dir.join("small.txt"), "one\n").unwrap();
+        let diff = diff_of(&dir, 512 * 1024).await;
+        let files = diff.files.expect("listed");
+        let counted: Vec<_> = files
+            .iter()
+            .map(|file| (file.path.as_str(), file.added))
+            .collect();
+        assert_eq!(counted, [("big.txt", None), ("small.txt", Some(1))]);
+        assert_eq!(
+            tree_of(&dir).await.diff_stat,
+            Some(protocol::event::DiffStat {
+                added: 1,
+                removed: 0
+            })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Every byte read counts against the budget, a binary probe's too**: once probes
+    /// of binary files have used it up, a text file after them is left uncounted.
+    #[tokio::test]
+    async fn binary_probes_count_against_the_reading_budget() {
+        let dir = temp_dir("files-probes");
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        git_sync(&dir, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let mut blob = vec![b'b'; BINARY_PROBE as usize];
+        blob[0] = 0;
+        for n in 0..(UNTRACKED_READ_BUDGET / BINARY_PROBE + 1) {
+            std::fs::write(dir.join(format!("a{n:04}.bin")), &blob).unwrap();
+        }
+        // Larger than what the probes leave (4194304 - 524 * 8000 = 2304 bytes), smaller
+        // than a whole budget: counted only if the probes cost nothing.
+        std::fs::write(dir.join("z.txt"), "z\n".repeat(1500)).unwrap();
+        let files = diff_of(&dir, 512 * 1024).await.files.expect("listed");
+        let last = files.last().expect("z.txt is listed last");
+        assert_eq!((last.path.as_str(), last.added), ("z.txt", None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A file larger than what is left of the budget costs none of it**: it is not read,
+    /// so a smaller file after it is still counted.
+    #[tokio::test]
+    async fn a_file_past_what_is_left_of_the_budget_leaves_it_for_later_files() {
+        let dir = temp_dir("files-left");
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        git_sync(&dir, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let line = "x".repeat(99) + "\n";
+        std::fs::write(
+            dir.join("a.txt"),
+            line.repeat((UNTRACKED_READ_BUDGET / 100) as usize - 10),
+        )
+        .unwrap();
+        std::fs::write(dir.join("b.txt"), "y".repeat(10_000)).unwrap();
+        std::fs::write(dir.join("c.txt"), "c\n".repeat(10)).unwrap();
+        let files = diff_of(&dir, 512 * 1024).await.files.expect("listed");
+        let counted: Vec<_> = files
+            .iter()
+            .map(|file| (file.path.as_str(), file.added))
+            .collect();
+        assert_eq!(
+            counted,
+            [
+                ("a.txt", Some(UNTRACKED_READ_BUDGET / 100 - 10)),
+                ("b.txt", None),
+                ("c.txt", Some(10))
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The diff keeps the repository's own `diff.relative`, the list does not**: read
+    /// from a folder below the top, the diff's paths are that folder's, as they were, so a
+    /// hunk comment names a path the run can open; the list's are from the top.
+    #[tokio::test]
+    async fn a_relative_diff_stays_relative_and_the_list_is_from_the_top() {
+        let dir = temp_dir("files-relative");
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        git_sync(&dir, &["config", "diff.relative", "true"]);
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/x.txt"), "1\n").unwrap();
+        std::fs::write(dir.join("top.txt"), "1\n").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "base"]);
+        std::fs::write(dir.join("sub/x.txt"), "2\n").unwrap();
+        std::fs::write(dir.join("top.txt"), "2\n").unwrap();
+        let diff = diff_of(&dir.join("sub"), 512 * 1024).await;
+        assert!(diff.unified.contains("+++ b/x.txt"), "{}", diff.unified);
+        assert!(!diff.unified.contains("top.txt"), "{}", diff.unified);
+        let paths: Vec<_> = diff
+            .files
+            .expect("listed")
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        assert_eq!(paths, ["sub/x.txt", "top.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **No read runs the repository's fsmonitor**: with `core.fsmonitor` naming a program
+    /// that leaves a mark, neither the diff nor the session list's read runs it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn no_read_runs_a_configured_fsmonitor() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("fsmonitor");
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        git_sync(&dir, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let mark = dir.join("ran");
+        let hook = dir.join("monitor.sh");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\necho x >> '{}'\n", mark.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git_sync(&dir, &["config", "core.fsmonitor", hook.to_str().unwrap()]);
+        std::fs::write(dir.join("loose.txt"), "x\n").unwrap();
+        let _ = std::fs::remove_file(&mark);
+        let diff = diff_of(&dir, 512 * 1024).await;
+        assert!(diff.unified.contains("loose.txt"), "{}", diff.unified);
+        let _ = tree_of(&dir).await;
+        assert!(!mark.exists(), "a read ran the configured fsmonitor");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **More untracked names than one listing holds**: the names that fit are listed whole
+    /// and the list says it was cut, rather than no list at all.
+    #[tokio::test]
+    async fn an_untracked_listing_past_its_cap_keeps_the_names_that_fit() {
+        let dir = temp_dir("files-many");
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        git_sync(&dir, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let name = "n".repeat(200);
+        for n in 0..(LISTING_CAP / 200 + 10) {
+            std::fs::write(dir.join(format!("{name}{n:05}")), "").unwrap();
+        }
+        let diff = diff_of(&dir, 512 * 1024).await;
+        assert!(diff.files_truncated);
+        let files = diff.files.expect("the names that fit are listed");
+        assert_eq!(files.len(), protocol::ws::MAX_DIFF_FILES);
+        assert!(
+            files.iter().all(|file| file.path.len() == 205),
+            "no cut name"
+        );
+        assert_eq!(
+            tree_of(&dir).await.diff_stat,
+            None,
+            "a total with names left out would read as the whole"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The list compares files as the diff does**: with copy detection on in the
+    /// repository's config, a copy is listed as one, with where it came from.
+    #[tokio::test]
+    async fn the_list_follows_the_repositorys_rename_and_copy_setting() {
+        let dir = temp_dir("files-copies");
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        git_sync(&dir, &["config", "diff.renames", "copies"]);
+        let text: String = (0..40).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(dir.join("src.txt"), &text).unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "base"]);
+        std::fs::write(dir.join("src.txt"), text.clone() + "more\n").unwrap();
+        std::fs::write(dir.join("dst.txt"), &text).unwrap();
+        git_sync(&dir, &["add", "."]);
+        let diff = diff_of(&dir, 512 * 1024).await;
+        assert!(
+            diff.unified.contains("copy from src.txt"),
+            "{}",
+            diff.unified
+        );
+        let copy = diff
+            .files
+            .expect("listed")
+            .into_iter()
+            .find(|file| file.path == "dst.txt")
+            .expect("the copy is listed");
+        assert_eq!(copy.status, protocol::ws::DiffFileStatus::Copied);
+        assert_eq!(copy.old_path.as_deref(), Some("src.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -1086,6 +1600,10 @@ mod tests {
             }
             assert_eq!(args.contains(&"HEAD"), against_head);
         }
+        assert!(
+            UNTRACKED_ARGS.contains(&"core.fsmonitor=false"),
+            "the untracked listing runs on every turn's end too: {UNTRACKED_ARGS:?}"
+        );
     }
 
     #[test]

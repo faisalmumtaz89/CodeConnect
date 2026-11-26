@@ -530,9 +530,12 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
     /// Lines added and removed in `cwd` against `HEAD` (minor 31), read at the
-    /// same moments as `git_branch`. Tracked files only: a new file git does not
-    /// track yet is not counted. Absent outside a repository, before the first
-    /// read, and from any older daemon.
+    /// same moments as `git_branch`: the sum of a `diff`'s `files`' counted lines,
+    /// so it is the total the open diff shows. A new file git does not track yet
+    /// counts every line (minor 53; tracked files only before); a file with no count
+    /// (binary, or past the daemon's reading budget) adds nothing. Absent outside a
+    /// repository, before the first read, when there were more untracked files than
+    /// the daemon lists at once, and from any older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_stat: Option<DiffStat>,
     /// The person's next message relaunches this ended run (minor 42): a run CodeConnect

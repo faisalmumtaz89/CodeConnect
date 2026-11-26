@@ -1213,7 +1213,8 @@ visit to one can still raise a dialog on the Mac.
 removed in tracked files against `HEAD` (`git diff --numstat`, run with the
 same switches as `get_diff`, so no external diff, textconv or fsmonitor program
 runs; a clean filter configured for a file, such as Git LFS's, does, as it does
-for `get_diff`; a binary file and a file git does not track add nothing). They are read when a turn ends
+for `get_diff`; a binary file and a file git does not track add nothing; from
+`>= 53` it is the sum of `get_diff`'s `files`, untracked files' lines included). They are read when a turn ends
 and when the daemon starts, never on a `sessions` request, and
 omitted outside a repository, before the first read, and on a detached head
 (the branch). It also answers `get_machine_stats` (the `machine_stats`
@@ -1290,9 +1291,12 @@ to probe credentials.
   `SendTextResult` gains `duplicate` and `indeterminate`, neither of which can
   reach a client that did not send a `request_id`.
 
-* **`get_diff{session_id}`** → `diff{session_id, unified, truncated, captured_at, note}`.
+* **`get_diff{session_id}`** → `diff{session_id, unified, truncated, captured_at, note, files?, files_truncated?}`.
   `git -C <session cwd> diff HEAD` plus a listing of untracked file names, capped
-  at 512KB. The client names a session, never a path. A non-git directory returns
+  at 512KB. From `>= 53`, `files` lists every changed file from the repository's
+  top, with its status and lines (an untracked file's from the file itself, regular
+  files only, within one 4 MB reading budget), whole even when `unified` is cut;
+  at most 1000 and 256KB of the frame, `files_truncated` when there were more. The client names a session, never a path. A non-git directory returns
   an empty diff *with a `note`* — an empty diff and "this was never a repository"
   must not look the same on screen.
 

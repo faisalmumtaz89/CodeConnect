@@ -921,7 +921,14 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     `link` attached, a Codex run's `codex_link` subscribed, and it carries its `menus`; a change or a Stop sent then
 ///     waits for the move. A daemon of 48 to 51 ends a run at its first idle point after the choice, and sends a moved
 ///     run no `menus`.
-pub const PROTOCOL_MINOR: u32 = 52;
+///   * `53` — **A diff lists its files.**
+///
+///     [`ws::ServerMessage::Diff`] gains `files`, every changed file with its status and lines ([`ws::DiffFile`]),
+///     whole even when `unified` is cut, at most [`ws::MAX_DIFF_FILES`] with `files_truncated` saying when there were
+///     more; an untracked file is listed with every line added. [`event::SessionSummary::diff_stat`] is their counted
+///     lines' sum, so it counts untracked files' lines too. A daemon below 53 sends no `files`, and its `diff_stat` counts tracked
+///     files only.
+pub const PROTOCOL_MINOR: u32 = 53;
 
 #[cfg(test)]
 mod ledger_tests {
