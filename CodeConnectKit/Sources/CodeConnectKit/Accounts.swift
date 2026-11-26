@@ -77,19 +77,24 @@ public struct AccountFacts: Decodable, Hashable, Sendable {
 public struct UsageWindow: Decodable, Hashable, Sendable {
     public let usedPercent: Int
     public let windowMinutes: Int
-    /// Unix seconds.
+    /// Unix seconds; 0 for a window the agent has not opened yet (minor 52: Antigravity's, unused).
     public let resetsAt: Int
+    /// The models it counts, in the agent's own words (minor 52: Antigravity's "Gemini Models"); nil where one window
+    /// counts all the agent's models.
+    public let group: String?
 
-    public init(usedPercent: Int, windowMinutes: Int, resetsAt: Int) {
+    public init(usedPercent: Int, windowMinutes: Int, resetsAt: Int, group: String? = nil) {
         self.usedPercent = usedPercent
         self.windowMinutes = windowMinutes
         self.resetsAt = resetsAt
+        self.group = group
     }
 
     private enum CodingKeys: String, CodingKey {
         case usedPercent = "used_percent"
         case windowMinutes = "window_minutes"
         case resetsAt = "resets_at"
+        case group
     }
 }
 
@@ -227,6 +232,11 @@ public enum AccountSwitchWords {
     }
 
     /// A usage window's caption, from its own length as the service names it.
+    /// A window's caption: its length, after its model group where the agent names one ("Gemini Models · 5-hour").
+    public static func caption(_ window: UsageWindow) -> String {
+        window.group.map { "\($0) · \(caption(minutes: window.windowMinutes))" } ?? caption(minutes: window.windowMinutes)
+    }
+
     public static func caption(minutes: Int) -> String {
         switch minutes {
         case 300: "5-hour"
@@ -241,6 +251,7 @@ public enum AccountSwitchWords {
     /// down), "resets in Nh Mm" from an hour ("resets in 5h" on the hour), "resets in N min" under an hour (at least 1);
     /// nil once the time has come, until the computer reads the window again.
     public static func resets(_ window: UsageWindow, now: Date) -> String? {
+        if window.resetsAt == 0 { return "not started" }
         let left = window.resetsAt - Int(now.timeIntervalSince1970.rounded(.down))
         guard left > 0 else { return nil }
         if left >= 2 * 86400 { return "resets in \(left / 86400) days" }

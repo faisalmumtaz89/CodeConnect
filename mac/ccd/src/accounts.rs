@@ -2260,11 +2260,18 @@ done
 
     /// Antigravity's sign-in as each listing carries it (S2), built as ccd builds one (its sign-in slot's mark, then
     /// what is held): signed in with agy's tier "Google AI Pro", signed in with no tier named, signed out, and signing
-    /// in. Its read time is fixed, so the frames are the same at every build.
+    /// in; and signed in with its plan's limits, read by agy's own /usage as ccd reads them (records shaped as agy 1.5.15
+    /// prints them, some of each Gemini window used). Its read time is fixed, so the frames are the same at every build.
     fn antigravity_sign_in_frames() -> serde_json::Value {
         let store = crate::store::Store::open_temp("ccd-agy-frames");
         let _db = store.temp_db();
         let key = super::default_key(&protocol::agent::AgentKind::Antigravity);
+        let usage = crate::start_session::agy_usage_windows(
+            "Gemini Models\tWeekly Limit Remaining\t80%\t2026-12-03T00:47:31Z\n\
+             Gemini Models\tFive Hour Limit Remaining\t45%\t2026-11-26T05:47:31Z\n\
+             Claude and GPT models\tWeekly Limit Remaining\t100%\t1970-01-01T00:00:00Z\n\
+             Claude and GPT models\tFive Hour Limit Remaining\t100%\t1970-01-01T00:00:00Z\n",
+        );
         let frame = |signed_in: Option<bool>, plan: Option<&str>, going: bool| {
             let facts = super::Facts::default();
             facts.keep_agent_signed(&key, signed_in);
@@ -2273,7 +2280,11 @@ done
                 (signed_in == Some(true)).then(|| protocol::ws::AccountFacts {
                     email: None,
                     plan: plan.map(str::to_string),
-                    windows: Vec::new(),
+                    windows: if plan == Some("Google AI Ultra") {
+                        usage.clone()
+                    } else {
+                        Vec::new()
+                    },
                     limits_available: None,
                     read_at: "2026-11-25T12:00:00.000Z".into(),
                 }),
@@ -2290,6 +2301,7 @@ done
             "signed_in_no_tier": frame(Some(true), None, false),
             "signed_out": frame(Some(false), None, false),
             "signing_in": frame(Some(false), None, true),
+            "signed_in_usage": frame(Some(true), Some("Google AI Ultra"), false),
         })
     }
 

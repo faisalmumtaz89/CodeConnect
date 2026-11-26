@@ -225,6 +225,38 @@ final class AntigravityKitTests: XCTestCase {
         XCTAssertFalse(lacking(false, [false, true, true]), "a ready agent is never lacking")
     }
 
+    /// **Antigravity's plan limits, by model group, as agy names them** (minor 53): each window carries its group; the
+    /// Accounts page captions each by its group and length, in agy's order; a window agy has not opened reads "not
+    /// started"; the reply bar shows the one nearest its limit. A window with no group is captioned by its length alone.
+    func testAntigravitysWindowsAreCaptionedByTheirGroupAndTheBarShowsTheFullest() throws {
+        func facts(_ windows: String) throws -> AccountFacts {
+            try JSONDecoder().decode(
+                AccountFacts.self, from: Data(#"{"read_at": "2026-11-26T04:10:00.000Z", "windows": [\#(windows)]}"#.utf8))
+        }
+        let agy = try facts(
+            """
+            {"used_percent": 30, "window_minutes": 10080, "resets_at": 1796258851, "group": "Gemini Models"},
+            {"used_percent": 55, "window_minutes": 300, "resets_at": 1795672051, "group": "Gemini Models"},
+            {"used_percent": 0, "window_minutes": 10080, "resets_at": 0, "group": "Claude and GPT models"},
+            {"used_percent": 0, "window_minutes": 300, "resets_at": 0, "group": "Claude and GPT models"}
+            """)
+        XCTAssertEqual(agy.windows.first?.group, "Gemini Models")
+        let now = Date(timeIntervalSince1970: 1_795_660_000)
+        let limits = ReplyBar.limits(agy, now: now)
+        XCTAssertEqual(
+            limits.map(\.caption),
+            [
+                "Gemini Models · 5-hour", "Gemini Models · Week", "Claude and GPT models · 5-hour",
+                "Claude and GPT models · Week",
+            ])
+        XCTAssertEqual(limits.first?.resets, "resets in 3h 20m")
+        XCTAssertEqual(limits.last?.resets, "not started")
+        XCTAssertEqual(ReplyBar.barLimits(agy, now: now).map(\.caption), ["Gemini Models · 5-hour"], "the fullest")
+        let claude = try facts(#"{"used_percent": 10, "window_minutes": 300, "resets_at": 1795670000}"#)
+        XCTAssertEqual(ReplyBar.limits(claude, now: now).map(\.caption), ["5-hour"], "no group: its length alone")
+        XCTAssertEqual(ReplyBar.barLimits(claude, now: now).count, 1, "no group: the bar shows every window")
+    }
+
     /// An Antigravity run's "/" offers model, effort, compact and diff: agy has no `/clear`. Compact's words name
     /// Antigravity, and its wait ends with the turn agy runs `/compact` in (a turn end after the send), as Claude's ends
     /// with Claude Code's own receipt; a turn end does not settle a Claude compact.

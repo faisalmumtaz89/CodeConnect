@@ -462,17 +462,27 @@ private struct AgentSignInGroup: View {
     var body: some View {
         let book = model.accountBook
         let signIn = book?.agentSignIn(for: agent)
+        let facts = book?.defaultFacts(for: agent)
+        let columns = AccountRow.columns([facts].compactMap { $0 })
         VStack(alignment: .leading, spacing: 8) {
-            Text(agent.displayName).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
-                .padding(.leading, 4)
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                Text(agent.displayName).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
+                Spacer()
+                ForEach(columns, id: \.self) { caption in
+                    Text("\(caption) used").font(Theme.ui(10.5)).foregroundStyle(Theme.text3)
+                        .frame(minWidth: AccountRow.column, alignment: .trailing)
+                }
+                Color.clear.frame(width: AccountRow.trailing, height: 1)
+            }
+            .padding(.leading, 4)
             VStack(spacing: 0) {
                 if book != nil {
                     AccountRow(
-                        model: model, agent: agent, id: nil, facts: nil, label: "Default",
+                        model: model, agent: agent, id: nil, facts: facts, label: "Default",
                         signedOut: signIn?.signedOut ?? false, signingIn: signIn?.signingIn ?? false,
-                        note: signIn?.line(plan: book?.defaultFacts(for: agent)?.plan), columns: [], inUse: true,
+                        note: signIn?.line(plan: facts?.plan), columns: columns, inUse: true,
                         choose: {}, acts: model.signsAgentsIn ? signIn?.acts ?? [] : [], remove: {},
-                        signOut: { signingOut = true }, reportsUsage: false)
+                        signOut: { signingOut = true })
                 } else {
                     Text("Asking this Mac…").font(Theme.ui(13)).foregroundStyle(Theme.text3)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 9)
@@ -511,11 +521,8 @@ private struct AgentAccounts: View {
     @State private var removing: AgentAccount?
 
     /// The windows the agent names across its accounts, in the order it names them: the group's columns.
-    private func columns(_ book: AccountBook) -> [Int] {
-        let all = ([book.defaultFacts(for: agent)] + book.accounts(for: agent).map(\.facts)).compactMap { $0 }
-        var seen: [Int] = []
-        for window in all.flatMap(\.windows) where !seen.contains(window.windowMinutes) { seen.append(window.windowMinutes) }
-        return seen
+    private func columns(_ book: AccountBook) -> [String] {
+        AccountRow.columns(([book.defaultFacts(for: agent)] + book.accounts(for: agent).map(\.facts)).compactMap { $0 })
     }
 
     var body: some View {
@@ -526,8 +533,8 @@ private struct AgentAccounts: View {
             HStack(alignment: .firstTextBaseline, spacing: 0) {
                 Text(agent.displayName).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
                 Spacer()
-                ForEach(columns, id: \.self) { minutes in
-                    Text("\(AccountSwitchWords.caption(minutes: minutes)) used").font(Theme.ui(10.5)).foregroundStyle(Theme.text3)
+                ForEach(columns, id: \.self) { caption in
+                    Text("\(caption) used").font(Theme.ui(10.5)).foregroundStyle(Theme.text3)
                         .frame(minWidth: AccountRow.column, alignment: .trailing)
                 }
                 Color.clear.frame(width: AccountRow.trailing, height: 1)
@@ -623,7 +630,7 @@ private struct AccountRow: View {
     let signedOut: Bool
     let signingIn: Bool
     let note: String?
-    let columns: [Int]
+    let columns: [String]
     let inUse: Bool
     /// What a click does: use it, or sign a signed-out one in again (`AppModel.choose`).
     let choose: () async -> Void
@@ -633,9 +640,15 @@ private struct AccountRow: View {
     let remove: () -> Void
     /// Sign Out… of an agent's own sign-in: asks first, by its group's card.
     var signOut: () -> Void = {}
-    /// Its agent reports usage of its plan: a row whose agent reports none (Antigravity) shows no figures, not a "Not
-    /// reported yet" that would never change.
-    var reportsUsage = true
+    /// The windows `all` name, in the order they name them, by caption (a model group's own, where the agent names
+    /// groups): a group's columns.
+    static func columns(_ all: [AccountFacts]) -> [String] {
+        var seen: [String] = []
+        for limit in all.flatMap({ ReplyBar.limits($0, now: .now) }) where !seen.contains(limit.caption) {
+            seen.append(limit.caption)
+        }
+        return seen
+    }
     @Environment(RowMenu.self) private var menu
     @State private var hovered = false
     @State private var moreFrame: CGRect = .zero
@@ -733,16 +746,14 @@ private struct AccountRow: View {
     /// empty cell where it names no such window. Or, in their place, "No plan limits" where its agent says none apply
     /// (`limitsAvailable` false), else "Not reported yet".
     @ViewBuilder private var figures: some View {
-        if !reportsUsage {
-            EmptyView()
-        } else if let facts, !ReplyBar.limits(facts, now: .now).isEmpty {
+        if let facts, !ReplyBar.limits(facts, now: .now).isEmpty {
             // Redrawn each minute while shown; each countdown is from the time of that drawing, since the schedule's own
             // date is the minute's start, up to 59 s earlier. The figures are the reply bar's (`ReplyBar.limits`).
             TimelineView(.everyMinute) { _ in
                 let limits = ReplyBar.limits(facts, now: .now)
                 HStack(spacing: 0) {
-                    ForEach(columns, id: \.self) { minutes in
-                        let window = limits.first { $0.caption == AccountSwitchWords.caption(minutes: minutes) }
+                    ForEach(columns, id: \.self) { caption in
+                        let window = limits.first { $0.caption == caption }
                         VStack(alignment: .trailing, spacing: 2) {
                             Text(window.map { "\($0.usedPercent)%" } ?? " ").font(Theme.ui(13)).monospacedDigit()
                                 .foregroundStyle((window?.usedPercent ?? 0) >= 90 ? Theme.amber : Theme.text2)
