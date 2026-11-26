@@ -318,7 +318,17 @@ pub async fn merge_pr(
     match crate::git::run_program(command, &args, MERGE_TIMEOUT, CREATE_CAP).await {
         Ok(out) if out.ok => Merged::Done,
         Ok(out) if said(&out, &["head branch was modified"]) => Merged::HeadMoved,
-        Ok(out) => Merged::Refused(crate::git::first_words(&out).unwrap_or_default()),
+        // gh warns first ("! The merge strategy for main is set by the merge queue"); GitHub's
+        // reason follows its warnings.
+        Ok(out) => Merged::Refused(
+            [&out.stderr, &out.stdout]
+                .into_iter()
+                .flat_map(|text| text.lines())
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with('!'))
+                .map(|line| line.chars().take(300).collect())
+                .unwrap_or_default(),
+        ),
         Err(err) if format!("{err:#}").contains("timed out") => Merged::Unknown,
         Err(err) => Merged::Refused(format!("{err:#}")),
     }

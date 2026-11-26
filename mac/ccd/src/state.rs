@@ -9684,6 +9684,35 @@ mod tests {
             done(&gh, &dir);
         }
 
+        // On a queue-protected base, gh warns before it tries ("! The merge strategy…"); the
+        // refusal shown is GitHub's, after the warning.
+        let (gh, daemon, dir) = at("01K1B3XQ8ZC0DE5FGH7JKMNP57", branch);
+        std::fs::write(
+            gh.with_file_name("merge.err"),
+            "! The merge strategy for trunk is set by the merge queue\nGraphQL: Resource not accessible by integration (enablePullRequestAutoMerge)\n",
+        )
+        .unwrap();
+        std::fs::write(gh.with_file_name("merge.exit"), "1").unwrap();
+        assert_eq!(
+            refused(
+                daemon
+                    .git_action(
+                        "01K1B3XQ8ZC0DE5FGH7JKMNP57",
+                        "m-10",
+                        &merge(MergeMethod::Squash)
+                    )
+                    .await
+            ),
+            (
+                code::MERGE_FAILED.to_string(),
+                Some(
+                    "GraphQL: Resource not accessible by integration (enablePullRequestAutoMerge)"
+                        .to_string()
+                )
+            )
+        );
+        done(&gh, &dir);
+
         // gh's answer lost, and GitHub not readable after: not known, never said to have failed.
         let (gh, daemon, dir) = at("01K1B3XQ8ZC0DE5FGH7JKMNP56", branch);
         std::fs::write(
