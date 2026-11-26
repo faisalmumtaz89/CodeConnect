@@ -159,8 +159,9 @@ private struct ConfirmationCard: View {
                             Image(systemName: item.mark).font(.system(size: 12)).foregroundStyle(Theme.text3)
                                 .frame(width: 14).accessibilityHidden(true)
                             Text(item.words).font(Theme.ui(13)).foregroundStyle(Theme.text2)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        .frame(height: 30)
+                        .frame(minHeight: 30)
                     }
                 }
                 .padding(.top, 12)

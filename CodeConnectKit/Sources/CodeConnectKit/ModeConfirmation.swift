@@ -11,6 +11,8 @@ public enum ModeConfirmation {
     /// The ask for the agent whose mode is being confirmed.
     public static func words(for agent: AgentKind) -> AskWords {
         let withoutAsking = AskWords.Item(mark: "apple.terminal", words: "Runs commands and edits files without asking")
+        // The mode is the run's own: the note says so, and until when (decision 221).
+        let inThisRun = "In this run, until you change the mode back."
         switch agent {
         case .codex:
             // The folder and network lines are true: the confirmed mode is Codex's own full-access preset — sandbox
@@ -22,13 +24,13 @@ public enum ModeConfirmation {
                     .init(mark: "folder", words: "Works outside this project’s folder"),
                     .init(mark: "globe", words: "Uses the network"),
                 ],
-                note: "Until you change the mode back.", cancel: "Keep Asking", confirm: "Give Full Access")
+                note: inThisRun, cancel: "Keep Asking", confirm: "Give Full Access")
         case .claude, .antigravity, .unsupported:
             // Claude's lines promise nothing about a sandbox: the mode only turns off claude's prompts. None of an
             // Antigravity run's modes lets agy work without asking (decision 214), so it never asks this.
             return AskWords(
                 title: "Let Claude work without asking?", items: [withoutAsking],
-                note: "Until you change the mode back.", cancel: "Keep Asking", confirm: "Bypass Permissions")
+                note: inThisRun, cancel: "Keep Asking", confirm: "Bypass Permissions")
         }
     }
 }

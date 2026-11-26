@@ -4,7 +4,7 @@ import SwiftUI
 /// The main window: the sidebar's agents, computers and projects, the fleet's runs beside it, and the run open beside
 /// them, or with none open the start form (`StartPane`); or Settings in the place of the list and the main area
 /// together; before any computer is paired, what to do first in the list's place. An agent is started from the start
-/// form: the + on the sidebar's Agents and File > New Agent (⌘N) leave Settings, close the open run and give the form the
+/// form: the + on the sidebar's Agents and File > New Run (⌘N) leave Settings, close the open run and give the form the
 /// keyboard. A computer is added from a sheet: the + on Computers and File > Add Computer (⇧⌘N); an iPhone from File >
 /// Add iPhone.
 struct MainWindow: View {
@@ -196,8 +196,8 @@ struct MainWindow: View {
         // host, which closes with every other panel.
         .environment(\.agentsShown, settings == nil)
         .focusedSceneValue(\.adding, $adding)
-        // New Agent is the start form in the main area: Settings and the open run close, and the form takes the
-        // keyboard. Before any computer is added there is no form: New Agent adds a computer first.
+        // New Run is the start form in the main area: Settings and the open run close, and the form takes the
+        // keyboard. Before any computer is added there is no form: New Run adds a computer first.
         .onChange(of: adding, initial: true) { _, kind in
             guard kind == .agent else { return }
             guard machines.showsFleet else {

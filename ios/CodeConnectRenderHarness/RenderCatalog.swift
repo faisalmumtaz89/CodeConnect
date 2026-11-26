@@ -1306,7 +1306,7 @@ enum RenderCatalog {
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/cl", row: "/clear")
-                try driver.require(app.buttons["Clear context"], "the destructive action")
+                try driver.require(app.buttons["session.clear.confirm"], "the destructive action")
             }),
 
         RenderScenario(

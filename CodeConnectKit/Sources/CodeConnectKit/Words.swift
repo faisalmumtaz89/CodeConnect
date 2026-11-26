@@ -56,7 +56,8 @@ public enum FleetWords {
     public static let noEndedRuns = "No ended runs."
     public static let noComputersYet = "No computers yet"
 
-    /// Ending run `name`, whose agent is `agent`: it stops and moves to Ended, and its folder is left as it is.
+    /// Ending run `name` (its whole `RunLabel.inline`, which tells it from another run in the same project), whose agent
+    /// is `agent`: it stops and moves to Ended, and its folder is left as it is.
     public static func endAsk(_ name: String, agent: String) -> AskWords {
         AskWords(
             title: "End “\(name)”?",

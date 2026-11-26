@@ -1109,7 +1109,7 @@ struct SessionDetailView: View {
                 ])
         }
         .ccConfirmation(isPresented: $confirmingEndRun) {
-            let ask = FleetWords.endAsk(label.project, agent: summary?.agent.displayName ?? "The agent")
+            let ask = FleetWords.endAsk(label.inline, agent: summary?.agent.displayName ?? "The agent")
             return CCConfirmation(
                 title: ask.title, message: ask.message,
                 answers: [
