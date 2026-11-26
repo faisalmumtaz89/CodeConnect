@@ -159,6 +159,10 @@ public enum SessionWords {
     public static let eventsAppearHere = "Events appear here as the agent works."
     /// Over an ended run's `SessionSummary.resumeCommand`.
     public static let pickUpAtComputer = "Pick this conversation up at the computer"
+    /// The reply line while the run's computer is offline: why a reply cannot go, and when it can.
+    public static func computerOffline(_ computer: String) -> String {
+        "\(computer) is offline. You can reply once it’s back."
+    }
 }
 
 /// A run's settings, as both apps name them.

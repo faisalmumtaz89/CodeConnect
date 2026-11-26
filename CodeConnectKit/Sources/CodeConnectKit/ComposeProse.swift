@@ -223,7 +223,10 @@ extension AppModel {
     /// run's own reason it cannot be answered from here (offering "Why?"), else nil.
     public func standingNote(for key: String, draft: String) -> ComposeProse.Note? {
         if let reason = sendBlockedReason(for: key, draft: draft) {
-            return ComposeProse.Note(text: reason, tone: .warning, icon: "warning-circle-fill")
+            // An offline computer by name, and when a reply can go; an offline link with a cause of its own keeps it.
+            let offline = reason == linkHealth.disabledReason && linkHealth.level == .offline && linkHealth.cause == nil
+            let text = offline ? machineName.map(SessionWords.computerOffline) ?? reason : reason
+            return ComposeProse.Note(text: text, tone: .warning, icon: "warning-circle-fill")
         }
         if let summary = shownSummary(for: key),
             let reason = FleetStatusRule.capability(summary: summary, capabilities: connection.capabilities).reason
