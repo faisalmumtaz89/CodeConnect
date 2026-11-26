@@ -136,6 +136,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                 agy.as_deref(),
                 request_id,
                 crate::accounts::SIGN_IN_WAIT,
+                None,
             )
             .await
             .0

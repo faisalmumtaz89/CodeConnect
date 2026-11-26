@@ -958,6 +958,30 @@ pub(crate) async fn sign_in(
             None,
         );
     };
+    // An Antigravity account signs in as Antigravity's own sign-in does, in its own folder.
+    if account.agent == AgentKind::Antigravity.as_str() {
+        let home = match AccountEnv::for_account(&protocol::root_dir(), &account) {
+            Ok(home) => home,
+            Err(err) => {
+                return (
+                    unavailable(request_id, "set up the account's folder", err.into()),
+                    None,
+                )
+            }
+        };
+        return sign_in_agent(
+            store,
+            sign_ins,
+            move |_| on_end(),
+            environment,
+            AgentKind::Antigravity,
+            agents.agy,
+            request_id,
+            wait,
+            home.as_ref(),
+        )
+        .await;
+    }
     let Some(program) = agents.path(&account.agent) else {
         let missing = format!(
             "{} isn't installed on this computer.",
@@ -1043,8 +1067,9 @@ pub(crate) async fn sign_in(
 
 /// Signs Antigravity in with agy's own sign-in, agy at `agy` (`agent`, any other refused): `authenticate` with Google's
 /// personal sign-in, for which agy opens the browser on this computer and listens for Google's answer itself. Answers
-/// at once: the listing, Antigravity `signing_in`. It takes the computer's one sign-in slot, under Antigravity's
-/// Default's key, as an account's sign-in does ([`sign_in`]); it ends when agy answers (whether it signed in or not),
+/// at once: the listing, Antigravity `signing_in`; on one of CodeConnect's accounts (`account`), in that account's
+/// folder (agy's `--gemini-dir`), that account signing in. It takes the computer's one sign-in slot, under Antigravity's
+/// Default's key or the account's, as an account's sign-in does ([`sign_in`]); it ends when agy answers (whether it signed in or not),
 /// after `wait`, or when a newer sign-in replaces it, and then agy is ended and `on_end` called with what agy said: its
 /// sign-in and its tier when it answered `authenticate` (signed in on a result, not on an error), `None` otherwise.
 #[allow(clippy::too_many_arguments)]
@@ -1057,6 +1082,7 @@ pub(crate) async fn sign_in_agent(
     agy: Option<&Path>,
     request_id: String,
     wait: std::time::Duration,
+    account: Option<&AccountEnv>,
 ) -> (
     protocol::ws::ServerMessage,
     Option<tokio::task::JoinHandle<()>>,
@@ -1067,7 +1093,9 @@ pub(crate) async fn sign_in_agent(
     let Some(agy) = agy else {
         return (refused(request_id, AGY_MISSING.into()), None);
     };
-    let Some(mut signing) = crate::start_session::Agy::start(environment, agy, None) else {
+    let Some(mut signing) =
+        crate::start_session::Agy::start(environment, agy, account.map(AccountEnv::folder))
+    else {
         return (
             unavailable(
                 request_id,
@@ -1081,13 +1109,11 @@ pub(crate) async fn sign_in_agent(
     let mine = sign_ins
         .count
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some((_, _, earlier)) =
-        sign_ins
-            .going
-            .lock()
-            .unwrap()
-            .replace((mine, default_key(&agent), end))
-    {
+    if let Some((_, _, earlier)) = sign_ins.going.lock().unwrap().replace((
+        mine,
+        account.map_or_else(|| default_key(&agent), |account| account.id().to_string()),
+        end,
+    )) {
         let _ = earlier.send(tokio::sync::oneshot::channel().0);
     }
     let reply = sign_ins.marked(listing(store, Some(request_id)));
@@ -2210,6 +2236,70 @@ done
         agy
     }
 
+    /// **An added Antigravity account signs in in its own folder** (306 #5): its sign-in is agy's `authenticate` in the
+    /// account's home (`--gemini-dir`), answered at once with the account signing in, and the person's own agy is not
+    /// signed in by it.
+    #[tokio::test]
+    async fn an_antigravity_account_signs_in_in_its_own_folder() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-agyacctin.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let agy = stand_in_agy(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-agyacctin");
+        let _db = store.temp_db();
+        let a = store.add_account("antigravity", "A").unwrap();
+        let on_a = super::AccountEnv::for_account(&protocol::root_dir(), &a)
+            .unwrap()
+            .unwrap();
+        let (ended, heard) = std::sync::mpsc::channel::<()>();
+        let (answered, running) = super::sign_in(
+            &store,
+            &Arc::new(super::SignIns::default()),
+            move || {
+                let _ = ended.send(());
+            },
+            &environment,
+            super::Agents {
+                codex: None,
+                claude: None,
+                agy: Some(&agy),
+            },
+            "s1".into(),
+            a.id.clone(),
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(
+            serde_json::to_value(&answered).unwrap()["accounts"][0]["signing_in"],
+            true,
+            "{answered:?}"
+        );
+        running.unwrap().await.unwrap();
+        assert!(
+            heard.try_recv().is_ok(),
+            "the list is pushed when agy answers"
+        );
+        assert!(
+            on_a.folder().join("signed").exists(),
+            "A is signed in in its own folder"
+        );
+        assert!(
+            !root.join("signed").exists(),
+            "the person's own agy is not signed in by it"
+        );
+        let _ = std::fs::remove_dir_all(on_a.folder());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **Removing an Antigravity account signs it out in its own folder, and keeps the folder while a run records it**
     /// (306 #1): each account is its own home of agy's, so its removal is agy's `logout` there, the person's own agy
     /// (the Default) left signed in. An account no run records goes with its folder; one an ended run records goes
@@ -2371,6 +2461,7 @@ done
             Some(&agy),
             "g1".into(),
             std::time::Duration::from_secs(10),
+            None,
         )
         .await;
         assert_eq!(
@@ -2470,6 +2561,7 @@ done
             Some(&agy),
             "g3".into(),
             std::time::Duration::from_millis(500),
+            None,
         )
         .await;
         late.unwrap().await.unwrap();
@@ -2492,6 +2584,7 @@ done
             Some(&agy),
             "g4".into(),
             std::time::Duration::from_secs(1),
+            None,
         )
         .await
         .0;
