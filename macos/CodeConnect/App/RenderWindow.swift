@@ -217,7 +217,7 @@
             FleetScope(rawValue: UserDefaults.standard.string(forKey: "CC_FLEET_SCOPE") ?? "") ?? .active
         }
 
-        /// `-CC_FILTER computer`: the list opens narrowed to the first computer with a run.
+        /// `-CC_FILTER <name>`: the list opens narrowed to the computer of that name, as the iPhone's flag does.
         static var filter: String? { UserDefaults.standard.string(forKey: "CC_FILTER") }
 
         /// `-CC_FOLDS_OPEN YES`: every diff opens with its folded stretches of unchanged lines opened, as clicks open them.
