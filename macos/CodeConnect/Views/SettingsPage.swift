@@ -399,6 +399,9 @@ private struct ComputerSettings: View {
             ActionButton(title: "Add Computer…", key: "⇧⌘N", prominent: false, id: "settings.computers.add", action: add)
         }
         .removesComputer($removing)
+        #if DEBUG
+            .task { if RenderWindow.confirm == "computer" { removing = computers.last } }
+        #endif
         .task(id: computers.map(\.machineID)) {
             guard let root = setup.installer?.root else { return }
             address = await Task.detached { LocalDaemon.address(root: root) }.value ?? address
