@@ -6716,7 +6716,7 @@ const MAX_PROJECTS: u32 = 200;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
     pub id: String,
-    /// `claude` or `codex`.
+    /// `claude`, `codex` or `antigravity`.
     pub agent: String,
     pub label: String,
 }

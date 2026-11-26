@@ -2341,7 +2341,7 @@ done
         let known = crate::start_session::KnownAgents::default();
         let offered = || async {
             known.forget(&protocol::agent::AgentKind::Antigravity);
-            crate::start_session::agy_offer(&known, &environment, &agy)
+            crate::start_session::agy_offer(&known, &environment, &agy, None)
                 .await
                 .expect("agy answered")
         };

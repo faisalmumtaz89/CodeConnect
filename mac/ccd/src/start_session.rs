@@ -306,7 +306,7 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
                 // agy), its plan its tier's name as agy gives it.
                 if *agent == AgentKind::Antigravity {
                     let offer = match agy {
-                        Some(agy) => agy_offer(&daemon.agents, environment, agy).await,
+                        Some(agy) => agy_offer(&daemon.agents, environment, agy, None).await,
                         None => None,
                     };
                     if let Some(offer) = &offer {
@@ -1451,7 +1451,7 @@ async fn agent_availability(
     if *agent == AgentKind::Antigravity {
         return match agy_path(environment, configured).await {
             Some(agy) => {
-                let offer = agy_offer(known, environment, &agy)
+                let offer = agy_offer(known, environment, &agy, account)
                     .await
                     .unwrap_or_default();
                 startable(agent, offer.signed_in, offer.models, &this_computer())
@@ -2177,26 +2177,28 @@ impl Agy {
     }
 }
 
-/// What the agy at `agy` offers a start: the model families its settings name, and whether it is signed in. agy has
+/// What the agy at `agy` offers a start on `account` (its folder agy's home; agy's own on the Default): the model
+/// families its settings name, and whether it is signed in. agy has
 /// no list of its own over ACP, so it is asked by opening one session with no prompt (`session/new`, which a signed-out
 /// agy refuses with "Authentication required") and closing it at once (`session/close`): agy 1.5.15 lists such a
 /// session in no history (measured, `session/list` before and after), though its empty conversation file stays in
 /// agy's folder. Asking starts agy and reaches Google, so a
-/// signed-in answer is kept for that binary (its size and time: agy names no version); a signed-out one is asked
+/// signed-in answer is kept for that binary and that account (its size and time: agy names no version); a signed-out one is asked
 /// again at each list, as nothing cheaper says when it is signed in. None when agy answered neither way in time.
 pub(crate) async fn agy_offer(
     known: &KnownAgents,
     environment: &HashMap<OsString, OsString>,
     agy: &Path,
+    account: Option<&crate::accounts::AccountEnv>,
 ) -> Option<Offer> {
     let version = std::fs::metadata(agy)
         .map(|meta| format!("{} {:?}", meta.len(), meta.modified().ok()))
         .unwrap_or_default();
-    if let Some(kept) = known.offered(&AgentKind::Antigravity, None, &version) {
+    if let Some(kept) = known.offered(&AgentKind::Antigravity, account, &version) {
         return Some(kept);
     }
     let home = home_in(environment);
-    let mut asking = Agy::start(environment, agy, None)?;
+    let mut asking = Agy::start(environment, agy, account.map(|account| account.folder()))?;
     let asked = async {
         asking
             .call(
@@ -2252,7 +2254,7 @@ pub(crate) async fn agy_offer(
         .as_ref()
         .is_some_and(|offer| offer.signed_in == Some(true))
     {
-        known.keep(&AgentKind::Antigravity, None, &version, offer.clone()?);
+        known.keep(&AgentKind::Antigravity, account, &version, offer.clone()?);
     }
     offer
 }
@@ -5806,6 +5808,62 @@ esac"#;
         std::fs::write(path, script).unwrap();
         std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
+    }
+
+    /// **On an Antigravity account, the start box offers what agy offers in that account's folder** (306 #5): agy is
+    /// asked in the account's own home (`--gemini-dir`), whose sign-in and models are its own, and the answer is kept
+    /// for that account alone: the person's own agy, signed in, does not stand for an account that is not.
+    #[tokio::test]
+    async fn on_an_antigravity_account_the_start_box_offers_what_its_folder_offers() {
+        let rig = Rig::new("agy-account", ANSWERING);
+        let known = KnownAgents::default();
+        let agy = rig.root.join("agy");
+        let argv = rig.root.join("agy.argv");
+        let opened = r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s","configOptions":[{"category":"model","options":[{"value":"gemini-4-neon","name":"Gemini 4 Neon"}]}]}}"#;
+        let refused = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Authentication required"}}"#;
+        std::fs::write(
+            &agy,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{argv}'\nwhile read -r line; do\n  case \"$line\" in\n    \
+                 *'\"initialize\"'*) echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":1}}}}' ;;\n    \
+                 *'\"session/new\"'*) if [ \"$2\" = --gemini-dir ]; then echo '{refused}'; else echo '{opened}'; fi ;;\n    \
+                 *'\"session/close\"'*) echo '{{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{{}}}}' ;;\n  esac\ndone\n",
+                argv = argv.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&agy, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let store = crate::store::Store::open_temp("ccd-agy-account");
+        let _db = store.temp_db();
+        let b = store.add_account("antigravity", "B").unwrap();
+        let on_b = crate::accounts::AccountEnv::for_account(&rig.root, &b)
+            .unwrap()
+            .unwrap();
+        let listed = |account| {
+            agent_availability(
+                &AgentKind::Antigravity,
+                &known,
+                &rig.env,
+                account,
+                agy.to_str(),
+            )
+        };
+        let mine = listed(None).await;
+        assert_eq!(mine.signed_in, Some(true), "{mine:?}");
+        let theirs = listed(Some(&on_b)).await;
+        assert_eq!(theirs.signed_in, Some(false), "{theirs:?}");
+        assert_eq!(theirs.models, Vec::new());
+        assert_eq!(
+            std::fs::read_to_string(&argv)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [
+                "acp",
+                &format!("acp --gemini-dir {}", on_b.folder().display())
+            ],
+        );
     }
 
     /// **Antigravity is listed with agy's own models** (S1): its start box offers the model families agy's settings
