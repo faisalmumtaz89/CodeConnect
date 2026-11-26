@@ -112,7 +112,12 @@ public struct LimitFoot: Equatable, Sendable {
         let facts = summary.account.flatMap { account in
             StartAgent(rawValue: summary.agent.rawValue).flatMap { book?.facts(for: $0, accountID: account.id) }
         }
-        let window = facts?.windows.first { $0.windowMinutes == limit.which.windowMinutes }
+        // The window of that length the run stopped in: one the account began after the limit is a later window.
+        let at = ISO8601.parse(limit.at)?.timeIntervalSince1970 ?? now.timeIntervalSince1970
+        let window = facts?.windows.first { window in
+            window.windowMinutes == limit.which.windowMinutes
+                && TimeInterval(window.resetsAt - window.windowMinutes * 60) <= at
+        }
         let reset = window.flatMap { window in
             AccountSwitchWords.countdown(window, now: now).map {
                 (date: Date(timeIntervalSince1970: TimeInterval(window.resetsAt)), countdown: $0)

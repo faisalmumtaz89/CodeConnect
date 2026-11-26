@@ -17,12 +17,12 @@ public struct RunList: Sendable, Equatable {
         needsYou = rows.filter { [.blocked, .failed, .idle].contains($0.status) || $0.summary.atLimit }
         working = rows.filter { shown($0) && !$0.summary.atLimit && [.running, .stopping].contains($0.status) }
         done = rows.filter { shown($0) && !$0.summary.atLimit && [.doneUnreviewed, .done].contains($0.status) }
-        ended = rows.filter { $0.status == .ended }
+        ended = rows.filter { $0.status == .ended && !$0.summary.atLimit }
     }
 
     /// How many runs `computer` has that have not ended: the ones the list shows of it, its count in the head's menu.
     public static func activeCount(_ rows: [FleetRow], on computer: String) -> Int {
-        rows.count { $0.machineID == computer && $0.status != .ended }
+        rows.count { $0.machineID == computer && ($0.status != .ended || $0.summary.atLimit) }
     }
 }
 
