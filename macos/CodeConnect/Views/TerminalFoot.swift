@@ -260,9 +260,12 @@ private final class ShellContainer: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        // KVO calls this on the thread that changed the first responder: AppKit's, the main thread.
         watching = window?.observe(\.firstResponder, options: [.initial, .new]) { window, _ in
-            let held = window.firstResponder is ShellView
-            MainActor.assumeIsolated { if Shells.shared.holdsKeys != held { Shells.shared.holdsKeys = held } }
+            MainActor.assumeIsolated {
+                let held = window.firstResponder is ShellView
+                if Shells.shared.holdsKeys != held { Shells.shared.holdsKeys = held }
+            }
         }
         if window == nil { MainActor.assumeIsolated { Shells.shared.holdsKeys = false } }
     }
