@@ -244,7 +244,9 @@ struct FleetList: View {
                 ForEach(section.rows) { row in
                     // In Needs you, narrowed, a run on another computer names that computer by its mark.
                     let elsewhere = section.id == "needsYou" && computer != nil && row.machineID != computer
-                    runRow(row, elsewhere: elsewhere, choosable: false)
+                    // Known by its section too: a run that moves to another section (Idle while the launch catches
+                    // up, Done once it has) is drawn anew there, never a lazy row kept with its old mark.
+                    runRow(row, elsewhere: elsewhere, choosable: false).id(section.id + "/" + row.id)
                 }
             }
         }
