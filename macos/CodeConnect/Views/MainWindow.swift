@@ -988,14 +988,14 @@ private struct EmptyFleet: View {
     }
 }
 
-/// A button with its key, where one reaches it: white and solid for the one thing to do, raised for
-/// the rest.
+/// A button with its key on a cap, where one reaches it: white and solid for the one thing to do, a faint white
+/// for the rest.
 struct ActionButton: View {
     let title: String
     let key: String?
     let prominent: Bool
-    /// Acts and cannot be taken back: the plain face in red, as every destructive button on the Mac is drawn. Never
-    /// prominent, never Return.
+    /// Acts and cannot be taken back: the plain face with its words in red, as every destructive button on the Mac is
+    /// drawn. Never prominent, never Return.
     var destructive = false
     /// A title the button is as wide as, too: a button whose word changes (Trust, Don't Trust) keeps one width.
     var sizedFor: String? = nil
@@ -1005,22 +1005,21 @@ struct ActionButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: 7) {
                 ZStack {
-                    if let sizedFor { Text(sizedFor.titleStyle).font(Theme.ui(12, .medium)).hidden() }
-                    Text(title.titleStyle).font(Theme.ui(12, .medium))
+                    if let sizedFor { Text(sizedFor.titleStyle).font(Theme.ui(12.5, .medium)).hidden() }
+                    Text(title.titleStyle).font(Theme.ui(12.5, .medium))
                 }
-                if let key { Text(key).font(Theme.ui(11)).opacity(0.6) }
+                if let key { KeyCap(key, onLight: prominent) }
             }
             .foregroundStyle(prominent ? Color.black : destructive ? Theme.red : Theme.text)
             .padding(.horizontal, 10)
             .frame(height: 26)
-            .background(prominent ? Theme.text : Theme.raised, in: RoundedRectangle(cornerRadius: 6))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(prominent ? Color.clear : destructive ? Theme.red.opacity(0.45) : Theme.hairline))
+            .background(prominent ? Theme.text : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(prominent ? Color.clear : Color.white.opacity(0.06)))
         }
-        .buttonStyle(.hover(over: true, id: id))
+        // The faint face shows the hover's fill through it; the white one, opaque, lightens instead.
+        .buttonStyle(.hover(over: prominent, id: id))
         .accessibilityIdentifier(id)
     }
 }

@@ -97,8 +97,8 @@ private struct ConfirmationHost: ViewModifier {
             .overlay {
                 if let shown = queue.shown.last {
                     ZStack {
-                        // The window under the ask takes no clicks while it is up, and is dimmed until no control in it
-                        // reads as live: at 0.6 a row's red-edged button falls below the card's own hairline in contrast.
+                        // The window under the ask takes no clicks while it is up, and is dimmed by 60% so no control in
+                        // it reads as live.
                         Color.black.opacity(0.6).contentShape(Rectangle()).onTapGesture {}
                         ConfirmationCard(
                             confirmation: shown.confirmation, typed: shown.confirmation.field?.text ?? .constant("")
