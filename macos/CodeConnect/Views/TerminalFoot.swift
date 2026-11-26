@@ -174,14 +174,30 @@ final class Shells {
 final class ShellView: TerminalView {
     /// Nothing has been fed to this screen yet.
     var isNew = true
-    /// A key or a paste is being handled: what the terminal sends now is the person's, not one of its own reports.
-    var typing: Bool { pasting || NSApp.currentEvent?.type == .keyDown }
-    private var pasting = false
 
-    override func paste(_ sender: Any) {
-        pasting = true
-        defer { pasting = false }
-        super.paste(sender)
+    // A stopped screen (its shell exited, or another device took it) is kept for reading and selecting until the
+    // person types: what the terminal reports for the program on it (mouse, focus, answers to its queries) goes
+    // nowhere, and a click or a scroll selects and scrolls here rather than reporting. Keys and pastes reach the
+    // coordinator without passing through `send(source:data:)`, so they still open it again.
+
+    private var stopped: Bool {
+        if case .stopped = (terminalDelegate as? ShellHost.Coordinator)?.terminal.phase { return true }
+        return false
+    }
+
+    override func send(source: Terminal, data: ArraySlice<UInt8>) {
+        if !stopped { super.send(source: source, data: data) }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        allowMouseReporting = !stopped
+        super.mouseDown(with: event)
+    }
+
+    // On the alternate screen with reporting off, SwiftTerm turns the wheel into arrow keys, which would be typing.
+    override func scrollWheel(with event: NSEvent) {
+        allowMouseReporting = !stopped
+        if !stopped || !getTerminal().isCurrentBufferAlternate { super.scrollWheel(with: event) }
     }
 
     override init(frame: CGRect) {
@@ -335,9 +351,6 @@ private struct ShellHost: NSViewRepresentable {
             MainActor.assumeIsolated {
                 // A replay's queries were the program's, long since answered: the terminal's own answers go nowhere.
                 guard !terminal.replaying else { return }
-                // A stopped screen opens again only for what the person types: a click or a focus change it reports
-                // for the program on it selects, or does nothing.
-                if case .stopped = terminal.phase, (source as? ShellView)?.typing != true { return }
                 terminal.type(Array(data))
             }
         }
