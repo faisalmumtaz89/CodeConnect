@@ -287,6 +287,7 @@ async fn run_git_inner(
         gh_host: None,
         pr: None,
         gh_read_at: None,
+        gh_repo: None,
     })
 }
 
@@ -300,7 +301,7 @@ pub(crate) async fn push_remote_urls(
     branch: &str,
     other: Option<&str>,
     timeout: Duration,
-) -> Option<(String, String)> {
+) -> Option<PrRemotes> {
     let git = git_bin(configured_bin)?;
     let local = format!("refs/heads/{branch}");
     let named = run(
@@ -321,7 +322,59 @@ pub(crate) async fn push_remote_urls(
         Some(parent) => parent,
         None => remote_url(&git, cwd, other.unwrap_or(&push), false, timeout).await?,
     };
-    Some((head, target))
+    Some(PrRemotes { push, head, target })
+}
+
+/// Where a branch's pull request comes from and goes: [`push_remote_urls`].
+pub(crate) struct PrRemotes {
+    /// The remote the branch pushes to: its name, or the URL a branch names as its remote.
+    pub push: String,
+    /// The URL it pushes to.
+    pub head: String,
+    /// The URL of the repository a pull request goes into.
+    pub target: String,
+}
+
+/// The longest a push may take: a repository's `pre-push` hook (a test run) works inside it.
+const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Why [`push`] did not push.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PushFailure {
+    /// Git refused (a hook, the remote, credentials): its first line.
+    Refused(String),
+    /// No answer within [`PUSH_TIMEOUT`]; it may have pushed.
+    Timeout,
+}
+
+/// Push `branch` to `remote` (a remote's name or a URL) as the branch of the same name there,
+/// and make that the branch's upstream: no force, no tags, the repository's `pre-push` hook
+/// running as it does for the person's own `git push`, through their login shell's `PATH`.
+pub async fn push(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    remote: &str,
+    branch: &str,
+    environment: &std::collections::HashMap<std::ffi::OsString, std::ffi::OsString>,
+) -> std::result::Result<(), PushFailure> {
+    let Some(git) = git_bin(configured_bin) else {
+        return Err(PushFailure::Refused("git is not installed".into()));
+    };
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    let args = [
+        "push",
+        "--no-follow-tags",
+        "-u",
+        "--",
+        remote,
+        refspec.as_str(),
+    ];
+    match run_write(&git, cwd, &args, PUSH_TIMEOUT, environment).await {
+        Ok(out) if out.ok => Ok(()),
+        Ok(out) => Err(PushFailure::Refused(first_words(&out).unwrap_or_default())),
+        Err(err) if format!("{err:#}").contains("timed out") => Err(PushFailure::Timeout),
+        Err(err) => Err(PushFailure::Refused(format!("{err:#}"))),
+    }
 }
 
 /// The URL `remote` pushes to (`push`) or fetches from. A name holding a `:` is itself the URL:
@@ -377,7 +430,7 @@ fn refused(code: &'static str, detail: Option<String>) -> CommitOutcome {
 }
 
 /// The first line git, or a hook, said: its error, else what it printed.
-fn first_words(out: &Output) -> Option<String> {
+pub(crate) fn first_words(out: &Output) -> Option<String> {
     [&out.stderr, &out.stdout]
         .into_iter()
         .flat_map(|text| text.lines())

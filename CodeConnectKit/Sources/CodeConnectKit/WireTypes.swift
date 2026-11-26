@@ -1099,6 +1099,11 @@ public struct Capabilities: Codable, Sendable, Hashable {
     public var commitsChanges: Bool {
         advertised["git_actions"]?.arrayValue?.contains { $0.stringValue == "commit" } == true
     }
+    /// This daemon opens a pull request from a run's branch for this paired device (`git_actions` naming `create_pr`,
+    /// minor 61). An older one answers `git_action` with `bad_request`, so nothing is sent unless this is set.
+    public var opensPullRequests: Bool {
+        advertised["git_actions"]?.arrayValue?.contains { $0.stringValue == "create_pr" } == true
+    }
     /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
     /// 21): its question cards carry `question_hold` and it takes the
     /// `answers` and `decline` decisions. Absent is false — an older daemon
@@ -1588,6 +1593,8 @@ public enum PutFileResult: Decodable, Sendable, Hashable {
 public enum GitActionResult: Decodable, Sendable, Hashable {
     /// Done; for a commit, the commit it made.
     case done(sha: String)
+    /// Done; for a pull request (`create_pr`, minor 61), the one opened, or the open one already there.
+    case pullRequest(number: UInt64, url: String)
     /// Not done: `code` is one of the computer's codes (`busy`, `unmerged`, `nothing_to_commit`, `git_failed`,
     /// `indeterminate`, …), and `detail`, for some, git's own words, to be shown verbatim.
     case refused(code: String, detail: String?)
@@ -1595,14 +1602,24 @@ public enum GitActionResult: Decodable, Sendable, Hashable {
     case unknown(status: String)
 
     private enum CodingKeys: String, CodingKey {
-        case status, sha, code, detail
+        case status, sha, pr, code, detail
+    }
+
+    private struct PullRequestLink: Decodable {
+        let number: UInt64
+        let url: String
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let status = try c.decode(String.self, forKey: .status)
         switch status {
-        case "done": self = .done(sha: try c.decode(String.self, forKey: .sha))
+        case "done":
+            if let pr = try c.decodeIfPresent(PullRequestLink.self, forKey: .pr) {
+                self = .pullRequest(number: pr.number, url: pr.url)
+            } else {
+                self = .done(sha: try c.decode(String.self, forKey: .sha))
+            }
         case "refused":
             self = .refused(
                 code: try c.decode(String.self, forKey: .code),
@@ -2050,6 +2067,9 @@ public struct RunGit: Decodable, Sendable, Hashable {
     public let pullRequest: PullRequest?
     /// When GitHub was asked; the computer asks at most every 30 s per commit. Nil when GitHub was not asked: no `gh`, no account in it, or its rate limit pausing reads.
     public let ghReadAt: String?
+    /// The repository a pull request from this branch goes into, `owner/name` (minor 61): the state line names it
+    /// before Create PR is pressed.
+    public let ghRepo: String?
 
     public enum GhState: String, Decodable, Sendable, Hashable {
         case signedIn = "signed_in"
@@ -2124,6 +2144,7 @@ public struct RunGit: Decodable, Sendable, Hashable {
         case ghHost = "gh_host"
         case pullRequest = "pr"
         case ghReadAt = "gh_read_at"
+        case ghRepo = "gh_repo"
     }
 }
 
@@ -2299,6 +2320,8 @@ public enum ClientMessage: Sendable {
     /// Commit every change in a run's folder (minor 59, `git_actions` naming `commit`), by `session_uid`, answered with
     /// `gitActionResult` carrying `requestID`. The same id again replays the first answer.
     case commit(requestID: String, sessionUID: String, message: String)
+    /// A pull request from the run's branch (`create_pr`, minor 61).
+    case createPullRequest(requestID: String, sessionUID: String)
     /// **Say something to a Codex session.** Minor 18, and the one message an
     /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
     case compose(
@@ -2536,6 +2559,11 @@ extension ClientMessage: Encodable {
             try c.encode(requestID, forKey: .requestID)
             try c.encode(sessionUID, forKey: .sessionUID)
             try c.encode(["kind": "commit", "message": message], forKey: .action)
+        case .createPullRequest(let requestID, let sessionUID):
+            try c.encode("git_action", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(sessionUID, forKey: .sessionUID)
+            try c.encode(["kind": "create_pr"], forKey: .action)
         case .compose(let session, let requestID, let text, let payloadHash, let attachments):
             try c.encode("compose", forKey: .type)
             try c.encode(session, forKey: .sessionID)

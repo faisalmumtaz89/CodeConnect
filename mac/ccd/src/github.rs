@@ -105,11 +105,8 @@ impl Reads {
         head_oid: Option<&str>,
     ) -> Read {
         let key = format!(
-            "{}/{}/{} {}:{branch} {}",
-            target.host,
-            target.owner,
-            target.name,
-            head.owner,
+            "{}{}",
+            branch_key(head, target, branch),
             head_oid.unwrap_or_default()
         );
         if let Some(read) = self.answered(&key, &target.host).await {
@@ -129,6 +126,16 @@ impl Reads {
         state.cached.retain(|_, (at, _)| at.elapsed() < WINDOW);
         state.cached.insert(key, (Instant::now(), read.clone()));
         read
+    }
+
+    /// Drop `branch`'s reads at every commit: the next read asks GitHub (after an action on it).
+    pub async fn forget(&self, head: &Repo, target: &Repo, branch: &str) {
+        let prefix = branch_key(head, target, branch);
+        self.state
+            .lock()
+            .await
+            .cached
+            .retain(|key, _| !key.starts_with(&prefix));
     }
 
     /// The answer for `key` without asking GitHub: its read under [`WINDOW`] old, or `unknown`
@@ -151,6 +158,139 @@ impl Reads {
             })
     }
 }
+
+/// The start of a branch's cache keys; the commit follows.
+fn branch_key(head: &Repo, target: &Repo, branch: &str) -> String {
+    format!(
+        "{}/{}/{} {}:{branch} ",
+        target.host, target.owner, target.name, head.owner
+    )
+}
+
+/// Why GitHub gave no answer to [`open_pr`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unavailable {
+    /// No `gh` on this computer.
+    Missing,
+    /// gh has no account for the host, or GitHub refused its token.
+    SignedOut,
+    /// GitHub could not be reached, asked to wait, or gave no pulls list.
+    Down,
+}
+
+/// The open pull request from `branch` of `head` into `target`, asked of GitHub now (no
+/// cache); `None` when there is none, or two.
+pub async fn open_pr(
+    gh_bin: Option<&str>,
+    head: &Repo,
+    target: &Repo,
+    branch: &str,
+) -> Result<Option<PullRequest>, Unavailable> {
+    let environment = &crate::start_session::phone_environment();
+    let Some(gh) = crate::start_session::gh_path(environment, gh_bin).await else {
+        return Err(Unavailable::Missing);
+    };
+    let from = format!("head={}:{branch}", head.owner);
+    match pulls(
+        &gh,
+        environment,
+        target,
+        &["state=open", &from, "per_page=2"],
+    )
+    .await
+    {
+        Ok(open) => Ok(open_from(&open, head, branch).flatten()),
+        Err(Failed::NoAccount | Failed::TokenRefused) => Err(Unavailable::SignedOut),
+        Err(Failed::RateLimited | Failed::Other) => Err(Unavailable::Down),
+    }
+}
+
+/// How long `gh pr create` may take.
+const CREATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What [`create_pr`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Created {
+    Opened(protocol::ws::PrLink),
+    /// gh refused: its first line.
+    Failed(String),
+    /// gh gave no answer in time; GitHub may have it.
+    Unknown,
+}
+
+/// `gh pr create` from `branch` of `head` into `target` (onto `base` when known, else the
+/// repository's default branch), its title and body gh's own from the branch's commits.
+pub async fn create_pr(
+    gh_bin: Option<&str>,
+    head: &Repo,
+    target: &Repo,
+    branch: &str,
+    base: Option<&str>,
+) -> Created {
+    let environment = &crate::start_session::phone_environment();
+    let Some(gh) = crate::start_session::gh_path(environment, gh_bin).await else {
+        return Created::Failed("gh is not installed".into());
+    };
+    let repo = format!("{}/{}", target.owner, target.name);
+    let same = head.owner.eq_ignore_ascii_case(&target.owner)
+        && head.name.eq_ignore_ascii_case(&target.name);
+    let from = if same {
+        branch.to_string()
+    } else {
+        format!("{}:{branch}", head.owner)
+    };
+    let mut args = vec![
+        "pr",
+        "create",
+        "--repo",
+        repo.as_str(),
+        "--head",
+        from.as_str(),
+        "--fill",
+    ];
+    if let Some(base) = base {
+        args.extend(["--base", base]);
+    }
+    match crate::git::run_program(
+        gh_command(&gh, environment, &args),
+        &args,
+        CREATE_TIMEOUT,
+        AUTH_LINE_CAP,
+    )
+    .await
+    {
+        Ok(out) if out.ok => match created(&out.stdout, target) {
+            Some(link) => Created::Opened(link),
+            None => Created::Failed(format!("gh answered no pull request of {repo}")),
+        },
+        Ok(out) => Created::Failed(crate::git::first_words(&out).unwrap_or_default()),
+        Err(err) if format!("{err:#}").contains("timed out") => Created::Unknown,
+        Err(err) => Created::Failed(format!("{err:#}")),
+    }
+}
+
+/// The pull request of `target` whose URL `gh pr create` printed last.
+fn created(stdout: &str, target: &Repo) -> Option<protocol::ws::PrLink> {
+    let url = stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())?;
+    let prefix = format!(
+        "https://{}/{}/{}/pull/",
+        target.host, target.owner, target.name
+    );
+    let rest = url
+        .get(..prefix.len())
+        .filter(|start| start.eq_ignore_ascii_case(&prefix))
+        .and(url.get(prefix.len()..))?;
+    Some(protocol::ws::PrLink {
+        number: rest.parse().ok()?,
+        url: url.to_string(),
+    })
+}
+
+/// `gh pr create`'s output is a URL and a few lines of progress.
+const AUTH_LINE_CAP: usize = 64 * 1024;
 
 /// `gh` run as ccd runs it: the person's environment, no prompt, no update notice, no colour,
 /// no pager.
@@ -452,6 +592,27 @@ mod tests {
             ),
             Some(None)
         );
+    }
+
+    /// **gh's answer is the target's pull request, or none**: its URL printed last, of the target
+    /// repository (any case), else nothing.
+    #[test]
+    fn a_created_pull_request_is_the_targets() {
+        let target = repo("cli", "cli");
+        let link = created("Creating pull request for w2 into trunk in cli/cli\n\nhttps://github.com/cli/cli/pull/15200\n", &target);
+        assert_eq!(link.map(|link| link.number), Some(15200));
+        assert_eq!(
+            created("https://github.com/CLI/Cli/pull/7\n", &target).map(|link| link.number),
+            Some(7)
+        );
+        for out in [
+            "https://github.com/someone/cli/pull/7\n",
+            "https://github.com/cli/cli/pull/x\n",
+            "",
+            "done\n",
+        ] {
+            assert_eq!(created(out, &target), None, "{out:?}");
+        }
     }
 
     /// **A closed pull request is the branch's only at the commit checked out**: GitHub's
