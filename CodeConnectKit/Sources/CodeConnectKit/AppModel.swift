@@ -111,6 +111,14 @@ public enum DiffFailure: Sendable, Equatable {
 }
 
 /// The state of one session's on-demand diff.
+/// Where a run's commit from its Changes panel stands (`AppModel.commitState(for:)`).
+public enum CommitState: Sendable, Equatable {
+    case idle
+    case committing
+    /// The computer did not commit, or may not have: why, in the app's words.
+    case refused(String)
+}
+
 public enum DiffState: Sendable {
     case idle
     case loading
@@ -265,6 +273,8 @@ public final class AppModel {
     /// Each run's repository as its computer last read it (`runGit(for:)`), and the runs a read is on its way for.
     private(set) var runGits: [String: RunGitReply] = [:]
     private var runGitsReading: Set<String> = []
+    /// Each run's commit from its Changes panel: on its way, or what the computer said when it did not commit.
+    private(set) var commits: [String: CommitState] = [:]
 
     /// How far back to backfill a session we have never cached. The daemon pages
     /// at 500; this keeps a cold open bounded without hiding recent work.
@@ -1894,6 +1904,7 @@ public final class AppModel {
         answersInFlight = []
         diffs = [:]
         runGits = [:]
+        commits = [:]
         // **The mutation controllers go with the fleet.** They were left
         // behind, so a reconnect that re-created a session under the same key
         // inherited the previous fleet's in-flight ids and settled banners —
@@ -3107,6 +3118,7 @@ public final class AppModel {
         if departedMarks.remove(key) != nil { ReviewMarks.forget(sessionKey: key) }
         diffs[key] = nil
         runGits[key] = nil
+        commits[key] = nil
         catchUp?.list?.removeAll { $0.sessionKey == key }
         catchUp?.progressed = true
         #if DEBUG
@@ -4288,6 +4300,37 @@ public final class AppModel {
     /// The run's repository as its computer last read it for its Changes panel (minor 56): nil before a read, from a
     /// computer that does not read repositories, and in the sample fleet and fixtures, which have none.
     public func runGit(for key: String) -> RunGitReply? { runGits[key] }
+
+    /// The computer commits a run's changes from its Changes panel (minor 59).
+    public var commitsChanges: Bool { connection.capabilities?.commitsChanges == true }
+
+    /// Where the run's commit from its Changes panel stands.
+    public func commitState(for key: String) -> CommitState { commits[key] ?? .idle }
+
+    /// Commits every change in the run's folder with `message`, unless a commit of it is on its way. Each is its own
+    /// request: once a commit has landed, another finds nothing to commit. Done, the panel's diff and repository are
+    /// read again and the run's conversation shows the computer's own note of it; refused, the computer's reason is
+    /// kept, in the app's words, until the next commit.
+    public func commit(key: String, message: String) {
+        guard commits[key] != .committing else { return }
+        commits[key] = .committing
+        Task { [weak self] in
+            guard let self else { return }
+            let refusal: String?
+            do {
+                switch try await self.connection.commit(sessionUID: key, message: message, requestID: UUID().uuidString) {
+                case .done: refusal = nil
+                case .refused(let code, let detail): refusal = ChangesWords.commitRefused(code: code, detail: detail)
+                case .unknown: refusal = ChangesWords.commitUnknown
+                }
+            } catch {
+                refusal = ChangesWords.commitUnknown
+            }
+            self.commits[key] = refusal.map(CommitState.refused) ?? .idle
+            self.loadDiff(key: key, force: true)
+            self.loadRunGit(key: key)
+        }
+    }
 
     /// Reads the run's repository again, unless a read is on its way. A failed read keeps the last one: the panel's
     /// diff says what became of the link, in its own words, so this read adds no second account of it.

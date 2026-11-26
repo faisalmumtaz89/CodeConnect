@@ -36,7 +36,16 @@ struct ChangesPanel: View {
             // names no branch.
             if let git {
                 BranchLine(branch: git.branch?.displaySafe, base: git.base?.name.displaySafe)
-                StateLine(text: ChangesWords.state(git), delta: nil, read: ISO8601.parse(git.readAt))
+                // Changes the computer can commit: the line under the state says whether it can now, and the commit
+                // row follows.
+                let committable = model.commitsChanges && git.changed.files > 0
+                VStack(alignment: .leading, spacing: 0) {
+                    StateLine(
+                        text: ChangesWords.state(git), delta: nil, read: ISO8601.parse(git.readAt),
+                        note: committable ? commitWait ?? ChangesWords.commitReady : nil)
+                    if committable { CommitRow(row: row, model: model, ready: commitWait == nil) }
+                }
+                .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             } else if reply == nil, let branch = row.summary.gitBranch?.displaySafe {
                 BranchLine(branch: branch, base: nil)
             }
@@ -72,6 +81,15 @@ struct ChangesPanel: View {
             } else {
                 reread()
             }
+        }
+    }
+
+    /// Why the run's changes cannot be committed yet: its agent works, or a card waits for the person; nil when they can.
+    private var commitWait: String? {
+        switch row.status {
+        case .running, .stopping: ChangesWords.commitWaitsWorking
+        case .blocked: ChangesWords.commitWaitsCard
+        default: nil
         }
     }
 
@@ -126,7 +144,8 @@ struct ChangesPanel: View {
                 StateLine(
                     text: "\(ChangesWords.files(files.count)) changed",
                     delta: (files.reduce(0) { $0 + ($1.added ?? 0) }, files.reduce(0) { $0 + ($1.removed ?? 0) }),
-                    read: raw.capturedDate ?? fetchedAt)
+                    read: raw.capturedDate ?? fetchedAt, note: nil)
+                .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             }
             Band(count: files.count, cut: raw.truncated || raw.filesTruncated)
             Document(raw: raw, diff: parsed, files: files).environment(hunks)
@@ -168,12 +187,14 @@ private struct BranchLine: View {
     }
 }
 
-/// How the run's changes stand, then when that was read.
+/// How the run's changes stand, then when that was read, or what the person can do about them.
 private struct StateLine: View {
     let text: String
     /// Lines added and removed, where the line counts them itself.
     let delta: (added: UInt64, removed: UInt64)?
     let read: Date?
+    /// Said in place of when it was read.
+    let note: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -183,16 +204,71 @@ private struct StateLine: View {
             }
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("changes.summary")
-            AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
-                .font(Theme.ui(12))
-                .foregroundStyle(Theme.text3)
-                .monospacedDigit()
-                .accessibilityIdentifier("changes.age")
+            if let note {
+                Text(note).font(Theme.ui(12)).foregroundStyle(Theme.text3).accessibilityIdentifier("changes.note.action")
+            } else {
+                AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.text3)
+                    .monospacedDigit()
+                    .accessibilityIdentifier("changes.age")
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+    }
+}
+
+/// The commit row: the message, the run's title to begin with, and Commit, which Return in the field presses too. Only
+/// while the run's agent is quiet; what the computer said when it did not commit stays under it.
+private struct CommitRow: View {
+    let row: FleetRow
+    let model: AppModel
+    /// The agent is quiet, so the changes can be committed.
+    let ready: Bool
+    @State private var message: String
+
+    init(row: FleetRow, model: AppModel, ready: Bool) {
+        self.row = row
+        self.model = model
+        self.ready = ready
+        _message = State(initialValue: row.label.inline)
+    }
+
+    var body: some View {
+        let state = model.commitState(for: row.id)
+        let words = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let enabled = ready && state != .committing && !words.isEmpty
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("Commit message", text: $message)
+                    .textFieldStyle(.plain)
+                    .font(Theme.ui(13))
+                    .foregroundStyle(Theme.text)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.hairline))
+                    .disabled(!ready || state == .committing)
+                    .onSubmit { if enabled { model.commit(key: row.id, message: words) } }
+                    .accessibilityIdentifier("changes.commit.message")
+                ActionButton(title: "Commit", key: "↩", prominent: true, id: "changes.commit") {
+                    model.commit(key: row.id, message: words)
+                }
+                .disabled(!enabled)
+            }
+            if case .refused(let why) = state {
+                Text(why)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.amber)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("changes.commit.refused")
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 12)
     }
 }
 
