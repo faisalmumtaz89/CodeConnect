@@ -14,6 +14,8 @@ public struct StartContext {
 
     public var starter: SessionStarter { model.starter }
     public var machineName: String { model.machineName ?? "this computer" }
+    /// The system the computer's daemon names ("macos", "linux"), by the same rule as its name; nil before it says.
+    public var machineOS: String? { model.daemonProfile.machineOS ?? model.machine?.os }
     public var projects: [StartProject] { (starter.projects ?? []).filter(\.exists) }
 
     public var id: String { model.machineID ?? "" }

@@ -20,12 +20,9 @@ struct BranchRow: View {
     /// A new worktree's name was kept with Return: the menu has closed, and the keyboard goes back to the form.
     let named: () -> Void
 
-    @Environment(\.startHeight) private var startHeight
     @Environment(\.startBox) private var startBox
     /// The row, label to last line, in the form's coordinates.
     @State private var frame: CGRect = .zero
-    /// The button's bottom edge, in the row's coordinates.
-    @State private var buttonBottom: CGFloat = 0
     /// How tall the menu's naming of a new worktree stands, while one is being named.
     @State private var namingHeight: CGFloat = 0
     /// The menu lists the branches to start a new worktree from, in place of its own rows.
@@ -46,7 +43,6 @@ struct BranchRow: View {
                 .accessibilityIdentifier("start.branch.reading")
             }
         }
-        .coordinateSpace(.named(Self.space))
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(StartForm.space)) } action: { frame = $0 }
         .overlay(alignment: .topLeading) {
             if open, let answer = context.git(folder.path), let git = answer { menu(git) }
@@ -57,23 +53,19 @@ struct BranchRow: View {
         .onChange(of: open) { listing = false }
     }
 
-    private nonisolated static let space = "start.branch.row"
     /// The least a menu keeps from the form's edges.
     private static let margin: CGFloat = 8
 
-    /// The menu, as tall as its rows up to `BranchMenu.mostRows`, ending inside the pane. It opens above the row,
-    /// clear of the label, when all of it fits between the label and `top`; else on the side of the button
-    /// with more room, as many whole rows as fit there, the rest scrolled to. Either way it stands the panels' one gap
-    /// from its button.
+    /// The menu, as tall as its rows up to `BranchMenu.mostRows`, above its chip as every menu of the box's bar opens
+    /// (screen 34), the panels' one gap from it: as many whole rows as fit between the chip and `top`, the rest scrolled
+    /// to.
     private func menu(_ git: StartGit) -> some View {
         let rows = BranchMenu.rows(git: git, folder: folder, listing: listing)
         let gap = Theme.panelGap
         let highest = max(top, Self.margin)
         let naming = newName == nil ? 0 : namingHeight
         let above = frame.minY - gap - highest - naming
-        let below = startHeight - frame.minY - buttonBottom - gap - Self.margin - naming
-        let opensAbove = BranchMenu.height(rows: rows) <= above || above > below
-        let shown = BranchMenu.rows(fitting: opensAbove ? above : below, of: rows)
+        let shown = BranchMenu.rows(fitting: above, of: rows)
         let placed = PanelPlace.place(widest: BranchMenu.width, leading: frame.minX, box: startBox)
         return BranchMenu(
             git: git, folder: folder, place: place, listing: $listing,
@@ -100,7 +92,7 @@ struct BranchRow: View {
         .openPanel()
         .offset(
             x: placed.x - frame.minX,
-            y: opensAbove ? -(BranchMenu.height(rows: shown) + naming + gap) : buttonBottom + gap)
+            y: -(BranchMenu.height(rows: shown) + naming + gap))
     }
 
     /// The chosen place, a button that opens the menu.
@@ -121,7 +113,6 @@ struct BranchRow: View {
         .help(title)
         .accessibilityIdentifier("start.branch")
         .accessibilityValue(open ? "open" : "closed")
-        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).maxY } action: { buttonBottom = $0 }
     }
 }
 

@@ -369,13 +369,13 @@ struct StartForm: View {
         .accessibilityIdentifier("start.folder")
         .accessibilityValue(folderOpen ? "open" : "closed")
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { folderChip = $0 }
-        .overlay(alignment: .topLeading) {
+        // Above the chip, as every menu of the box's bar opens (screen 32).
+        .overlay(alignment: .bottomLeading) {
             if folderOpen {
                 let placed = PanelPlace.place(widest: 520, leading: folderChip.minX, box: box)
                 folderPanel(context, width: placed.width).openPanel()
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { folderPanelHeight = $0 }
-                    // Above the chip, as every menu of the box's bar opens (screen 32).
-                    .offset(x: placed.x - folderChip.minX, y: -(folderPanelHeight + Theme.panelGap))
+                    .offset(x: placed.x - folderChip.minX, y: -(InputBoxChip.height + Theme.panelGap))
             }
         }
         .closesPanel($folderOpen)
@@ -851,9 +851,8 @@ private struct ComputerButton: View {
             open.toggle()
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "desktopcomputer").font(.system(size: 11)).accessibilityHidden(true)
+                ComputerMark(os: chosen.machineOS)
                 Text(chosen.machineName).font(InputBoxChip.font).lineLimit(1).truncationMode(.tail)
-                Circle().fill(Theme.green).frame(width: 6, height: 6).accessibilityHidden(true)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(Theme.text2)
@@ -864,8 +863,9 @@ private struct ComputerButton: View {
         .accessibilityIdentifier("start.computer")
         .accessibilityValue(open ? "open" : "closed")
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(StartForm.space)).minX } action: { minX = $0 }
-        .overlay(alignment: .topLeading) {
-            if open { panel.openPanel().offset(x: placed.x - minX, y: InputBoxChip.height + Theme.panelGap) }
+        // Above the chip, as every menu of the box's bar opens.
+        .overlay(alignment: .bottomLeading) {
+            if open { panel.openPanel().offset(x: placed.x - minX, y: -(InputBoxChip.height + Theme.panelGap)) }
         }
         .closesPanel($open)
     }
@@ -879,6 +879,7 @@ private struct ComputerButton: View {
                 }
                 Button(action: pick) {
                     MenuRow(chosen: context.id == chosen.id) {
+                        ComputerMark(os: context.machineOS).foregroundStyle(Theme.text2)
                         Text(context.machineName).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
                     }
                 }
