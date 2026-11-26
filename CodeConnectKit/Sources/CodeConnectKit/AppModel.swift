@@ -4346,7 +4346,9 @@ public final class AppModel {
             guard let reply = try? await self.connection.runGit(session: key) else { return }
             self.runGits[key] = reply
             // A clean repository ends what a refused commit said: the next changes are another commit.
-            if reply.git?.changed.files == 0, case .refused = self.commits[key] { self.commits[key] = nil }
+            if let changed = reply.git?.changed, changed.files == 0, changed.complete, case .refused = self.commits[key] {
+                self.commits[key] = nil
+            }
         }
     }
 
