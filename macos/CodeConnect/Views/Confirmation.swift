@@ -1,10 +1,14 @@
+import CodeConnectKit
 import SwiftUI
 
 /// An ask before a change, or a notice after one, as the Mac draws every one of them: a card centred on the window
-/// under the app's own dimming, never the system's alert. Esc gives the safe answer; a destructive answer never takes
-/// Return; a notice's OK takes both.
+/// under the app's own dimming, never the system's alert. Its title names what it acts on; one line for each thing the
+/// act does; one quieter line that reassures, says until when or, on a notice, says what happened. Esc gives the safe
+/// answer; a destructive answer never takes Return; a notice's OK takes both.
 struct Confirmation {
     let title: String
+    /// What the act does, a line each (`AskWords`); none on a notice.
+    var items: [AskWords.Item] = []
     let message: String
     /// The answers left to right: the safe one first, the one that acts last.
     let answers: [Answer]
@@ -34,6 +38,18 @@ struct Confirmation {
     struct Field {
         let placeholder: String
         let text: Binding<String>
+    }
+}
+
+extension Confirmation {
+    /// The ask `words` says, its safe answer `cancelID` and the one that acts `confirmID`, which `perform`s.
+    init(_ words: AskWords, cancelID: String, confirmID: String, perform: @escaping () -> Void) {
+        self.init(
+            title: words.title, items: words.items, message: words.note,
+            answers: [
+                .init(title: words.cancel, kind: .cancel, id: cancelID),
+                .init(title: words.confirm, kind: .destructive, id: confirmID, perform: perform),
+            ])
     }
 }
 
@@ -119,7 +135,7 @@ private struct ConfirmationHost: ViewModifier {
     }
 }
 
-/// The card: its title, its sentence, its answers at the bottom right.
+/// The card: its title, its lines, its quieter line, its answers at the bottom right.
 private struct ConfirmationCard: View {
     let confirmation: Confirmation
     /// The field's text, held so a blank one keeps the acting answers off as it is typed.
@@ -131,9 +147,27 @@ private struct ConfirmationCard: View {
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 0) {
             Text(confirmation.title).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
-            Text(unwidowed(confirmation.message)).font(Theme.ui(12.5)).foregroundStyle(Theme.text2)
+                .fixedSize(horizontal: false, vertical: true)
+            if confirmation.items.isEmpty {
+                Spacer().frame(height: 8)
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(confirmation.items, id: \.self) { item in
+                        HStack(spacing: 10) {
+                            Image(systemName: item.mark).font(.system(size: 12)).foregroundStyle(Theme.text3)
+                                .frame(width: 14).accessibilityHidden(true)
+                            Text(item.words).font(Theme.ui(13)).foregroundStyle(Theme.text2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(minHeight: 30)
+                    }
+                }
+                .padding(.top, 12)
+                .padding(.bottom, 4)
+            }
+            Text(unwidowed(confirmation.message)).font(Theme.ui(12)).foregroundStyle(Theme.text3)
                 .fixedSize(horizontal: false, vertical: true)
             if let field = confirmation.field {
                 TextField("", text: field.text, prompt: Text(field.placeholder).foregroundStyle(Theme.text3))
@@ -151,7 +185,7 @@ private struct ConfirmationCard: View {
                     .frame(height: 28)
                     .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
                     .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
-                    .padding(.top, 4)
+                    .padding(.top, 12)
             }
             HStack(spacing: 8) {
                 Spacer()
@@ -159,13 +193,14 @@ private struct ConfirmationCard: View {
                     button(each)
                 }
             }
-            .padding(.top, 10)
+            .padding(.top, 18)
         }
-        .padding(18)
-        .frame(width: 420, alignment: .leading)
+        .padding(20)
+        .frame(width: 400, alignment: .leading)
         .background(Theme.sheet, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.hairline))
-        .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.09)))
+        .shadow(color: .black.opacity(0.55), radius: 32, y: 24)
+        .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
         .focusable(confirmation.field == nil)
         .focusEffectDisabled()
         .focused($holdsKeyboard)
@@ -192,8 +227,10 @@ private struct ConfirmationCard: View {
         // With a field, the plain answer is the one Return gives, and is drawn so.
         let takesReturn = each.kind == .ok || (each.kind == .plain && confirmation.field != nil)
         let blank = confirmation.field != nil && typed.trimmingCharacters(in: .whitespaces).isEmpty
+        // Each key the card answers to is drawn on its answer: Esc on the safe one, Return on the one that takes it.
+        let key: String? = each.kind == .cancel ? "Esc" : takesReturn ? "↩" : nil
         let face = ActionButton(
-            title: each.title, key: nil, prominent: takesReturn, destructive: each.kind == .destructive,
+            title: each.title, key: key, prominent: takesReturn, destructive: each.kind == .destructive,
             id: each.id
         ) { answer(each) }
         .disabled(blank && each.kind != .cancel)

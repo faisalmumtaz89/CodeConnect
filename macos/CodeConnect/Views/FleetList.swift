@@ -290,10 +290,10 @@ struct FleetList: View {
         #endif
         // Ending a run cannot be undone: it asks once (the approved words), then says only what went wrong.
         .confirmation($ending) { row in
-            Confirmation(title: FleetWords.endTitle, message: FleetWords.endMessage(row.summary.agent.displayName), answers: [
-                .init(title: "Cancel", kind: .cancel, id: "endRun.cancel"),
-                .init(title: "End Run", kind: .destructive, id: "endRun.confirm") { endRun(row) },
-            ])
+            Confirmation(
+                FleetWords.endAsk(row.label.inline, agent: row.summary.agent.displayName), cancelID: "endRun.cancel",
+                confirmID: "endRun.confirm"
+            ) { endRun(row) }
         }
         .confirmation($endNote) { note in
             Confirmation(

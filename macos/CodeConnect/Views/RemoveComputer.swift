@@ -16,13 +16,9 @@ private struct RemovesComputer: ViewModifier {
     func body(content: Content) -> some View {
         content.confirmation($removing) { computer in
             Confirmation(
-                title: ComputerRemoval.question, message: ComputerRemoval.sentence(name: computer.machineName),
-                answers: [
-                    .init(title: "Cancel", kind: .cancel, id: "computer.remove.cancel"),
-                    .init(title: ComputerRemoval.action, kind: .destructive, id: "computer.remove.confirm") {
-                        machines.unpair(computer)
-                    },
-                ])
+                ComputerRemoval.ask(name: computer.machineName, system: computer.machineSystem),
+                cancelID: "computer.remove.cancel", confirmID: "computer.remove.confirm"
+            ) { machines.unpair(computer) }
         }
     }
 }

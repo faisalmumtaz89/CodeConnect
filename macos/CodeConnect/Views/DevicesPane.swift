@@ -2,7 +2,7 @@ import CodeConnectKit
 import SwiftUI
 
 /// Settings: this computer's devices, as its own CodeConnect lists them over its local socket. One entry a phone or
-/// computer (Kit's `DeviceGroup`), with Block; the blocked ones with Allow again. Each asks first, naming the device.
+/// computer (Kit's `DeviceGroup`), with Block; the blocked ones with Allow Again. Each asks first, naming the device.
 /// The app's own entry has no Block, and no entry has Block while the app can't tell which is its own. While this
 /// computer isn't answering, the pane says so rather than show the last list. Every word is Kit's.
 struct DevicesPane: View {
@@ -108,7 +108,7 @@ struct DevicesPane: View {
 
     private func row(_ group: DeviceGroup) -> some View {
         let isThisMac = group.devices.contains { $0.deviceID == thisDevice }
-        // By the device Block and Allow again act on.
+        // By the device Block and Allow Again act on.
         let id = "settings.device.\(group.devices[0].deviceID)"
         return HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {

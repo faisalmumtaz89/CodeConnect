@@ -1,13 +1,18 @@
 /// Removing a paired computer from this device, in the words both apps ask with.
 public enum ComputerRemoval {
-    public static let question = "Remove this computer?"
-    public static let action = "Remove"
-
-    /// What removing forgets, and where the computer comes back: the place that holds both routes, the owner's
-    /// Tailscale list and a code. On a Mac that is Add a Computer; on the iPhone, Settings, where Add a computer
-    /// opens the camera and the Tailscale list is a section of its own.
-    public static func sentence(name: String?, on device: HostDevice = .current) -> String {
-        let place = device == .mac ? "Add a Computer" : "Settings"
-        return "This \(device.name) forgets \(name ?? "this computer"). You can add it again from \(place)."
+    /// Removing computer `name`, whose system is `system` (`AppModel.machineSystem`): what this device forgets, marked
+    /// with the computer's own mark, and where it comes back, the place that holds both routes, the owner's Tailscale
+    /// list and a code. On a Mac that is Add Computer; on the iPhone, Settings, where Add a computer opens the camera
+    /// and the Tailscale list is a section of its own.
+    public static func ask(name: String?, system: String?, on device: HostDevice = .current) -> AskWords {
+        let computer = name ?? "this computer"
+        return AskWords(
+            title: "Remove \(computer)?",
+            items: [
+                .init(mark: system == "Linux" ? "server.rack" : "desktopcomputer",
+                      words: "This \(device.name) forgets \(computer)")
+            ],
+            note: device == .mac ? "You can add it again with Add Computer." : "You can add it again from Settings.",
+            cancel: "Cancel", confirm: "Remove")
     }
 }

@@ -106,10 +106,11 @@ final class NativeCommandTests: XCTestCase {
         XCTAssertEqual(
             named.commandStatus(compact, .waiting(request: "keep the plan", quietly: true), on: .mac)?.tone, .neutral)
 
+        let clear = ClearConfirmation.ask
         XCTAssertEqual(
-            [ClearConfirmation.title, ClearConfirmation.clear, ClearConfirmation.keep, ClearConfirmation.message],
-            ["Clear Claude’s context?", "Clear context", "Keep context",
-             "Claude Code will forget this conversation’s context. CodeConnect’s timeline will stay here."])
+            [clear.title, clear.confirm, clear.cancel, clear.message],
+            ["Clear Claude’s context?", "Clear Context", "Keep Context",
+             "Claude Code forgets this conversation’s context. CodeConnect’s timeline stays here."])
         XCTAssertEqual(
             [CompactPrompt.title, CompactPrompt.explanation(), CompactPrompt.fieldLabel, CompactPrompt.placeholder(),
              CompactPrompt.action],

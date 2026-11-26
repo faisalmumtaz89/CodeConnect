@@ -4,7 +4,7 @@ import SwiftUI
 /// The main window: the sidebar's agents, computers and projects, the fleet's runs beside it, and the run open beside
 /// them, or with none open the start form (`StartPane`); or Settings in the place of the list and the main area
 /// together; before any computer is paired, what to do first in the list's place. An agent is started from the start
-/// form: the + on the sidebar's Agents and File > New Agent (⌘N) leave Settings, close the open run and give the form the
+/// form: the + on the sidebar's Agents and File > New Run (⌘N) leave Settings, close the open run and give the form the
 /// keyboard. A computer is added from a sheet: the + on Computers and File > Add Computer (⇧⌘N); an iPhone from File >
 /// Add iPhone.
 struct MainWindow: View {
@@ -196,8 +196,8 @@ struct MainWindow: View {
         // host, which closes with every other panel.
         .environment(\.agentsShown, settings == nil)
         .focusedSceneValue(\.adding, $adding)
-        // New Agent is the start form in the main area: Settings and the open run close, and the form takes the
-        // keyboard. Before any computer is added there is no form: New Agent adds a computer first.
+        // New Run is the start form in the main area: Settings and the open run close, and the form takes the
+        // keyboard. Before any computer is added there is no form: New Run adds a computer first.
         .onChange(of: adding, initial: true) { _, kind in
             guard kind == .agent else { return }
             guard machines.showsFleet else {
@@ -221,7 +221,7 @@ struct MainWindow: View {
             chosen = nil
             // A run opened shows, even with its pane hidden; with none open, the list shows again.
             if opened != nil { runHidden = false } else { listHidden = false }
-            // The start's own run, opened from the list as it launches: the start is done, so New Agent shows a fresh
+            // The start's own run, opened from the list as it launches: the start is done, so New Run shows a fresh
             // form rather than the start's progress opening it again.
             if let opened, let id = startDraft.sent?.requestID,
                 case .started(let uid, _)? = machines.models.lazy.compactMap({ $0.starter.starts[id] }).first?.outcome,
@@ -339,12 +339,12 @@ extension MainWindow {
 }
 
 extension FocusedValues {
-    /// What the main window is adding: the File menu's New Agent opens its start form; Add Computer and Add iPhone its
+    /// What the main window is adding: the File menu's New Run opens its start form; Add Computer and Add iPhone its
     /// sheet.
     @Entry var adding: Binding<AddKind?>?
 }
 
-/// File > New Agent (⌘N), Add Computer (⇧⌘N) and Add iPhone, in place of New Window: the app has one window,
+/// File > New Run (⌘N), Add Computer (⇧⌘N) and Add iPhone, in place of New Window: the app has one window,
 /// and these open its start form or its sheet, opening the window first when it is closed or behind another.
 /// Unavailable while its sheet is open.
 struct AddCommands: Commands {
@@ -355,7 +355,7 @@ struct AddCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Group {
-                Button("New Agent…") { add(.agent) }
+                Button("New Run") { add(.agent) }
                     .keyboardShortcut("n", modifiers: .command)
                 Button("Add Computer…") { add(.computer) }
                     .keyboardShortcut("n", modifiers: [.command, .shift])

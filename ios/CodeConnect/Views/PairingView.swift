@@ -985,11 +985,12 @@ struct MachineScreen: View {
             .fixedSize(horizontal: false, vertical: true)
         }
         .ccConfirmation(isPresented: $confirmingRemove) {
-            CCConfirmation(
-                title: ComputerRemoval.question, message: ComputerRemoval.sentence(name: model.machineName),
+            let ask = ComputerRemoval.ask(name: model.machineName, system: model.machineSystem)
+            return CCConfirmation(
+                title: ask.title, message: ask.message,
                 answers: [
-                    .init(title: "Cancel", kind: .cancel, id: "computer.remove.cancel"),
-                    .init(title: ComputerRemoval.action, kind: .destructive, id: "computer.remove.confirm") {
+                    .init(title: ask.cancel, kind: .cancel, id: "computer.remove.cancel"),
+                    .init(title: ask.confirm, kind: .destructive, id: "computer.remove.confirm") {
                         machines.unpair(model)
                         dismiss()
                     },

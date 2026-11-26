@@ -137,11 +137,10 @@ extension AppModel {
 
 /// The words of the confirmation `/clear` asks for first.
 public enum ClearConfirmation {
-    public static let title = "Clear Claude’s context?"
-    public static let clear = "Clear context"
-    public static let keep = "Keep context"
-    public static let message =
-        "Claude Code will forget this conversation’s context. CodeConnect’s timeline will stay here."
+    public static let ask = AskWords(
+        title: "Clear Claude’s context?",
+        items: [.init(mark: "trash", words: "Claude Code forgets this conversation’s context")],
+        note: "CodeConnect’s timeline stays here.", cancel: "Keep Context", confirm: "Clear Context")
 }
 
 /// The words of the control `/compact` opens, naming the run's agent.

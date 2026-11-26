@@ -1,7 +1,7 @@
 import CodeConnectKit
 import SwiftUI
 
-/// The Active list with nothing in it: where agents come from, in plain words, and New agent.
+/// The Active list with nothing in it: where agents come from, in plain words, and New Run.
 struct NoAgentsYet: View {
     let newAgent: () -> Void
 

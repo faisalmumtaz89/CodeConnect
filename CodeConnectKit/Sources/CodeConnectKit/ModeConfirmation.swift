@@ -5,39 +5,32 @@
 /// run's mode list for the entry the daemon marks `confirm`, and nothing is sent until the confirm button —
 /// Escape and cancel send nothing.
 ///
-/// Read by both apps so the words are identical: the iPhone and the Mac show the same four strings. Only
-/// what is true is stated (97): no claim about safety, and the mode only turns off the agent's prompts.
+/// Read by both apps so the words are identical. Only what is true is stated (97): no claim about safety, and the mode
+/// only turns off the agent's prompts, for this run until the mode is changed back.
 public enum ModeConfirmation {
-    public struct Words: Sendable, Hashable {
-        public let title: String
-        public let message: String
-        /// The destructive confirm button.
-        public let confirm: String
-        /// The cancel button, which Escape also triggers.
-        public let cancel: String
-    }
-
-    /// The four strings for the agent whose mode is being confirmed.
-    public static func words(for agent: AgentKind) -> Words {
+    /// The ask for the agent whose mode is being confirmed.
+    public static func words(for agent: AgentKind) -> AskWords {
+        let withoutAsking = AskWords.Item(mark: "apple.terminal", words: "Runs commands and edits files without asking")
+        // The mode is the run's own: the note says so, and until when (decision 221).
+        let inThisRun = "In this run, until you change the mode back."
         switch agent {
         case .codex:
-            // The folder-and-network clause is true: the confirmed mode is Codex's own full-access preset
-            // — sandbox `danger-full-access` and approval `never` — set through X6.
-            return Words(
+            // The folder and network lines are true: the confirmed mode is Codex's own full-access preset — sandbox
+            // `danger-full-access` and approval `never` — set through X6.
+            return AskWords(
                 title: "Give Codex full access?",
-                message: "Codex will run commands and edit files in this run without asking you first, "
-                    + "outside this project’s folder and with network access, until you change the mode back.",
-                confirm: "Give Full Access",
-                cancel: "Keep Asking")
+                items: [
+                    withoutAsking,
+                    .init(mark: "folder", words: "Works outside this project’s folder"),
+                    .init(mark: "globe", words: "Uses the network"),
+                ],
+                note: inThisRun, cancel: "Keep Asking", confirm: "Give Full Access")
         case .claude, .antigravity, .unsupported:
-            // Claude's message promises nothing about a sandbox: the mode only turns off claude's prompts. None of an
+            // Claude's lines promise nothing about a sandbox: the mode only turns off claude's prompts. None of an
             // Antigravity run's modes lets agy work without asking (decision 214), so it never asks this.
-            return Words(
-                title: "Let Claude work without asking?",
-                message: "Claude will run commands and edit files in this run without asking you first, "
-                    + "until you change the mode back.",
-                confirm: "Bypass Permissions",
-                cancel: "Keep Asking")
+            return AskWords(
+                title: "Let Claude work without asking?", items: [withoutAsking],
+                note: inThisRun, cancel: "Keep Asking", confirm: "Bypass Permissions")
         }
     }
 }

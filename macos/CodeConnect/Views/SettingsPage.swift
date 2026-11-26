@@ -510,7 +510,7 @@ private struct AgentSignInGroup: View {
 /// each by the email its agent signs in as and its plan beneath; the share used of each window the agent names, in
 /// columns captioned on the group's title line; the row in use filled, with a check at its leading edge; a click on
 /// another uses it. "…" on hover (and a right-click) holds Sign In Again… on a signed-out row and Remove… on an added
-/// one. "Add account…" is the group's quiet last row: it adds an account and starts its sign-in in the browser at once,
+/// one. "Add Account…" is the group's quiet last row: it adds an account and starts its sign-in in the browser at once,
 /// no name asked (the row reads its email once signed in). Under the group, a switch in progress in words.
 private struct AgentAccounts: View {
     let model: AppModel
@@ -551,7 +551,7 @@ private struct AgentAccounts: View {
                     Button { Task { await model.addAndSignIn(agent: agent) } } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "plus").font(.system(size: 11, weight: .medium)).frame(width: AccountRow.lead)
-                            Text("Add account…").font(Theme.ui(13))
+                            Text("Add Account…").font(Theme.ui(13))
                             Spacer()
                         }
                         .foregroundStyle(Theme.text3)
