@@ -2,7 +2,7 @@ import CodeConnectKit
 import SwiftUI
 
 /// Settings › Folders: the answers to the folder question that each computer able to start an agent keeps, by path,
-/// so a row stays where it is when its answer changes, with Trust / Don't Trust and Forget. Each computer is read now
+/// so a row stays where it is when its answer changes, with Trusted | Not trusted and Forget. Each computer is read now
 /// and every five seconds while the pane is open, so an answer given in the start sheet meanwhile shows. A computer is
 /// sent one request at a time: every reply is its whole list, and the replies to two requests sent together can arrive
 /// in either order. A change that fails says so, then the list is read again; what it said stays until the pane opens
@@ -28,6 +28,8 @@ struct FoldersPane: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 ForEach(contexts, id: \.id) { computer($0) }
+                Text(FolderWords.forgetHelp).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let refusal {
                     Text(refusal).font(Theme.ui(12)).foregroundStyle(Theme.red).fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("folders.refusal")
@@ -53,78 +55,61 @@ struct FoldersPane: View {
     }
 
     private func computer(_ context: StartContext) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(context.machineName).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.text3)
+        SettingsGroup(title: context.machineName) {
             if let list = lists[context.id] {
                 if list.isEmpty {
                     note(FolderWords.empty)
                 } else {
-                    VStack(spacing: 0) {
-                        ForEach(Array(list.sorted { $0.path < $1.path }.enumerated()), id: \.element.path) { index, answer in
-                            if index > 0 { Rectangle().fill(Theme.hairline).frame(height: 1) }
-                            row(answer, context)
-                        }
-                    }
-                    .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
-                    .disabled(busy.contains(context.id))
+                    ForEach(list.sorted { $0.path < $1.path }, id: \.path) { row($0, context) }
                 }
             } else {
                 note(unreadable.contains(context.id) ? FolderWords.unreachable(context.machineName) : FolderWords.reading(context.machineName))
             }
         }
+        .disabled(busy.contains(context.id))
     }
 
+    /// The folder, its answer as one of two segments, and Forget. Each control names its folder, so a list of the
+    /// window's buttons reads "Trusted demo", never "Trusted, Trusted".
     private func row(_ answer: FolderAnswer, _ context: StartContext) -> some View {
-        let trusted = answer.trust == .trusted
         let id = "folders.\(answer.path)"
         let name = URL(fileURLWithPath: answer.path).lastPathComponent
         return HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(Theme.ui(12.5, .medium))
-                    .foregroundStyle(Theme.text).lineLimit(1)
-                Text(answer.path).font(Theme.mono(11)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head)
-            }
+            Image(systemName: "folder").font(.system(size: 12)).foregroundStyle(Theme.text2)
+                .accessibilityHidden(true)
+            Text(answer.path).font(Theme.mono(12.5)).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.head)
             Spacer(minLength: 8)
-            // The word, the button and Forget stand in fixed columns, whichever the answer: the word right-aligned in a
-            // column as wide as either word, the button as wide as either of its titles.
-            ZStack(alignment: .trailing) {
-                Text(FolderWords.trusted).hidden()
-                Text(FolderWords.notTrusted).hidden()
-                Text(trusted ? FolderWords.trusted : FolderWords.notTrusted)
-                    .foregroundStyle(trusted ? Theme.text2 : Theme.amber)
-                    .accessibilityIdentifier("\(id).state")
-            }
-            .font(Theme.ui(11.5))
-            .fixedSize()
-            // Each control names its folder, so a list of the window's buttons reads "Trust demo", never "Trust, Trust".
-            ActionButton(
-                title: trusted ? "Don’t Trust" : "Trust", key: nil, prominent: false,
-                sizedFor: trusted ? "Trust" : "Don’t Trust", id: "\(id).change"
-            ) {
-                Task {
-                    await send(context) { try await $0.setFolderTrust(path: answer.path, trust: trusted ? .notTrusted : .trusted) }
+            SegmentedTrack(
+                options: [FolderTrust.trusted, .notTrusted], chosen: answer.trust, fill: Theme.window,
+                id: { "\(id).\($0 == .trusted ? "trusted" : "notTrusted")" },
+                choose: { trust in
+                    Task { await send(context) { try await $0.setFolderTrust(path: answer.path, trust: trust) } }
                 }
+            ) { trust, chosen in
+                Text(trust == .trusted ? FolderWords.trusted : FolderWords.notTrusted)
+                    .font(Theme.ui(12, chosen ? .medium : .regular))
+                    .foregroundStyle(chosen ? Theme.text : Theme.text3)
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+                    .accessibilityLabel("\(trust == .trusted ? FolderWords.trusted : FolderWords.notTrusted) \(name)")
             }
-            .accessibilityLabel("\(trusted ? "Don’t Trust" : "Trust") \(name)")
-            Button("Forget") {
+            .fixedSize()
+            ActionButton(title: FolderWords.forget, key: nil, prominent: false, id: "\(id).forget") {
                 Task { await send(context) { try await $0.forgetFolderTrust(path: answer.path) } }
             }
-            .buttonStyle(.hover(over: true, id: "\(id).forget"))
-            .font(Theme.ui(12))
-            .foregroundStyle(Theme.text2)
-            .help(FolderWords.forgetHelp)
-            .accessibilityLabel("Forget \(name)")
-            .accessibilityIdentifier("\(id).forget")
+            .accessibilityLabel("\(FolderWords.forget) \(name)")
         }
-        .padding(.horizontal, Theme.rowInset)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(id)
     }
 
     private func note(_ text: String) -> some View {
         Text(text).font(Theme.ui(12)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// One request to the computer, a change or else a read; a change that fails is followed by a read.
