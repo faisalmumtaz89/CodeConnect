@@ -127,14 +127,14 @@
             guard let value = UserDefaults.standard.string(forKey: "CC_SELECT") else { return nil }
             return .some(Int(value))
         }
-        /// `-CC_COMPUTER_MENU YES`: a computer's "…", once shown (`-CC_HOVER sidebar.computer.<id>`), opens its menu a
-        /// moment later, as a click does.
+        /// `-CC_COMPUTER_MENU YES`: the list head's computer menu ("All ▾") opens a moment after launch, as a click
+        /// opens it.
         static var opensComputerMenu: Bool { UserDefaults.standard.bool(forKey: "CC_COMPUTER_MENU") }
 
         /// `-CC_SETTINGS YES`: the window opens on Settings, photographed once its section has what it shows: Devices,
         /// or the section `-CC_SETTINGS_TAB general|computers|devices|folders|accounts` names.
         /// `-CC_SETTINGS_AFTER <seconds>`: the window turns to Settings that long after launch, over whatever opened
-        /// meanwhile (a row's menu by `-CC_COMPUTER_MENU`).
+        /// meanwhile (the computer menu by `-CC_COMPUTER_MENU`).
         static var settingsAfter: Double? {
             UserDefaults.standard.object(forKey: "CC_SETTINGS_AFTER") == nil
                 ? nil : UserDefaults.standard.double(forKey: "CC_SETTINGS_AFTER")
@@ -219,17 +219,7 @@
             FleetScope(rawValue: UserDefaults.standard.string(forKey: "CC_FLEET_SCOPE") ?? "") ?? .active
         }
 
-        /// `-CC_FLEET_GROUPING project` or `computer`: the list opens grouped so, whatever this Mac keeps, and keeps
-        /// nothing of it; nil when not given.
-        static var fleetGrouping: FleetGroup.Kind? {
-            switch UserDefaults.standard.string(forKey: "CC_FLEET_GROUPING") {
-            case "project": .project
-            case "computer": .computer
-            default: nil
-            }
-        }
-
-        /// `-CC_FILTER computer` or `project`: the list opens narrowed to the sidebar's first computer or project.
+        /// `-CC_FILTER <name>`: the list opens narrowed to the computer of that name, as the iPhone's flag does.
         static var filter: String? { UserDefaults.standard.string(forKey: "CC_FILTER") }
 
         /// `-CC_FOLDS_OPEN YES`: every diff opens with its folded stretches of unchanged lines opened, as clicks open them.
@@ -258,10 +248,8 @@
             (UserDefaults.standard.string(forKey: "CC_ATTACH_FILES") ?? "").split(separator: ",")
                 .map { URL(fileURLWithPath: String($0)) }
         }
-        /// `-CC_SESSION_TAB changes`: the opened run shows its Changes.
-        static var sessionTab: SessionTab? {
-            UserDefaults.standard.string(forKey: "CC_SESSION_TAB") == "changes" ? .changes : nil
-        }
+        /// `-CC_SESSION_TAB changes`: the opened run shows its changes panel.
+        static var opensChanges: Bool { UserDefaults.standard.string(forKey: "CC_SESSION_TAB") == "changes" }
         /// `-CC_TERMINAL YES`: the opened run's shell is open at the panel's foot. `-CC_TERMINAL_TYPE <text>`: once it is
         /// open, these words are typed into it, then Return (`\n` for more lines).
         static var terminalOpen: Bool { UserDefaults.standard.bool(forKey: "CC_TERMINAL") }

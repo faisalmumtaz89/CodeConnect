@@ -8,26 +8,30 @@ import SwiftUI
 /// at the computer, the command that does it stands above that line.
 struct ComposerBar: View {
     let key: String
-    /// Shows the run's Changes tab, as the header's Changes does: the box's /diff.
+    /// Opens the run's changes panel, as the header's Changes does: the box's /diff.
     let showsChanges: () -> Void
     @Environment(Machines.self) private var machines
 
     var body: some View {
         if let model = machines.model(forSession: key) {
             if let summary = model.shownSummary(for: key), summary.takesNoReply {
-                if let command = summary.resumeCommand { ResumeCommand(command: command) }
-                EndedLine()
+                if let command = summary.resumeCommand { ResumeCommand(command: command).onConversationColumn() }
+                EndedLine(model: model, key: key, summary: summary)
             } else if let kept = model.drafts(for: key) {
-                Composer(model: model, key: key, kept: kept, showsChanges: showsChanges)
+                Composer(model: model, key: key, kept: kept, showsChanges: showsChanges).onConversationColumn()
             }
         }
     }
 }
 
-/// In an ended run's reply box's place: the pane's foot band, its hairline and 34 pt the sidebar's foot's, so the two
-/// end on one line (the run list has a foot only while runs are being chosen); the mark and words on the
-/// conversation's notice columns.
+/// In an ended run's reply box's place: the pane's foot band, under its hairline; the mark and words on the
+/// conversation's notice columns, and under its words the agent the run was, with its model and the effort it ended
+/// with, as far as the run said them.
 private struct EndedLine: View {
+    let model: AppModel
+    let key: String
+    let summary: SessionSummary
+
     var body: some View {
         VStack(spacing: 0) {
             Rectangle().fill(Theme.hairline).frame(height: 1)
@@ -35,14 +39,33 @@ private struct EndedLine: View {
                 Image(systemName: "checkmark.circle").font(.system(size: 11)).foregroundStyle(Theme.text3)
                     .frame(width: 14)
                     .accessibilityHidden(true)
-                Text(SessionWords.runEnded).font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(SessionWords.runEnded)
+                    agentLine
+                }
+                .font(Theme.ui(12))
+                .foregroundStyle(Theme.text3)
+                .padding(.vertical, 8)
             }
             .padding(.horizontal, 28)
-            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+            .frame(minHeight: 34)
+            .onConversationColumn()
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("session.endedLine")
+    }
+
+    /// The agent, and the model it said it ran when it said: by the label of the run's menu entry for that model when
+    /// there is one, so the line and the settings list spell it alike, else as the agent reported it, in code type
+    /// (Kit's `modelName`); then the effort it ended with (Kit's `headerEffort`), with or without a model said.
+    private var agentLine: Text {
+        var line = Text(summary.agent.productName)
+        if let confirmed = model.confirmedModel(for: key) {
+            let name = RunSettings.modelName(confirmed: confirmed.name, menus: summary.menus, label: summary.modelLabel)
+            line = Text("\(line) · \(name.reported ? Text(name.text).font(Theme.mono(11.5)) : Text(name.text))")
+        }
+        if let effort = RunSettings.headerEffort(summary: summary) { line = Text("\(line) · \(effort)") }
+        return line
     }
 }
 
@@ -76,15 +99,22 @@ private struct ResumeCommand: View {
 private struct Composer: View {
     let model: AppModel
     let key: String
-    /// The run's words and the send whose answer never came, kept by the run (`RunDrafts`): they outlive this box.
-    /// The rest of the box (the last outcome, a command's watch) starts again.
+    /// The run's words, the send whose answer never came, a send on its way, the last outcome and a command's watch,
+    /// kept by the run (`RunDrafts`): they outlive this box. The rest of the box (its panels, its palette) starts again.
     @Bindable var kept: RunDrafts
     let showsChanges: () -> Void
 
-    /// What became of the last Claude send or refused command; Kit words it.
-    @State private var result: ComposeAttempt?
+    /// What became of the last Claude send or refused command; Kit words it. The run's (`RunDrafts.lastSend`).
+    private var result: ComposeAttempt? {
+        get { kept.lastSend }
+        nonmutating set { kept.lastSend = newValue }
+    }
     @State private var retire: Task<Void, Never>?
-    @State private var sending = false
+    /// A send or command is on its way. The run's (`RunDrafts.sending`).
+    private var sending: Bool {
+        get { kept.sending }
+        nonmutating set { kept.sending = newValue }
+    }
     @State private var askingAgain = false
     /// The field has the keyboard: Esc leaves it before it closes the run.
     @FocusState private var fieldFocused: Bool
@@ -92,8 +122,11 @@ private struct Composer: View {
     @State private var selection: TextSelection?
     @Environment(\.replyFocusRequest) private var replyFocusRequest
     @Environment(\.agentsShown) private var agentsShown
-    /// The Compact command typed last, and where it stands.
-    @State private var running: Running?
+    /// The Compact command typed last, and where it stands. The run's (`RunDrafts.command`).
+    private var running: Running? {
+        get { kept.command }
+        nonmutating set { kept.command = newValue }
+    }
     @State private var quiet: Task<Void, Never>?
     /// The settings panel open above the box's bar, if any.
     @State private var panel: SettingsPanel?
@@ -118,12 +151,7 @@ private struct Composer: View {
     /// The pointer is on the usage figures, and their card shows over the bar.
     @State private var usageHovered = false
 
-    private struct Running: Equatable {
-        let command: NativeCommand
-        var phase: CommandPhase
-        /// How far the run's events had got when it was sent: only a receipt above this answers it.
-        let baseline: UInt64
-    }
+    private typealias Running = CommandWatch
 
     private var summary: SessionSummary? { model.shownSummary(for: key) }
     private var isCodex: Bool { summary?.isCodex == true }
@@ -157,9 +185,9 @@ private struct Composer: View {
             if let line { note(line) }
             box
         }
-        // Docked under the conversation, 20 pt in from the pane's sides and its foot; 16 pt under the conversation's last
-        // line at its end (its row's 7 pt inset and the column's 1 pt end, then these 8).
-        .padding(.horizontal, 20)
+        // Docked under the conversation, on its column's 28 pt sides and 20 pt above the pane's foot; 16 pt under the
+        // conversation's last line at its end (its row's 7 pt inset and the column's 1 pt end, then these 8).
+        .padding(.horizontal, 28)
         .padding(.top, 8)
         .padding(.bottom, 20)
         .onChange(of: kept.reply) { old, new in
@@ -175,8 +203,9 @@ private struct Composer: View {
             if !new.isEmpty, case .neutral = running?.phase { running = nil }
         }
         // A send a live Stop cancelled hands its words back here, but only into an empty reply, so a draft being typed
-        // is never overwritten. Taken or not, Kit's offer is consumed, so the words are offered once.
-        .onChange(of: model.composerRestore[key]) { _, restore in
+        // is never overwritten; offered while no box showed the run, they are taken as one appears. Taken or not, Kit's
+        // offer is consumed, so the words are offered once.
+        .onChange(of: model.composerRestore[key], initial: true) { _, restore in
             guard let restore else { return }
             if kept.reply.isEmpty { kept.reply = restore }
             model.consumeComposerRestore(for: key)
@@ -184,7 +213,12 @@ private struct Composer: View {
         // A new handshake is the link back, and so is the box coming back, from another tab or another run: the
         // unanswered send is asked again, if Kit's rule still allows it.
         .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
-        .onAppear { askUnansweredAgain() }
+        .onAppear {
+            askUnansweredAgain()
+            // A command still watched takes a receipt that came while no box showed the run. Its caption's timers, and
+            // a landed note's, run on in the box that started them, each acting only on its own value.
+            settle()
+        }
         // A run nothing has been said to yet, as one started with no first message, has the cursor in its box once its
         // conversation is in. Not "an empty conversation": a Codex run files its session start before any message.
         .task(id: awaitsFirstMessage) {
@@ -229,10 +263,6 @@ private struct Composer: View {
                 }
             }
         #endif
-        .onDisappear {
-            retire?.cancel()
-            quiet?.cancel()
-        }
         .sheet(isPresented: $compacting) {
             CompactDialog(instructions: $instructions, agent: summary?.agent ?? .claude) {
                 compacting = false
@@ -505,7 +535,8 @@ private struct Composer: View {
         guard attempt.landed else { return }
         retire = Task {
             try? await Task.sleep(for: .seconds(4))
-            guard !Task.isCancelled else { return }
+            // Only its own: a box no longer shown still runs this, and a later outcome is another box's to retire.
+            guard !Task.isCancelled, result == attempt else { return }
             result = nil
         }
     }
@@ -526,7 +557,7 @@ private struct Composer: View {
             opener = draft
             clearing = true
         case .nativeDiff:
-            // The run's own Changes tab, as the iPhone opens its Changes: nothing reaches the computer, and the words
+            // The run's own changes panel, as the iPhone opens its Changes: nothing reaches the computer, and the words
             // that asked for it leave the box, typed whole or a part with the row chosen.
             kept.reply = ""
             showsChanges()

@@ -1,20 +1,21 @@
 import CodeConnectKit
 import SwiftUI
 
-/// One run, opened beside the list: where it runs, what it is called, how it stands, and its conversation or its
-/// changes. Opening and closing it mark the run reviewed, as the iPhone does.
+/// One run, opened beside the list: where it runs, what it is called, how it stands, its conversation, and its changes
+/// beside it or, in a narrow pane, in its place. Opening and closing it mark the run reviewed, as the iPhone does.
 struct SessionPane: View {
     let row: FleetRow
     let model: AppModel
-    /// Which tab is shown: the window's, which keeps it for the run it was chosen on.
-    @Binding var tab: SessionTab
-    @State private var height: CGFloat = 0
+    /// The run's changes panel is open: the window's, which keeps it for each run.
+    @Binding var changesOpen: Bool
+    @State private var size: CGSize = .zero
     /// A request holds the reply box's place.
     @State private var boxTaken = false
     /// How tall the reply box stands (none while a request holds its place): a request shares the half pane with it.
     @State private var replyHeight: CGFloat = 0
     /// The reply field (or its command list) holds the keyboard.
     @FocusedValue(\.composerHoldsEscape) private var composerHolds
+    @FocusedValue(\.changesFieldFocused) private var changesFieldFocused
     /// The window's Add sheet, and its setup checklist: either covers the window, and then a request's answers take no
     /// keys, as the window's own Esc stands down for the Add sheet.
     @FocusedValue(\.adding) private var adding
@@ -23,49 +24,31 @@ struct SessionPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Place(summary: row.summary, computer: row.machineName)
-            Rectangle().fill(Theme.hairline).frame(height: 1)
-            Heading(row: row, model: model, tab: $tab)
-            ZStack(alignment: .topLeading) {
-                if tab == .conversation {
-                    VStack(spacing: 0) {
-                        Conversation(model: model, key: row.id)
-                        // What waits on you sits at the foot, outside the conversation's scroll, in at most half the
-                        // pane with the reply box when that shows, so the window holds them both at its smallest; its
-                        // answers take the reply box's place. Not while the reply field holds the keyboard: the box
-                        // stays the writer's until it lets go. Once a request has the box, the field can't take the
-                        // keyboard back, so what holds it then is the request's own field.
-                        PendingRequests(
-                            model: model, key: row.id, maxHeight: max(0, height / 2 - replyHeight),
-                            held: composerHolds == true && !boxTaken,
-                            sheetUp: adding.map { $0.wrappedValue != nil } ?? false || setup.shown)
-                        // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its
-                        // way are kept. It takes no room, no click, no keyboard (Tab can't reach it) and no reading.
-                        // Not clipped: its command list opens above it.
-                        ComposerBar(key: row.id) { tab = .changes }
-                            .frame(height: boxTaken ? 0 : nil, alignment: .top)
-                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { replyHeight = $0 }
-                            .opacity(boxTaken ? 0 : 1)
-                            .allowsHitTesting(!boxTaken)
-                            .disabled(boxTaken)
-                            .accessibilityHidden(boxTaken)
-                    }
-                    .onPreferenceChange(HoldsReplyBox.self) { boxTaken = $0 }
-                }
-                if tab == .changes {
-                    // The run's shell at the panel's foot, until the Changes panel gives it its own place there.
-                    VStack(spacing: 0) {
-                        ChangesTab(model: model, key: row.id)
-                        TerminalFoot(row: row, model: model)
-                    }
-                }
+            Band(row: row, model: model, changesOpen: $changesOpen)
+            // The conversation stays mounted under its changes, so neither loses its place when the pane crosses the
+            // width that holds them side by side: there the panel stands beside it, narrower it covers it. Covered, its
+            // foot goes: no request is read or answered, and no reply typed, where it can't be seen (the reply's words
+            // are the run's, kept).
+            VStack(spacing: 0) {
+                // Hidden only while covered, and on the conversation alone: an explicit `accessibilityHidden(false)` on
+                // the stack would stand over the reply box's own hiding while a request has its place.
+                Conversation(model: model, key: row.id)
+                    .opacity(inPlace ? 0 : 1)
+                    .allowsHitTesting(!inPlace)
+                    .disabled(inPlace)
+                    .accessibilityHidden(inPlace)
+                if !inPlace { foot }
             }
+            .onPreferenceChange(HoldsReplyBox.self) { boxTaken = $0 }
+            .padding(.trailing, changesOpen && !inPlace ? 1 + Self.panelWidth : 0)
+            .overlay(alignment: .trailing) { if changesOpen { changes } }
         }
         #if DEBUG
-            .task { if let shown = RenderWindow.sessionTab { tab = shown } }
+            .task { if RenderWindow.opensChanges { changesOpen = true } }
         #endif
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+        .preference(key: ChangesInPlace.self, value: inPlace)
         .background(Theme.window)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session.pane")
@@ -74,127 +57,169 @@ struct SessionPane: View {
         .onDisappear { if agentsShown { model.markReviewed(row.id) } }
         .onChange(of: agentsShown) { _, shown in if shown { model.markReviewed(row.id) } }
     }
+
+    /// What waits on you and the reply box, under the conversation.
+    @ViewBuilder private var foot: some View {
+        // What waits on you sits at the foot, outside the conversation's scroll, in at most half the pane with
+        // the reply box when that shows, so the window holds them both at its smallest; its answers take the
+        // reply box's place. Not while the reply field holds the keyboard: the box stays the writer's until it
+        // lets go (a hunk's comment field, which holds Esc too, is not the reply's). Once a request has the box,
+        // the field can't take the keyboard back, so what holds it then is the request's own field.
+        PendingRequests(
+            model: model, key: row.id, maxHeight: max(0, size.height / 2 - replyHeight),
+            held: composerHolds == true && changesFieldFocused != true && !boxTaken,
+            keysElsewhere: adding.map { $0.wrappedValue != nil } ?? false || setup.shown || changesFieldFocused == true)
+        // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its way are
+        // kept. It takes no room, no click, no keyboard (Tab can't reach it) and no reading. Not clipped: its
+        // command list opens above it.
+        ComposerBar(key: row.id) { changesOpen = true }
+            .frame(height: boxTaken ? 0 : nil, alignment: .top)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { replyHeight = $0 }
+            .opacity(boxTaken ? 0 : 1)
+            .allowsHitTesting(!boxTaken)
+            .disabled(boxTaken)
+            .accessibilityHidden(boxTaken)
+    }
+
+    /// The run's changes: beside the conversation, behind a hairline, or in its place, under the row that gives it back.
+    private var changes: some View {
+        HStack(spacing: 0) {
+            if !inPlace { Rectangle().fill(Theme.hairline).frame(width: 1) }
+            VStack(spacing: 0) {
+                if inPlace {
+                    HStack {
+                        Spacer()
+                        ActionButton(title: "‹ Conversation", key: "Esc", prominent: false, small: true,
+                            id: "session.changes.back") { changesOpen = false }
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: 38)
+                    .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+                }
+                ChangesTab(model: model, key: row.id)
+                // The run's shell at the panel's foot, sized by itself: its bar closed, its screen open.
+                TerminalFoot(row: row, model: model)
+            }
+            .frame(width: inPlace ? nil : Self.panelWidth)
+        }
+        .background(Theme.window)
+    }
+
+    /// The changes panel's width, beside the conversation.
+    static let panelWidth: CGFloat = 480
+
+    /// The changes stand in the conversation's place: the pane can't hold the conversation's column and the panel side
+    /// by side. Before the pane has a width, they stand beside it: its first frame on a wide window draws both.
+    private var inPlace: Bool {
+        changesOpen && size.width > 0 && size.width < Theme.conversationColumn + 1 + Self.panelWidth
+    }
 }
 
-/// Where the run is: its computer, its folder as a shell prints it, and the branch checked out there when git
-/// names one (none outside a repository or on a detached head).
-private struct Place: View {
-    let summary: SessionSummary
-    let computer: String?
+/// The run's changes panel stands in the conversation's place: Esc gives the conversation back before it closes the run.
+struct ChangesInPlace: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
+}
+
+extension View {
+    /// On the conversation's column (`Theme.conversationColumn`), centred in a wider pane.
+    func onConversationColumn() -> some View {
+        frame(maxWidth: Theme.conversationColumn, alignment: .leading).frame(maxWidth: .infinity)
+    }
+}
+
+/// The run's band: what it is called, and under it where it runs, its project, the branch checked out there when git
+/// names one, and its computer with that computer's mark, greyed while offline and its link's word beside it while the
+/// link is not working, as the run list says it; at its end the changes panel's toggle, with the lines the run has
+/// changed.
+private struct Band: View {
+    let row: FleetRow
+    let model: AppModel
+    @Binding var changesOpen: Bool
     @Environment(\.headerClearance) private var headerClearance
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text(computer ?? "Unknown computer").lineLimit(1)
-            separator
-            Text(FleetGroup.shellPath(summary.shownCwd)).font(Theme.mono(11.5)).lineLimit(1).truncationMode(.head)
-            if let branch = summary.gitBranch?.displaySafe {
-                separator
-                Text(branch).font(Theme.mono(11.5)).lineLimit(1).accessibilityIdentifier("session.branch")
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.label.inline)
+                    .font(Theme.ui(13, .semibold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("session.title")
+                place
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: 0)
+            PanelToggle(diff: row.summary.diffStat, open: $changesOpen)
         }
-        .font(Theme.ui(12))
-        .foregroundStyle(Theme.text2)
-        .padding(.horizontal, 20)
-        .padding(.leading, max(0, headerClearance.leading - 20))
-        .padding(.trailing, max(0, headerClearance.trailing - 20))
+        .padding(.leading, max(20, headerClearance.leading))
+        .padding(.trailing, max(14, headerClearance.trailing))
         .frame(height: 52)
-    }
-
-    private var separator: some View {
-        Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold)).foregroundStyle(Theme.text3)
-            .accessibilityHidden(true)
-    }
-}
-
-/// What the run is called, how it stands, which agent and model it is, the lines it has changed, how long ago it
-/// last said anything, and its two tabs.
-private struct Heading: View {
-    let row: FleetRow
-    let model: AppModel
-    @Binding var tab: SessionTab
-
-    var body: some View {
-        let since = row.lastActive
-        VStack(alignment: .leading, spacing: 10) {
-            Text(row.label.inline)
-                .font(Theme.ui(18, .semibold))
-                .foregroundStyle(Theme.text)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .accessibilityIdentifier("session.title")
-            HStack(spacing: 12) {
-                HStack(spacing: 6) {
-                    StateIcon(status: row.status)
-                    Text(row.status.label)
-                }
-                // The mark and the word say one thing; read once.
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(row.status.label)
-                .accessibilityIdentifier(row.status == .ended ? "session.ended" : "session.state")
-                HStack(spacing: 6) {
-                    AgentMark(agent: row.summary.agent)
-                    agentLine
-                }
-                if let diff = row.summary.diffStat {
-                    LineDelta(added: diff.added, removed: diff.removed).accessibilityIdentifier("session.diffStat")
-                }
-                AgeText(since: since) { Format.ago(since: since, now: $0) }
-                    .foregroundStyle(Theme.text3)
-                    .monospacedDigit()
-            }
-            .font(Theme.ui(12))
-            .foregroundStyle(Theme.text2)
-            HStack(spacing: 20) {
-                ForEach(SessionTab.allCases, id: \.self) { each in
-                    UnderlineTab(
-                        title: each.title, id: each.id, selected: tab == each,
-                        count: each == .changes ? ChangesTab.fileCount(model: model, key: row.id) : nil
-                    ) { tab = each }
-                }
-            }
-            .padding(.top, 6)
-        }
-        .padding(.horizontal, 28)
-        .padding(.top, 18)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
     }
 
-    /// The agent, and the model it says it runs when it has said: by the label of the run's menu entry for that
-    /// model when there is one, so the line and the settings list spell it alike, else as the agent reported it, in
-    /// code type (Kit's `modelName`). A run that takes no reply names, after the model, the effort it ended with (Kit's
-    /// `headerEffort`); any other run names its effort on its reply row.
-    private var agentLine: Text {
-        let agent = Text(row.summary.agent.productName)
-        guard let confirmed = model.confirmedModel(for: row.id) else { return agent }
-        let name = RunSettings.modelName(
-            confirmed: confirmed.name, menus: row.summary.menus, label: row.summary.modelLabel)
-        let line = Text("\(agent) · \(name.reported ? Text(name.text).font(Theme.mono(11.5)) : Text(name.text))")
-        guard let effort = RunSettings.headerEffort(summary: row.summary) else { return line }
-        return Text("\(line) · \(effort)")
+    /// Where the run is. The computer and its link's word give way last, so a long project or branch is what shortens;
+    /// the whole line, with the folder as a shell prints it, is the help.
+    private var place: some View {
+        let link = model.linkHealth
+        let live = link.level != .offline
+        let branch = row.summary.gitBranch?.displaySafe
+        let computer = row.machineName ?? "Unknown computer"
+        let word = link.machineWord.map { live ? "· \($0)" : RunListWords.offline }
+        return HStack(spacing: 5) {
+            Text(row.label.project)
+            if let branch {
+                Image(systemName: "chevron.right").font(.system(size: 7, weight: .semibold)).accessibilityHidden(true)
+                Text(branch).font(Theme.mono(11)).accessibilityIdentifier("session.branch")
+            }
+            Text(verbatim: "·").accessibilityHidden(true)
+            HStack(spacing: 4) {
+                ComputerMark(os: model.machineOS)
+                Text(computer)
+                if let word { Text(word).foregroundStyle(Theme.text3) }
+            }
+            .foregroundStyle(live ? Theme.text2 : Theme.text3)
+            .layoutPriority(1)
+        }
+        .font(Theme.ui(11.5))
+        .foregroundStyle(Theme.text3)
+        .lineLimit(1)
+        .help(
+            [row.label.project, FleetGroup.shellPath(row.summary.shownCwd), branch, computer].compactMap { $0 }
+                .joined(separator: " · "))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("session.place")
     }
 }
 
-/// What the pane shows below its heading.
-enum SessionTab: CaseIterable {
-    case conversation
-    case changes
+/// The changes panel's toggle: its mark and the lines the run has changed, lighter while the panel is open. It always
+/// opens: the count comes at a turn's end, and an older computer sends none, while the panel reads the changes as they
+/// are.
+private struct PanelToggle: View {
+    let diff: DiffStat?
+    @Binding var open: Bool
 
-    var title: String {
-        switch self {
-        case .conversation: return "Conversation"
-        case .changes: return "Changes"
+    var body: some View {
+        let changed = diff.flatMap { $0.added + $0.removed > 0 ? $0 : nil }
+        Button { open.toggle() } label: {
+            HStack(spacing: 6) {
+                // Not the run's own toggle's sidebar beside it: what this one shows is lines changed.
+                Image(systemName: "plus.forwardslash.minus").font(.system(size: 10))
+                if let changed { LineDelta(added: changed.added, removed: changed.removed) }
+            }
+            .foregroundStyle(Theme.text)
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(Color.white.opacity(open ? 0.13 : 0.08), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.white.opacity(0.06)))
         }
-    }
-
-    /// What a driver finds the tab by.
-    var id: String {
-        switch self {
-        case .conversation: return "session.tab.conversation"
-        case .changes: return "session.tab.changes"
-        }
+        .buttonStyle(.hover(id: "session.changes.toggle"))
+        .help(open ? "Hide Changes" : "Show Changes")
+        .accessibilityLabel("Changes")
+        .accessibilityValue(changed.map { "+\($0.added) −\($0.removed)" } ?? "")
+        .accessibilityAddTraits(open ? .isSelected : [])
+        .accessibilityIdentifier("session.changes.toggle")
     }
 }
 

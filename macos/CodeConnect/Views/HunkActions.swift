@@ -170,6 +170,7 @@ struct HunkCommentField: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .focusedValue(\.composerHoldsEscape, focused ? true : nil)
+        .focusedValue(\.changesFieldFocused, focused ? true : nil)
         #if DEBUG
             .task {
                 // A render's words and refusal, typed after the field has the keyboard, as a person's are.

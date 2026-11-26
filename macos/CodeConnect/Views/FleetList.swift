@@ -13,25 +13,20 @@ enum FleetScope: String {
     }
 }
 
-extension FleetGroup.Kind {
-    var title: String { self == .computer ? "Computer" : "Project" }
-}
-
-/// Every run on every paired computer, one line each, grouped by computer or by project in the
-/// fleet's own order, or only one computer's or project's when the sidebar narrows it. A run waiting on you is a
-/// state of its row, and its group says how many decisions wait there.
+/// The window's run list, 256 pt down its leading side: in its head the computer it is narrowed to ("All ▾") and New
+/// Run (+); under it every run on every paired computer in three sections by what it needs (`RunList`), Needs you,
+/// Working and Done, Done ending with the way to the ended runs ("N ended ›"), which the list shows in their place
+/// with the way back ("‹ Active"); in its foot this Mac's Tailscale and Settings.
 struct FleetList: View {
     @Environment(Machines.self) private var machines
     @Binding var scope: FleetScope
-    @Binding var grouping: FleetGroup.Kind
+    /// The computer the list is narrowed to, if any; the Mac narrows by computer alone.
     @Binding var filter: FleetFilter?
     /// The run open beside the list, if any.
     @Binding var opened: String?
-    /// A computer whose pairing has to change: Add Computer, its address already in the code form.
-    let pairAgain: (String) -> Void
-    /// Opens Start an agent.
-    let newAgent: () -> Void
-    @State private var folded: Set<String> = []
+    let newRun: () -> Void
+    let addComputer: () -> Void
+    let openSettings: () -> Void
     /// The row under the pointer, and the row whose "…" panel is open.
     @State private var hovered: String?
     /// The window's one row menu, which a run's "…" or a right-click on its row opens.
@@ -53,219 +48,111 @@ struct FleetList: View {
     @State private var batchRunning = false
     @State private var batchRefused: [String: String] = [:]
 
+    /// The machine id the list is narrowed to.
+    private var computer: String? {
+        if case .computer(let id) = filter { return id }
+        return nil
+    }
+
     var body: some View {
-        let rows = narrowed(scope.rows(machines.fleet))
-        let namingComputer = machines.models.filter(\.showsFleet).count > 1
+        let list = RunList(machines.fleet, computer: computer)
+        let rows = scope == .active ? list.needsYou + list.working + list.done : list.ended
+        let selectable = scope == .finished ? list.ended.filter(removable).map(\.id) : []
+        let picked = selectable.filter(chosen.contains)
         VStack(spacing: 0) {
-            let selectable = selectableKeys(rows)
-            let picked = FleetGroup.picked(rows, by: grouping, folded: folded, chosen: chosen, removable: removable)
-            HStack(spacing: 10) {
-                if selecting {
-                    Text(verbatim: "\(picked.count) selected").font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
-                    Spacer()
-                    let all = !selectable.isEmpty && chosen.isSuperset(of: selectable)
-                    ActionButton(title: all ? "Deselect All" : "Select All", key: nil, prominent: false, id: "fleet.selectAll") {
-                        chosen = all ? [] : Set(selectable)
-                    }
-                    .keyboardShortcut("a", modifiers: .command)
-                    .disabled(batchRunning)
-                    // No Done while a batch runs: the batch holds the choice until it has answered.
-                    if !batchRunning {
-                        // While the card asks, Esc is the card's: Done keeps its face (the card stops clicks behind
-                        // it) but not the key.
-                        ActionButton(title: "Done", key: nil, prominent: false, id: "fleet.selectDone") { endSelection() }
-                            .keyboardShortcut(removingMany == nil ? .cancelAction : nil)
-                    }
-                } else {
-                    Text(scope.title).font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
-                    Text(verbatim: "\(rows.count)").font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                    if let filter {
-                        FilterChip(name: filter.name(in: machines)) { self.filter = nil }
-                    }
-                    Spacer()
-                    if !selectable.isEmpty {
-                        ActionButton(title: "Select", key: nil, prominent: false, id: "fleet.select") { startSelection() }
-                    }
-                    GroupingSwitch(selection: $grouping)
+            // The head's controls stand at the end of the list's 256 pt, whatever the list's width, so the computer menu
+            // opens from the same place, over whatever is beside the list; the ended runs are every computer's, so no
+            // computer is offered over them.
+            HStack(spacing: 4) {
+                Spacer(minLength: 0)
+                if scope == .active { ComputerFilter(filter: $filter, addComputer: addComputer) }
+                Button(action: newRun) {
+                    Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.text2)
+                        .frame(width: 20, height: 24)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.hover(radius: 6, id: "fleet.newRun"))
+                .focusable(false)
+                .help("New Run")
+                .accessibilityLabel("New Run")
+                .accessibilityIdentifier("fleet.newRun")
             }
-            .padding(.horizontal, 16)
-            .padding(.leading, max(0, headerClearance.leading - 16))
-            .padding(.trailing, max(0, headerClearance.trailing - 16))
-            .frame(height: 52)
-            Rectangle().fill(Theme.hairline).frame(height: 1)
-            // What the last batch did not remove, and why, under the header.
+            // Clear of the list's toggle beside the window's buttons when the list comes first.
+            .padding(.leading, max(16, headerClearance.leading - 16))
+            .padding(.trailing, 12)
+            .frame(width: 256, height: 52)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Its dropdown opens over the rows below it.
+            .zIndex(1)
+            // What the last batch did not remove, and why, under the head.
             if let note = batchNote(rows) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(note.title).font(Theme.ui(12, .medium)).foregroundStyle(Theme.amber)
                     Text(note.reasons).font(Theme.ui(12)).foregroundStyle(Theme.text2).lineLimit(2)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 18)
                 .padding(.vertical, 8)
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("fleet.batchNote")
-                Rectangle().fill(Theme.hairline).frame(height: 1)
             }
 
-            // A computer whose link is not working shows why in place of its list, and the one thing to do: rows it
-            // listed before are the last it said, and none can be acted on until it is reached again.
-            if rows.isEmpty || shownComputerNotice != nil {
-                Group {
-                    if let (computer, notice) = shownComputerNotice {
-                        ComputerNotice(notice: notice, act: noticeAction(computer, notice))
-                    } else if scope == .active {
-                        NoAgentsYet(newAgent: newAgent)
-                    } else {
-                        Text(FleetWords.noEndedRuns).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
-                    }
-                }
-                .padding(.horizontal, 24)
-                .frame(maxWidth: 440)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if scope == .active, machines.fleet.isEmpty {
+                NoAgentsYet(newAgent: newRun)
+                    .padding(.horizontal, 18)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(FleetGroup.groups(rows, by: grouping)) { group in
-                            let isFolded = folded.contains(group.id)
-                            Button {
-                                if isFolded { folded.remove(group.id) } else { folded.insert(group.id) }
-                            } label: {
-                                GroupHeader(
-                                    group: group, grouping: grouping, namingComputer: namingComputer,
-                                    folded: isFolded)
-                            }
-                            .buttonStyle(.hover(radius: 0, id: "fleet.group.\(group.axID)"))
-                            // The list is one stop for the keyboard; its rows are not stops of their own.
-                            .focusable(false)
-                            .accessibilityIdentifier("fleet.group.\(group.axID)")
-                            .accessibilityValue(isFolded ? "folded" : "open")
-                            if !isFolded {
-                                ForEach(group.rows) { row in
-                                    let selected = opened == row.id
-                                    let model = machines.model(for: row.machineID)
-                                    let endable = model?.canEndRun(row.summary) == true
-                                    // The iPhone's rule for its Remove: ended (or adopted), on a computer whose ccd
-                                    // removes runs. Never with End run: a run CodeConnect started is removable only
-                                    // once it has ended.
-                                    let removable =
-                                        row.summary.isRemovable && model?.daemonProfile.removesSessions == true
-                                    let more = hovered == row.id || menu.shown?.owner == "fleet.row.\(row.id).more"
-                                        || HoverButtonStyle.forced("fleet.row.\(row.id)")
-                                    let choosable = selectable.contains(row.id)
-                                    Button {
-                                        if selecting || (choosable && NSEvent.modifierFlags.contains(.command)) {
-                                            // Choosing: a click chooses or lets go; ⌘-click starts choosing with it.
-                                            guard choosable, !batchRunning else { return }
-                                            if !selecting { startSelection() }
-                                            if chosen.contains(row.id) { chosen.remove(row.id) } else { chosen.insert(row.id) }
-                                            return
-                                        }
-                                        opened = selected ? nil : row.id
-                                        keepListFocus()
-                                    } label: {
-                                        FleetLine(
-                                            row: row, selected: selected, roomForMore: more && !selecting,
-                                            chosen: selecting && choosable ? chosen.contains(row.id) : nil,
-                                            refusal: batchRefused[row.id])
-                                    }
-                                    .buttonStyle(.hover(radius: 0, id: "fleet.row.\(row.id)"))
-                                    .focusable(false)
-                                    .accessibilityElement(children: .contain)
-                                    .accessibilityAction { opened = selected ? nil : row.id }
-                                    .accessibilityIdentifier("fleet.row.\(row.id)")
-                                    .accessibilityAddTraits(selected ? .isSelected : [])
-                                    // The run's "…" (decisions 185 and 217): on hover, its panel holding Copy
-                                    // Working Directory, then End Run… while the run is live, or Remove… once it has
-                                    // ended (an adopted run's at any time); for VoiceOver, which does not hover, those
-                                    // are the row's own actions.
-                                    .accessibilityActions {
-                                        Button("Copy Working Directory") { copyToPasteboard(row.summary.cwd) }
-                                            .accessibilityIdentifier("fleet.row.\(row.id).copyWorkingDirectoryAction")
-                                        if endable {
-                                            Button("End Run…") { ending = row }
-                                                .accessibilityIdentifier("fleet.row.\(row.id).endRunAction")
-                                        }
-                                        if removable {
-                                            Button("Remove…") { removing = row }
-                                                .accessibilityIdentifier("fleet.row.\(row.id).removeAction")
-                                        }
-                                    }
-                                    .overlay(alignment: .trailing) {
-                                        moreButton(row, endable: endable, removable: removable, shown: more && !selecting)
-                                    }
-                                    // The same menu, at the pointer; none while choosing.
-                                    .onRightClick { point in
-                                        guard !selecting else { return }
-                                        RunMore.show(
-                                            menu, at: CGRect(origin: point, size: .zero), id: "fleet.row.\(row.id).more",
-                                            action: endable ? .endRun : removable ? .remove : nil, copies: row.summary.cwd
-                                        ) { if endable { ending = row } else { removing = row } }
-                                    }
-                                    .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
-                                    .id(group.id + "/" + row.id)
-                                }
-                            }
-                        }
-                        let finished = narrowed(FleetScope.finished.rows(machines.fleet)).count
-                        if scope == .active, finished > 0 {
-                            Button { scope = .finished } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .bold))
-                                    Text(FleetScope.finished.title).font(Theme.ui(12, .medium))
-                                    Text(verbatim: "\(finished)").font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                                    Spacer()
-                                }
-                                .foregroundStyle(Theme.text2)
-                                .padding(.horizontal, 16)
-                                .frame(height: 34)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.hover(radius: 0, id: "fleet.showFinished"))
-                            .focusable(false)
-                            .accessibilityIdentifier("fleet.showFinished")
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if scope == .active {
+                            activeSections(list)
+                        } else {
+                            endedSection(list.ended, selectable: selectable, picked: picked)
                         }
                     }
                     // Room below the last row.
-                    .padding(.bottom, 40)
+                    .padding(.bottom, 24)
                 }
                 #if DEBUG
                     .defaultScrollAnchor(RenderWindow.listAtEnd ? .bottom : nil)
                 #endif
-                // One stop for the keyboard: ↑ and ↓ move the open run through the runs as the list shows them, a
-                // folded group's skipped, and the list keeps the keyboard as the run opens beside it.
+                // One stop for the keyboard: ↑ and ↓ move the open run through the runs as the list shows them, and
+                // the list keeps the keyboard as the run opens beside it.
                 .focusable()
                 .focused($listFocused)
                 .focusEffectDisabled()
                 .onMoveCommand { direction in
                     guard direction == .up || direction == .down else { return }
-                    let shown = FleetGroup.groups(rows, by: grouping).filter { !folded.contains($0.id) }
-                        .flatMap { $0.rows.map(\.id) }
-                    opened = ListStep.step(from: opened, in: shown, down: direction == .down)
+                    opened = ListStep.step(from: opened, in: rows.map(\.id), down: direction == .down)
                     keepListFocus()
                 }
             }
 
-            // The list's foot, only while choosing runs: what is chosen is removed from it.
+            // While choosing: every removable run at once, and what is chosen removed together.
             if selecting {
-                Rectangle().fill(Theme.hairline).frame(height: 1)
-                HStack(spacing: 14) {
-                    Spacer()
+                HStack(spacing: 8) {
+                    let all = !selectable.isEmpty && chosen.isSuperset(of: selectable)
+                    ActionButton(title: all ? "Deselect All" : "Select All", key: nil, prominent: false, id: "fleet.selectAll") {
+                        chosen = all ? [] : Set(selectable)
+                    }
+                    .keyboardShortcut("a", modifiers: .command)
+                    .disabled(batchRunning)
+                    Spacer(minLength: 0)
                     ActionButton(
                         title: batchRunning ? "Removing…" : "Remove \(picked.count)…", key: nil, prominent: false,
                         destructive: true, id: "fleet.removeChosen"
                     ) { removingMany = picked }
                     .disabled(picked.isEmpty || batchRunning)
                 }
-                .padding(.horizontal, 16)
-                .frame(height: 34)
+                .padding(.horizontal, 12)
+                .frame(height: 40)
             }
+            ListFoot(openSettings: openSettings)
         }
-        .background(Theme.window)
-        // Leaving the Ended runs leaves the choosing, and so does no removable run being left at all. A run only
-        // folded away or filtered out is still there: it stays chosen and is picked again once shown.
+        .background(Theme.sidebar)
+        // Leaving the ended runs leaves the choosing, and so does no removable run being left at all.
         .onChange(of: scope) { endSelection() }
-        .onChange(of: scope.rows(machines.fleet).contains(where: removable)) { _, any in if !any { endSelection() } }
+        .onChange(of: list.ended.contains(where: removable)) { _, any in if !any { endSelection() } }
         #if DEBUG
             .task(id: rows.first?.id) {
                 guard let row = rows.first else { return }
@@ -277,7 +164,6 @@ struct FleetList: View {
                 default: break
                 }
                 if let count = RenderWindow.select {
-                    let selectable = selectableKeys(rows)
                     startSelection()
                     chosen = Set(selectable.prefix(count ?? selectable.count))
                     switch RenderWindow.confirm {
@@ -327,24 +213,154 @@ struct FleetList: View {
         }
     }
 
+    /// Needs you, Working and Done. Unnarrowed, a section with no runs is left out; narrowed, it says so, and Needs
+    /// you, which never narrows, says it holds every computer's. Done ends with the way to the ended runs, while any.
+    @ViewBuilder private func activeSections(_ list: RunList) -> some View {
+        let narrowedTo = computer.flatMap { id in machines.models.first { $0.machineID == id }?.machineName }
+        let sections: [(id: String, title: String, rows: [FleetRow])] = [
+            ("needsYou", "Needs you", list.needsYou), ("working", "Working", list.working), ("done", "Done", list.done),
+        ]
+        ForEach(sections, id: \.id) { section in
+            let ended = section.id == "done" && !list.ended.isEmpty
+            if !section.rows.isEmpty || (computer != nil && section.id != "needsYou") || ended {
+                SectionLabel(title: section.title, id: section.id) {
+                    if section.id == "needsYou", computer != nil {
+                        Text(RunListWords.allComputers).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                    } else if ended {
+                        Button { scope = .finished } label: {
+                            Text(RunListWords.ended(list.ended.count)).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                        }
+                        .buttonStyle(.hover(radius: 5, id: "fleet.showFinished"))
+                        .focusable(false)
+                        .accessibilityIdentifier("fleet.showFinished")
+                    }
+                }
+                if section.rows.isEmpty, let narrowedTo {
+                    Text(RunListWords.noneOn(narrowedTo)).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
+                        .padding(.horizontal, 18)
+                        .frame(height: 30)
+                        .accessibilityIdentifier("fleet.section.\(section.id).none")
+                }
+                ForEach(section.rows) { row in
+                    // In Needs you, narrowed, a run on another computer names that computer by its mark.
+                    let elsewhere = section.id == "needsYou" && computer != nil && row.machineID != computer
+                    // Known by its section too: a run that moves to another section (Idle while the launch catches
+                    // up, Done once it has) is drawn anew there, never a lazy row kept with its old mark.
+                    runRow(row, elsewhere: elsewhere, choosable: false).id(section.id + "/" + row.id)
+                }
+            }
+        }
+    }
+
+    /// The ended runs, on every computer, with the way back and, while any can be removed, Select; while choosing,
+    /// how many are chosen and Done.
+    @ViewBuilder private func endedSection(_ ended: [FleetRow], selectable: [String], picked: [String]) -> some View {
+        SectionLabel(title: selecting ? "\(picked.count) selected" : FleetScope.finished.title, id: "ended") {
+            if selecting {
+                // No Done while a batch runs: the batch holds the choice until it has answered. While the card asks,
+                // Esc is the card's.
+                if !batchRunning {
+                    labelButton("Done", id: "fleet.selectDone") { endSelection() }
+                        .keyboardShortcut(removingMany == nil ? .cancelAction : nil)
+                }
+            } else {
+                if !selectable.isEmpty { labelButton("Select", id: "fleet.select") { startSelection() } }
+                labelButton("‹ Active", id: "fleet.showActive") { scope = .active }
+            }
+        }
+        if ended.isEmpty {
+            Text(FleetWords.noEndedRuns).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
+                .padding(.horizontal, 18)
+                .frame(height: 30)
+        }
+        ForEach(ended) { row in runRow(row, elsewhere: false, choosable: selectable.contains(row.id)) }
+    }
+
+    /// A section label's word that acts: quiet, as the label's own words.
+    private func labelButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Text(title).font(Theme.ui(12)).foregroundStyle(Theme.text3) }
+            .buttonStyle(.hover(radius: 5, id: id))
+            .focusable(false)
+            .accessibilityIdentifier(id)
+    }
+
+    /// One run's row: a click opens it (or, while choosing, chooses it), its "…" on hover or a right-click holds what
+    /// can be done to it.
+    private func runRow(_ row: FleetRow, elsewhere: Bool, choosable: Bool) -> some View {
+        let selected = opened == row.id
+        let model = machines.model(for: row.machineID)
+        let endable = model?.canEndRun(row.summary) == true
+        // The iPhone's rule for its Remove: ended (or adopted), on a computer whose ccd removes runs. Never with End
+        // run: a run CodeConnect started is removable only once it has ended.
+        let removable = row.summary.isRemovable && model?.daemonProfile.removesSessions == true
+        let more = hovered == row.id || menu.shown?.owner == "fleet.row.\(row.id).more"
+            || HoverButtonStyle.forced("fleet.row.\(row.id)")
+        let activate = {
+            if selecting || (choosable && NSEvent.modifierFlags.contains(.command)) {
+                // Choosing: a click chooses or lets go; ⌘-click starts choosing with it.
+                guard choosable, !batchRunning else { return }
+                if !selecting { startSelection() }
+                if chosen.contains(row.id) { chosen.remove(row.id) } else { chosen.insert(row.id) }
+                return
+            }
+            opened = selected ? nil : row.id
+            keepListFocus()
+        }
+        return Button(action: activate) {
+            FleetLine(
+                row: row, selected: selected, roomForMore: more && !selecting,
+                elsewhere: elsewhere ? model?.machineOS ?? "" : nil,
+                chosen: selecting && choosable ? chosen.contains(row.id) : nil,
+                refusal: batchRefused[row.id])
+        }
+        .buttonStyle(.hover(radius: 6, id: "fleet.row.\(row.id)"))
+        .focusable(false)
+        .padding(.horizontal, 8)
+        .padding(.bottom, 2)
+        .accessibilityElement(children: .contain)
+        .accessibilityAction { activate() }
+        .accessibilityIdentifier("fleet.row.\(row.id)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        // The run's "…" (decisions 185 and 217): on hover, its panel holding Copy Working Directory, then End Run…
+        // while the run is live, or Remove… once it has ended (an adopted run's at any time); for VoiceOver, which
+        // does not hover, those are the row's own actions.
+        .accessibilityActions {
+            Button("Copy Working Directory") { copyToPasteboard(row.summary.cwd) }
+                .accessibilityIdentifier("fleet.row.\(row.id).copyWorkingDirectoryAction")
+            if endable {
+                Button("End Run…") { ending = row }
+                    .accessibilityIdentifier("fleet.row.\(row.id).endRunAction")
+            }
+            if removable {
+                Button("Remove…") { removing = row }
+                    .accessibilityIdentifier("fleet.row.\(row.id).removeAction")
+            }
+        }
+        .overlay(alignment: .trailing) {
+            if more && !selecting {
+                RunMore(
+                    id: "fleet.row.\(row.id).more", action: endable ? .endRun : removable ? .remove : nil,
+                    copies: row.summary.cwd
+                ) { if endable { ending = row } else { removing = row } }
+                .padding(.trailing, 14)
+            }
+        }
+        // The same menu, at the pointer; none while choosing.
+        .onRightClick { point in
+            guard !selecting else { return }
+            RunMore.show(
+                menu, at: CGRect(origin: point, size: .zero), id: "fleet.row.\(row.id).more",
+                action: endable ? .endRun : removable ? .remove : nil, copies: row.summary.cwd
+            ) { if endable { ending = row } else { removing = row } }
+        }
+        .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
+    }
+
     /// Gives the list the keyboard, and gives it again once the window has laid out the run that opened: the new pane
     /// beside the list otherwise hands the keyboard to the first control left in the window.
     private func keepListFocus() {
         listFocused = true
         DispatchQueue.main.async { listFocused = true }
-    }
-
-    /// The row's "…" while it is shown: on hover, or while its panel is open.
-    @ViewBuilder private func moreButton(_ row: FleetRow, endable: Bool, removable: Bool, shown: Bool) -> some View {
-        if shown {
-            RunMore(
-                id: "fleet.row.\(row.id).more", action: endable ? .endRun : removable ? .remove : nil,
-                copies: row.summary.cwd
-            ) {
-                if endable { ending = row } else { removing = row }
-            }
-            .padding(.trailing, 16)
-        }
     }
 
     private func endRun(_ row: FleetRow) {
@@ -355,12 +371,6 @@ struct FleetList: View {
     private func remove(_ row: FleetRow) {
         guard let model = machines.model(for: row.machineID) else { return }
         Task { removeNote = FleetWords.removalRefused(await model.removeSession(row.summary)) }
-    }
-
-    /// The runs a choice can hold: the Ended runs the list shows that can be removed (`FleetGroup.choosable`).
-    private func selectableKeys(_ rows: [FleetRow]) -> [String] {
-        guard scope == .finished else { return [] }
-        return FleetGroup.choosable(rows, by: grouping, folded: folded, removable: removable)
     }
 
     /// Ended, on a computer that removes runs.
@@ -404,189 +414,320 @@ struct FleetList: View {
         guard !kept.isEmpty else { return nil }
         return ("\(kept.count) not removed", Set(kept).sorted().joined(separator: " · "))
     }
-
-    /// The computer the list is narrowed to, when its link is not working, and what it says: the sentence behind the
-    /// sidebar's word.
-    private var shownComputerNotice: (AppModel, LinkNotice)? {
-        guard case .computer(let id) = filter,
-            let model = machines.models.first(where: { ($0.machineID ?? "") == id }),
-            let notice = model.linkHealth.notice
-        else { return nil }
-        return (model, notice)
-    }
-
-    /// The notice's one action on the Mac, as the computer's sidebar row offers it (`LinkNotice.macAction`): Try
-    /// Again where the link can be asked again, Open Tailscale where Tailscale is off and its app is here, Pair Again
-    /// where the pairing or its address has to change.
-    private func noticeAction(_ computer: AppModel, _ notice: LinkNotice) -> (title: String, run: () -> Void)? {
-        let app = TailscaleApp.url
-        switch LinkNotice.macAction(notice.action, tailscaleFound: app != nil) {
-        case .tryAgain: return (PeerWords.tryAgain, { computer.connection.retryNow() })
-        case .openTailscale:
-            guard let app else { return nil }
-            return (LinkNotice.openTailscale, { NSWorkspace.shared.open(app) })
-        case .pairAgain:
-            guard let address = computer.endpoint?.typedAddress else { return nil }
-            return (LinkHealth.pairAgain, { pairAgain(address) })
-        case nil: return nil
-        }
-    }
-
-    /// These rows as the sidebar's filter leaves them.
-    private func narrowed(_ rows: [FleetRow]) -> [FleetRow] { filter?.narrow(rows) ?? rows }
 }
 
-/// What the list is narrowed to, beside its count; a click shows every run again.
-private struct FilterChip: View {
-    let name: String
-    let clear: () -> Void
-
-    var body: some View {
-        Button(action: clear) {
-            HStack(spacing: 6) {
-                Text(name).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.text2)
-            }
-            .padding(.horizontal, 9)
-            .frame(height: 22)
-            .background(Theme.raised, in: Capsule())
-            .overlay(Capsule().strokeBorder(Theme.hairline))
-        }
-        .buttonStyle(.hover(radius: 11, over: true, id: "fleet.filter.clear"))
-        .help("Show every agent")
-        .accessibilityLabel("\(name), show every agent")
-        .accessibilityIdentifier("fleet.filter.clear")
-    }
-}
-
-private struct GroupingSwitch: View {
-    @Binding var selection: FleetGroup.Kind
-
-    var body: some View {
-        SegmentedTrack(
-            options: FleetGroup.Kind.allCases, chosen: selection, fill: Theme.raised.opacity(0.6),
-            id: { "fleet.grouping.\($0.title.lowercased())" }, choose: { selection = $0 }
-        ) { option, chosen in
-            Text(option.title)
-                .font(Theme.ui(11.5, chosen ? .medium : .regular))
-                .foregroundStyle(chosen ? Theme.text : Theme.text3)
-                .padding(.horizontal, 9)
-                .frame(height: 22)
-        }
-    }
-}
-
-/// A group's name, how many runs it holds, how many decisions wait in it, and where a project is
-/// (`ProjectPlace`); a click folds it.
-private struct GroupHeader: View {
-    @Environment(Machines.self) private var machines
-    let group: FleetGroup
-    let grouping: FleetGroup.Kind
-    let namingComputer: Bool
-    let folded: Bool
-
-    /// A computer's link when it is not working, in the word the sidebar and the iPhone's cards say beside its name.
-    private var linkWord: String? {
-        guard grouping == .computer else { return nil }
-        return machines.models.first { ($0.machineID ?? "") == group.id }?.linkHealth.machineWord
-    }
+/// A section's label, 34 pt: its name, and at its end what the section adds (a note, or a way elsewhere).
+private struct SectionLabel<Trailing: View>: View {
+    let title: String
+    let id: String
+    @ViewBuilder let trailing: () -> Trailing
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: folded ? "chevron.right" : "chevron.down")
-                .font(.system(size: 8.5, weight: .bold))
-                .foregroundStyle(Theme.text3)
-                .frame(width: 9)
-            Image(systemName: grouping == .computer ? "desktopcomputer" : "folder")
-                .font(.system(size: 11))
-                .foregroundStyle(grouping == .computer ? Theme.text2 : Theme.text3)
-            Text(group.name).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                .truncationMode(.middle)
-            // The counts stay whole on one line; the name before them is what gives way, in its middle.
-            Text(verbatim: "\(group.rows.count)").font(Theme.ui(11.5)).foregroundStyle(Theme.text3).fixedSize()
-            if let linkWord {
-                Text(linkWord).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1).fixedSize()
-            }
-            if group.waiting > 0 {
-                Text(FleetCount.waitingForYou(group.waiting)).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.amber)
-                    .lineLimit(1)
-                    .fixedSize()
-            }
-            Spacer(minLength: 16)
-            if grouping == .project {
-                ProjectPlace(project: group, namingComputer: namingComputer, size: 11)
-            }
+            Text(title).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text3).lineLimit(1)
+                .accessibilityIdentifier("fleet.section.\(id)")
+            Spacer(minLength: 0)
+            trailing()
         }
-        .padding(.horizontal, 16)
-        .frame(height: 32)
-        .contentShape(Rectangle())
-        .background(Theme.pane.opacity(0.55), in: Rectangle())
-        .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+        .padding(.leading, 18)
+        .padding(.trailing, 14)
+        .frame(height: 34)
+        .padding(.top, 6)
     }
 }
 
-/// Where a project is: its computer, when more than one is paired, and its folder. Short in a narrow
-/// place, each is cut once, where it keeps its meaning: the computer at its end, and the folder to its
-/// last part after "…/", whole, so a cut never lands inside a folder's name.
-struct ProjectPlace: View {
-    let project: FleetGroup
-    let namingComputer: Bool
-    let size: CGFloat
+/// The list head's "All ▾": the computer the list is narrowed to, by its mark and name, or All; it opens the computer
+/// menu below itself, its leading edge on the button's, 6 pt down. The menu's rows: All computers, with every
+/// computer's runs; each computer, its mark, its name over its runs (or, not reached, when it was last seen), and its
+/// CPU, RAM and disk, read afresh while the menu is open; then Add Computer….
+private struct ComputerFilter: View {
+    @Environment(Machines.self) private var machines
+    @Binding var filter: FleetFilter?
+    let addComputer: () -> Void
+    @State private var open = false
+    @State private var height: CGFloat = 0
+
+    private var chosen: AppModel? {
+        guard case .computer(let id) = filter else { return nil }
+        return machines.models.first { $0.machineID == id }
+    }
 
     var body: some View {
-        HStack(spacing: 4) {
-            if namingComputer {
-                // First in line for room: the folder takes what is left, down to "…/" and its last part cut.
-                Text(project.computer).font(Theme.ui(size)).lineLimit(1).truncationMode(.tail).layoutPriority(1)
-                Text(verbatim: "·").font(Theme.ui(size))
+        Button { open.toggle() } label: {
+            HStack(spacing: 6) {
+                ComputerMark(os: chosen?.machineOS, size: 11)
+                Text(chosen?.machineName ?? "All").font(Theme.ui(12.5, .medium)).lineLimit(1).truncationMode(.middle)
+                Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
-            ViewThatFits(in: .horizontal) {
-                Text(project.folder)
-                Text(verbatim: "…/" + (project.folder.split(separator: "/").last.map(String.init) ?? project.folder))
-                    .truncationMode(.middle)
-            }
-            .font(Theme.mono(size))
-            .lineLimit(1)
+            .foregroundStyle(Theme.text2)
+            .inputBoxChip(open: open, bordered: true)
         }
-        .foregroundStyle(Theme.text3)
+        .buttonStyle(.hover(radius: 8, id: "fleet.computers"))
+        .focusable(false)
+        .help(chosen?.machineName ?? RunListWords.allTitle)
+        .accessibilityIdentifier("fleet.computers")
+        .accessibilityValue(open ? "open" : "closed")
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        .overlay(alignment: .topLeading) {
+            if open { menu.openPanel().offset(y: height + Theme.panelGap) }
+        }
+        .closesPanel($open)
+        #if DEBUG
+            .task {
+                guard RenderWindow.opensComputerMenu else { return }
+                // After the render has sized and placed its window, as a click comes on a window at rest.
+                try? await Task.sleep(for: .seconds(1))
+                open = true
+            }
+        #endif
+    }
+
+    private var menu: some View {
+        let computers = machines.models.filter(\.showsFleet)
+        let fleet = machines.fleet
+        let all = fleet.count { $0.status != .ended }
+        return VStack(alignment: .leading, spacing: 0) {
+            choice(0, id: "fleet.computers.all", chosen: filter == nil, to: nil) {
+                MenuRow(chosen: filter == nil) {
+                    ComputerMark(os: nil).foregroundStyle(Theme.text2)
+                    Text(RunListWords.allTitle).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
+                } trailing: {
+                    Text(RunListWords.runs(all)).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                }
+            }
+            MenuDivider().padding(.vertical, 4)
+            ForEach(Array(computers.enumerated()), id: \.element.machineID) { index, computer in
+                let id = computer.machineID ?? ""
+                choice(index + 1, id: "fleet.computers.\(id)", chosen: filter == .computer(id), to: .computer(id)) {
+                    ComputerChoice(
+                        computer: computer, chosen: filter == .computer(id),
+                        count: RunList.activeCount(fleet, on: id))
+                }
+            }
+            MenuDivider().padding(.vertical, 4)
+            Button(action: chooseAdd) {
+                MenuRow(chosen: false) {
+                    Image(systemName: "plus").font(.system(size: 11)).foregroundStyle(Theme.text2)
+                    Text("Add Computer…").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
+                }
+            }
+            .buttonStyle(.panelRow)
+            .panelRow(computers.count + 1, id: "fleet.computers.addComputer", choose: chooseAdd)
+            .accessibilityIdentifier("fleet.computers.addComputer")
+        }
+        .frame(minWidth: 280)
+        .fixedSize()
+        .menuCard()
+    }
+
+    private func chooseAdd() {
+        open = false
+        addComputer()
+    }
+
+    /// The menu's row `index`: a click narrows the list to `to`, or to every run.
+    private func choice(
+        _ index: Int, id: String, chosen: Bool, to narrowed: FleetFilter?, @ViewBuilder label: () -> some View
+    ) -> some View {
+        let choose = {
+            filter = narrowed
+            open = false
+        }
+        return Button(action: choose, label: label)
+            .buttonStyle(.panelRow)
+            .panelRow(index, id: id, choose: choose)
+            .accessibilityIdentifier(id)
+            .accessibilityAddTraits(chosen ? .isSelected : [])
     }
 }
 
-/// A run's command line cut to the room the row leaves it, by the Kit's rule (`commandPreview`): its start and its
-/// end, never a tail cut that hides what it runs on. It takes the row's room up to the agent's mark, so the width it
-/// measures is that room and not its own text's; until measured, the whole command, held to one line. Spoken in full.
-private struct CommandPreview: View {
-    let command: String
-    @State private var width: CGFloat = 0
+/// A computer in the list head's menu: its mark and name over how many runs it has, with its load at the row's end
+/// while it is reached; not reached, it is greyed and says so, and its line says when it was last seen, or how many
+/// runs wait for it. Its load is read afresh while the row is shown, as long as the menu is open.
+private struct ComputerChoice: View {
+    let computer: AppModel
+    let chosen: Bool
+    let count: Int
 
-    /// One character's width in the line's font: a monospaced font has one.
-    private static let advance = max(("0" as NSString).size(withAttributes: [.font: Theme.monoFont(11.5)]).width, 1)
+    /// Not offline: a link connecting, quiet or refused is still this computer's, and says so in Settings.
+    private var live: Bool { computer.linkHealth.level != .offline }
 
-    /// Half a point of slack, so a rounding difference never pushes the last character past the edge.
-    private var columns: Int { width > 0 ? Int(((width - 0.5) / Self.advance).rounded(.down)) : 0 }
+    /// What the row shows of the computer's latest sample: only while its link is live, so no figure outlasts the
+    /// link that brought it.
+    private var load: MachineLoad? {
+        guard computer.linkHealth.level == .live else { return nil }
+        var stats = computer.machineStats
+        #if DEBUG
+            if let shown = RenderWindow.machineStats { stats = shown }
+        #endif
+        guard let stats else { return nil }
+        return MachineLoad(
+            cpu: stats.cpu, memoryUsed: stats.memoryUsed, memoryTotal: stats.memoryTotal,
+            diskUsed: stats.diskUsed, diskTotal: stats.diskTotal)
+    }
+
+    private var second: String? {
+        live
+            ? RunListWords.runs(count)
+            : RunListWords.offlineLine(lastSeen: computer.connection.lastContactAt, waiting: count, now: .now)
+    }
 
     var body: some View {
-        Text(columns > 0 ? commandPreview(command, columns: columns) : command)
-            .font(Theme.mono(11.5))
-            .foregroundStyle(Theme.text3)
-            .lineLimit(1)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
-            .accessibilityLabel(command)
+        let load = load
+        Group {
+            if let second {
+                MenuRow(chosen: chosen) { name } second: { Text(second) } trailing: { meters(load) }
+            } else {
+                MenuRow(chosen: chosen) { name } trailing: { meters(load) }
+            }
+        }
+        .help([computer.machineSystem, load?.line].compactMap { $0 }.joined(separator: " · "))
+        .task { await computer.keepMachineStatsFresh() }
+    }
+
+    @ViewBuilder private var name: some View {
+        ComputerMark(os: computer.machineOS).foregroundStyle(Theme.text2)
+        Text(computer.machineName ?? "Unknown computer").font(Theme.ui(12.5))
+            .foregroundStyle(live ? Theme.text : Theme.text3).lineLimit(1)
+        // A link that is not working says so in its own word ("· Pair again", "· Blocked"), offline in the list's.
+        if let word = computer.linkHealth.machineWord {
+            Text(live ? "· \(word)" : RunListWords.offline).font(Theme.ui(12.5)).foregroundStyle(Theme.text3).fixedSize()
+        }
+    }
+
+    @ViewBuilder private func meters(_ load: MachineLoad?) -> some View {
+        if let load {
+            HStack(spacing: 10) {
+                if let cpu = load.cpu { LoadMeter(label: "CPU", used: cpu) }
+                if let memory = load.memory { LoadMeter(label: "RAM", used: memory) }
+                if let disk = load.disk { LoadMeter(label: "Disk", used: disk) }
+            }
+            .padding(.leading, 16)
+        }
     }
 }
 
-/// One run on one line: its state, what it is called, what it is doing, which agent, and how long
-/// since it last did anything. Its computer is its group's to say.
+/// One figure of a computer's load: its name and share on one line over a 44 pt bar, amber at 90% or more, when the
+/// computer needs you, and quiet grey below that.
+private struct LoadMeter: View {
+    let label: String
+    let used: Double
+
+    var body: some View {
+        let high = used >= 0.9
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 3) {
+                Text(label).foregroundStyle(Theme.text3)
+                Text(MachineLoad.percent(used)).foregroundStyle(high ? Theme.amber : Theme.text2)
+            }
+            .font(Theme.mono(10.5))
+            .fixedSize()
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.08))
+                Capsule().fill(high ? Theme.amber : Theme.text3).frame(width: 44 * min(max(used, 0), 1))
+            }
+            .frame(width: 44, height: 2.5)
+        }
+    }
+}
+
+/// The list's foot: this Mac's Tailscale as its own daemon says it (`peers`), read as the Add sheet reads it, the whole
+/// sign-in, or in its place what is wrong in the words a computer's link uses; then the way into Settings. Nothing
+/// until the daemon has said, but Settings. Where this Mac's daemon answers is read every five seconds, as the Add
+/// sheet reads it, so its move from loopback onto Tailscale shows.
+private struct ListFoot: View {
+    @Environment(Machines.self) private var machines
+    @Environment(Setup.self) private var setup
+    let openSettings: () -> Void
+    @State private var address: LocalDaemon.Address?
+
+    /// What this Mac's own daemon last said about its Tailscale.
+    private var directory: PeerDirectory? {
+        #if DEBUG
+            if let peers = RenderWindow.peers { return peers }
+        #endif
+        return setup.thisMac(at: address).flatMap { machines.model(for: $0)?.tailnet }
+    }
+
+    var body: some View {
+        let status = directory.map { TailscaleNote.Status($0, onLoopback: TailscaleNote.onLoopback(address)) }
+        VStack(spacing: 0) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+            HStack(spacing: 7) {
+                if let status {
+                    Text(status.footWords).font(Theme.ui(11.5)).foregroundStyle(status.isSignedIn ? Theme.text2 : Theme.text3)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(status.footWords)
+                        .accessibilityLabel(status.spokenFoot)
+                        .accessibilityIdentifier("fleet.tailscale")
+                }
+                Spacer(minLength: 4)
+                Button { openSettings() } label: {
+                    Image(systemName: "gearshape.fill").font(.system(size: 13)).foregroundStyle(Theme.text2)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.hover(radius: 6, id: "fleet.settings"))
+                .help("Settings")
+                .accessibilityLabel("Settings")
+                .accessibilityIdentifier("fleet.settings")
+            }
+            .padding(.leading, 18)
+            .padding(.trailing, 10)
+            .frame(height: 34)
+        }
+        .accessibilityElement(children: .contain)
+        .task {
+            guard let root = setup.installer?.root else { return }
+            while !Task.isCancelled {
+                // A read that gets no answer (the service restarting onto Tailscale) keeps what it last said: the foot
+                // changes only on an answer.
+                if let read = await Task.detached(operation: { LocalDaemon.address(root: root) }).value { address = read }
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+    }
+}
+
+extension TailscaleNote.Status {
+    fileprivate var isSignedIn: Bool {
+        if case .signedIn = self { return true }
+        return false
+    }
+
+    /// What VoiceOver reads for the foot's words.
+    fileprivate var spokenFoot: String {
+        switch self {
+        case .signedIn(let login): login.map { "Tailscale connected, signed in as \($0)" } ?? "Tailscale connected"
+        default: "Tailscale: \(footWords)"
+        }
+    }
+
+    /// The foot's words: the whole sign-in once signed in; otherwise what is wrong.
+    fileprivate var footWords: String {
+        switch self {
+        case .signedIn(let login): login ?? "Signed in to Tailscale"
+        case .notConnected, .notInstalled: LinkNotice.connectTailscale
+        case .moving: "Connecting"
+        case .tagged: "Not signed in as you"
+        }
+    }
+}
+
+/// One run on one 30 pt line: its state, what it is called, and how long since it last did anything; in Needs you,
+/// narrowed to another computer, that run's computer by its mark before its age.
 private struct FleetLine: View {
     let row: FleetRow
-    /// Open beside the list: the selected fill, and a bar on its leading edge.
+    /// Open beside the list: the selected fill.
     let selected: Bool
     /// The run's "…" stands in its age's place, which hides while it shows: nothing else in the row moves.
     let roomForMore: Bool
+    /// The run's computer's system, when the row names its computer.
+    var elsewhere: String? = nil
     /// While choosing runs to remove: whether this one is chosen; its box takes the status mark's place.
     var chosen: Bool? = nil
-    /// Why the last batch did not remove it, in place of what it last did.
+    /// Why the last batch did not remove it, in place of its age.
     var refusal: String? = nil
     @State private var lastTick = Date()
 
@@ -601,53 +742,36 @@ private struct FleetLine: View {
                     .accessibilityIdentifier("fleet.row.\(row.id).status")
             }
             Text(row.label.inline)
-                .font(Theme.ui(12.5, row.status == .blocked ? .medium : .regular))
-                .foregroundStyle(Theme.text)
+                .font(Theme.ui(13, row.status == .blocked ? .medium : .regular))
+                .foregroundStyle(row.status == .ended ? Theme.text2 : Theme.text)
                 .lineLimit(1)
-                .truncationMode(.middle)
-                .layoutPriority(1)
-            // What it is on: the tool call in prose and its argument as code, or else the
-            // daemon's own sentence; asked to end, that it is stopping, until it has.
-            if let refusal {
-                Text(refusal).font(Theme.ui(12)).foregroundStyle(Theme.amber).lineLimit(1).modifier(DropsWhenNarrow())
-            } else if row.status == .stopping {
-                Text("Stopping…").font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1).modifier(DropsWhenNarrow())
-            } else if let activity = row.activity {
-                Text(activity.tool).font(Theme.ui(12)).foregroundStyle(Theme.text2).lineLimit(1).modifier(DropsWhenNarrow())
-                    // Beside a command, which fills the row, the tool's name keeps its own width.
-                    .layoutPriority(isCommandTool(activity.tool) ? 0.5 : 0)
-                if let argument = activity.argument, !argument.isEmpty {
-                    if isCommandTool(activity.tool) {
-                        CommandPreview(command: argument).modifier(DropsWhenNarrow()).layoutPriority(0.5)
-                    } else {
-                        Text(argument).font(Theme.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1).modifier(DropsWhenNarrow())
-                    }
-                }
-            } else if !row.subtitle.isEmpty {
-                Text(row.subtitle).font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1).modifier(DropsWhenNarrow())
-            }
+                .truncationMode(.tail)
             Spacer(minLength: 6)
-            AgentMark(agent: row.summary.agent)
+            if let refusal {
+                Text(refusal).font(Theme.ui(11.5)).foregroundStyle(Theme.amber).lineLimit(1)
+            }
+            if let elsewhere {
+                ComputerMark(os: elsewhere, size: 10).foregroundStyle(Theme.text3)
+            }
             Text(Format.age(since: since, now: AgeTick.renderTime(lastTick: lastTick)))
                 .font(Theme.ui(11.5))
                 .foregroundStyle(Theme.text3)
                 .monospacedDigit()
-                .frame(width: RunMore.width, alignment: .trailing)
+                .frame(minWidth: RunMore.width, alignment: .trailing)
                 .opacity(roomForMore ? 0 : 1)
         }
-        .padding(.horizontal, 16)
-        .frame(height: 36)
-        .background(selected ? Theme.selected : .clear, in: Rectangle())
-        .overlay(alignment: .leading) {
-            if selected { Rectangle().fill(Theme.text2).frame(width: 2) }
-        }
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(selected ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
+        // Its computer on hover, which tells apart two runs named alike on two computers.
+        .help(row.machineName ?? "")
         .task(id: AgeClock(since: since, scale: .age)) {
             await AgeTick.follow(AgeClock(since: since, scale: .age)) { lastTick = $0 }
         }
     }
 }
 
-/// A row's "…" (a run's, or a computer's in the sidebar): it opens the window's row menu (`RowMenu`) below itself,
+/// A run's "…": it opens the window's row menu (`RowMenu`) below itself,
 /// holding End Run… or Remove… (`PanelItem`, destructive), each of which asks before anything is sent; a run's menu
 /// first offers Copy Working Directory, its folder as the computer names it, as the iPhone's run offers it, and is
 /// there for every run, so a run that can be neither ended nor removed from here has that item alone. A right-click
@@ -670,12 +794,9 @@ struct RunMore: View {
     var copies: String? = nil
     let perform: () -> Void
     #if DEBUG
-        /// A render's `-CC_RUN_MENU <uid>` names this run's "…", or `-CC_COMPUTER_MENU` a computer's: once shown, it
-        /// opens a moment later, as a click opens it.
-        private var opensAtLaunch: Bool {
-            RenderWindow.openRunMenu.map { id == "fleet.row.\($0).more" } == true
-                || (RenderWindow.opensComputerMenu && id.hasPrefix("sidebar.computer."))
-        }
+        /// A render's `-CC_RUN_MENU <uid>` names this run's "…": once shown, it opens a moment later, as a click
+        /// opens it.
+        private var opensAtLaunch: Bool { RenderWindow.openRunMenu.map { id == "fleet.row.\($0).more" } == true }
     #endif
     @Environment(RowMenu.self) private var menu
     @State private var frame: CGRect = .zero
@@ -728,25 +849,6 @@ struct RunMore: View {
 
 }
 
-/// A row's words given less room than a short word shows nothing, never a sliver of a letter beside the name. Only
-/// words cut to that room: a short word shown whole ("Edit") is shown.
-private struct DropsWhenNarrow: ViewModifier {
-    @State private var width: CGFloat = .infinity
-    /// The words' own width, uncut.
-    @State private var whole: CGFloat = 0
-
-    func body(content: Content) -> some View {
-        content
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
-            .background {
-                content.fixedSize().hidden()
-                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { whole = $0 }
-            }
-            .opacity(width < 28 && width < whole - 0.5 ? 0 : 1)
-    }
-}
-
-/// A run's state as the fleet orders it (`FleetStatus`), drawn small: amber when it waits on you.
 /// A run's box while choosing runs to remove, in the status mark's 13-point place.
 private struct ChooseBox: View {
     let on: Bool
@@ -765,6 +867,7 @@ private struct ChooseBox: View {
     }
 }
 
+/// A run's state as the fleet orders it (`FleetStatus`), drawn small: amber when it waits on you.
 struct StateIcon: View {
     let status: FleetStatus
 

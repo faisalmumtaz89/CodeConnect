@@ -1,10 +1,9 @@
 import SwiftUI
 
-/// The main window's three panes, each of which hides on its own: by its toggle at the window's top edge, or from the
-/// View menu (⌃⌘S for the sidebar). A hidden pane leaves nothing behind; its room goes to the panes beside it. Kept in
-/// the Mac's preferences, so the window opens again as it was left.
+/// The main window's two panes, the run list and the run, each of which hides beside the other while a run is open: by
+/// its toggle at the window's top edge, or from the View menu (⌃⌘S for the list). A hidden pane leaves nothing behind;
+/// its room goes to the pane beside it. Kept in the Mac's preferences, so the window opens again as it was left.
 enum Panes {
-    static let sidebarHidden = "panes.sidebarHidden"
     static let listHidden = "panes.listHidden"
     static let runHidden = "panes.runHidden"
 }
@@ -44,9 +43,8 @@ struct PaneToggle: View {
     }
 }
 
-/// View > Hide Sidebar (⌃⌘S), Hide List and Hide Run, each Show while its pane is hidden.
+/// View > Hide List (⌃⌘S) and Hide Run, each Show while its pane is hidden.
 struct PaneCommands: Commands {
-    @AppStorage(Panes.sidebarHidden) private var sidebarHidden = false
     @AppStorage(Panes.listHidden) private var listHidden = false
     @AppStorage(Panes.runHidden) private var runHidden = false
     @FocusedValue(\.runIsOpen) private var runIsOpen
@@ -55,12 +53,11 @@ struct PaneCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .sidebar) {
             Group {
-                Button(sidebarHidden ? "Show Sidebar" : "Hide Sidebar") { sidebarHidden.toggle() }
-                    .keyboardShortcut("s", modifiers: [.control, .command])
                 Button(listHidden ? "Show List" : "Hide List") {
                     listHidden.toggle()
                     if listHidden { runHidden = false }
                 }
+                .keyboardShortcut("s", modifiers: [.control, .command])
                 .disabled(runIsOpen != true)
                 Button(runHidden ? "Show Run" : "Hide Run") {
                     runHidden.toggle()

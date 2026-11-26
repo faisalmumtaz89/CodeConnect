@@ -35,9 +35,8 @@ enum Theme {
     static let segmentLift = 0.15
     /// How far a panel opened by a button stands off it, above or below: a clear gap, never touching.
     static let panelGap: CGFloat = 6
-    /// How far a menu opened by a list row's "…" stands off it: close enough that it covers the row's second line whole
-    /// rather than cutting through its text.
-    static let rowMenuGap: CGFloat = 1
+    /// The conversation's column: its rows, the request at its foot and the reply box, 640 pt with their 28 pt sides.
+    static let conversationColumn: CGFloat = 640 + 2 * 28
 
     // The meaning colours and the text greys are the Kit's, shared with the iPhone; the grounds are the Mac's own.
     static let text = CC.text.primary
@@ -97,20 +96,24 @@ struct ThemeRoot<Content: View>: View {
     var body: some View { content.font(Theme.ui(13)).foregroundStyle(Theme.text) }
 }
 
-/// A key as a hint prints it: a small raised cap.
+/// A key as a hint prints it: a small raised cap, or on a light face (a prominent button's) a faint dark one.
 struct KeyCap: View {
     let key: String
+    let onLight: Bool
 
-    init(_ key: String) { self.key = key }
+    init(_ key: String, onLight: Bool = false) {
+        self.key = key
+        self.onLight = onLight
+    }
 
     var body: some View {
         Text(key)
             .font(Theme.ui(10.5, .medium))
-            .foregroundStyle(Theme.text2)
+            .foregroundStyle(onLight ? Color.black.opacity(0.6) : Theme.text2)
             .padding(.horizontal, 4)
             .frame(minWidth: 16, minHeight: 16)
-            .background(Theme.raised, in: RoundedRectangle(cornerRadius: 3.5))
-            .overlay(RoundedRectangle(cornerRadius: 3.5).strokeBorder(Theme.hairline))
+            .background(onLight ? Color.black.opacity(0.08) : Theme.raised, in: RoundedRectangle(cornerRadius: 3.5))
+            .overlay(RoundedRectangle(cornerRadius: 3.5).strokeBorder(onLight ? Color.black.opacity(0.08) : Theme.hairline))
     }
 }
 

@@ -2,8 +2,8 @@ import CodeConnectKit
 import CoreImage.CIFilterBuiltins
 import SwiftUI
 
-/// What is added, and how: an agent from the start form in the window's main area (the sidebar's +, ⌘N); a computer or
-/// an iPhone from the Add sheet, which opens on either (the sidebar's +, ⇧⌘N, the iPhone's menu item).
+/// What is added, and how: an agent from the start form in the window's main area (the run list's +, ⌘N); a computer
+/// or an iPhone from the Add sheet, which opens on either (the list's computer menu, ⇧⌘N, the iPhone's menu item).
 enum AddKind: String, Identifiable, CaseIterable {
     case agent, computer, iPhone
 
