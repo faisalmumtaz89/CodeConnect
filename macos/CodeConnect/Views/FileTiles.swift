@@ -170,6 +170,9 @@ private struct DroppedFiles: ViewModifier {
                 }
             }
             .onDrop(of: [.fileURL, .png, .tiff], delegate: Receiver(on: on, over: $over, take: take))
+            #if DEBUG
+                .task(id: on) { if on, !RenderWindow.droppedNames.isEmpty { over = RenderWindow.droppedNames } }
+            #endif
     }
 
     private struct Receiver: DropDelegate {

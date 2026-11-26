@@ -248,6 +248,11 @@
             (UserDefaults.standard.string(forKey: "CC_ATTACH_FILES") ?? "").split(separator: ",")
                 .map { URL(fileURLWithPath: String($0)) }
         }
+        /// `-CC_DROP_NAMES <name>,<name>`: files by these names stand over every drop target that takes files, as if
+        /// dragged there (a test launch has no drag): its plate shows, counted, and its box's rim lights.
+        static var droppedNames: [String] {
+            (UserDefaults.standard.string(forKey: "CC_DROP_NAMES") ?? "").split(separator: ",").map(String.init)
+        }
         /// `-CC_SESSION_TAB changes`: the opened run shows its changes panel.
         static var opensChanges: Bool { UserDefaults.standard.string(forKey: "CC_SESSION_TAB") == "changes" }
         /// `-CC_TERMINAL YES`: the opened run's shell is open at the panel's foot. `-CC_TERMINAL_TYPE <text>`: once it is
