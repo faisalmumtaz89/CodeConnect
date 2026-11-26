@@ -585,7 +585,7 @@ private struct AgentSignInGroup: View {
 
 /// One agent's accounts on this Mac, as design A draws them (decision 307): its Default, then the accounts added,
 /// each by the email its agent signs in as and its plan beneath; the share used of each window the agent names, in
-/// columns captioned on the group's title line; the row in use filled, with a check at its leading edge; a click on
+/// columns captioned on the group's title line; the row in use marked by a check at its leading edge; a click on
 /// another uses it. "…" on hover (and a right-click) holds Sign In Again… on a signed-out row and Remove… on an added
 /// one. "Add Account…" is the group's quiet last row: it adds an account and starts its sign-in in the browser at once,
 /// no name asked (the row reads its email once signed in). Under the group, a switch in progress in words. An agent with
@@ -810,7 +810,8 @@ private struct AccountRow: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 9)
             .background(
-                inUse ? Theme.selected : lit ? Color.white.opacity(Theme.hoverLift) : .clear,
+                // The check alone marks the row in use; only a row a click would choose lights under the pointer.
+                lit && !inUse ? Color.white.opacity(Theme.hoverLift) : .clear,
                 in: RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
         }
