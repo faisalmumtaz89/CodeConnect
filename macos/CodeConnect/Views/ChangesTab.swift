@@ -18,6 +18,10 @@ struct ChangesPanel: View {
         self.model = model
         self.key = key
         _hunks = State(initialValue: HunkActions(model: model, key: key))
+        // A diff already on hand shows at once when the panel opens, while it is read again.
+        if case .loaded(let raw, let parsed, let fetchedAt) = model.diffState(for: key) {
+            _shown = State(initialValue: (raw, parsed, fetchedAt))
+        }
     }
 
     var body: some View {
@@ -26,21 +30,12 @@ struct ChangesPanel: View {
             if let branch = model.shownSummary(for: key)?.gitBranch?.displaySafe {
                 BranchLine(branch: branch)
             }
-            switch state {
-            case .loading where shown != nil:
-                if let shown { loaded(shown.raw, shown.parsed, shown.fetchedAt) }
-            case .idle, .loading:
-                Message(id: "changes.loading", title: ChangesWords.reading)
-            case .failed(.app(let reason)):
-                Message(id: "changes.offline", title: "The changes could not be read", sentence: reason) {
-                    model.loadDiff(key: key, force: true)
-                }
-            case .failed(.daemon(let reason)):
-                Message(
-                    id: "changes.failed", title: ChangesWords.couldNotRead,
-                    sentence: ChangesWords.itsReason, quote: (reason, "changes.failed.reason"))
-            case .loaded(let raw, let parsed, let fetchedAt):
-                loaded(raw, parsed, fetchedAt)
+            // One branch draws a read diff, the one on hand or, while it is read again, the last one, so a reread keeps
+            // the same views and their folds, scroll and unsent comment.
+            if let diff = onHand(state) ?? (state.isLoading ? shown : nil) {
+                loaded(diff.raw, diff.parsed, diff.fetchedAt)
+            } else {
+                unread(state)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -52,9 +47,7 @@ struct ChangesPanel: View {
         .task(id: key) { reread() }
         .onChange(of: model.shownSummary(for: key)?.diffStat) { _, _ in reread() }
         .onChange(of: loadedAt) { _, _ in
-            if case .loaded(let raw, let parsed, let fetchedAt) = model.diffState(for: key) {
-                shown = (raw, parsed, fetchedAt)
-            }
+            if let diff = onHand(model.diffState(for: key)) { shown = diff }
         }
         // Asked again the moment the link is back, as the iPhone does: only after the app's own link failure, never
         // after a refusal the computer made.
@@ -66,6 +59,29 @@ struct ChangesPanel: View {
             } else if state.failedOnTheLink {
                 model.loadDiff(key: key, force: true)
             }
+        }
+    }
+
+    /// The diff a read gave, when the state holds one.
+    private func onHand(_ state: DiffState) -> (raw: SessionDiff, parsed: UnifiedDiff, fetchedAt: Date)? {
+        if case .loaded(let raw, let parsed, let fetchedAt) = state { return (raw, parsed, fetchedAt) }
+        return nil
+    }
+
+    /// A state with no read diff to draw: reading, the app's link failing, or the computer's refusal in its words.
+    @ViewBuilder
+    private func unread(_ state: DiffState) -> some View {
+        switch state {
+        case .failed(.app(let reason)):
+            Message(id: "changes.offline", title: "The changes could not be read", sentence: reason) {
+                model.loadDiff(key: key, force: true)
+            }
+        case .failed(.daemon(let reason)):
+            Message(
+                id: "changes.failed", title: ChangesWords.couldNotRead,
+                sentence: ChangesWords.itsReason, quote: (reason, "changes.failed.reason"))
+        case .idle, .loading, .loaded:
+            Message(id: "changes.loading", title: ChangesWords.reading)
         }
     }
 

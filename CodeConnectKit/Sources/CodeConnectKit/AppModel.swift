@@ -4289,6 +4289,8 @@ public final class AppModel {
         // to ask, and falling through would overwrite the loaded diff with a
         // failure written in the link's vocabulary.
         if sampleFleetActive { return }
+        // A fixture's preloaded diff likewise has no daemon to read it again.
+        if fixturesActive, case .loaded = diffs[key] { return }
         if !force, diffs[key]?.isLoading == true { return }
         guard connection.phase.isConnected else {
             // The app's own sentence about its own link. Tagged `.app` so the
