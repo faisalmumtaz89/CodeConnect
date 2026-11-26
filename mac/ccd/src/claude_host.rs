@@ -2398,6 +2398,17 @@ async fn relaunch(
     };
     // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
     let switching = crate::switch::switched(daemon, uid).await;
+    let Ok(ToHost::Start { options: kept, .. }) = serde_json::from_str::<ToHost>(&ended.start)
+    else {
+        let why = "its start could not be read".to_string();
+        if switching {
+            crate::switch::relaunch_failed(daemon, uid, why.clone()).await;
+        }
+        let reason = format!("This session could not start again ({why}); nothing was sent.");
+        return refuse_relaunch(daemon, uid, request_id, &reason).await;
+    };
+    // An Antigravity run's session files are copied below, so nothing its old agy started may still be writing them.
+    let antigravity = kept.agent == AgentKind::Antigravity;
     if let Some(old) = &old {
         let earlier_boot = matches!(
             (old.boot, protocol::proc_identity::boot_identity()),
@@ -2405,16 +2416,15 @@ async fn relaunch(
         );
         if !earlier_boot
             && (liveness(&old.host) != Liveness::Gone
-                || switching && group_has_members(old.host.pid))
+                || (switching || antigravity) && group_has_members(old.host.pid))
         {
             return refuse_relaunch(daemon, uid, request_id, STILL_ENDING).await;
         }
     }
     let environment = crate::start_session::phone_environment();
-    // The account Claude Code's starts use now (306 Slice E): a run relaunched, by a message or by a switch, goes on
-    // the active one, and records it.
-    let account = match crate::accounts::AccountEnv::active(&daemon.store, root, &AgentKind::Claude)
-    {
+    // The account its agent's starts use now (306 Slice E): a run relaunched, by a message or by a switch, goes on the
+    // active one, and records it.
+    let account = match crate::accounts::AccountEnv::active(&daemon.store, root, &kept.agent) {
         Ok(account) => account,
         Err(err) => {
             crate::log_error!("{uid}: could not read its account to relaunch it: {err:#}");
@@ -2422,12 +2432,8 @@ async fn relaunch(
         }
     };
     let checked = async {
-        let kept = match serde_json::from_str::<ToHost>(&ended.start) {
-            Ok(ToHost::Start { options, .. }) => options,
-            _ => return Err("its start could not be read".to_string()),
-        };
         // An Antigravity run goes on with the agy a start would find now.
-        let binary = if kept.agent == AgentKind::Antigravity {
+        let binary = if antigravity {
             crate::start_session::agy_path(&environment, daemon.config.agy_bin.as_deref())
                 .await
                 .ok_or_else(|| "Antigravity isn’t installed here".to_string())?
@@ -2446,7 +2452,7 @@ async fn relaunch(
         };
         let host_bin = host_binary(&daemon.config)?;
         let codeconnect = launcher.clone()?;
-        Ok::<_, String>((binary, host_bin, codeconnect, kept))
+        Ok::<_, String>((binary, host_bin, codeconnect))
     };
     // A switch's start is ready by its message's deadline, its checks included, or it is refused with nothing sent.
     let checked = if switching {
@@ -2456,7 +2462,7 @@ async fn relaunch(
     } else {
         checked.await
     };
-    let (claude, host_bin, codeconnect, kept) = match checked {
+    let (claude, host_bin, codeconnect) = match checked {
         Ok(checked) => checked,
         Err(why) => {
             if switching {
@@ -2466,8 +2472,6 @@ async fn relaunch(
             return refuse_relaunch(daemon, uid, request_id, &reason).await;
         }
     };
-    // The account is Claude Code's: an Antigravity run has none of CodeConnect's, goes on none and records none.
-    let account = account.filter(|_| kept.agent.is_claude());
     let Some(claude_path) = claude.to_str() else {
         let reason = "This session could not start again (its agent's path is not text); nothing \
                       was sent.";
@@ -2554,6 +2558,20 @@ async fn relaunch(
             return refuse_relaunch(daemon, uid, request_id, not_running).await;
         }
     }
+    // An Antigravity run going on in another home than its last takes its session there (306): its claim keeps any
+    // other message from starting it meanwhile, and a copy that fails puts it back as it was, nothing launched.
+    if antigravity {
+        if let Err(why) = carry_session(daemon, uid, root, &environment, account.as_ref(), &ended) {
+            if let Err(err) = daemon.db.undo_relaunch(uid.to_string(), old, None).await {
+                crate::log_error!("{uid}: could not put the run back to exited: {err:#}");
+            }
+            if switching {
+                crate::switch::relaunch_failed(daemon, uid, why.clone()).await;
+            }
+            let reason = format!("This session could not start again ({why}); nothing was sent.");
+            return refuse_relaunch(daemon, uid, request_id, &reason).await;
+        }
+    }
     let begun = match bring_up(daemon, uid, &uuid, &start, &run, deadline, true).await {
         Ok(begun) => begun,
         Err(why) => {
@@ -2595,6 +2613,33 @@ async fn relaunch(
         Ok(Ok(Err(NotBegun::Ended(_)))) | Ok(Err(_)) | Err(_) => {
             SendTextResult::Indeterminate { reason: lost }
         }
+    }
+}
+
+/// The Antigravity run `uid`'s session, copied from agy's home on the account the run records into its home on
+/// `account`, the one it goes on now ([`crate::accounts::carry_agy_session`]); nothing when the two are one.
+fn carry_session(
+    daemon: &Daemon,
+    uid: &str,
+    root: &Path,
+    environment: &HashMap<OsString, OsString>,
+    account: Option<&crate::accounts::AccountEnv>,
+    ended: &crate::store::ClaudeRelaunch,
+) -> Result<(), String> {
+    let was = match daemon.store.run_account(uid) {
+        Ok(Some(was)) => crate::accounts::AccountEnv::for_account(root, &was)
+            .map_err(|err| format!("its account's folder could not be made: {err}"))?,
+        Ok(None) => None,
+        Err(err) => return Err(format!("its account could not be read: {err:#}")),
+    };
+    let from = crate::accounts::agy_home(was.as_ref(), environment);
+    let to = crate::accounts::agy_home(account, environment);
+    match (from, to) {
+        (Some(from), Some(to)) if from != to => {
+            crate::accounts::carry_agy_session(&from, &to, &ended.claude_session_id)
+                .map_err(|err| format!("its conversation could not be moved: {err}"))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -13166,6 +13211,277 @@ mod tests {
         assert_eq!(restarted.store.run_account(&uid).unwrap(), None);
         let live = serde_json::to_value(summary(&restarted, &uid).await).unwrap();
         assert_eq!(live.get("switching"), None, "not due to move: {live}");
+    }
+
+    /// **A message moves an Antigravity run onto the active account with its session's own files** (306 #3): a run on
+    /// account A whose agy ended, B made active, and the person's next message: the session's files (named by its id
+    /// in agy's conversations, brain and annotations) are copied from A's folder into B's, any of them B had cleared
+    /// first, nothing else in either folder touched and A keeping its copy; the host is launched with B's folder,
+    /// resumes the session, and the run records B.
+    #[tokio::test]
+    async fn a_message_moves_an_antigravity_run_with_its_sessions_files() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        let (claude, _) = crate::start_session::test_claude(&rig.root);
+        let agy = rig.root.join("bin/agy");
+        std::fs::write(&agy, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = rig.root.join("stub-host-account");
+        std::fs::write(
+            &host,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"${{CODECONNECT_GEMINI_DIR-unset}}\" >> \"$1/account\"\n\
+                 echo $$ > \"$1/stub.pid\"\nprintf '{{\"protocol_version\":{HOST_PROTOCOL_VERSION},\"host_pid\":%s}}' \
+                 \"$$\" > \"$1/host.json\"\nexec sleep 20\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755)).unwrap();
+        rig.daemon = daemon_with(
+            &rig.root,
+            Config {
+                claude_bin: Some(claude.display().to_string()),
+                agy_bin: Some(agy.display().to_string()),
+                agent_host_bin: Some(host.display().to_string()),
+                ..Default::default()
+            },
+        );
+        rig.daemon
+            .relaunch_from
+            .set((rig.root.clone(), Ok(rig.root.join("codeconnect"))))
+            .unwrap();
+        let a = rig.daemon.store.add_account("antigravity", "A").unwrap();
+        let b = rig.daemon.store.add_account("antigravity", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("antigravity", Some(&a.id))
+            .unwrap());
+        rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &a).unwrap();
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let daemon = Arc::clone(&rig.daemon);
+        let (result, mut played) = tokio::join!(
+            start(
+                &daemon,
+                Run {
+                    agent: AgentKind::Antigravity,
+                    claude_path: "/nonexistent/agy",
+                    ..run(&rig, "req-agy", &cwd, &host)
+                }
+            ),
+            async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid, "status": "done",
+                                       "initialize": agy_menus()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        let uid = started_uid(&result);
+        let turn = played.start_uuid();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 3, "turn": turn, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-7", "update": {
+                "sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Reading."}}}}}),
+        )
+        .await;
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 4, "turn": turn, "message": {
+                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let dir = played.dir.clone();
+        drop(played);
+        until_detached(&rig.daemon, &uid).await;
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(a.clone()));
+
+        let folder = |account: &crate::store::Account| {
+            rig.root
+                .join("accounts")
+                .join("antigravity")
+                .join(&account.id)
+        };
+        let put = |path: PathBuf, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let (on_a, on_b) = (
+            folder(&a).join("antigravity-cli"),
+            folder(&b).join("antigravity-cli"),
+        );
+        put(on_a.join("conversations/sess-7.db"), "the conversation");
+        put(on_a.join("brain/sess-7/plan.md"), "the plan");
+        put(on_a.join("annotations/sess-7.pbtxt"), "the notes");
+        put(on_a.join("conversations/other.db"), "another session on A");
+        put(on_b.join("conversations/sess-7.db-wal"), "stale");
+        put(on_b.join("conversations/other.db"), "B's own session");
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("antigravity", Some(&b.id))
+            .unwrap());
+
+        let (sent, relaunched) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-on-b", "carry on"),
+            async {
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let ToHost::Start { uuid, options, .. } = relaunched.start.clone() else {
+                    panic!("not a start: {:?}", relaunched.start);
+                };
+                assert_eq!(options.resume.as_deref(), Some("sess-7"));
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid, "status": "done"}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            }
+        );
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        let read = |path: PathBuf| std::fs::read_to_string(path).ok();
+        assert_eq!(
+            [
+                read(on_b.join("conversations/sess-7.db")),
+                read(on_b.join("brain/sess-7/plan.md")),
+                read(on_b.join("annotations/sess-7.pbtxt")),
+                read(on_b.join("conversations/sess-7.db-wal")),
+                read(on_b.join("conversations/other.db")),
+            ],
+            [
+                Some("the conversation".to_string()),
+                Some("the plan".to_string()),
+                Some("the notes".to_string()),
+                None,
+                Some("B's own session".to_string()),
+            ],
+            "the session's files on B, B's stale one cleared, B's other session untouched"
+        );
+        assert_eq!(
+            read(on_a.join("conversations/sess-7.db")).as_deref(),
+            Some("the conversation"),
+            "A keeps its copy"
+        );
+        let folders = std::fs::read_to_string(dir.join("account")).unwrap();
+        assert_eq!(
+            folders.lines().collect::<Vec<_>>(),
+            [folder(&a).to_str().unwrap(), folder(&b).to_str().unwrap()],
+            "{folders}"
+        );
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        stop(&relaunched.dir);
+    }
+
+    /// **An Antigravity run is not relaunched while its old host's group still holds a process** (306 #3): its session's
+    /// files are copied at a relaunch, so a message to a run whose agy ended on its own, the host gone but a child it
+    /// started still in its group, is refused as still ending, nothing started.
+    #[tokio::test]
+    async fn an_antigravity_run_is_not_relaunched_while_its_old_group_holds_a_process() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        let (claude, _) = crate::start_session::test_claude(&rig.root);
+        let agy = rig.root.join("bin/agy");
+        std::fs::write(&agy, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = stub_host_with_child(&rig);
+        rig.daemon = daemon_with(
+            &rig.root,
+            Config {
+                claude_bin: Some(claude.display().to_string()),
+                agy_bin: Some(agy.display().to_string()),
+                agent_host_bin: Some(host.display().to_string()),
+                ..Default::default()
+            },
+        );
+        rig.daemon
+            .relaunch_from
+            .set((rig.root.clone(), Ok(rig.root.join("codeconnect"))))
+            .unwrap();
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let daemon = Arc::clone(&rig.daemon);
+        let (result, mut played) = tokio::join!(
+            start(
+                &daemon,
+                Run {
+                    agent: AgentKind::Antigravity,
+                    claude_path: "/nonexistent/agy",
+                    ..run(&rig, "req-agy", &cwd, &host)
+                }
+            ),
+            async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid, "status": "done",
+                                       "initialize": agy_menus()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        let uid = started_uid(&result);
+        let turn = played.start_uuid();
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 3, "turn": turn, "message": {"jsonrpc": "2.0",
+                "method": "session/update", "params": {"sessionId": "sess-7", "update": {
+                "sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Reading."}}}}}),
+        )
+        .await;
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "acp", "seq": 4, "turn": turn, "message": {
+                "jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let child = pid_in(&played.dir, "child.pid");
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        drop(played);
+        until_detached(&rig.daemon, &uid).await;
+        let sent = send_as_app(&rig.daemon, &uid, "r-early", "carry on").await;
+        // SAFETY: kill(2) of the stand-in's own child, by the pid it recorded.
+        unsafe { libc::kill(child, libc::SIGKILL) };
+        gone(child).await;
+        assert_eq!(
+            sent,
+            SendTextResult::Refused {
+                reason: STILL_ENDING.to_string()
+            }
+        );
+        assert_eq!(kept(&rig, &uid).0, "exited", "nothing started");
     }
 
     /// **An Antigravity run whose agy ended on its own is relaunched by the person's next

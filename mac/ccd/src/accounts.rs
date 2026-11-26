@@ -228,6 +228,83 @@ impl AccountEnv {
     }
 }
 
+/// agy's folders that hold a session's own files, under its home: each file or folder there named for the session's id,
+/// alone or before a `.` (`<id>.db`, `<id>.db-wal`, `<id>/`, `<id>.pbtxt`), measured on agy 1.5.15 (2026-11-26): with
+/// them copied into another signed-in home, the session resumes there with its conversation.
+const AGY_SESSION_FOLDERS: [&str; 3] = [
+    "antigravity-cli/conversations",
+    "antigravity-cli/brain",
+    "antigravity-cli/annotations",
+];
+
+/// agy's home on `account`, its folder, or on its Default agy's own (`~/.gemini`, `HOME` in `environment`).
+pub(crate) fn agy_home(
+    account: Option<&AccountEnv>,
+    environment: &HashMap<OsString, OsString>,
+) -> Option<PathBuf> {
+    match account {
+        Some(account) => Some(account.folder.clone()),
+        None => environment
+            .get(std::ffi::OsStr::new("HOME"))
+            .map(|home| Path::new(home).join(".gemini")),
+    }
+}
+
+/// Moves agy's session `id` from the home `from` into the home `to`: `to`'s files of that session are removed, then
+/// `from`'s copied in, so the session resumed in `to` is the one it left in `from`. Nothing else in either home is
+/// touched, and `from` keeps its copy. A link is neither followed nor copied. An id that is not one plain name moves
+/// nothing.
+pub(crate) fn carry_agy_session(from: &Path, to: &Path, id: &str) -> std::io::Result<()> {
+    if id.is_empty() || id.starts_with('.') || id.contains('/') {
+        return Err(std::io::Error::other(
+            "agy named its session with more than a name",
+        ));
+    }
+    let named = |name: &std::ffi::OsStr| {
+        name.to_str().is_some_and(|name| {
+            name.strip_prefix(id)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+        })
+    };
+    for folder in AGY_SESSION_FOLDERS {
+        let (source, target) = (from.join(folder), to.join(folder));
+        if let Ok(entries) = std::fs::read_dir(&target) {
+            for entry in entries.flatten().filter(|entry| named(&entry.file_name())) {
+                if entry.file_type()?.is_dir() {
+                    std::fs::remove_dir_all(entry.path())?;
+                } else {
+                    std::fs::remove_file(entry.path())?;
+                }
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(&source) else {
+            continue;
+        };
+        for entry in entries.flatten().filter(|entry| named(&entry.file_name())) {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&target)?;
+            copy_tree(&entry.path(), &target.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
+/// `from`, a file or a folder with everything in it, copied to `to`; a link is left out.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    let kind = std::fs::symlink_metadata(from)?.file_type();
+    if kind.is_dir() {
+        std::fs::DirBuilder::new().mode(0o700).create(to)?;
+        for entry in std::fs::read_dir(from)?.flatten() {
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+    } else if kind.is_file() {
+        std::fs::copy(from, to)?;
+    }
+    Ok(())
+}
+
 /// A device's ask about accounts, answered with every account and each agent's active one once the ask's change is
 /// made. An unknown agent, or an id that is not one of the agent's, is refused and nothing changes; a refusal names the
 /// request it answers (`AccountsRefused`).
