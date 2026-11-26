@@ -49,8 +49,6 @@ struct StartForm: View {
     /// This Mac's daemon's id (`LocalDaemon.machineID`): the computer whose daemon said that id when it connected is
     /// this Mac. Nil without one, as in a test launch with no rig of its own.
     @State private var thisMac: String?
-    /// The search field has the keyboard, and with it the folders under it.
-    @FocusState private var searchFocused: Bool
     /// The folder list's rows, measured: the list is as tall as they are, up to its most (`listMost`).
     @State private var listHeight: CGFloat = 0
 
@@ -64,7 +62,6 @@ struct StartForm: View {
 
     /// The chosen computer's choices, from the draft.
     private var choices: StartDraft.Choices { context.map { draft.choices(on: $0.id) } ?? StartDraft.Choices() }
-    private var query: String { choices.query }
     private var folderPath: String? { choices.folderPath }
     /// The place chosen; nil is the default (`startPlace`).
     private var place: StartPlace? { choices.place }
@@ -360,7 +357,7 @@ struct StartForm: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "folder").font(.system(size: 11)).accessibilityHidden(true)
-                Text(folder?.name ?? "Choose folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.tail)
+                Text(folder?.name ?? Self.chooseFolder).font(InputBoxChip.font).lineLimit(1).truncationMode(.tail)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             // While none is chosen, the folder is the piece still missing: the bar's one lit, bordered chip.
@@ -368,7 +365,7 @@ struct StartForm: View {
             .inputBoxChip(open: folderOpen, bordered: folder == nil)
         }
         .buttonStyle(.hover(radius: 8, id: "start.folder"))
-        .help(folder?.path ?? "Choose folder")
+        .help(folder?.path ?? Self.chooseFolder)
         .accessibilityIdentifier("start.folder")
         .accessibilityValue(folderOpen ? "open" : "closed")
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { folderChip = $0 }
@@ -377,19 +374,20 @@ struct StartForm: View {
                 let placed = PanelPlace.place(widest: 520, leading: folderChip.minX, box: box)
                 folderPanel(context, width: placed.width).openPanel()
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { folderPanelHeight = $0 }
-                    .offset(x: placed.x - folderChip.minX, y: InputBoxChip.height + Theme.panelGap)
+                    // Above the chip, as every menu of the box's bar opens (screen 32).
+                    .offset(x: placed.x - folderChip.minX, y: -(folderPanelHeight + Theme.panelGap))
             }
         }
         .closesPanel($folderOpen)
         .onChange(of: folderOpen) { _, open in if !open { browsing = false } }
     }
 
-    /// The most the folder list stands: 260 pt, or less where the pane ends sooner, so the whole panel, its foot rows
-    /// included, stays inside the pane; at least one folder's row. Before the panel is measured, 260.
+    /// The most the folder list stands: 260 pt, or less where the pane's top comes sooner, so the whole panel, its foot
+    /// row included, stays inside the pane above the chip; at least one folder's row. Before the panel is measured, 260.
     private var listMost: CGFloat {
         guard folderPanelHeight > 0 else { return 260 }
         let others = folderPanelHeight - listShown
-        let room = startHeight - PanelPlace.margin - folderChip.maxY - Theme.panelGap - others
+        let room = folderChip.minY - Theme.panelGap - PanelPlace.margin - others
         return min(260, max(room, 44))
     }
 
@@ -420,30 +418,18 @@ struct StartForm: View {
                 }
             } else if context.projects.isEmpty {
                 Text("No recent folders on \(context.machineName) yet.").font(Theme.ui(12)).foregroundStyle(Theme.text2)
-                if let picked = picked(context) { pickedRow(picked) }
+                if let picked = picked(context) { folderRow(picked, index: 0) }
             } else {
-                TextField("", text: choice(\.query), prompt: Text("Search recent folders").foregroundStyle(Theme.text3))
-                    .accessibilityLabel("Search recent folders")
-                    .accessibilityIdentifier("start.search")
-                    // The field and the folders under it are one stop for the keyboard: ↑ and ↓ move the chosen
-                    // folder through the folders as shown while the cursor stays here, so typing goes on; Return
-                    // keeps it and closes the panel.
-                    .focused($searchFocused)
-                    // The panel opens with the keyboard here, so the first keys typed search and the arrows choose.
-                    .onAppear { DispatchQueue.main.async { searchFocused = true } }
-                    .onKeyPress(.downArrow) { moveFolder(context, down: true) }
-                    .onKeyPress(.upArrow) { moveFolder(context, down: false) }
-                    .onSubmit { folderOpen = false }
-                    .textFieldStyle(.plain)
-                    .font(Theme.ui(12.5))
-                    .menuField()
-                MenuHeader(text: "Recent")
+                MenuHeader(text: "Recent on \(context.machineName)")
                 ScrollViewReader { list in
                     ScrollView {
                         // Not lazy: every folder is in the accessibility tree, scrolled to or not.
-                        VStack(spacing: 0) {
-                            if let picked = picked(context) { pickedRow(picked) }
-                            ForEach(startFilter(context.projects, query)) { project in folderRow(project) }
+                        VStack(spacing: MenuMetrics.rowGap) {
+                            let picked = picked(context)
+                            if let picked { folderRow(picked, index: 0) }
+                            ForEach(Array(context.projects.enumerated()), id: \.element.path) { offset, project in
+                                folderRow(project, index: offset + (picked == nil ? 0 : 1))
+                            }
                         }
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                     }
@@ -451,7 +437,7 @@ struct StartForm: View {
                     // or the choice or the list changes, so a click on a row in view moves nothing.
                     .task(id: [folderPath ?? "", "\(context.projects.count)"]) { list.scrollTo(folderPath) }
                 }
-                // As tall as its rows, up to 260 pt or the room the pane has under the panel, then it scrolls. An exact
+                // As tall as its rows, up to 260 pt or the room the pane has above the panel, then it scrolls. An exact
                 // height: a panel is drawn over its button, which offers it only the button's own height, so a range
                 // would collapse the list to its least.
                 .frame(height: min(max(listHeight, 1), listMost))
@@ -461,60 +447,53 @@ struct StartForm: View {
             // computer's by browsing it.
             if !browsing && (isThisMac(context) || context.browses) {
                 MenuDivider().padding(.vertical, 5)
-                if isThisMac(context) { chooseButton } else { browseButton }
+                chooseRow(context)
             }
         }
     }
 
-    /// One arrow-key step through the folders as shown, the picked one first.
-    private func moveFolder(_ context: StartContext, down: Bool) -> KeyPress.Result {
-        let shown = (picked(context).map { [$0.path] } ?? []) + startFilter(context.projects, query).map(\.path)
-        draft.chooseFolder(ListStep.step(from: folderPath, in: shown, down: down), on: context.id)
-        return .handled
-    }
-
-    private func folderRow(_ project: StartProject) -> some View {
-        Button {
-            choose(project.path)
-        } label: {
+    /// A folder on one line, as screen 32 draws it: its mark, its name, and its path after it, cut at its head. Row
+    /// `index` of the menu's light: ↓ ↑ move it, Return chooses.
+    private func folderRow(_ project: StartProject, index: Int) -> some View {
+        let choose = { self.choose(project.path) }
+        return Button(action: choose) {
             MenuRow(chosen: folderPath == project.path) {
-                Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 8)
-                AgeText(since: project.lastUsed) { startProjectMeta(project, now: $0) }
-                    .font(Theme.ui(11)).foregroundStyle(Theme.text3).lineLimit(1)
-            } second: {
-                Text(project.shownPath).font(Theme.mono(11.5)).truncationMode(.head)
+                Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.text2).accessibilityHidden(true)
+                Text(project.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1).fixedSize()
+                Text(project.shownPath).font(Theme.mono(11.5)).foregroundStyle(Theme.text2).lineLimit(1)
+                    .truncationMode(.head)
             }
         }
-        .buttonStyle(.menuRow(id: "start.folder.\(project.path)"))
+        .buttonStyle(.panelRow)
+        .panelRow(index, id: "start.folder.\(project.path)", choose: choose)
         .focusable(false)
+        .accessibilityLabel(project.name)
         .accessibilityIdentifier("start.folder.\(project.path)")
         .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
         .id(project.path)
     }
 
-    /// Any folder on this Mac, from the standard folder panel.
-    private var chooseButton: some View {
-        Button(action: chooseFolder) {
-            MenuRow(chosen: false) { Text("Choose a folder\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
+    /// "Choose Folder…": this Mac's standard folder panel, or another computer's folders browsed in the menu (a
+    /// computer below minor 30 lists only its recent ones). The menu's last row.
+    private func chooseRow(_ context: StartContext) -> some View {
+        let index = context.projects.count + (picked(context) == nil ? 0 : 1)
+        let choose = {
+            if isThisMac(context) {
+                chooseFolder()
+            } else {
+                branchMenuOpen = false
+                browsing = true
+            }
         }
-        .buttonStyle(.menuRow(id: "start.choose"))
+        return Button(action: choose) {
+            MenuRow { Text(Self.chooseFolder + "\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
+        }
+        .buttonStyle(.panelRow)
+        .panelRow(index, id: "start.choose", choose: choose)
         .accessibilityIdentifier("start.choose")
     }
 
-    /// Any folder on a computer that is not this Mac, browsed in the Folder box (a computer below minor 30 lists only
-    /// its recent ones).
-    private var browseButton: some View {
-        Button {
-            branchMenuOpen = false
-            browsing = true
-        } label: {
-            MenuRow(chosen: false) { Text("Browse\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1) }
-        }
-        .buttonStyle(.menuRow(id: "start.browse"))
-        .accessibilityIdentifier("start.browse")
-    }
+    private static let chooseFolder = "Choose Folder"
 
     private func chooseFolder() {
         #if DEBUG
@@ -541,23 +520,10 @@ struct StartForm: View {
     /// The selected folder when no row below shows it: one chosen that is not a recent one, or a recent one the search
     /// hides. So the folder Start starts in is always one of the list's rows.
     private func picked(_ context: StartContext) -> StartProject? {
-        guard let folder, !startFilter(context.projects, query).contains(where: { $0.path == folder.path }) else {
+        guard let folder, !context.projects.contains(where: { $0.path == folder.path }) else {
             return nil
         }
         return folder
-    }
-
-    /// The selected folder above the rows when none of them shows it: its name and its path, selected.
-    private func pickedRow(_ project: StartProject) -> some View {
-        MenuRow(chosen: true) {
-            Text(project.name).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                .truncationMode(.middle)
-        } second: {
-            Text(project.path).font(Theme.mono(11.5)).truncationMode(.head)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("start.picked")
-        .accessibilityAddTraits(.isSelected)
     }
 
     // MARK: First message and model
