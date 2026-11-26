@@ -55,7 +55,8 @@ struct FolderBrowser: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Text(verbatim: listing?.path ?? path ?? " ")
+                // As a shell prints it, "~/models" (screen 33).
+                Text(verbatim: (listing?.path ?? path).map(StartProject.shown) ?? " ")
                     .font(Theme.mono(11))
                     .foregroundStyle(Theme.text2)
                     .lineLimit(1)
@@ -153,17 +154,26 @@ struct FolderBrowser: View {
         }
     }
 
+    /// A folder by its name, its mark before it (".." has none), lit while the keys are on it: a click or the pointer
+    /// puts them there, and the list has that one fill (screen 33). It chooses nothing: Use This Folder takes the folder
+    /// shown.
     private func row(name: String, opens target: String) -> some View {
         Button {
             selected = target
             focused = true
         } label: {
-            MenuRow(chosen: selected == target) {
-                Text(verbatim: name).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1)
+            MenuRow {
+                if name != ".." {
+                    Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.text2)
+                        .accessibilityHidden(true)
+                }
+                Text(verbatim: name).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
                     .truncationMode(.middle)
             }
+            .environment(\.menuRowLit, selected == target)
         }
-        .buttonStyle(.menuRow(id: "start.browse.folder.\(name)"))
+        .buttonStyle(.plain)
+        .onHover { if $0 { selected = target } }
         .simultaneousGesture(TapGesture(count: 2).onEnded { go(target) })
         .focusable(false)
         .accessibilityIdentifier("start.browse.folder.\(name)")

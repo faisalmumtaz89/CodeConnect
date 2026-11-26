@@ -186,7 +186,10 @@ public struct StartProject: Identifiable, Hashable, Sendable {
     public var id: String { path }
 
     /// The folder as a shell prints it: `~/code/infra`.
-    public var shownPath: String {
+    public var shownPath: String { Self.shown(path) }
+
+    /// Any folder as a shell prints it: under a home folder, a Mac's (/Users) or a Linux computer's (/home), from "~".
+    public static func shown(_ path: String) -> String {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count >= 3, parts[0].isEmpty, parts[1] == "Users" || parts[1] == "home"
         else { return path }
