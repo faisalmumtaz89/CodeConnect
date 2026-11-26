@@ -37,6 +37,7 @@ struct BranchRow: View {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text(StartWords.readingBranches(folder.name)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                        .lineLimit(1).truncationMode(.tail)
                 }
                 .accessibilityIdentifier("start.branch.reading")
             }

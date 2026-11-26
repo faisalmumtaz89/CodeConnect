@@ -99,7 +99,7 @@ struct InputBoxSubmit: View {
 /// the bar is short of room; every other control keeps its own width. Room is shared in two rounds: first every
 /// yielding control gets its words up to `InputBoxChip.floor` (all of them, if shorter), and where even that does not
 /// fit, the lowest `yields` gives its floor up first; then what is left goes to them whole, highest `yields` first.
-/// The bar is never wider than it is given, so it never widens what holds it.
+/// The bar is wider than it is given only when its controls at their least do not fit; the floors never widen it.
 struct BarLayout: Layout {
     /// The control stands at the bar's trailing edge.
     struct Trailing: LayoutValueKey { static let defaultValue = false }
@@ -114,7 +114,9 @@ struct BarLayout: Layout {
         let used = widths.reduce(0, +) + gaps(subviews)
         let height = subviews.indices.map { subviews[$0].sizeThatFits(.init(width: widths[$0], height: nil)).height }
             .max() ?? 0
-        return CGSize(width: proposal.width ?? used, height: height)
+        // As wide as it is given, and never narrower than its controls at their least: what holds it learns what it
+        // truly needs, and is never widened by the floors.
+        return CGSize(width: max(proposal.width ?? used, used), height: height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
