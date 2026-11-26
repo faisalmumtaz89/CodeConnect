@@ -353,11 +353,12 @@ private struct FileRow: View {
     private var row: some View {
             HStack(spacing: 8) {
                 Image(systemName: "doc").font(.system(size: 10)).foregroundStyle(Theme.text3).accessibilityHidden(true)
-                (Text(verbatim: file.folder.displaySafe).foregroundStyle(Theme.text3)
-                    + Text(verbatim: file.name.displaySafe).foregroundStyle(Theme.text))
-                    .font(Theme.mono(11.5))
-                    .lineLimit(1)
-                    .truncationMode(.head)
+                Text(
+                    "\(Text(verbatim: file.folder.displaySafe).foregroundStyle(Theme.text3))\(Text(verbatim: file.name.displaySafe).foregroundStyle(Theme.text))"
+                )
+                .font(Theme.mono(11.5))
+                .lineLimit(1)
+                .truncationMode(.head)
                 Spacer(minLength: 8)
                 if let added = file.added, let removed = file.removed {
                     LineDelta(added: added, removed: removed)
