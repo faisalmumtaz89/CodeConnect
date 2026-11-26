@@ -1,7 +1,8 @@
 import CodeConnectKit
 import SwiftUI
 
-/// The model button at the composer's bottom left, and its menu: a section an agent, opening upward over the form.
+/// The model button at the bar's end, and its menu: a section an agent, opening upward over the form with its trailing
+/// edge on the button's (screen 31), as a menu at the window's edge does.
 /// What each section holds and every word the app adds are Kit's (`StartContext.models`); a model's label is the
 /// agent's own name for it, shown as sent.
 struct ModelButton: View {
@@ -11,11 +12,12 @@ struct ModelButton: View {
     let choose: (StartModelChoice) -> Void
 
     @Environment(\.startBox) private var startBox
-    /// The button's top leading corner, in `StartForm.space`.
-    @State private var minX: CGFloat = 0
-    @State private var minY: CGFloat = 0
+    /// The button, in `StartForm.space`.
+    @State private var chip: CGRect = .zero
+    /// The menu, 440 pt or the box's width, its trailing edge on the button's and inside the box.
     private var placed: (x: CGFloat, width: CGFloat) {
-        PanelPlace.place(widest: 440, leading: minX, box: startBox)
+        let width = startBox.width > 0 ? min(440, startBox.width) : 440
+        return (max(startBox.minX, chip.maxX - width), width)
     }
 
     private var checking: Bool { context.startAgents.contains { context.models($0) == .checking } }
@@ -37,14 +39,10 @@ struct ModelButton: View {
         .disabled(checking)
         .accessibilityIdentifier("start.model")
         .accessibilityValue(open ? "open" : "closed")
-        // Above the button, clear of it by the panels' one gap, inside the box by the start form's one rule
-        // (`PanelPlace`).
-        .onGeometryChange(for: CGPoint.self) { $0.frame(in: .named(StartForm.space)).origin } action: {
-            minX = $0.x
-            minY = $0.y
-        }
+        // Above the button, clear of it by the panels' one gap.
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(StartForm.space)) } action: { chip = $0 }
         .overlay(alignment: .bottomLeading) {
-            if open { menu.openPanel().offset(x: placed.x - minX, y: -(InputBoxChip.height + Theme.panelGap)) }
+            if open { menu.openPanel().offset(x: placed.x - chip.minX, y: -(InputBoxChip.height + Theme.panelGap)) }
         }
         .closesPanel($open)
     }
@@ -85,7 +83,7 @@ struct ModelButton: View {
         // The card's own inset each side within its width, as every panel's.
         .frame(width: placed.width - 2 * MenuMetrics.inset)
         // Its top 8 pt inside the pane (before the button is measured, its tallest).
-        .frame(maxHeight: minY > 0 ? min(360, minY - Theme.panelGap - PanelPlace.margin) : 360)
+        .frame(maxHeight: chip.minY > 0 ? min(360, chip.minY - Theme.panelGap - PanelPlace.margin) : 360)
         .fixedSize(horizontal: false, vertical: true)
         .menuCard()
     }
