@@ -2415,14 +2415,14 @@ impl Store {
     /// now, is no message waiting. Anything not known reads not quiet.
     pub fn certainly_quiet(&self, session_uid: &str, sending: &str) -> Result<bool> {
         let conn = self.read();
-        let codex = conn
+        let agent = conn
             .query_row(
                 "SELECT agent FROM all_sessions WHERE session_uid = ?1",
                 params![session_uid],
                 |row| row.get::<_, String>(0),
             )
-            .optional()?
-            .is_some_and(|agent| agent == AgentKind::Codex.as_str());
+            .optional()?;
+        let codex = agent.as_deref() == Some(AgentKind::Codex.as_str());
         let waiting: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM text_mutations
                             WHERE session_uid = ?1 AND status = 'applying' AND request_id IS NOT ?3)
@@ -2435,6 +2435,9 @@ impl Store {
         )?;
         if waiting {
             return Ok(false);
+        }
+        if agent.as_deref() == Some(AgentKind::Antigravity.as_str()) {
+            return acp_quiet(&conn, session_uid);
         }
         // What its process has filed: everything since the run's newest end, whose process this one followed.
         let mut stmt = conn.prepare(
@@ -7542,6 +7545,58 @@ fn event_from_row(session_uid: &str, row: &rusqlite::Row<'_>) -> rusqlite::Resul
         turn_id: row.get(7)?,
         item_id: row.get(8)?,
     })
+}
+
+/// Whether the Antigravity run `session_uid` is certainly quiet by what its process has filed since the run's newest
+/// end: agy takes each message at once and queues it behind the turn running, then ends that message's turn with the
+/// reply to its prompt, filed under its uuid. So every message and mail wake has its turn's end, no tool it began is
+/// still running, and its last turn ran no command, which may still run in the background.
+fn acp_quiet(conn: &Connection, session_uid: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, source_event_id, turn_id, payload FROM events
+          WHERE session_uid = ?1
+            AND seq > COALESCE((SELECT MAX(seq) FROM events WHERE session_uid = ?1 AND kind = ?2), 0)
+          ORDER BY seq",
+    )?;
+    let events = stmt
+        .query_map(
+            params![session_uid, EventKind::SessionEnd.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let ends: Vec<&str> = events
+        .iter()
+        .filter(|(kind, ..)| kind == EventKind::TurnComplete.as_str())
+        .map(|(_, _, turn, _)| turn.as_str())
+        .collect();
+    let Some(&last) = ends.last() else {
+        return Ok(false);
+    };
+    let mut running = std::collections::HashSet::new();
+    for (kind, id, turn, payload) in &events {
+        let asked = id.strip_prefix("say:").or_else(|| id.strip_prefix("wake:"));
+        if asked.is_some_and(|asked| !ends.contains(&asked)) {
+            return Ok(false);
+        }
+        let tool = serde_json::from_str::<serde_json::Value>(payload).unwrap_or_default();
+        let call = tool["tool_use_id"].as_str().unwrap_or_default().to_string();
+        if kind == EventKind::ToolCall.as_str() {
+            if turn == last && tool["tool_name"] == "Run" {
+                return Ok(false);
+            }
+            running.insert(call);
+        } else if kind == EventKind::ToolResult.as_str() {
+            running.remove(&call);
+        }
+    }
+    Ok(running.is_empty())
 }
 
 #[cfg(test)]
@@ -14117,5 +14172,111 @@ mod tests {
             ),
             "nothing an operator can read named the column: {told}"
         );
+    }
+
+    /// **An Antigravity run is certainly quiet once every message it was given has its turn's end** (306 G3): agy takes
+    /// a message at once and queues it behind the turn running, and ends each turn with the reply to that message's
+    /// prompt, filed under its uuid. Quiet: each message and mail wake since its process started answered, no tool still
+    /// running, and no command run in its last turn (one may still run in the background). A turn's tools are read by
+    /// its id, so a finished Read leaves it quiet.
+    #[test]
+    fn an_antigravity_run_is_quiet_once_every_message_has_its_turns_end() {
+        let filed = |steps: &[(&str, &str)]| {
+            let (store, _path) = temp_store();
+            let session = key("AG", "ag-1");
+            let mut row = session_row(&session);
+            row.agent = AgentKind::Antigravity;
+            assert_eq!(
+                store.begin_run(&row, &session.uid, None, None).unwrap(),
+                None
+            );
+            for (seq, (step, turn)) in steps.iter().enumerate() {
+                let acp = |message: serde_json::Value| match protocol::acp_map::read(
+                    &session,
+                    "start",
+                    seq as u64,
+                    Some(turn),
+                    &message,
+                ) {
+                    protocol::acp_map::Read::Events(events) => events,
+                    protocol::acp_map::Read::Chunk { .. } => unreachable!(),
+                };
+                let tool = |kind: &str, status: &str| {
+                    acp(
+                        json!({"method": "session/update", "params": {"update": {"sessionUpdate": "tool_call",
+                        "toolCallId": format!("call-{seq}"), "kind": kind, "status": status, "rawInput": {}}}}),
+                    )
+                };
+                let events = match *step {
+                    "say" => vec![crate::claude_host::person_row(&session.uid, turn, "hello", None, None)],
+                    "wake" => vec![PendingEvent::new(
+                        &session,
+                        EventKind::Notification,
+                        json!({"notification_type": protocol::event::notice::MAIL_NUDGE, "message": "mail"}),
+                        Source::Daemon,
+                    )
+                    .with_source_event_id(format!("wake:{turn}"))],
+                    "read" => tool("read", "completed"),
+                    "run" => tool("execute", "completed"),
+                    "running" => tool("read", "in_progress"),
+                    "end" => acp(json!({"result": {"stopReason": "end_turn"}})),
+                    other => unreachable!("{other}"),
+                };
+                for event in &events {
+                    store.append_event(event).unwrap();
+                }
+            }
+            store.certainly_quiet(&session.uid, "sending").unwrap()
+        };
+        let quiet = [
+            ("answered", vec![("say", "m1"), ("end", "m1")]),
+            (
+                "a finished read",
+                vec![("say", "m1"), ("read", "m1"), ("end", "m1")],
+            ),
+            (
+                "two answered",
+                vec![("say", "m1"), ("say", "m2"), ("end", "m1"), ("end", "m2")],
+            ),
+            (
+                "a wake answered",
+                vec![("say", "m1"), ("end", "m1"), ("wake", "w1"), ("end", "w1")],
+            ),
+            (
+                "a command before its last turn",
+                vec![
+                    ("say", "m1"),
+                    ("run", "m1"),
+                    ("end", "m1"),
+                    ("say", "m2"),
+                    ("end", "m2"),
+                ],
+            ),
+        ];
+        let busy = [
+            ("nothing answered", vec![("say", "m1")]),
+            (
+                "a queued message",
+                vec![("say", "m1"), ("say", "m2"), ("end", "m1")],
+            ),
+            (
+                "a wake running",
+                vec![("say", "m1"), ("end", "m1"), ("wake", "w1")],
+            ),
+            (
+                "a tool running",
+                vec![("say", "m1"), ("running", "m1"), ("end", "m1")],
+            ),
+            (
+                "a command in its last turn",
+                vec![("say", "m1"), ("run", "m1"), ("end", "m1")],
+            ),
+        ];
+        for (case, steps) in quiet {
+            assert!(filed(&steps), "{case}: quiet");
+        }
+        for (case, steps) in busy {
+            assert!(!filed(&steps), "{case}: not quiet");
+        }
     }
 }
