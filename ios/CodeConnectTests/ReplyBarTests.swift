@@ -56,13 +56,14 @@ final class ReplyBarTests: XCTestCase {
 
     /// A recorded live summary of `agent`, on the account `account` names (`nil`: none named).
     private func summary(
-        _ agent: StartAgent, account: JSONValue?, limit: String? = nil, lifecycle: String? = nil
+        _ agent: StartAgent, account: JSONValue?, limit: String? = nil, at: String = "2026-11-28T18:56:40Z",
+        lifecycle: String? = nil
     ) throws -> SessionSummary {
         let (name, key) =
             agent == .claude ? ("minor-46-wire", "session_hosted_live") : ("codex-settings-wire", "session_codex_live")
         var run = try XCTUnwrap(try bundled(name)[key]?.objectValue)
         run["account"] = account
-        if let limit { run["limit"] = .object(["which": .string(limit), "at": .string("2026-11-28T18:56:40Z")]) }
+        if let limit { run["limit"] = .object(["which": .string(limit), "at": .string(at)]) }
         if let lifecycle { run["lifecycle"] = .string(lifecycle) }
         return try decode(SessionSummary.self, .object(run))
     }
@@ -253,6 +254,21 @@ final class ReplyBarTests: XCTestCase {
         XCTAssertEqual(foot.title, "Weekly limit reached")
         XCTAssertEqual(foot.resets, "Resets Fri 4 Dec, 4:00 PM")
         XCTAssertEqual(foot.full, "Week")
+    }
+
+    /// A run left at its limit past that window's reset: the account's window of that length is a later one, begun
+    /// after the limit, so it is not the limit's; no reset, no window marked.
+    func testALaterWindowIsNotTheLimits() throws {
+        let book = try book()
+        let (d, _) = try on("D", in: book)
+        let run = try summary(
+            .claude, account: .object(["id": .string(d.id), "label": .string("D")]), limit: "five_hour",
+            at: "2026-11-28T10:00:00Z")
+        let foot = try XCTUnwrap(LimitFoot.of(summary: run, book: book, now: now, timeZone: .gmt))
+        XCTAssertEqual(foot.title, "5-hour limit reached")
+        XCTAssertNil(foot.resets)
+        XCTAssertNil(foot.resetsAt)
+        XCTAssertNil(foot.full)
     }
 
     /// A limit with no window of its own says which it is, with no reset and no window marked.
