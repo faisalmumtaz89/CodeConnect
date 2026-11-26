@@ -130,6 +130,8 @@ impl Reads {
 
     /// Drop `branch`'s reads at every commit: the next read asks GitHub (after an action on it).
     pub async fn forget(&self, head: &Repo, target: &Repo, branch: &str) {
+        // After the read in flight, so its answer from before the action is not kept.
+        let _one_at_a_time = self.one_at_a_time.lock().await;
         let prefix = branch_key(head, target, branch);
         self.state
             .lock()
@@ -219,8 +221,10 @@ pub enum Created {
 }
 
 /// `gh pr create` from `branch` of `head` into `target` (onto `base` when known, else the
-/// repository's default branch), its title and body gh's own from the branch's commits.
+/// repository's default branch), its title and body gh's own from the branch's commits, which
+/// it reads with git in `cwd`, the run's folder.
 pub async fn create_pr(
+    cwd: &str,
     gh_bin: Option<&str>,
     head: &Repo,
     target: &Repo,
@@ -251,14 +255,9 @@ pub async fn create_pr(
     if let Some(base) = base {
         args.extend(["--base", base]);
     }
-    match crate::git::run_program(
-        gh_command(&gh, environment, &args),
-        &args,
-        CREATE_TIMEOUT,
-        AUTH_LINE_CAP,
-    )
-    .await
-    {
+    let mut command = gh_command(&gh, environment, &args);
+    command.current_dir(cwd);
+    match crate::git::run_program(command, &args, CREATE_TIMEOUT, CREATE_CAP).await {
         Ok(out) if out.ok => match created(&out.stdout, target) {
             Some(link) => Created::Opened(link),
             None => Created::Failed(format!("gh answered no pull request of {repo}")),
@@ -290,7 +289,7 @@ fn created(stdout: &str, target: &Repo) -> Option<protocol::ws::PrLink> {
 }
 
 /// `gh pr create`'s output is a URL and a few lines of progress.
-const AUTH_LINE_CAP: usize = 64 * 1024;
+const CREATE_CAP: usize = 64 * 1024;
 
 /// `gh` run as ccd runs it: the person's environment, no prompt, no update notice, no colour,
 /// no pager.
@@ -607,6 +606,7 @@ mod tests {
         );
         for out in [
             "https://github.com/someone/cli/pull/7\n",
+            "https://github.com/abc/xyz/pull/7\n",
             "https://github.com/cli/cli/pull/x\n",
             "",
             "done\n",

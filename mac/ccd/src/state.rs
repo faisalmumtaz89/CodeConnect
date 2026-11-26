@@ -5515,7 +5515,7 @@ impl Daemon {
     }
 
     /// A pull request from `row`'s branch ([`protocol::ws::GitAction::CreatePr`]): the open one
-    /// already there, else the branch pushed (when the push remote lacks it at `HEAD`) and one
+    /// already there, else the branch pushed (no force) and one
     /// opened with gh. Whatever the outcome, the branch's GitHub read is asked again next time.
     async fn create_pr(&self, row: &crate::store::SessionRow) -> ActionOutcome {
         use crate::github::{Created, Unavailable};
@@ -5576,26 +5576,27 @@ impl Daemon {
                     break 'outcome ActionOutcome::Refused(code::GITHUB_UNAVAILABLE, None)
                 }
             }
-            if !git.pushed {
-                let pushed = crate::git::push(
-                    &row.cwd,
-                    git_bin,
-                    &remotes.push,
-                    &branch,
-                    &crate::start_session::phone_environment(),
-                )
-                .await;
-                match pushed {
-                    Ok(()) => {}
-                    Err(crate::git::PushFailure::Refused(detail)) => {
-                        break 'outcome ActionOutcome::Refused(code::GIT_FAILED, Some(detail))
-                    }
-                    Err(crate::git::PushFailure::Timeout) => {
-                        break 'outcome ActionOutcome::Refused(code::TIMEOUT, Some("push".into()))
-                    }
+            // Always pushed (no force): nothing when the remote has the commit checked out, refused
+            // when the branch there moved on, so the pull request is of the commit shown.
+            let pushed = crate::git::push(
+                &row.cwd,
+                git_bin,
+                &remotes.push,
+                &branch,
+                &crate::start_session::phone_environment(),
+            )
+            .await;
+            match pushed {
+                Ok(()) => {}
+                Err(crate::git::PushFailure::Refused(detail)) => {
+                    break 'outcome ActionOutcome::Refused(code::GIT_FAILED, Some(detail))
+                }
+                Err(crate::git::PushFailure::Timeout) => {
+                    break 'outcome ActionOutcome::Refused(code::TIMEOUT, Some("push".into()))
                 }
             }
-            let created = crate::github::create_pr(gh_bin, &head, &target, &branch, base).await;
+            let created =
+                crate::github::create_pr(&row.cwd, gh_bin, &head, &target, &branch, base).await;
             if let Created::Opened(pr) = created {
                 break 'outcome done(pr);
             }
@@ -8577,7 +8578,8 @@ mod tests {
 
     /// A stand-in `gh` in its own folder, answering `gh api` for the pulls from the files beside
     /// it, as gh 2.87.3 does: `open.json`/`closed.json` on stdout, `api.err` on stderr, exit
-    /// `api.exit`; `pr create` from `create.out`/`create.err`/`create.exit`, after which an open
+    /// `api.exit`; `pr create` from `create.out`/`create.err`/`create.exit`, writing the folder it
+    /// ran in to `create.cwd`, after which an open
     /// lookup reads `open.after` when there is one; every call is logged to `calls`, after
     /// `prompt=` and its `GH_PROMPT_DISABLED`.
     /// Signed in by default: exit 0 and GitHub's own cli/cli answers (no credential captures
@@ -8595,7 +8597,7 @@ mod tests {
         std::fs::write(
             &gh,
             "#!/bin/sh\nd=$(dirname \"$0\")\necho \"prompt=${GH_PROMPT_DISABLED:-on} $*\" >> \"$d/calls\"\ncase \"$*\" in\n\
-             \"pr create\"*) touch \"$d/created\"; cat \"$d/create.err\" >&2; cat \"$d/create.out\"; exit $(cat \"$d/create.exit\");;\n\
+             \"pr create\"*) touch \"$d/created\"; pwd -P > \"$d/create.cwd\"; cat \"$d/create.err\" >&2; cat \"$d/create.out\"; exit $(cat \"$d/create.exit\");;\n\
              *state=open*) cat \"$d/api.err\" >&2; if [ -f \"$d/created\" ] && [ -f \"$d/open.after\" ]; then cat \"$d/open.after\"; else cat \"$d/open.json\"; fi; exit $(cat \"$d/api.exit\");;\n\
              *state=closed*) cat \"$d/api.err\" >&2; cat \"$d/closed.json\"; exit $(cat \"$d/api.exit\");;\n\
              esac\nexit 2\n",
@@ -9027,7 +9029,8 @@ mod tests {
             git_in(bare, &["for-each-ref", "--format=%(refname) %(objectname)"])
         };
 
-        // Pushed, then opened; the same request is answered again without a call.
+        // Read first (cached), pushed, then opened in the run's folder; the same request is
+        // answered again without a call; and the next read asks GitHub again.
         let gh = stand_in_gh();
         std::fs::write(
             gh.with_file_name("create.out"),
@@ -9037,6 +9040,12 @@ mod tests {
         let daemon = on(&gh);
         let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP30";
         let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-feature");
+        daemon.run_git(uid).await.unwrap().unwrap();
+        let read = gh_calls(&gh).len();
+        assert_eq!(
+            read, 2,
+            "open, then closed: the stand-in's open list lacks it"
+        );
         assert_eq!(daemon.git_action(uid, "p-1", &create).await, pr(15200));
         let head = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
         assert_eq!(refs(&bare).trim(), format!("refs/heads/w2-feature {head}"));
@@ -9049,26 +9058,60 @@ mod tests {
             "origin/w2-feature"
         );
         let calls = gh_calls(&gh);
-        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls.len(), read + 2, "{calls:?}");
         assert!(
-            calls[0].contains("repos/cli/cli/pulls") && calls[0].contains("head=cli:w2-feature"),
+            calls[read].contains("repos/cli/cli/pulls")
+                && calls[read].contains("head=cli:w2-feature"),
             "{calls:?}"
         );
         assert!(
-            calls[1].contains("pr create --repo cli/cli --head w2-feature --fill"),
+            calls[read + 1].contains("pr create --repo cli/cli --head w2-feature --fill"),
             "{calls:?}"
         );
         assert!(
-            !calls[1].contains("--base"),
+            !calls[read + 1].contains("--base"),
             "no base known: the repository's default: {calls:?}"
         );
+        assert_eq!(
+            std::fs::read_to_string(gh.with_file_name("create.cwd"))
+                .unwrap()
+                .trim(),
+            dir.canonicalize().unwrap().to_str().unwrap(),
+            "gh reads the branch's commits in the run's folder"
+        );
         assert_eq!(daemon.git_action(uid, "p-1", &create).await, pr(15200));
-        assert_eq!(gh_calls(&gh).len(), 2, "a request is answered once");
+        assert_eq!(gh_calls(&gh).len(), read + 2, "a request is answered once");
         daemon.run_git(uid).await.unwrap().unwrap();
         assert_eq!(
             gh_calls(&gh).len(),
-            4,
-            "after it, the branch's GitHub read is asked again (open, then closed: the stand-in's open list lacks it)"
+            read + 4,
+            "after it, the branch's GitHub read is asked again, not answered from before it"
+        );
+        done(&gh, &dir, &bare);
+
+        // The branch there moved on since this clone last fetched: the push is refused, and
+        // no pull request is opened for a commit the panel does not show.
+        let gh = stand_in_gh();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP37";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-moved");
+        git_in(&dir, &["push", "-q", "-u", "origin", "w2-moved"]);
+        git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "Elsewhere"]);
+        git_in(&dir, &["push", "-q", "origin", "HEAD:refs/heads/w2-moved"]);
+        git_in(&dir, &["reset", "-q", "--hard", "HEAD~1"]);
+        git_in(
+            &dir,
+            &["update-ref", "refs/remotes/origin/w2-moved", "HEAD"],
+        );
+        assert_eq!(
+            refused_as(&daemon.git_action(uid, "p-10", &create).await).0,
+            code::GIT_FAILED
+        );
+        assert_eq!(
+            gh_calls(&gh).len(),
+            1,
+            "only the lookup: {:?}",
+            gh_calls(&gh)
         );
         done(&gh, &dir, &bare);
 
