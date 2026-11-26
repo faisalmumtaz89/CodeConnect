@@ -796,6 +796,11 @@ async fn codex_start(
         Err(why) => return failed(StartFailure::LaunchFailed, why),
     };
     let git_bin = daemon.config.git_bin.as_deref();
+    let worktree = match free_new_worktree(git_bin, path, &AgentKind::Codex, worktree).await {
+        Ok(worktree) => worktree,
+        Err(why) => return failed(StartFailure::LaunchFailed, why),
+    };
+    let worktree = worktree.as_ref();
     let cwd = match worktree {
         None => path.to_string(),
         Some(worktree) => match place(environment, git_bin, path, worktree).await {
@@ -907,8 +912,8 @@ async fn folder_question(
 
 /// The folder a Claude run runs in, for every start kind: the start folder; an existing or
 /// a branch's worktree, as `place` found or made it (`cwd`); a new worktree's folder in
-/// Claude's own layout under the repository's main folder, which `--worktree <name>`
-/// reopens when it is already there.
+/// Claude's own layout under the repository's main folder, under a name no folder there
+/// has yet (`free_worktree_name`).
 async fn run_folder(
     path: &str,
     cwd: &str,
@@ -1022,6 +1027,12 @@ async fn hosted_start(
             ),
         );
     };
+    let worktree =
+        match free_new_worktree(daemon.config.git_bin.as_deref(), path, &agent, worktree).await {
+            Ok(worktree) => worktree,
+            Err(why) => return failed(StartFailure::LaunchFailed, why),
+        };
+    let worktree = worktree.as_ref();
     let (cwd, new_worktree) = match worktree {
         None => (path.to_string(), None),
         // Claude makes its own (`--worktree`); agy has no such flag, so ccd makes one for it as for Codex.
@@ -1233,6 +1244,70 @@ async fn place(
             Ok(made(folder))
         }
     }
+}
+
+/// A start's new worktree under a name nothing in its repository has (`free_worktree_name`), read afresh; any other
+/// place as it is.
+async fn free_new_worktree(
+    git_bin: Option<&str>,
+    path: &str,
+    agent: &AgentKind,
+    worktree: Option<&StartWorktree>,
+) -> Result<Option<StartWorktree>, String> {
+    let Some(StartWorktree::New { name }) = worktree else {
+        return Ok(worktree.cloned());
+    };
+    check_worktree_name(name)?;
+    let main = crate::git::worktrees(path, git_bin, GIT_READ_TIMEOUT)
+        .await
+        .and_then(|entries| entries.first().map(|main| main.path.clone()))
+        .ok_or_else(|| format!("{path} is not in a git repository"))?;
+    let branches = crate::git::local_branches(path, git_bin, GIT_READ_TIMEOUT)
+        .await
+        .ok_or_else(|| format!("git could not list the branches of {path}"))?;
+    let name = free_worktree_name(name, agent, &branches, &main)?;
+    Ok(Some(StartWorktree::New { name }))
+}
+
+/// A new worktree's name nothing in the repository has: `name`, else `name-2`, `name-3`, …. Taken: the branch the
+/// agent would make (Claude Code's `worktree-<name>`, the name itself for the others) is a branch or clashes with
+/// one's path (`fix` beside `fix/x`), or the worktree's folder is already there, which Claude Code would reopen. The
+/// app avoids the names it was listed; only this computer sees every branch. A name under an existing branch
+/// (`fix/x` under `fix`) no number frees: refused in git's words.
+fn free_worktree_name(
+    name: &str,
+    agent: &AgentKind,
+    branches: &[String],
+    main: &str,
+) -> Result<String, String> {
+    let branch = |name: &str| match agent {
+        AgentKind::Claude => format!("worktree-{name}"),
+        _ => name.to_string(),
+    };
+    if let Some(parent) = branches
+        .iter()
+        .find(|existing| branch(name).starts_with(&format!("{existing}/")))
+    {
+        return Err(format!(
+            "a branch named {parent} already exists, so {} can't be made",
+            branch(name)
+        ));
+    }
+    let taken = |name: &str| {
+        let wanted = branch(name);
+        branches
+            .iter()
+            .any(|existing| *existing == wanted || existing.starts_with(&format!("{wanted}/")))
+            || worktree_folder(main, name).exists()
+    };
+    let mut free = name.to_string();
+    let mut number = 2;
+    while taken(&free) {
+        free = format!("{name}-{number}");
+        number += 1;
+    }
+    check_worktree_name(&free)?;
+    Ok(free)
 }
 
 /// Where a worktree named `name` goes: Claude Code's own layout, with each `/`
@@ -3400,15 +3475,15 @@ mod tests {
 
         // Every start kind, each row its own repository: the folder its run runs in is the
         // start folder, an existing worktree, a branch's worktree, or a new worktree's folder
-        // in Claude's layout, there or not there (removed, its answer kept). The answers are
-        // kept ones: the start folder's by its real path, the run folder's by its real path,
-        // or by its own path while it is not there.
+        // in Claude's layout, which is never there yet (a name whose folder is there goes to
+        // the next name). The answers are kept ones: the start folder's by its real path, the
+        // run folder's by its real path, or by its own path while it is not there.
         #[derive(Debug)]
         enum Kind {
             StartFolder,
             Existing,
             Branch,
-            New { there: bool },
+            New,
         }
         use Trust::{NotTrusted as Not, Trusted as Yes};
         let rows = [
@@ -3416,19 +3491,16 @@ mod tests {
             (Kind::StartFolder, Not, None, Not),
             (Kind::Existing, Yes, Some(Not), Not),
             (Kind::Branch, Yes, Some(Not), Not),
-            (Kind::New { there: true }, Yes, Some(Not), Not),
-            (Kind::New { there: false }, Yes, Some(Not), Not),
+            (Kind::New, Yes, Some(Not), Not),
             // The mirror: a run folder answered trusted never raises the start folder's.
             (Kind::Existing, Not, Some(Yes), Not),
             (Kind::Branch, Not, Some(Yes), Not),
-            (Kind::New { there: true }, Not, Some(Yes), Not),
-            (Kind::New { there: false }, Not, Some(Yes), Not),
+            (Kind::New, Not, Some(Yes), Not),
             // A run folder with no answer of its own keeps the start folder's.
             (Kind::StartFolder, Yes, None, Yes),
             (Kind::Existing, Yes, None, Yes),
             (Kind::Branch, Yes, None, Yes),
-            (Kind::New { there: true }, Yes, None, Yes),
-            (Kind::New { there: false }, Yes, None, Yes),
+            (Kind::New, Yes, None, Yes),
         ];
         let mut wrong = Vec::new();
         for (row, (kind, start, own, runs)) in rows.iter().enumerate() {
@@ -3465,21 +3537,8 @@ mod tests {
                         worktree_folder(main, "fix/b10"),
                     )
                 }
-                Kind::New { there } => {
+                Kind::New => {
                     let folder = worktree_folder(main, "feat/b10");
-                    if *there {
-                        git(
-                            &project,
-                            &[
-                                "worktree",
-                                "add",
-                                "-q",
-                                "-b",
-                                "worktree-feat",
-                                folder.to_str().unwrap(),
-                            ],
-                        );
-                    }
                     let name = "feat/b10".to_string();
                     (Some(StartWorktree::New { name }), folder)
                 }
@@ -4483,9 +4542,15 @@ mod tests {
         );
         assert_eq!(git(&folder, &["rev-parse", "HEAD"]), ahead);
 
-        let detail = refusal(rig.start_in(&existing, AgentKind::Codex, new()).await);
-        assert!(detail.contains("already exists"), "{detail}");
-        assert_eq!(rig.runs(), 1);
+        // The same name again: its branch is there now, so the next start goes to the next name.
+        let again = rig.start_in(&existing, AgentKind::Codex, new()).await;
+        assert!(reached(&again), "{again:?}");
+        let next = Path::new(&main).join(".claude/worktrees/fix+login-2");
+        assert_eq!(
+            git(&next, &["symbolic-ref", "--short", "HEAD"]),
+            "fix/login-2"
+        );
+        assert_eq!(rig.runs(), 2);
     }
 
     /// **A repeated Codex start on a branch finds its run and makes no second worktree**:
@@ -4788,6 +4853,99 @@ mod tests {
         assert_eq!(
             git(&folder, &["symbolic-ref", "--short", "HEAD"]),
             "fix/agy"
+        );
+    }
+
+    /// **A new worktree's name the repository has is not reused**: a branch of that name, however many newer branches
+    /// stand before it (the app is listed only the newest 100), and the run goes in `<name>-2`.
+    #[tokio::test]
+    async fn a_new_codex_worktree_named_as_a_branch_the_app_was_not_listed_goes_to_the_next_name() {
+        let rig = recording("taken-codex");
+        git(&rig.project, &["branch", "fix-the-tests"]);
+        for i in 0..100 {
+            git(&rig.project, &["branch", &format!("newer-{i}")]);
+        }
+        let main = rig.main();
+        let result = rig
+            .start_in(
+                &rig.project(),
+                AgentKind::Codex,
+                StartWorktree::New {
+                    name: "fix-the-tests".into(),
+                },
+            )
+            .await;
+        assert!(reached(&result), "{result:?}");
+        let folder = Path::new(&main).join(".claude/worktrees/fix-the-tests-2");
+        assert_eq!(
+            git(&folder, &["symbolic-ref", "--short", "HEAD"]),
+            "fix-the-tests-2"
+        );
+    }
+
+    /// **A new worktree whose folder is already there goes to the next name**, as Claude Code would reopen it.
+    #[tokio::test]
+    async fn a_new_antigravity_worktree_whose_folder_is_there_goes_to_the_next_name() {
+        let rig = recording("taken-agy");
+        let main = rig.main();
+        let there = Path::new(&main).join(".claude/worktrees/fix-the-tests");
+        std::fs::create_dir_all(&there).unwrap();
+        std::fs::write(there.join("notes.txt"), "kept").unwrap();
+        let result = rig
+            .start_in(
+                &rig.project(),
+                AgentKind::Antigravity,
+                StartWorktree::New {
+                    name: "fix-the-tests".into(),
+                },
+            )
+            .await;
+        assert!(reached(&result), "{result:?}");
+        let folder = Path::new(&main).join(".claude/worktrees/fix-the-tests-2");
+        assert_eq!(rig.host_cwd(), folder.canonicalize().unwrap());
+    }
+
+    /// **The next free name, by each agent's branch**: Claude Code's `worktree-<name>`, the others' `<name>`; a branch
+    /// path clashing either way (`fix` beside `fix/x`); a name under a branch no number frees (`fix/x` under `fix`) is
+    /// refused in git's words.
+    #[test]
+    fn a_new_worktree_takes_the_next_name_no_branch_or_folder_has() {
+        let main = std::env::temp_dir().join(format!("free-names-{}", std::process::id()));
+        let main = main.display().to_string();
+        let branches = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        let free = |name: &str, agent: AgentKind, names: &[&str]| {
+            free_worktree_name(name, &agent, &branches(names), &main)
+        };
+        assert_eq!(free("fix", AgentKind::Codex, &[]), Ok("fix".into()));
+        assert_eq!(free("fix", AgentKind::Claude, &["fix"]), Ok("fix".into()));
+        assert_eq!(
+            free(
+                "fix",
+                AgentKind::Claude,
+                &["worktree-fix", "worktree-fix-2"]
+            ),
+            Ok("fix-3".into())
+        );
+        assert_eq!(
+            free("fix", AgentKind::Codex, &["worktree-fix", "fix"]),
+            Ok("fix-2".into())
+        );
+        assert_eq!(
+            free("fix", AgentKind::Codex, &["fix/x"]),
+            Ok("fix-2".into())
+        );
+        assert_eq!(
+            free("fix", AgentKind::Antigravity, &["fix/x/y", "fix-2"]),
+            Ok("fix-3".into())
+        );
+        assert_eq!(
+            free("fix/x", AgentKind::Codex, &["fix"]),
+            Err("a branch named fix already exists, so fix/x can't be made".into())
         );
     }
 
