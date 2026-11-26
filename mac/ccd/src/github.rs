@@ -72,7 +72,7 @@ pub fn parse_remote(url: &str) -> Option<Repo> {
 pub struct Read {
     pub gh: GhState,
     pub pr: Option<PullRequest>,
-    /// When GitHub was asked; `None` while the host's reads are paused.
+    /// When GitHub was asked; `None` when it was not: no gh, or the host's reads paused.
     pub read_at: Option<String>,
 }
 
@@ -80,6 +80,8 @@ pub struct Read {
 #[derive(Default)]
 pub struct Reads {
     state: Mutex<State>,
+    /// Held across a read of GitHub: reads asked together wait for the first and share it.
+    one_at_a_time: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -109,25 +111,15 @@ impl Reads {
             head.owner,
             head_oid.unwrap_or_default()
         );
-        // One read at a time: reads asked together wait for the first and share its answer.
-        let mut state = self.state.lock().await;
-        if let Some((at, read)) = state.cached.get(&key) {
-            if at.elapsed() < WINDOW {
-                return read.clone();
-            }
+        if let Some(read) = self.answered(&key, &target.host).await {
+            return read;
         }
-        let paused = state
-            .paused
-            .get(&target.host)
-            .is_some_and(|until| Instant::now() < *until);
-        if paused {
-            return Read {
-                gh: GhState::Unknown,
-                pr: None,
-                read_at: None,
-            };
+        let _one_at_a_time = self.one_at_a_time.lock().await;
+        if let Some(read) = self.answered(&key, &target.host).await {
+            return read;
         }
         let (read, rate_limited) = read_github(gh_bin, head, target, branch, head_oid).await;
+        let mut state = self.state.lock().await;
         if rate_limited {
             state
                 .paused
@@ -136,6 +128,26 @@ impl Reads {
         state.cached.retain(|_, (at, _)| at.elapsed() < WINDOW);
         state.cached.insert(key, (Instant::now(), read.clone()));
         read
+    }
+
+    /// The answer for `key` without asking GitHub: its read under [`WINDOW`] old, or `unknown`
+    /// while `host` is paused.
+    async fn answered(&self, key: &str, host: &str) -> Option<Read> {
+        let state = self.state.lock().await;
+        if let Some((at, read)) = state.cached.get(key) {
+            if at.elapsed() < WINDOW {
+                return Some(read.clone());
+            }
+        }
+        state
+            .paused
+            .get(host)
+            .is_some_and(|until| Instant::now() < *until)
+            .then_some(Read {
+                gh: GhState::Unknown,
+                pr: None,
+                read_at: None,
+            })
     }
 }
 
@@ -178,7 +190,12 @@ async fn read_github(
     };
     let environment = &crate::start_session::phone_environment();
     let Some(gh) = crate::start_session::gh_path(environment, gh_bin).await else {
-        return (read(GhState::Missing, None), false);
+        let missing = Read {
+            gh: GhState::Missing,
+            pr: None,
+            read_at: None,
+        };
+        return (missing, false);
     };
     match pull_request(&gh, environment, head, target, branch, head_oid).await {
         Ok(pr) => (read(GhState::SignedIn, pr), false),
@@ -367,6 +384,7 @@ mod tests {
             "file:///srv/git/app.git",
             "https://gitlab.com/group/sub/app.git",
             "https://github.com/cli",
+            "https://github.com/cli/cli/pulls",
             "git@github.com:-x/app.git",
         ] {
             assert_eq!(parse_remote(url), None, "{url}");

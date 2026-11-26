@@ -2048,7 +2048,7 @@ public struct RunGit: Decodable, Sendable, Hashable {
     public let ghHost: String?
     /// The branch's pull request: the open one from it, else a closed or merged one whose head is the commit checked out.
     public let pullRequest: PullRequest?
-    /// When GitHub was asked; the computer asks at most every 30 s per commit. Nil while GitHub's rate limit pauses it.
+    /// When GitHub was asked; the computer asks at most every 30 s per commit. Nil when GitHub was not asked: no `gh`, or its rate limit pausing reads.
     public let ghReadAt: String?
 
     public enum GhState: String, Decodable, Sendable, Hashable {

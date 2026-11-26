@@ -8595,6 +8595,41 @@ mod tests {
         );
         done(&gh, &dir);
 
+        // A fork clone with its parent added as `upstream`, never fetched: no `upstream/HEAD`.
+        let gh = stand_in_gh();
+        let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP25", fork);
+        git_in(
+            &dir,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/lazerg/cli-2.git",
+            ],
+        );
+        git_in(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/cli/cli.git",
+            ],
+        );
+        let read = daemon
+            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP25")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.pr.as_ref().map(|pr| pr.number), Some(15111));
+        let calls = gh_calls(&gh);
+        assert!(
+            calls[0].contains("repos/cli/cli/pulls")
+                && calls[0].contains(&format!("head=lazerg:{fork}")),
+            "the PR is looked for on the parent: {calls:?}"
+        );
+        done(&gh, &dir);
+
         let gh = stand_in_gh();
         std::fs::write(
             gh.with_file_name("api.err"),
@@ -8631,7 +8666,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(read.gh, Some(GhState::Missing));
+        assert_eq!(
+            (read.gh, read.gh_read_at),
+            (Some(GhState::Missing), None),
+            "GitHub is not asked"
+        );
         let local = daemon_on(Arc::clone(&daemon.store), Config::default());
         for url in ["/srv/git/app.git", "https://gitlab.com/team/app.git"] {
             git_in(&dir, &["remote", "set-url", "origin", url]);

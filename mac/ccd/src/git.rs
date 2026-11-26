@@ -291,9 +291,9 @@ async fn run_git_inner(
 }
 
 /// The remote `branch` pushes to (`%(push:remotename)`: its `pushRemote`,
-/// `remote.pushDefault`, or the upstream's), else `origin`: the URL it pushes to, and the URL
-/// `other` (the push remote again when `None`) fetches from: what [`crate::github`] names
-/// the head and target repositories by.
+/// `remote.pushDefault`, or the upstream's), else `origin`: the URL it pushes to; and the URL
+/// the remote named `upstream` (a fork's parent) fetches from, else `other`, else the push
+/// remote: what [`crate::github`] names the head and target repositories by.
 pub(crate) async fn push_remote_urls(
     cwd: &str,
     configured_bin: Option<&str>,
@@ -317,13 +317,18 @@ pub(crate) async fn push_remote_urls(
         .filter(|remote| !remote.is_empty())
         .unwrap_or_else(|| "origin".to_string());
     let head = remote_url(&git, cwd, &["get-url", "--push", "--", &push], timeout).await?;
-    let target = remote_url(
-        &git,
-        cwd,
-        &["get-url", "--", other.unwrap_or(&push)],
-        timeout,
-    )
-    .await?;
+    let target = match remote_url(&git, cwd, &["get-url", "--", "upstream"], timeout).await {
+        Some(parent) => parent,
+        None => {
+            remote_url(
+                &git,
+                cwd,
+                &["get-url", "--", other.unwrap_or(&push)],
+                timeout,
+            )
+            .await?
+        }
+    };
     Some((head, target))
 }
 

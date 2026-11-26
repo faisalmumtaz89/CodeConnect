@@ -1451,7 +1451,8 @@ pub struct RunGit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<PullRequest>,
     /// When GitHub was asked: a read within 30 s of one for the same branch and commit is
-    /// answered from it. Absent while GitHub's rate limit pauses the host's reads.
+    /// answered from it. Absent when GitHub was not asked: no `gh`, or its rate limit
+    /// pausing the host's reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_read_at: Option<String>,
 }
