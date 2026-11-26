@@ -36,6 +36,8 @@ public final class RunTerminal {
     @ObservationIgnored private let connection: DaemonConnection
     @ObservationIgnored private var attachmentID: String?
     @ObservationIgnored private var size = (cols: 80, rows: 24)
+    /// The size the open in flight asked for: the shell's, until the open answers.
+    @ObservationIgnored private var openedSize = (cols: 80, rows: 24)
     /// The output offset fed so far, per run: what an open resumes after.
     @ObservationIgnored private var fed: [String: UInt64] = [:]
     @ObservationIgnored private var replayEnd: UInt64 = 0
@@ -68,6 +70,12 @@ public final class RunTerminal {
         session = nil
         phase = .idle
         pending.removeAll()
+    }
+
+    /// The view showing run `session` is a new one, with none of the screen fed before: its next open asks for the
+    /// output the computer kept rather than resuming after what the old view had.
+    public func forgetScreen(session: String) {
+        fed[session] = nil
     }
 
     /// The view's size changed.
@@ -112,6 +120,10 @@ public final class RunTerminal {
             chunk = max(1, maxChunk)
             replayEnd = end
             phase = .open(folder: folder)
+            // The view took its size while the open was on its way.
+            if size != openedSize {
+                _ = connection.sendInOrder(.terminalResize(attachmentID: id, cols: size.cols, rows: size.rows))
+            }
             flush()
         case .terminalOutput(let id, let data, let reset, let offset) where id == attachmentID:
             guard let session else { return }
@@ -145,12 +157,16 @@ public final class RunTerminal {
         return false
     }
 
+    /// An open the link cannot carry yet still reads `.opening`: the handshake's `linkUp` sends it.
     private func open(takeover: Bool) {
-        guard let session, connection.capabilities?.servesRunTerminal == true else { return }
-        let id = UUID().uuidString
-        attachmentID = id
+        guard let session else { return }
+        attachmentID = nil
         inputCredit = 0
         phase = .opening
+        guard connection.capabilities?.servesRunTerminal == true else { return }
+        let id = UUID().uuidString
+        attachmentID = id
+        openedSize = size
         let sent = connection.sendInOrder(
             .terminalOpen(
                 attachmentID: id, session: session, cols: size.cols, rows: size.rows, outputCredit: Self.outputCredit,

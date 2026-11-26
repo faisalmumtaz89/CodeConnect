@@ -4,7 +4,8 @@ import XCTest
 
 /// **A run's shell as one computer's link carries it** (minor 55), counted at the socket: the open and what it asks
 /// for, output fed in order with its credit given back, typing held for the open and for credit, a fold and a resume
-/// from the offset fed, a stopped view opened again by a keystroke, and a reconnect that resumes without taking over.
+/// from the offset fed, a stopped view opened again by a keystroke, a reconnect that resumes without taking over, an
+/// open before the handshake, a size taken while opening, and a new screen that asks for the kept output.
 @MainActor
 final class RunTerminalTests: XCTestCase {
 
@@ -154,6 +155,55 @@ final class RunTerminalTests: XCTestCase {
         model.terminal.linkDown()
         model.terminal.linkUp()
         XCTAssertEqual(recorder.opens.count, 2, "a view another device took waits for a keystroke")
+    }
+
+    /// **A shell opened before the link has handshaken opens with the handshake, and what was typed meanwhile goes to
+    /// it.**
+    func testAnOpenBeforeTheHandshakeOpensWithIt() throws {
+        let model = AppModel(cache: EventCache())
+        model.connection.simulateConnectedForTesting()
+        let recorder = Recorder()
+        model.connection.sendStub = { recorder.frames.append($0) }
+        model.terminal.show(session: "u-1", cols: 80, rows: 24)
+        model.terminal.type(Array("ls\r".utf8))
+        XCTAssertTrue(recorder.frames.isEmpty, "\(recorder.frames)")
+        XCTAssertEqual(model.terminal.phase, .opening)
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(canApproveReliably: true, sendText: true, extra: ["run_terminal": .bool(true)]), minor: 55)
+        model.terminal.linkUp()
+        XCTAssertEqual(recorder.opens.count, 1)
+        opened(model, try XCTUnwrap(recorder.opens.first?.id))
+        XCTAssertEqual(recorder.typed, ["ls\r"])
+    }
+
+    /// **The size the view took while the open was on its way is sent once the shell is open; an unchanged one is
+    /// not.**
+    func testASizeTakenWhileOpeningIsSentOnceOpen() throws {
+        let (model, recorder) = model()
+        model.terminal.show(session: "u-1", cols: 80, rows: 25)
+        model.terminal.resize(cols: 132, rows: 17)
+        let id = try XCTUnwrap(recorder.opens.first?.id)
+        opened(model, id)
+        guard case .terminalResize(id, 132, 17)? = recorder.frames.last else { return XCTFail("\(recorder.frames)") }
+        model.terminal.hide()
+        model.terminal.show(session: "u-1", cols: 132, rows: 17)
+        opened(model, try XCTUnwrap(recorder.opens.last?.id))
+        XCTAssertEqual(
+            recorder.frames.filter { if case .terminalResize = $0 { return true } else { return false } }.count, 1)
+    }
+
+    /// **A new view of a run asks for the output the computer kept, not for what came after an old view's screen.**
+    func testANewScreenAsksForTheKeptOutput() throws {
+        let (model, recorder) = model()
+        model.terminal.show(session: "u-1", cols: 80, rows: 24)
+        let first = try XCTUnwrap(recorder.opens.first?.id)
+        opened(model, first)
+        output(model, first, "hello", reset: true, offset: 5)
+        model.terminal.hide()
+        model.terminal.forgetScreen(session: "u-1")
+        model.terminal.show(session: "u-1", cols: 80, rows: 24)
+        XCTAssertEqual(recorder.opens.count, 2)
+        XCTAssertNil(recorder.opens.last?.resumeAfter)
     }
 
     /// **The frames, as the daemon writes and reads them** (`ws.rs`'s own wire test).

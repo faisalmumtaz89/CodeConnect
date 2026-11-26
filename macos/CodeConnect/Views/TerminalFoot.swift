@@ -172,6 +172,18 @@ final class Shells {
 
 /// The shell's screen: SwiftTerm's Mac terminal in the app's terminal colours and Menlo, read out as a text area.
 final class ShellView: TerminalView {
+    /// Nothing has been fed to this screen yet.
+    var isNew = true
+    /// A key or a paste is being handled: what the terminal sends now is the person's, not one of its own reports.
+    var typing: Bool { pasting || NSApp.currentEvent?.type == .keyDown }
+    private var pasting = false
+
+    override func paste(_ sender: Any) {
+        pasting = true
+        defer { pasting = false }
+        super.paste(sender)
+    }
+
     override init(frame: CGRect) {
         super.init(frame: frame, font: NSFont(name: Theme.codeFace, size: 11.5))
         getTerminal().options.ansi256PaletteStrategy = .xterm
@@ -280,6 +292,8 @@ private struct ShellHost: NSViewRepresentable {
             view.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
         ])
         view.terminalDelegate = coordinator
+        if view.isNew { terminal.forgetScreen(session: session) }
+        view.isNew = false
         coordinator.join(session: session, view: view)
         DispatchQueue.main.async { [weak view] in view?.window?.makeFirstResponder(view) }
     }
@@ -321,6 +335,9 @@ private struct ShellHost: NSViewRepresentable {
             MainActor.assumeIsolated {
                 // A replay's queries were the program's, long since answered: the terminal's own answers go nowhere.
                 guard !terminal.replaying else { return }
+                // A stopped screen opens again only for what the person types: a click or a focus change it reports
+                // for the program on it selects, or does nothing.
+                if case .stopped = terminal.phase, (source as? ShellView)?.typing != true { return }
                 terminal.type(Array(data))
             }
         }
@@ -333,12 +350,13 @@ private struct ShellHost: NSViewRepresentable {
         nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         nonisolated func scrolled(source: TerminalView, position: Double) {}
         nonisolated func bell(source: TerminalView) {
-            MainActor.assumeIsolated { NSSound.beep() }
+            MainActor.assumeIsolated { if !terminal.replaying { NSSound.beep() } }
         }
         /// What a program copied (OSC 52), onto this Mac's clipboard.
         nonisolated func clipboardCopy(source: TerminalView, content: Data) {
             let text = String(decoding: content, as: UTF8.self)
             MainActor.assumeIsolated {
+                guard !terminal.replaying else { return }
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
             }
