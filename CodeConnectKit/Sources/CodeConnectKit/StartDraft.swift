@@ -18,7 +18,9 @@ public final class StartDraft {
         public var folderPath: String?
         public var query = ""
         public var model: StartModelChoice?
-        public var place = StartPlace.folder
+        /// Where in the folder's repository it starts, as the person chose; nil until they choose, which each app's
+        /// form reads as its own default.
+        public var place: StartPlace?
         /// A new worktree's name while one is being named.
         public var newName: String?
 
@@ -111,14 +113,14 @@ public final class StartDraft {
         choices[computer] = each
     }
 
-    /// A folder the person picks starts in the folder as it is, until they choose a place in it. The same folder again
-    /// changes nothing.
+    /// A folder the person picks has no place in it chosen, until they choose one. The same folder again changes
+    /// nothing.
     public func chooseFolder(_ path: String?, on computer: String) {
         guard choices(on: computer).folderPath != path else { return }
         edit(on: computer) {
             $0.folderPath = path
             $0.query = ""
-            $0.place = .folder
+            $0.place = nil
             $0.newName = nil
         }
     }
@@ -167,7 +169,7 @@ public final class StartDraft {
     public func didOpen() {
         if let sent {
             edit(on: sent.ask.computerID) {
-                $0.place = .folder
+                $0.place = nil
                 $0.newName = nil
             }
         }

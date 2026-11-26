@@ -90,6 +90,33 @@ public enum StartPlace: Hashable, Sendable {
             !part.isEmpty && part != "." && part != ".." && part.allSatisfy(allowed.contains)
         }
     }
+
+    /// A new worktree's name from a run's first message: its words in lower case, accents dropped, joined by "-", as
+    /// many whole words as fit in 40 bytes (a first word longer than that cut to it), "run" when the task has no Latin
+    /// letter or digit. A name the repository already has, as the branch the new worktree would get or as a worktree's
+    /// folder, gets "-2", "-3", ….
+    public static func named(fromTask task: String, for agent: StartAgent, in git: StartGit) -> String {
+        let most = 40
+        let words = task.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil).lowercased()
+            .split { !($0.isASCII && ($0.isLetter || $0.isNumber)) }
+        var base = ""
+        for word in words {
+            let next = base.isEmpty ? String(word.prefix(most)) : base + "-" + word
+            guard next.utf8.count <= most else { break }
+            base = next
+        }
+        if base.isEmpty { base = "run" }
+        let branches = Set(git.branches + git.worktrees.compactMap(\.branch))
+        let folders = Set(git.worktrees.map { URL(fileURLWithPath: $0.path).lastPathComponent })
+        func taken(_ name: String) -> Bool { branches.contains(newBranch(name, for: agent)) || folders.contains(name) }
+        var name = base
+        var number = 2
+        while taken(name) {
+            name = "\(base)-\(number)"
+            number += 1
+        }
+        return name
+    }
 }
 
 /// A `list_folder` (minor 30): a folder, or none for the home folder, with or

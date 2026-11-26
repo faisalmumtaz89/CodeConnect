@@ -66,7 +66,8 @@ struct StartForm: View {
     private var choices: StartDraft.Choices { context.map { draft.choices(on: $0.id) } ?? StartDraft.Choices() }
     private var query: String { choices.query }
     private var folderPath: String? { choices.folderPath }
-    private var place: StartPlace { choices.place }
+    /// The place chosen, else the folder as it is.
+    private var place: StartPlace { choices.place ?? .folder }
     private var newName: String? { choices.newName }
 
     /// One of the chosen computer's choices, as a binding the form's controls write to the draft through.
@@ -590,7 +591,8 @@ struct StartForm: View {
             folderButton(context).yields(2)
             if let folder, context.branchAhead(folder) {
                 BranchRow(
-                    context: context, folder: folder, agent: pick?.agent, place: choice(\.place),
+                    context: context, folder: folder, agent: pick?.agent,
+                    place: Binding(get: { place }, set: { choice(\.place).wrappedValue = $0 }),
                     newName: choice(\.newName), open: $branchMenuOpen, top: 0
                 ) {
                     // A turn after the menu closes, as `takeKeyboard`'s, so AppKit's settling doesn't take it back.

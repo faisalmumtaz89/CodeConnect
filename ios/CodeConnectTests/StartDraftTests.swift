@@ -88,9 +88,11 @@ final class StartDraftTests: XCTestCase {
         XCTAssertEqual(draft.choices(on: "a").folderPath, "/w/query-parser")
         XCTAssertEqual(draft.choices(on: "a").place, .branch("feature/strict-mode"))
         XCTAssertEqual(draft.choices(on: "b").folderPath, "/w/other")
-        // Only the person's own new folder resets the place.
+        // Only the person's own new folder resets the place: to none chosen, which each app's form reads as its own
+        // default.
         draft.chooseFolder("/w/web", on: "a")
-        XCTAssertEqual(draft.choices(on: "a").place, .folder)
+        XCTAssertNil(draft.choices(on: "a").place)
+        XCTAssertNil(StartDraft.Choices().place)
     }
 
     /// New Agent's keyboard request is kept until the form draws, and taken once.
@@ -134,7 +136,7 @@ final class StartDraftTests: XCTestCase {
         draft.didOpen()
         XCTAssertEqual(draft.message, "")
         XCTAssertNil(draft.sent)
-        XCTAssertEqual(draft.choices(on: "a").place, .folder)
+        XCTAssertNil(draft.choices(on: "a").place)
         XCTAssertEqual(draft.choices(on: "a").folderPath, "/w/query-parser")
     }
 
