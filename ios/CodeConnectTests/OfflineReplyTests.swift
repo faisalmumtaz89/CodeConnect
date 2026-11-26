@@ -32,6 +32,15 @@ final class OfflineReplyTests: XCTestCase {
         XCTAssertEqual(model.sendBlockedReason(for: key, draft: "hello"), model.linkHealth.disabledReason)
     }
 
+    /// The changes panel, while the computer is offline: whom it can't reach, and how old what it shows is.
+    func testThePanelSaysWhomItCantReachAndHowOldItsDiffIs() {
+        let now = Date()
+        XCTAssertEqual(ChangesWords.cantReach("lumen5090"), "Can’t reach lumen5090")
+        XCTAssertEqual(
+            ChangesWords.lastSaid(since: now.addingTimeInterval(-120), now: now),
+            "Showing what it last said, \(Format.ago(since: now.addingTimeInterval(-120), now: now))")
+    }
+
     func testAnOfflineLinkWithItsOwnCauseKeepsIt() {
         let model = model(linkState: "tailnet")
         XCTAssertEqual(model.linkHealth.level, .offline)
