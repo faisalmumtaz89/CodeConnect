@@ -110,7 +110,6 @@ public enum DiffFailure: Sendable, Equatable {
     }
 }
 
-/// The state of one session's on-demand diff.
 /// Where a run's commit from its Changes panel stands (`AppModel.commitState(for:)`).
 public enum CommitState: Sendable, Equatable {
     case idle
@@ -119,6 +118,7 @@ public enum CommitState: Sendable, Equatable {
     case refused(String)
 }
 
+/// The state of one session's on-demand diff.
 public enum DiffState: Sendable {
     case idle
     case loading
@@ -4327,7 +4327,8 @@ public final class AppModel {
                 refusal = ChangesWords.commitUnknown
             }
             self.commits[key] = refusal.map(CommitState.refused) ?? .idle
-            self.loadDiff(key: key, force: true)
+            // A read already on its way waits behind the commit on the computer, so it shows the commit's result.
+            if self.diffs[key]?.isLoading != true { self.loadDiff(key: key, force: true) }
             self.loadRunGit(key: key)
         }
     }
@@ -4342,7 +4343,10 @@ public final class AppModel {
         Task { [weak self] in
             guard let self else { return }
             defer { self.runGitsReading.remove(key) }
-            if let reply = try? await self.connection.runGit(session: key) { self.runGits[key] = reply }
+            guard let reply = try? await self.connection.runGit(session: key) else { return }
+            self.runGits[key] = reply
+            // A clean repository ends what a refused commit said: the next changes are another commit.
+            if reply.git?.changed.files == 0, case .refused = self.commits[key] { self.commits[key] = nil }
         }
     }
 
