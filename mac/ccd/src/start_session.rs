@@ -1043,10 +1043,8 @@ async fn hosted_start(
     let worktree = worktree.as_ref();
     let (cwd, new_worktree) = match worktree {
         None => (path.to_string(), None),
-        // Claude makes its own (`--worktree`); agy has no such flag, so ccd makes one for it as for Codex.
-        // Whether Claude's own checkout runs the repository's hooks for a folder answered not trusted
-        // is not known here (ccd turns them off for the worktrees it makes): a gap, kept until a real
-        // claude in a rig shows it.
+        // Claude makes its own (`--worktree`), and its checkout runs none of the repository's hooks
+        // (claude 2.1.332); agy has no such flag, so ccd makes one for it as for Codex.
         Some(StartWorktree::New { name }) if agent != AgentKind::Antigravity => {
             match check_worktree_name(name) {
                 Ok(()) => (path.to_string(), Some(name.as_str())),
