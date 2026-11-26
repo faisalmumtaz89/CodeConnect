@@ -1347,7 +1347,8 @@ to probe credentials.
   and commit every 30 seconds whatever asks, and not for 5 minutes after GitHub
   refuses a read for its rate limit. `gh_read_at` is when GitHub was asked for the
   answer; it is absent when GitHub was not asked (no gh, no account in gh, or
-  the pause). A branch whose remote is a URL (as `gh pr checkout` sets for a
+  the pause). From `>= 61`, `gh_repo` (`owner/name`) names the repository a pull
+  request from the branch goes into. A branch whose remote is a URL (as `gh pr checkout` sets for a
   fork's PR) is read from that URL.
 * **`git_action{request_id, session_uid, action}`** (`>= 59`, `git_actions` names
   each action; paired devices only) → `git_action_result{request_id, session_uid,
@@ -1376,6 +1377,23 @@ to probe credentials.
   A refused commit leaves what it staged staged. Every git child for a run's folder
   (`get_diff`, `get_run_git`, the session-list refresh and actions) runs one at a
   time, and each is answered off the connection's loop.
+  From `>= 61` `action` may be `{kind: "create_pr"}`, answered `done{pr: {number,
+  url}}` (no `sha`): the open pull request from the run's branch into `gh_repo`
+  (looked up as `get_run_git` looks, but asked of GitHub now) is the answer, and
+  nothing is pushed; else the branch is pushed to its push remote when that lacks
+  it at `HEAD` (`git push --no-follow-tags -u -- <remote>
+  refs/heads/<b>:refs/heads/<b>`, no force, through the login shell with the
+  repository's `pre-push` hook, 120 s) and opened with `gh pr create --repo
+  <gh_repo> --head <[owner:]b> --fill [--base <base>]` (title and body from the
+  commits, 30 s). If gh refuses or gives no answer, GitHub is asked once more, and
+  a pull request found there is the answer, so one is never opened twice; else
+  `create_failed{"pushed; " + gh's line}`, or `indeterminate` when gh gave no
+  answer. Refused before anything is sent on a detached head, while unmerged, on
+  the base branch itself (`on_base_branch`), with no commits past the base
+  (`nothing_to_propose`), with no github.com remote (`no_github_remote`), and when
+  gh is missing, signed out, or GitHub cannot be reached (`gh_missing`,
+  `gh_signed_out`, `github_unavailable`); a refused push is `git_failed` with
+  git's (or the hook's) line. The branch's GitHub read is asked again after it.
 * **`EventKind::TurnComplete`** marks the end of a turn. For Claude it is filed
   from the SDK's `result`, which the run's agent host relays as each turn ends.
   `SessionEnd` now means only what it says: the run ended.

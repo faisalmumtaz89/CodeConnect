@@ -2404,7 +2404,7 @@ pub(crate) fn capabilities(
         changes: paired,
         // The actions on a run's repository a paired device may send, one by one.
         git_actions: if paired {
-            vec!["commit".to_string()]
+            vec!["commit".to_string(), "create_pr".to_string()]
         } else {
             Vec::new()
         },
@@ -7784,7 +7784,7 @@ mod tests {
             .await;
         assert_eq!(
             ack["capabilities"]["git_actions"],
-            serde_json::json!(["commit"]),
+            serde_json::json!(["commit", "create_pr"]),
             "{ack}"
         );
         phone.send(ask).await.unwrap();
