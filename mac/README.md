@@ -1350,7 +1350,7 @@ to probe credentials.
   five, oldest first) goes above the words ccd hands it, never above a Claude
   `/` command, while the person's row keeps their words. A message a Stop drops
   told nothing, so the next one carries the lines again; a message that relaunches
-  an ended Claude run carries none, and the one after it does. Refused, nothing staged, while any run in the folder waits on a
+  an ended Claude or Antigravity run carries none, and the one after it does. Refused, nothing staged, while any run in the folder waits on a
   card or may be working (starting or stopping; live, a Codex run as its live
   link says, a Claude run from its log, any other, or a Codex run not yet linked,
   counted as working), on a detached head, while a merge has unresolved files

@@ -6823,6 +6823,8 @@ mod tests {
         assert_eq!(start["params"]["input"][0]["text"], "again", "told once");
         answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
         let _ = again.await;
+        drop(ws);
+        end_run(&rig, &uid).await;
     }
 
     /// **X5-1 G1: a phone's message to an idle engine run starts a turn, and its words are
@@ -6983,7 +6985,6 @@ mod tests {
         let thread = frames[2]["params"]["threadId"].as_str().unwrap();
         let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
         let (uid, mut ws) = engine_run(&rig, "req-cut-note", thread, turn).await;
-        turn_begun(&rig.daemon, &uid, &mut ws, thread, turn).await;
         rig.daemon
             .ingest(PendingEvent::new(
                 &SessionKey::new(&uid, &uid),
@@ -6994,6 +6995,7 @@ mod tests {
             ))
             .await
             .unwrap();
+        turn_begun(&rig.daemon, &uid, &mut ws, thread, turn).await;
         let sent = saying(&rig.daemon, &uid, "say-a", "steered");
         let start = asked(&mut ws, "turn/start").await;
         assert_eq!(
@@ -7006,7 +7008,12 @@ mod tests {
         let interrupt = asked(&mut ws, "turn/interrupt").await;
         answer(&mut ws, &interrupt, json!({})).await;
         tell(&mut ws, &its_turn_ended("interrupted")).await;
-        assert!(stop.await.is_ok());
+        assert_eq!(
+            stop.await.unwrap(),
+            protocol::ws::InterruptResult::Aborted {
+                turn_id: turn.into()
+            }
+        );
         settled_as(&rig.daemon, &uid, "say-a", crate::store::COMPOSE_STOPPED).await;
         let again = saying(&rig.daemon, &uid, "say-b", "after the stop");
         let start = asked(&mut ws, "turn/start").await;

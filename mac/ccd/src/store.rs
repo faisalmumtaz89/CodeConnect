@@ -1638,13 +1638,13 @@ impl Store {
               WHERE session_uid = ?1 AND kind = ?2
                 AND json_extract(payload, '$.notification_type') = ?3
                 AND seq > COALESCE((
-                    SELECT MAX(told_through) FROM commit_notes AS note
-                     WHERE note.session_uid = ?1
-                       AND NOT EXISTS (
-                           SELECT 1 FROM events AS dropped
-                            WHERE dropped.session_uid = ?1 AND dropped.kind = ?2
-                              AND json_extract(dropped.payload, '$.notification_type') = ?5
-                              AND json_extract(dropped.payload, '$.request_id') = note.request_id)
+                    SELECT MAX(told_through) FROM commit_notes
+                     WHERE session_uid = ?1
+                       AND request_id NOT IN (
+                           SELECT json_extract(payload, '$.request_id') FROM events
+                            WHERE session_uid = ?1 AND kind = ?2
+                              AND json_extract(payload, '$.notification_type') = ?5
+                              AND json_extract(payload, '$.request_id') IS NOT NULL)
                 ), 0)
               ORDER BY seq DESC LIMIT ?4",
         )?;

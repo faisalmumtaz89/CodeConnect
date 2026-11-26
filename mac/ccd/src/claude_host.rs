@@ -6270,7 +6270,6 @@ mod tests {
         let rig = rig();
         let mut played = live_run(&rig).await;
         let uid = played.uid.clone();
-        turn_begins(&mut played, 3, "turn-1").await;
         rig.daemon
             .ingest(PendingEvent::new(
                 &SessionKey::new(&uid, &uid),
@@ -6281,6 +6280,7 @@ mod tests {
             ))
             .await
             .unwrap();
+        turn_begins(&mut played, 3, "turn-1").await;
         let (_, (_, text)) = tokio::join!(
             send_as_app(&rig.daemon, &uid, "r-1", "queued"),
             host_takes(&mut played, 4, "done")
