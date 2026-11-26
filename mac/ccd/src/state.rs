@@ -3571,6 +3571,8 @@ impl Daemon {
         let switching: HashMap<String, i64> = self.db.switching_runs().await?.into_iter().collect();
         let accounts: HashMap<String, crate::store::RecordedAccount> =
             self.db.run_accounts().await?.into_iter().collect();
+        let mut limits: HashMap<String, protocol::event::RunLimit> =
+            self.db.run_limits().await?.into_iter().collect();
         let rows = self.db.list_sessions().await?;
         // Read up front, before the lock is taken, one query per row.
         let mut last_seqs: HashMap<String, u64> = HashMap::with_capacity(rows.len());
@@ -3735,6 +3737,7 @@ impl Daemon {
                 }),
                 _ => None,
             };
+            session.limit = limits.remove(&session.session_uid);
             match switching.get(&session.session_uid).copied() {
                 Some(crate::store::Store::SWITCH_FAILED) => {
                     session.switching = Some(protocol::event::Switching::Failed)
@@ -4921,6 +4924,7 @@ impl Daemon {
                 relaunchable: relaunchable.contains(&row.session_uid),
                 switching: None,
                 account: None,
+                limit: None,
             });
         }
         out

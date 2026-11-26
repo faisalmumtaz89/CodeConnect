@@ -553,6 +553,44 @@ pub struct SessionSummary {
     /// started; absent on any other, and from a daemon below 48: absent is "not known", never Default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<RunAccount>,
+    /// The usage limit the run stopped at (minor 54), as its agent said it: absent while it is at none, from the
+    /// run's next turn on, and from a daemon below 54. Its reset is the run's account's held window of that length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<RunLimit>,
+}
+
+/// The usage limit a run stopped at ([`SessionSummary::limit`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunLimit {
+    /// Which limit.
+    pub which: LimitKind,
+    /// When the agent said so (RFC 3339).
+    pub at: String,
+}
+
+/// Which usage limit a run stopped at ([`RunLimit::which`]): Claude Code's `rate_limit_event` refused with its
+/// `rateLimitType` or `errorCode`; Codex's `usageLimitExceeded` with the window its last `account/rateLimits/updated`
+/// had full, or its workspace's `rateLimitReachedType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitKind {
+    /// The 5-hour window: its reset is the account's 300-minute window's.
+    FiveHour,
+    /// The weekly window: its reset is the account's 10080-minute window's.
+    Weekly,
+    /// Claude Code's weekly Opus window.
+    WeeklyOpus,
+    /// Claude Code's weekly Sonnet window.
+    WeeklySonnet,
+    /// Claude Code's extra usage.
+    ExtraUsage,
+    /// Claude Code's credits.
+    Credits,
+    /// A Codex workspace's credits or usage limit.
+    Workspace,
+    /// A limit the agent did not name, and any word a newer daemon sends.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The account a run runs on ([`SessionSummary::account`]).
@@ -830,6 +868,7 @@ mod tests {
             relaunchable: false,
             switching: None,
             account: None,
+            limit: None,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);

@@ -928,7 +928,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     more; an untracked file is listed with every line added. [`event::SessionSummary::diff_stat`] is their counted
 ///     lines' sum, so it counts untracked files' lines too. A daemon below 53 sends no `files`, and its `diff_stat` counts tracked
 ///     files only.
-pub const PROTOCOL_MINOR: u32 = 53;
+///   * `54` — **A run says the usage limit it stopped at.**
+///
+///     [`event::SessionSummary::limit`] ([`event::RunLimit`]): set when Claude Code's `rate_limit_event` says
+///     `rejected`, or a Codex turn fails with `usageLimitExceeded`; gone once the run's next turn starts. It names the
+///     limit ([`event::LimitKind`]), not its reset, which is the run's account's held window of that length. A daemon
+///     below 54 sends none.
+pub const PROTOCOL_MINOR: u32 = 54;
 
 #[cfg(test)]
 mod ledger_tests {

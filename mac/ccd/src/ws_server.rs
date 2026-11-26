@@ -5819,6 +5819,7 @@ mod tests {
             relaunchable: false,
             switching: None,
             account: None,
+            limit: None,
         };
         serde_json::json!({
             "hello_ack_capabilities": ack["capabilities"],
@@ -5886,6 +5887,7 @@ mod tests {
                 relaunchable: false,
                 switching: None,
                 account: None,
+                limit: None,
             }
         };
         serde_json::json!({

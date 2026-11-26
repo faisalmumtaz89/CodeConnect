@@ -261,6 +261,26 @@ fn failed(detail: String) -> StartSessionResult {
     }
 }
 
+/// Which usage limit a Codex turn that failed with `usageLimitExceeded` stopped at, by the account's `limits` Codex
+/// last said: a workspace's own (`rateLimitReachedType`), else the window it said full (300 minutes, 10080 minutes).
+fn codex_limit(limits: &serde_json::Value) -> protocol::event::LimitKind {
+    use protocol::event::LimitKind;
+    let reached = limits["rateLimitReachedType"].as_str().unwrap_or_default();
+    if reached.starts_with("workspace_") {
+        return LimitKind::Workspace;
+    }
+    let full = crate::accounts::codex_windows(limits)
+        .into_iter()
+        .filter(|window| window.used_percent >= 100)
+        .map(|window| window.window_minutes)
+        .max();
+    match full {
+        Some(300) => LimitKind::FiveHour,
+        Some(10080) => LimitKind::Weekly,
+        _ => LimitKind::Unknown,
+    }
+}
+
 /// The ladder on a failed start's process group, under the warrant of its recorded leader.
 pub(crate) async fn stop(uid: &str, leader: ProcessIdentity, boot: Option<BootIdentity>) {
     use crate::claude_host::Ladder;
@@ -774,6 +794,8 @@ async fn link(
         .map(|owed| (owed.thread.clone(), owed.turn.clone()));
     let mut stops: Vec<WaitingStop> = Vec::new();
     let mut sends: Vec<WaitingSend> = Vec::new();
+    // Its account's limits as Codex last said them on this connection, which name the limit a turn stops at.
+    let mut limits = serde_json::Value::Null;
     let host = daemon
         .db
         .watched_host(uid.clone())
@@ -803,10 +825,12 @@ async fn link(
                     (Some("turn/started"), Some(thread), Some(turn)) => {
                         running = Some((thread.to_string(), turn.to_string()));
                         daemon.note_turn_running(&uid);
+                        crate::claude_host::clear_limit(&daemon, &uid).await;
                     }
                     // Its own word that its account's limits changed, on this connection: no process started. A
                     // word that names no window changes nothing.
                     (Some("account/rateLimits/updated"), _, _) => {
+                        limits = frame["params"]["rateLimits"].clone();
                         if let Ok(account) = daemon.store.run_account(&uid) {
                             let key = account.map_or_else(
                                 || crate::accounts::default_key(&AgentKind::Codex),
@@ -824,6 +848,9 @@ async fn link(
                             running = None;
                         }
                         let status = frame["params"]["turn"]["status"].as_str().unwrap_or_default();
+                        if frame["params"]["turn"]["error"]["codexErrorInfo"] == "usageLimitExceeded" {
+                            crate::claude_host::set_limit(&daemon, &uid, codex_limit(&limits)).await;
+                        }
                         let (ended, waiting): (Vec<_>, Vec<_>) =
                             std::mem::take(&mut stops).into_iter().partition(|stop| stop.turn == turn);
                         stops = waiting;
@@ -11017,6 +11044,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A Codex turn that fails at a usage limit marks the run at it (minor 54), until its next turn**: `turn/completed`
+    /// failed with `codexErrorInfo` `usageLimitExceeded` names the window the connection's last
+    /// `account/rateLimits/updated` said full (300 minutes: the 5-hour), or a workspace's when its
+    /// `rateLimitReachedType` is one; the next `turn/started` clears it, and a turn failing otherwise names none.
+    #[tokio::test]
+    async fn a_codex_turn_failed_at_its_usage_limit_marks_the_run_until_its_next_turn() {
+        use protocol::event::LimitKind;
+        async fn limit_is(
+            daemon: &Daemon,
+            uid: &str,
+            want: Option<protocol::event::LimitKind>,
+            why: &str,
+        ) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let sessions = daemon.sessions().await.unwrap();
+                let run = sessions.iter().find(|run| run.session_uid == uid).unwrap();
+                let which = run.limit.as_ref().map(|limit| limit.which);
+                if which == want {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "{why}: {which:?}");
+                tokio::time::sleep(POLL).await;
+            }
+        }
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let (uid, mut ws) = engine_run_offering(&rig, &recorded_models(), "gpt-6.1-sol").await;
+        // The keys and types codex 0.170.0 sends (values made up).
+        let limits = |primary: u64, reached: serde_json::Value| {
+            json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+                "limitId": "codex", "limitName": null, "planType": "plus",
+                "primary": {"usedPercent": primary, "windowDurationMins": 300, "resetsAt": 1795928400},
+                "secondary": {"usedPercent": 30, "windowDurationMins": 10080, "resetsAt": 1796428800},
+                "credits": null, "individualLimit": null, "normalModelSlug": null,
+                "rateLimitReachedType": reached, "spendControlReached": null}}})
+        };
+        let failed = |turn: &str, info: &str| {
+            json!({"method": "turn/completed", "params": {"threadId": "thr-x6", "turn": {"id": turn,
+                "status": "failed", "items": [], "error": {"message": "You've hit your usage limit.",
+                "codexErrorInfo": info, "additionalDetails": null}}}})
+        };
+        tell(&mut ws, &limits(100, json!("rate_limit_reached"))).await;
+        tell(&mut ws, &turn_started("thr-x6", "turn-2")).await;
+        tell(&mut ws, &failed("turn-2", "usageLimitExceeded")).await;
+        limit_is(
+            &rig.daemon,
+            &uid,
+            Some(LimitKind::FiveHour),
+            "the window said full",
+        )
+        .await;
+        tell(&mut ws, &turn_started("thr-x6", "turn-3")).await;
+        limit_is(&rig.daemon, &uid, None, "the next turn clears it").await;
+        tell(
+            &mut ws,
+            &limits(60, json!("workspace_member_usage_limit_reached")),
+        )
+        .await;
+        tell(&mut ws, &failed("turn-3", "usageLimitExceeded")).await;
+        limit_is(
+            &rig.daemon,
+            &uid,
+            Some(LimitKind::Workspace),
+            "the workspace's",
+        )
+        .await;
+        tell(&mut ws, &turn_started("thr-x6", "turn-4")).await;
+        tell(&mut ws, &failed("turn-4", "other")).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        limit_is(
+            &rig.daemon,
+            &uid,
+            None,
+            "a turn failing otherwise names none",
+        )
+        .await;
     }
 
     /// **A Codex run's own word that its account's limits changed updates them, with no process started**: its
