@@ -153,8 +153,16 @@ pub(crate) fn answer_for(run: HostedRun) -> StartSessionResult {
 }
 
 /// What became of a run's `start`, as its link committed it: `Ok` once the start is
-/// done, or why it did not start (the host's refusal, or the link ending first).
-type Begun = Result<(), String>;
+/// done, or why it is not ([`NotBegun`]).
+type Begun = Result<(), NotBegun>;
+
+/// Why a run's `start` is not done: the host refused it, which its link committed, or the link ended before any
+/// outcome, when claude may have taken the start all the same.
+#[derive(Debug)]
+enum NotBegun {
+    Refused(String),
+    Ended(String),
+}
 
 /// Start `run`: its row, its folder, its host, the first attach and `start`, then the
 /// answer from the start's outcome.
@@ -247,7 +255,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     };
     match tokio::time::timeout_at(deadline, begun).await {
         Ok(Ok(Ok(()))) => started,
-        Ok(Ok(Err(detail))) => failed(detail),
+        Ok(Ok(Err(NotBegun::Refused(detail) | NotBegun::Ended(detail)))) => failed(detail),
         Ok(Err(_)) => failed("the agent host's link ended".into()),
         // No outcome yet. The run exists and is starting, and its link keeps applying
         // what comes, so a late outcome still makes it `live` or `failed`.
@@ -1167,7 +1175,7 @@ async fn link(
                 }
                 // Told once committed, before the ack: a failed ack keeps what is stored.
                 if let Some(begun) = begun.take() {
-                    let _ = begun.send(said);
+                    let _ = begun.send(said.map_err(NotBegun::Refused));
                 }
                 if let Err(why) = send(&mut write, &ToHost::Ack { seq }).await {
                     break why;
@@ -1336,7 +1344,7 @@ async fn link(
     };
     crate::log_info!("{uid}: the agent host link ended: {ended}");
     if let Some(begun) = begun.take() {
-        let _ = begun.send(Err(ended));
+        let _ = begun.send(Err(NotBegun::Ended(ended)));
     }
     daemon.host_link_detached(&uid).await;
     end_if_host_gone(&daemon, &uid).await;
@@ -2574,15 +2582,15 @@ async fn relaunch(
         Ok(Ok(Ok(()))) => SendTextResult::Sent {
             matched: text.to_string(),
         },
-        // A refusal the link committed puts the run back `exited` and releases the claim; a
-        // link that ended first leaves it starting, for the watch.
-        Ok(Ok(Err(detail))) => match daemon.db.hosted_link(uid.to_string()).await {
-            Ok(Some(linked)) if linked.lifecycle == Lifecycle::Exited => SendTextResult::Refused {
-                reason: format!("{agent} did not start again ({detail}); nothing was sent."),
-            },
-            _ => SendTextResult::Indeterminate { reason: lost },
+        // A refusal the link committed puts the run back `exited` and releases the claim. A link that ended first
+        // leaves it to the watch, whatever the watch has made of it since: the start was sent, so the message may
+        // have reached claude.
+        Ok(Ok(Err(NotBegun::Refused(detail)))) => SendTextResult::Refused {
+            reason: format!("{agent} did not start again ({detail}); nothing was sent."),
         },
-        Ok(Err(_)) | Err(_) => SendTextResult::Indeterminate { reason: lost },
+        Ok(Ok(Err(NotBegun::Ended(_)))) | Ok(Err(_)) | Err(_) => {
+            SendTextResult::Indeterminate { reason: lost }
+        }
     }
 }
 
