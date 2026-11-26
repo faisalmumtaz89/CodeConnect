@@ -979,7 +979,18 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     `gh_host`, `pr` ([`ws::PullRequest`]: the open one from the branch, else the newest closed or merged one at
 ///     the commit checked out, looked up by the branch's owner, so a fork's PR on its parent is found) and
 ///     `gh_read_at`; GitHub is asked at most once per 30 s per branch and commit. A daemon below 60 sends none of them.
-pub const PROTOCOL_MINOR: u32 = 60;
+///   * `61` — **A pull request from the Changes panel.**
+///
+///     [`ws::GitAction::CreatePr`] pushes the run's branch and opens a pull request from it with gh, or answers the open one
+///     already there; [`ws::GitActionResult::Done`] carries it as `pr` ([`ws::PrLink`]), and `sha` is absent for it.
+///     [`ws::RunGit`] gains `gh_repo`, the repository the pull request goes into. `git_actions` names `create_pr`; a
+///     daemon below 61 does not.
+///   * `62` — **A pull request's checks.**
+///
+///     An open [`ws::PullRequest`] carries `checks` ([`ws::Check`]: name, state, start, end, log URL, and a failed check
+///     run's first failure line) and `checks_complete`, read with it in one more GitHub request. A daemon below 62 sends
+///     neither.
+pub const PROTOCOL_MINOR: u32 = 62;
 
 #[cfg(test)]
 mod ledger_tests {

@@ -5213,9 +5213,7 @@ impl Daemon {
             let urls = match &read {
                 Ok(git) => match &git.branch {
                     Some(branch) => {
-                        let other = git.base.as_ref().map(|base| base.remote.as_str());
-                        crate::git::push_remote_urls(&row.cwd, git_bin, branch, other, timeout)
-                            .await
+                        crate::git::push_remote_urls(&row.cwd, git_bin, branch, timeout).await
                     }
                     None => None,
                 },
@@ -5230,10 +5228,10 @@ impl Daemon {
             return Ok(Ok(git));
         };
         // Asked of GitHub outside the folder's gate: it is the network, not the folder.
-        let repos = urls.and_then(|(head, target)| {
+        let repos = urls.and_then(|remotes| {
             Some((
-                crate::github::parse_remote(&head)?,
-                crate::github::parse_remote(&target)?,
+                crate::github::parse_remote(&remotes.head)?,
+                crate::github::parse_remote(&remotes.target)?,
             ))
         });
         match repos {
@@ -5249,6 +5247,7 @@ impl Daemon {
                     )
                     .await;
                 git.gh = Some(read.gh);
+                git.gh_repo = Some(format!("{}/{}", target.owner, target.name));
                 git.gh_host = Some(target.host);
                 git.pr = read.pr;
                 git.gh_read_at = read.read_at;
@@ -5272,13 +5271,26 @@ impl Daemon {
             code: code.to_string(),
             detail,
         };
-        let GitAction::Commit { message } = action;
-        let message = message.trim();
-        if request_id.is_empty()
-            || message.is_empty()
-            || message.len() > protocol::ws::MAX_COMMIT_MESSAGE_BYTES
-            || message.contains('\0')
-        {
+        let (route, claimed_text) = match action {
+            GitAction::Commit { message } => {
+                let message = message.trim();
+                if message.is_empty()
+                    || message.len() > protocol::ws::MAX_COMMIT_MESSAGE_BYTES
+                    || message.contains('\0')
+                {
+                    return refused(code::BAD_REQUEST, None);
+                }
+                (
+                    "commit",
+                    format!("codeconnect.git_action.commit.v1\n{message}"),
+                )
+            }
+            GitAction::CreatePr => (
+                "create_pr",
+                "codeconnect.git_action.create_pr.v1".to_string(),
+            ),
+        };
+        if request_id.is_empty() {
             return refused(code::BAD_REQUEST, None);
         }
         let row = match self.db.get_session(session_uid.to_string()).await {
@@ -5291,11 +5303,9 @@ impl Daemon {
         let claimed = crate::store::ClaimedMaterial {
             thread_id: String::new(),
             generation: 0,
-            route: "commit".into(),
+            route: route.into(),
             target_turn_id: None,
-            claimed_hash: protocol::hash::sha256_hex(
-                format!("codeconnect.git_action.commit.v1\n{message}").as_bytes(),
-            ),
+            claimed_hash: protocol::hash::sha256_hex(claimed_text.as_bytes()),
             question_decision: None,
         };
         let claim = self
@@ -5330,7 +5340,7 @@ impl Daemon {
             }
             Err(err) => return refused(code::GIT_FAILED, Some(format!("{err:#}"))),
         }
-        // Any run in this folder may be writing to it, not only the one committing.
+        // Any run in this folder may be writing to it, not only the one acting.
         let busy = match self.db.list_sessions().await {
             Ok(rows) => {
                 let mut busy = false;
@@ -5345,73 +5355,67 @@ impl Daemon {
             Err(_) => true,
         };
         let outcome = if busy {
-            crate::git::CommitOutcome::Refused {
-                code: code::BUSY,
-                detail: None,
-            }
+            ActionOutcome::Refused(code::BUSY, None)
         } else {
-            crate::git::commit(
-                &row.cwd,
-                self.config.git_bin.as_deref(),
-                message,
-                Duration::from_millis(self.config.diff_timeout_ms),
-                &crate::start_session::phone_environment(),
-            )
-            .await
+            match action {
+                GitAction::Commit { message } => {
+                    self.commit_outcome(session_uid, request_id, &row, message.trim())
+                        .await
+                }
+                GitAction::CreatePr => self.create_pr(&row).await,
+            }
         };
         let result = match outcome {
-            crate::git::CommitOutcome::Committed {
-                sha,
-                files,
-                message,
+            ActionOutcome::Done {
+                result,
+                notice,
+                what,
             } => {
-                let result = GitActionResult::Done { sha: sha.clone() };
-                let notice = PendingEvent::new(
-                    &SessionKey::new(session_uid, &row.session_id),
-                    EventKind::Notification,
-                    serde_json::json!({
-                        "notification_type": protocol::event::notice::COMMITTED,
-                        "oid": sha,
-                        "files": files,
-                        "message": message,
-                    }),
-                    Source::Daemon,
-                )
-                .with_source_event_id(format!("git_commit:{request_id}"));
-                let settled = self
-                    .settle_with_event(
-                        session_uid,
-                        crate::store::OPERATION_GIT_ACTION,
-                        request_id,
-                        &serde_json::to_string(&result).unwrap_or_default(),
-                        notice,
-                    )
-                    .await;
+                let outcome = serde_json::to_string(&result).unwrap_or_default();
+                let settled = match notice {
+                    Some(notice) => {
+                        self.settle_with_event(
+                            session_uid,
+                            crate::store::OPERATION_GIT_ACTION,
+                            request_id,
+                            &outcome,
+                            *notice,
+                        )
+                        .await
+                    }
+                    None => {
+                        self.db
+                            .settle_mutation(
+                                crate::store::OPERATION_GIT_ACTION,
+                                session_uid.to_string(),
+                                request_id.to_string(),
+                                outcome,
+                                protocol::time::now_rfc3339(),
+                            )
+                            .await
+                    }
+                };
                 match settled {
                     Ok(true) => result,
                     // Settled by no row (its run was removed meanwhile): nothing kept, as below.
                     Ok(false) => refused(
                         code::INDETERMINATE,
-                        Some(format!(
-                            "committed {sha}, but the computer could not record it"
-                        )),
+                        Some(format!("{what}, but the computer could not record it")),
                     ),
-                    // Committed, but neither the answer nor the notice is kept: a retry finds the
-                    // claim unsettled, so this answer says the same.
+                    // Done, but its answer is not kept: a retry finds the claim unsettled, so
+                    // this answer says the same.
                     Err(err) => {
                         crate::log_error!(
-                            "{session_uid}: committed {sha}, but could not record it: {err:#}"
+                            "{session_uid}: {what}, but could not record it: {err:#}"
                         );
                         refused(
                             code::INDETERMINATE,
-                            Some(format!(
-                                "committed {sha}, but the computer could not record it"
-                            )),
+                            Some(format!("{what}, but the computer could not record it")),
                         )
                     }
                 }
             }
-            crate::git::CommitOutcome::Refused { code, detail } => {
+            ActionOutcome::Refused(code, detail) => {
                 let result = refused(code, detail);
                 // The refusal stands only once kept: a retry reads what was kept.
                 match self
@@ -5429,14 +5433,14 @@ impl Daemon {
                     settled => {
                         if let Err(err) = settled {
                             crate::log_error!(
-                                "{session_uid}: could not record a refused commit: {err:#}"
+                                "{session_uid}: could not record a refused {route}: {err:#}"
                             );
                         }
                         refused(code::INDETERMINATE, None)
                     }
                 }
             }
-            crate::git::CommitOutcome::Unknown(detail) => {
+            ActionOutcome::Unknown(detail) => {
                 if let Err(err) = self
                     .db
                     .settle_mutation_indeterminate(
@@ -5447,13 +5451,172 @@ impl Daemon {
                     )
                     .await
                 {
-                    crate::log_error!("{session_uid}: could not record an unknown commit: {err:#}");
+                    crate::log_error!(
+                        "{session_uid}: could not record an unknown {route}: {err:#}"
+                    );
                 }
                 refused(code::INDETERMINATE, Some(detail))
             }
         };
         self.refresh_tree(session_uid);
         result
+    }
+
+    /// A commit of every change in `row`'s folder, and the notice it files.
+    async fn commit_outcome(
+        &self,
+        session_uid: &str,
+        request_id: &str,
+        row: &crate::store::SessionRow,
+        message: &str,
+    ) -> ActionOutcome {
+        let outcome = crate::git::commit(
+            &row.cwd,
+            self.config.git_bin.as_deref(),
+            message,
+            Duration::from_millis(self.config.diff_timeout_ms),
+            &crate::start_session::phone_environment(),
+        )
+        .await;
+        match outcome {
+            crate::git::CommitOutcome::Committed {
+                sha,
+                files,
+                message,
+            } => {
+                let notice = PendingEvent::new(
+                    &SessionKey::new(session_uid, &row.session_id),
+                    EventKind::Notification,
+                    serde_json::json!({
+                        "notification_type": protocol::event::notice::COMMITTED,
+                        "oid": sha,
+                        "files": files,
+                        "message": message,
+                    }),
+                    Source::Daemon,
+                )
+                .with_source_event_id(format!("git_commit:{request_id}"));
+                ActionOutcome::Done {
+                    what: format!("committed {sha}"),
+                    result: protocol::ws::GitActionResult::Done {
+                        sha: Some(sha),
+                        pr: None,
+                    },
+                    notice: Some(Box::new(notice)),
+                }
+            }
+            crate::git::CommitOutcome::Refused { code, detail } => {
+                ActionOutcome::Refused(code, detail)
+            }
+            crate::git::CommitOutcome::Unknown(detail) => ActionOutcome::Unknown(detail),
+        }
+    }
+
+    /// A pull request from `row`'s branch ([`protocol::ws::GitAction::CreatePr`]): the open one
+    /// already there, else the branch pushed (no force) and one
+    /// opened with gh. Whatever the outcome, the branch's GitHub read is asked again next time.
+    async fn create_pr(&self, row: &crate::store::SessionRow) -> ActionOutcome {
+        use crate::github::{Created, Unavailable};
+        use protocol::ws::git_refusal as code;
+        let timeout = Duration::from_millis(self.config.diff_timeout_ms);
+        let git_bin = self.config.git_bin.as_deref();
+        let gh_bin = self.config.gh_bin.as_deref();
+        let git = match crate::git::run_git(&row.cwd, git_bin, timeout).await {
+            Ok(git) => git,
+            Err(note) => return ActionOutcome::Refused(code::NOT_A_REPOSITORY, Some(note)),
+        };
+        let Some(branch) = git.branch.clone() else {
+            return ActionOutcome::Refused(code::DETACHED, None);
+        };
+        if git.unmerged {
+            return ActionOutcome::Refused(code::UNMERGED, None);
+        }
+        // Without a known base nothing says this branch is not the default one: never pushed.
+        let Some(base) = git.base.as_ref().map(|base| base.name.as_str()) else {
+            return ActionOutcome::Refused(code::BASE_UNKNOWN, None);
+        };
+        if base == branch {
+            return ActionOutcome::Refused(code::ON_BASE_BRANCH, None);
+        }
+        if git.ahead == Some(0) {
+            return ActionOutcome::Refused(code::NOTHING_TO_PROPOSE, None);
+        }
+        let remotes = crate::git::push_remote_urls(&row.cwd, git_bin, &branch, timeout).await;
+        let Some((remotes, head, target)) = remotes.and_then(|remotes| {
+            let head = crate::github::parse_remote(&remotes.head)?;
+            let target = crate::github::parse_remote(&remotes.target)?;
+            Some((remotes, head, target))
+        }) else {
+            return ActionOutcome::Refused(code::NO_GITHUB_REMOTE, None);
+        };
+        let done = |pr: protocol::ws::PrLink| ActionOutcome::Done {
+            what: format!("opened pull request #{}", pr.number),
+            result: protocol::ws::GitActionResult::Done {
+                sha: None,
+                pr: Some(pr),
+            },
+            notice: None,
+        };
+        let link = |pr: protocol::ws::PullRequest| protocol::ws::PrLink {
+            number: pr.number,
+            url: pr.url,
+        };
+        let outcome = 'outcome: {
+            match crate::github::open_pr(gh_bin, &head, &target, &branch).await {
+                Ok(Some(pr)) => break 'outcome done(link(pr)),
+                Ok(None) => {}
+                Err(Unavailable::Missing) => {
+                    break 'outcome ActionOutcome::Refused(code::GH_MISSING, None)
+                }
+                Err(Unavailable::SignedOut) => {
+                    break 'outcome ActionOutcome::Refused(code::GH_SIGNED_OUT, None)
+                }
+                Err(Unavailable::Down) => {
+                    break 'outcome ActionOutcome::Refused(code::GITHUB_UNAVAILABLE, None)
+                }
+            }
+            // Always pushed (no force): nothing when the remote has the commit checked out, refused
+            // when the branch there moved on, so the pull request is of the commit shown.
+            let pushed = crate::git::push(
+                &row.cwd,
+                git_bin,
+                &remotes.push,
+                &branch,
+                &crate::start_session::phone_environment(),
+            )
+            .await;
+            match pushed {
+                Ok(()) => {}
+                Err(crate::git::PushFailure::Refused(detail)) => {
+                    break 'outcome ActionOutcome::Refused(code::GIT_FAILED, Some(detail))
+                }
+                Err(crate::git::PushFailure::Timeout) => {
+                    break 'outcome ActionOutcome::Refused(code::TIMEOUT, Some("push".into()))
+                }
+            }
+            let created =
+                crate::github::create_pr(&row.cwd, gh_bin, &head, &target, &branch, base).await;
+            if let Created::Opened(pr) = created {
+                break 'outcome done(pr);
+            }
+            // A lost answer or a race: the pull request may be there, and is never opened twice.
+            match (
+                crate::github::open_pr(gh_bin, &head, &target, &branch).await,
+                created,
+            ) {
+                (Ok(Some(pr)), _) => done(link(pr)),
+                (Ok(None), Created::Failed(detail)) => {
+                    ActionOutcome::Refused(code::CREATE_FAILED, Some(format!("pushed; {detail}")))
+                }
+                // gh gave no answer, or GitHub could not be asked again: it may have one.
+                _ => ActionOutcome::Unknown(
+                    "pushed; GitHub may have the pull request: read the run's repository again"
+                        .into(),
+                ),
+            }
+        };
+        self.github.forget(&head, &target, &branch).await;
+        outcome
     }
 
     /// Read a run's branch and line counts from git into the session list, on a
@@ -6410,6 +6573,20 @@ async fn git_gate_in(gates: &Mutex<HashMap<String, Arc<Mutex<()>>>>, cwd: &str) 
     let mut gates = gates.lock().await;
     gates.retain(|_, gate| Arc::strong_count(gate) > 1);
     Arc::clone(gates.entry(cwd.to_string()).or_default())
+}
+
+/// What an action on a run's repository came to, before it is kept.
+enum ActionOutcome {
+    /// Done: the answer, the notice it files, and what was done, in words for a log.
+    Done {
+        result: protocol::ws::GitActionResult,
+        notice: Option<Box<PendingEvent>>,
+        what: String,
+    },
+    /// Not done: a [`protocol::ws::git_refusal`] code and, for some, the tool's words.
+    Refused(&'static str, Option<String>),
+    /// It may have been done, and the tool could not say: never tried again.
+    Unknown(String),
 }
 
 #[cfg(test)]
@@ -8074,7 +8251,10 @@ mod tests {
         let head = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
         assert_eq!(
             first,
-            protocol::ws::GitActionResult::Done { sha: head.clone() }
+            protocol::ws::GitActionResult::Done {
+                sha: Some(head.clone()),
+                pr: None,
+            }
         );
         assert_eq!(
             committed_notices(&daemon, uid),
@@ -8400,7 +8580,10 @@ mod tests {
 
     /// A stand-in `gh` in its own folder, answering `gh api` for the pulls from the files beside
     /// it, as gh 2.87.3 does: `open.json`/`closed.json` on stdout, `api.err` on stderr, exit
-    /// `api.exit`; every call is logged to `calls`, after `prompt=` and its `GH_PROMPT_DISABLED`.
+    /// `api.exit`; `pr create` from `create.out`/`create.err`/`create.exit`, writing the folder it
+    /// ran in to `create.cwd`, after which an open
+    /// lookup reads `open.after` when there is one; every call is logged to `calls`, after
+    /// `prompt=` and its `GH_PROMPT_DISABLED`.
     /// Signed in by default: exit 0 and GitHub's own cli/cli answers (no credential captures
     /// gh's signed-in run; its body is that answer).
     fn stand_in_gh() -> std::path::PathBuf {
@@ -8416,7 +8599,9 @@ mod tests {
         std::fs::write(
             &gh,
             "#!/bin/sh\nd=$(dirname \"$0\")\necho \"prompt=${GH_PROMPT_DISABLED:-on} $*\" >> \"$d/calls\"\ncase \"$*\" in\n\
-             *state=open*) cat \"$d/api.err\" >&2; cat \"$d/open.json\"; exit $(cat \"$d/api.exit\");;\n\
+             \"api graphql\"*) cat \"$d/api.err\" >&2; cat \"$d/checks.json\"; exit $(cat \"$d/api.exit\");;\n\
+             \"pr create\"*) touch \"$d/created\"; pwd -P > \"$d/create.cwd\"; cat \"$d/create.err\" >&2; cat \"$d/create.out\"; exit $(cat \"$d/create.exit\");;\n\
+             *state=open*) cat \"$d/api.err\" >&2; if [ -f \"$d/created\" ] && [ -f \"$d/open.after\" ]; then cat \"$d/open.after\"; else cat \"$d/open.json\"; fi; exit $(cat \"$d/api.exit\");;\n\
              *state=closed*) cat \"$d/api.err\" >&2; cat \"$d/closed.json\"; exit $(cat \"$d/api.exit\");;\n\
              esac\nexit 2\n",
         )
@@ -8425,8 +8610,16 @@ mod tests {
         let fixtures = github_fixtures();
         std::fs::copy(fixtures.join("pulls-open.json"), dir.join("open.json")).unwrap();
         std::fs::copy(fixtures.join("pulls-closed.json"), dir.join("closed.json")).unwrap();
+        std::fs::copy(
+            fixtures.join("checks-graphql.json"),
+            dir.join("checks.json"),
+        )
+        .unwrap();
         std::fs::write(dir.join("api.err"), "").unwrap();
         std::fs::write(dir.join("api.exit"), "0").unwrap();
+        for (name, text) in [("create.out", ""), ("create.err", ""), ("create.exit", "0")] {
+            std::fs::write(dir.join(name), text).unwrap();
+        }
         gh
     }
 
@@ -8531,11 +8724,21 @@ mod tests {
         assert_eq!(read.gh, Some(GhState::SignedIn));
         assert_eq!(read.pr.as_ref().map(|pr| pr.number), Some(15173));
         assert_eq!(two.unwrap().unwrap().pr, read.pr);
+        let pr = read.pr.as_ref().unwrap();
+        assert_eq!(
+            (pr.checks.as_ref().map(Vec::len), pr.checks_complete),
+            (Some(10), Some(true)),
+            "an open pull request's checks, from the checks query"
+        );
         let calls = gh_calls(&gh);
         assert_eq!(
             calls.len(),
-            1,
-            "two reads at once, one open pulls call: {calls:?}"
+            2,
+            "two reads at once: one open pulls call, one checks query: {calls:?}"
+        );
+        assert!(
+            calls[1].contains("api graphql") && calls[1].contains("number=15173"),
+            "{calls:?}"
         );
         assert!(
             calls[0].starts_with("prompt=1 "),
@@ -8551,7 +8754,7 @@ mod tests {
             (again.pr, again.gh_read_at),
             (read.pr.clone(), read.gh_read_at.clone())
         );
-        assert_eq!(gh_calls(&gh).len(), 1, "inside the window gh is not asked");
+        assert_eq!(gh_calls(&gh).len(), 2, "inside the window gh is not asked");
         git_in(
             &dir,
             &[
@@ -8567,7 +8770,7 @@ mod tests {
             ],
         );
         daemon.run_git(uid).await.unwrap().unwrap();
-        assert_eq!(gh_calls(&gh).len(), 2, "a new commit is read again");
+        assert_eq!(gh_calls(&gh).len(), 4, "a new commit is read again");
         done(&gh, &dir);
 
         let gh = stand_in_gh();
@@ -8739,6 +8942,464 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run on `branch` (one commit past the first) whose `origin` is cli/cli over SSH, its
+    /// pushes landing in a bare repository beside it through `core.sshCommand`: nothing leaves
+    /// the computer, and git still names the GitHub repository. Returns the run's folder and
+    /// the bare repository.
+    fn run_pushing_to_a_bare(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        branch: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = run_in_a_repository_as(
+            daemon,
+            uid,
+            protocol::agent::AgentKind::Claude,
+            Lifecycle::Exited,
+        );
+        let bare = dir.with_extension("bare");
+        let git = crate::git::git_bin(None).unwrap();
+        let made = std::process::Command::new(&git)
+            .args(["init", "-q", "--bare"])
+            .arg(&bare)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let ssh = dir.with_extension("ssh");
+        std::fs::write(
+            &ssh,
+            format!(
+                "#!/bin/sh\nexec '{}' receive-pack '{}'\n",
+                git.display(),
+                bare.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git_in(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "ssh://git@github.com/cli/cli.git",
+            ],
+        );
+        git_in(&dir, &["config", "core.sshCommand", ssh.to_str().unwrap()]);
+        // As a clone has it: `origin/HEAD` names `main`, at the first commit.
+        git_in(&dir, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git_in(
+            &dir,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        git_in(&dir, &["switch", "-q", "-c", branch]);
+        git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "Second"]);
+        (dir, bare)
+    }
+
+    fn pr(number: u64) -> protocol::ws::GitActionResult {
+        protocol::ws::GitActionResult::Done {
+            sha: None,
+            pr: Some(protocol::ws::PrLink {
+                number,
+                url: format!("https://github.com/cli/cli/pull/{number}"),
+            }),
+        }
+    }
+
+    fn refused_as(result: &protocol::ws::GitActionResult) -> (String, Option<String>) {
+        match result {
+            protocol::ws::GitActionResult::Refused { code, detail } => {
+                (code.clone(), detail.clone())
+            }
+            done => panic!("not refused: {done:?}"),
+        }
+    }
+
+    /// **A pull request is opened once, and never twice**: pushed then opened with gh (and the
+    /// same request answered again without a call), an open one returned without pushing, gh's
+    /// refusal after the push, a lost "already exists" race answered from the lookup, signed out
+    /// and a refusing `pre-push` hook stopping before anything is sent, the base branch, a branch
+    /// with nothing to propose, and a remote that names no GitHub repository.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pull_request_is_opened_once_and_never_twice() {
+        use protocol::ws::git_refusal as code;
+        let _env = crate::ProcessEnvRead::take();
+        let create = protocol::ws::GitAction::CreatePr;
+        let on = |gh: &std::path::Path| {
+            daemon_on(
+                shared_store(),
+                Config {
+                    gh_bin: Some(gh.to_str().unwrap().into()),
+                    ..Config::default()
+                },
+            )
+        };
+        let done = |gh: &std::path::Path, dir: &std::path::Path, bare: &std::path::Path| {
+            for path in [
+                dir.to_path_buf(),
+                bare.to_path_buf(),
+                gh.parent().unwrap().to_path_buf(),
+            ] {
+                let _ = std::fs::remove_dir_all(path);
+            }
+            let _ = std::fs::remove_file(dir.with_extension("ssh"));
+        };
+        let refs = |bare: &std::path::Path| {
+            git_in(bare, &["for-each-ref", "--format=%(refname) %(objectname)"])
+        };
+
+        // Read first (cached), pushed, then opened in the run's folder; the same request is
+        // answered again without a call; and the next read asks GitHub again.
+        let gh = stand_in_gh();
+        std::fs::write(
+            gh.with_file_name("create.out"),
+            "https://github.com/cli/cli/pull/15200\n",
+        )
+        .unwrap();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP30";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-feature");
+        daemon.run_git(uid).await.unwrap().unwrap();
+        let read = gh_calls(&gh).len();
+        assert_eq!(
+            read, 2,
+            "open, then closed: the stand-in's open list lacks it"
+        );
+        assert_eq!(daemon.git_action(uid, "p-1", &create).await, pr(15200));
+        let head = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+        assert_eq!(refs(&bare).trim(), format!("refs/heads/w2-feature {head}"));
+        assert_eq!(
+            git_in(
+                &dir,
+                &["rev-parse", "--abbrev-ref", "w2-feature@{upstream}"]
+            )
+            .trim(),
+            "origin/w2-feature"
+        );
+        let calls = gh_calls(&gh);
+        assert_eq!(calls.len(), read + 2, "{calls:?}");
+        assert!(
+            calls[read].contains("repos/cli/cli/pulls")
+                && calls[read].contains("head=cli:w2-feature"),
+            "{calls:?}"
+        );
+        assert!(
+            calls[read + 1]
+                .contains("pr create --repo cli/cli --head w2-feature --base main --fill"),
+            "{calls:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(gh.with_file_name("create.cwd"))
+                .unwrap()
+                .trim(),
+            dir.canonicalize().unwrap().to_str().unwrap(),
+            "gh reads the branch's commits in the run's folder"
+        );
+        assert_eq!(daemon.git_action(uid, "p-1", &create).await, pr(15200));
+        assert_eq!(gh_calls(&gh).len(), read + 2, "a request is answered once");
+        daemon.run_git(uid).await.unwrap().unwrap();
+        assert_eq!(
+            gh_calls(&gh).len(),
+            read + 4,
+            "after it, the branch's GitHub read is asked again, not answered from before it"
+        );
+        done(&gh, &dir, &bare);
+
+        // The branch there moved on since this clone last fetched: the push is refused, and
+        // no pull request is opened for a commit the panel does not show.
+        let gh = stand_in_gh();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP37";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-moved");
+        git_in(&dir, &["push", "-q", "-u", "origin", "w2-moved"]);
+        git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "Elsewhere"]);
+        git_in(&dir, &["push", "-q", "origin", "HEAD:refs/heads/w2-moved"]);
+        git_in(&dir, &["reset", "-q", "--hard", "HEAD~1"]);
+        git_in(
+            &dir,
+            &["update-ref", "refs/remotes/origin/w2-moved", "HEAD"],
+        );
+        let (refused, reason) = refused_as(&daemon.git_action(uid, "p-10", &create).await);
+        assert_eq!(refused, code::GIT_FAILED);
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|line| line.starts_with("! [rejected]")),
+            "git's reason, not the line naming the remote: {reason:?}"
+        );
+        assert_eq!(
+            gh_calls(&gh).len(),
+            1,
+            "only the lookup: {:?}",
+            gh_calls(&gh)
+        );
+        done(&gh, &dir, &bare);
+
+        // An open pull request from the branch: returned, nothing pushed, nothing created.
+        let gh = stand_in_gh();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP31";
+        let branch = "dependabot/go_modules/github.com/sigstore/sigstore-go-1.4.1";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, branch);
+        assert_eq!(daemon.git_action(uid, "p-2", &create).await, pr(15173));
+        assert_eq!(refs(&bare), "");
+        assert_eq!(gh_calls(&gh).len(), 1);
+        done(&gh, &dir, &bare);
+
+        // gh refuses after the push: said so, and the branch stays pushed.
+        let gh = stand_in_gh();
+        // gh's words for a refused create, written from its source.
+        std::fs::write(
+            gh.with_file_name("create.err"),
+            "pull request create failed: GraphQL: Head sha can't be blank (createPullRequest)\n",
+        )
+        .unwrap();
+        std::fs::write(gh.with_file_name("create.exit"), "1").unwrap();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP32";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-refused");
+        assert_eq!(
+            refused_as(&daemon.git_action(uid, "p-3", &create).await),
+            (
+                code::CREATE_FAILED.to_string(),
+                Some("pushed; pull request create failed: GraphQL: Head sha can't be blank (createPullRequest)".into())
+            )
+        );
+        assert!(refs(&bare).contains("refs/heads/w2-refused"));
+        assert_eq!(gh_calls(&gh).len(), 3, "lookup, create, the lookup after");
+        done(&gh, &dir, &bare);
+
+        // "Already exists" (a race): the lookup after finds it, and it is the answer.
+        let gh = stand_in_gh();
+        // gh's words when one is already open, written from its source.
+        std::fs::write(
+            gh.with_file_name("create.err"),
+            "a pull request for branch \"w2-race\" into branch \"trunk\" already exists:\nhttps://github.com/cli/cli/pull/15300\n",
+        )
+        .unwrap();
+        std::fs::write(gh.with_file_name("create.exit"), "1").unwrap();
+        std::fs::write(
+            gh.with_file_name("open.after"),
+            r#"[{"number": 15300, "state": "open", "html_url": "https://github.com/cli/cli/pull/15300", "merged_at": null,
+                "base": {"ref": "trunk"}, "head": {"ref": "w2-race", "sha": "0", "repo": {"full_name": "cli/cli"}}}]"#,
+        )
+        .unwrap();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP33";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-race");
+        assert_eq!(daemon.git_action(uid, "p-4", &create).await, pr(15300));
+        done(&gh, &dir, &bare);
+
+        // Signed out (gh's own capture): nothing pushed, nothing created.
+        let gh = stand_in_gh();
+        gh_answers_as(&gh, "api-signed-out");
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP34";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-out");
+        assert_eq!(
+            refused_as(&daemon.git_action(uid, "p-5", &create).await).0,
+            code::GH_SIGNED_OUT
+        );
+        assert_eq!(refs(&bare), "");
+        done(&gh, &dir, &bare);
+
+        // The repository's pre-push hook refuses: its words, and gh is not asked to create.
+        let gh = stand_in_gh();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP35";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-hook");
+        let hook = dir.join(".git/hooks/pre-push");
+        std::fs::write(&hook, "#!/bin/sh\necho 'the tests failed' >&2\nexit 1\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            refused_as(&daemon.git_action(uid, "p-6", &create).await),
+            (
+                code::GIT_FAILED.to_string(),
+                Some("the tests failed".into())
+            )
+        );
+        assert_eq!(refs(&bare), "");
+        assert_eq!(gh_calls(&gh).len(), 1, "only the lookup");
+        done(&gh, &dir, &bare);
+
+        // A triangle (`remote.pushDefault=fork`, the parent as `origin`): after `push -u fork`
+        // the branch tracks the fork, and the pull request is still looked for on the parent.
+        let gh = stand_in_gh();
+        std::fs::write(
+            gh.with_file_name("create.out"),
+            "https://github.com/cli/cli/pull/15400\n",
+        )
+        .unwrap();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP40";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-tri");
+        git_in(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "fork",
+                "ssh://git@github.com/lazerg/cli-2.git",
+            ],
+        );
+        git_in(&dir, &["update-ref", "refs/remotes/fork/main", "main"]);
+        git_in(
+            &dir,
+            &[
+                "symbolic-ref",
+                "refs/remotes/fork/HEAD",
+                "refs/remotes/fork/main",
+            ],
+        );
+        git_in(&dir, &["config", "remote.pushDefault", "fork"]);
+        assert_eq!(daemon.git_action(uid, "p-13", &create).await, pr(15400));
+        let calls = gh_calls(&gh);
+        assert!(
+            calls[1].contains("pr create --repo cli/cli --head lazerg:w2-tri"),
+            "{calls:?}"
+        );
+        daemon.run_git(uid).await.unwrap().unwrap();
+        let read = gh_calls(&gh);
+        assert!(
+            read[2].contains("repos/cli/cli/pulls") && read[2].contains("head=lazerg:w2-tri"),
+            "the parent, after the push made the fork the branch's upstream: {read:?}"
+        );
+        done(&gh, &dir, &bare);
+
+        // No base known (a repository made by `git init` and pushed has no `origin/HEAD`):
+        // nothing says this is not the default branch, so nothing is pushed or asked.
+        let gh = stand_in_gh();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP38";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-nobase");
+        git_in(
+            &dir,
+            &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+        );
+        assert_eq!(
+            refused_as(&daemon.git_action(uid, "p-11", &create).await).0,
+            code::BASE_UNKNOWN
+        );
+        assert_eq!(refs(&bare), "");
+        assert!(gh_calls(&gh).is_empty(), "{:?}", gh_calls(&gh));
+        done(&gh, &dir, &bare);
+
+        // gh fails, and GitHub cannot be asked again (its answer is not a pulls list): not known
+        // whether it opened one, so never said to have failed.
+        let gh = stand_in_gh();
+        std::fs::write(
+            gh.with_file_name("create.err"),
+            "error connecting to api.github.com\n",
+        )
+        .unwrap();
+        std::fs::write(gh.with_file_name("create.exit"), "1").unwrap();
+        std::fs::write(gh.with_file_name("open.after"), "not a pulls list").unwrap();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP39";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-lost");
+        assert_eq!(
+            refused_as(&daemon.git_action(uid, "p-12", &create).await).0,
+            code::INDETERMINATE
+        );
+        done(&gh, &dir, &bare);
+
+        // The base branch itself, then a branch with nothing past it, then no GitHub remote.
+        let gh = stand_in_gh();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP36";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-base");
+        git_in(&dir, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git_in(
+            &dir,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        git_in(&dir, &["switch", "-q", "main"]);
+        git_in(&dir, &["reset", "-q", "--hard", "w2-base"]);
+        assert_eq!(
+            refused_as(&daemon.git_action(uid, "p-7", &create).await).0,
+            code::ON_BASE_BRANCH
+        );
+        git_in(&dir, &["switch", "-q", "-c", "w2-level"]);
+        assert_eq!(
+            refused_as(&daemon.git_action(uid, "p-8", &create).await).0,
+            code::NOTHING_TO_PROPOSE
+        );
+        git_in(&dir, &["remote", "set-url", "origin", "/srv/git/app.git"]);
+        git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "Third"]);
+        assert_eq!(
+            refused_as(&daemon.git_action(uid, "p-9", &create).await).0,
+            code::NO_GITHUB_REMOTE
+        );
+        assert!(gh_calls(&gh).is_empty(), "{:?}", gh_calls(&gh));
+        done(&gh, &dir, &bare);
+    }
+
+    /// **A merged pull request carries no checks, and they are not asked for**: only an open
+    /// one's are read.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_merged_pull_request_is_read_without_its_checks() {
+        use protocol::agent::AgentKind;
+        use protocol::ws::PrState;
+        let _env = crate::ProcessEnvRead::take();
+        let gh = stand_in_gh();
+        let daemon = daemon_on(
+            shared_store(),
+            Config {
+                gh_bin: Some(gh.to_str().unwrap().into()),
+                ..Config::default()
+            },
+        );
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP41";
+        let dir = run_in_a_repository_as(&daemon, uid, AgentKind::Claude, Lifecycle::Exited);
+        git_in(
+            &dir,
+            &["remote", "add", "origin", "https://github.com/cli/cli.git"],
+        );
+        git_in(&dir, &["switch", "-q", "-c", "w2-done"]);
+        let head = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(gh.with_file_name("open.json"), "[]").unwrap();
+        std::fs::write(
+            gh.with_file_name("closed.json"),
+            format!(
+                r#"[{{"number": 15500, "state": "closed", "html_url": "https://github.com/cli/cli/pull/15500",
+                    "merged_at": "2026-11-26T10:00:00Z", "base": {{"ref": "trunk"}},
+                    "head": {{"ref": "w2-done", "sha": "{head}", "repo": {{"full_name": "cli/cli"}}}}}}]"#
+            ),
+        )
+        .unwrap();
+        let read = daemon.run_git(uid).await.unwrap().unwrap();
+        let pr = read.pr.unwrap();
+        assert_eq!((pr.number, pr.state), (15500, PrState::Merged));
+        assert_eq!((pr.checks, pr.checks_complete), (None, None));
+        let calls = gh_calls(&gh);
+        assert_eq!(
+            calls.len(),
+            2,
+            "open, then closed; no checks query: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.contains("graphql")),
+            "{calls:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(gh.parent().unwrap());
     }
 
     /// **A read of a run's repository and a commit in it never run git at once**: started

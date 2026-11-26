@@ -340,7 +340,8 @@
     "delete_session": true,
     "diff": true,
     "git_actions": [
-      "commit"
+      "commit",
+      "create_pr"
     ],
     "history_pages": true,
     "hook_only_approvals": true,

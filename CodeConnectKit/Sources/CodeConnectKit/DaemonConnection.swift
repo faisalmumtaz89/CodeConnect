@@ -1218,6 +1218,22 @@ public final class DaemonConnection {
             timeout: Self.commitTimeout)
     }
 
+    /// Open a pull request from the run `sessionUID`'s branch: pushed first when its push remote lacks it, then opened with
+    /// gh into the repository `RunGit.ghRepo` names; an open one already there is the answer. `requestID` is its
+    /// identity: a retry reuses it and the computer replays its answer, never opening two.
+    public func createPullRequest(sessionUID: String, requestID: String) async throws -> GitActionResult {
+        guard capabilities?.opensPullRequests == true else {
+            throw ConnectionError.incompatible(
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can’t open a pull request on this connection."
+            )
+        }
+        return try await request(
+            key: requestID,
+            store: \.gitActionWaiters,
+            send: .createPullRequest(requestID: requestID, sessionUID: sessionUID),
+            timeout: Self.commitTimeout)
+    }
+
     /// A run's repository for its Changes panel (`get_run_git`), correlated by the reference as `diff` is.
     public func runGit(session: String) async throws -> RunGitReply {
         guard capabilities?.readsRunGit == true else {

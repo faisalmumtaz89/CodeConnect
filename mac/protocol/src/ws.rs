@@ -1458,6 +1458,11 @@ pub struct RunGit {
     /// or its rate limit pausing the host's reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_read_at: Option<String>,
+    /// The repository on `gh_host` a pull request from this branch goes into, `owner/name`: the
+    /// remote named `upstream` (a fork's parent), else `origin`, else the push remote
+    /// (minor 61). Absent when no remote names a github.com repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_repo: Option<String>,
 }
 
 /// Whether `gh` can read a [`RunGit`]'s repository on GitHub.
@@ -1487,6 +1492,49 @@ pub struct PullRequest {
     pub head_oid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_at: Option<String>,
+    /// An open one's checks at its head (minor 62), sorted failed, pending, cancelled, unknown,
+    /// passed, skipped, then by name; at most 100. Absent when not read: a closed or merged
+    /// pull request, an older daemon, or GitHub not answering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<Vec<Check>>,
+    /// False when there were more than 100, or the head moved while they were read (then
+    /// `checks` is empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_complete: Option<bool>,
+}
+
+/// One of a [`PullRequest`]'s checks: a check run, or a commit status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Check {
+    /// A check run's name, or a status's context.
+    pub name: String,
+    pub state: CheckState,
+    /// A check run's start; a status has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// Absent while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    /// Its log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// A failed check run's first failure annotation's first line, when it says more than the
+    /// runner's "Process completed with exit code N.".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_line: Option<String>,
+}
+
+/// A [`Check`]'s state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    Fail,
+    Pending,
+    Cancelled,
+    /// A state this daemon does not name.
+    Unknown,
+    Pass,
+    Skipped,
 }
 
 /// A [`PullRequest`]'s state.
@@ -1507,6 +1555,10 @@ pub enum GitAction {
     /// running as they do for the person's own `git commit`. Files a
     /// [`crate::event::notice::COMMITTED`] notice into the run's conversation.
     Commit { message: String },
+    /// The branch pushed to its push remote (no force) and a pull request opened from it into
+    /// [`RunGit::gh_repo`], titled and described by gh from its commits (minor 61). An open one
+    /// from the branch already there is the answer, and nothing is pushed.
+    CreatePr,
 }
 
 /// Ceiling on a [`GitAction::Commit`]'s message, the same as a typed message's.
@@ -1516,14 +1568,26 @@ pub const MAX_COMMIT_MESSAGE_BYTES: usize = MAX_SEND_TEXT_BYTES;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum GitActionResult {
-    /// Done; for a commit, `sha` is the commit made.
-    Done { sha: String },
+    /// Done: for a commit, `sha` is the commit made; for a pull request, `pr` is it.
+    Done {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pr: Option<PrLink>,
+    },
     /// Not done, with one of [`git_refusal`]'s codes and, for some, git's own words.
     Refused {
         code: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+}
+
+/// A pull request a [`GitAction::CreatePr`] opened or found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrLink {
+    pub number: u64,
+    pub url: String,
 }
 
 /// The codes of a refused [`GitActionResult`]; an app words each itself.
@@ -1551,6 +1615,25 @@ pub mod git_refusal {
     /// git did not answer after it may have committed). Never tried again under this id: the
     /// run's repository, read again, shows what git has.
     pub const INDETERMINATE: &str = "indeterminate";
+    /// No `gh` on this computer.
+    pub const GH_MISSING: &str = "gh_missing";
+    /// `gh` has no account for the repository's host, or GitHub refused its token.
+    pub const GH_SIGNED_OUT: &str = "gh_signed_out";
+    /// GitHub could not be reached, asked to wait, or gave no answer gh could read. Nothing was
+    /// pushed.
+    pub const GITHUB_UNAVAILABLE: &str = "github_unavailable";
+    /// No remote names a github.com repository.
+    pub const NO_GITHUB_REMOTE: &str = "no_github_remote";
+    /// The branch checked out is the base branch itself.
+    pub const ON_BASE_BRANCH: &str = "on_base_branch";
+    /// No base branch is known (no `refs/remotes/<remote>/HEAD`, as a repository made by
+    /// `git init` and pushed has none): nothing is pushed.
+    pub const BASE_UNKNOWN: &str = "base_unknown";
+    /// The branch has no commits the base lacks.
+    pub const NOTHING_TO_PROPOSE: &str = "nothing_to_propose";
+    /// gh refused to open the pull request; `detail` is its line, after "pushed; " when the
+    /// branch was pushed first.
+    pub const CREATE_FAILED: &str = "create_failed";
 }
 
 /// A [`RunGit`]'s base branch.
@@ -2787,9 +2870,17 @@ mod tests {
             crate::PROTOCOL_MINOR >= 60,
             "a run's GitHub state and its pull request (`gh`, `gh_host`, `pr`, `gh_read_at`) is minor 60"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 61,
+            "a pull request from the Changes panel (`create_pr`, `pr` on `done`, `gh_repo`) is minor 61"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 62,
+            "a pull request's checks (`checks`, `checks_complete`) are minor 62"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 60);
+        assert_eq!(crate::PROTOCOL_MINOR, 62);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3503,7 +3594,7 @@ mod tests {
             uploads: true,
             run_terminal: true,
             changes: true,
-            git_actions: vec!["commit".into()],
+            git_actions: vec!["commit".into(), "create_pr".into()],
         }
     }
 
@@ -4698,6 +4789,45 @@ mod tests {
         assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded);
     }
 
+    /// **A pull request from the Changes panel, as the apps send and read it** (minor 61): the
+    /// action has no arguments, its `done` carries `pr` and no `sha`, and a commit's `done`
+    /// still carries `sha` alone.
+    #[test]
+    fn a_pull_request_action_encodes_as_the_apps_read_it() {
+        let ask: ClientMessage = serde_json::from_str(
+            r#"{"type":"git_action","request_id":"p-1","session_uid":"u","action":{"kind":"create_pr"}}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(ask, ClientMessage::GitAction { ref action, .. } if *action == GitAction::CreatePr),
+            "{ask:?}"
+        );
+        let opened = GitActionResult::Done {
+            sha: None,
+            pr: Some(PrLink {
+                number: 7,
+                url: "https://github.com/o/r/pull/7".into(),
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(&opened).unwrap(),
+            serde_json::json!({"status": "done", "pr": {"number": 7, "url": "https://github.com/o/r/pull/7"}})
+        );
+        let committed = GitActionResult::Done {
+            sha: Some("abc".into()),
+            pr: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&committed).unwrap(),
+            serde_json::json!({"status": "done", "sha": "abc"})
+        );
+        for done in [opened, committed] {
+            let back: GitActionResult =
+                serde_json::from_value(serde_json::to_value(&done).unwrap()).unwrap();
+            assert_eq!(back, done);
+        }
+    }
+
     /// **A run's repository, as the apps read it**: the request by session, the base's
     /// `ref` spelled as git spells it, absent fields omitted, and a repository-less answer
     /// as a bare note.
@@ -4735,8 +4865,18 @@ mod tests {
                     base: "main".into(),
                     head_oid: "abc".into(),
                     merged_at: None,
+                    checks: Some(vec![Check {
+                        name: "test".into(),
+                        state: CheckState::Fail,
+                        started_at: Some("s".into()),
+                        completed_at: None,
+                        url: Some("l".into()),
+                        failure_line: Some("expected 2, got 3".into()),
+                    }]),
+                    checks_complete: Some(true),
                 }),
                 gh_read_at: Some("u".into()),
+                gh_repo: Some("o/r".into()),
             }),
             note: None,
         };
@@ -4750,9 +4890,11 @@ mod tests {
                     "base": {"name": "main", "remote": "origin", "ref": "refs/remotes/origin/main"},
                     "changed": {"files": 2, "added": 5, "removed": 1, "complete": true},
                     "ahead": 1, "pushed": false, "unmerged": false, "read_at": "t",
-                    "gh": "signed_in", "gh_host": "github.com", "gh_read_at": "u",
+                    "gh": "signed_in", "gh_host": "github.com", "gh_read_at": "u", "gh_repo": "o/r",
                     "pr": {"number": 7, "url": "https://github.com/o/r/pull/7", "state": "open",
-                           "base": "main", "head_oid": "abc"},
+                           "base": "main", "head_oid": "abc", "checks_complete": true,
+                           "checks": [{"name": "test", "state": "fail", "started_at": "s", "url": "l",
+                                       "failure_line": "expected 2, got 3"}]},
                 },
             })
         );

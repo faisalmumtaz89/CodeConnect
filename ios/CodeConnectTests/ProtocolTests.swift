@@ -212,6 +212,28 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(pr.state, .merged)
         XCTAssertEqual(pr.headOID, "abc")
         XCTAssertEqual(pr.mergedAt, "m")
+        XCTAssertNil(pr.checks, "a closed or merged one carries none")
+
+        let checked = try decodeServer(
+            """
+            {"type":"run_git","session_id":"cc-1",
+             "git":{"branch":"feat/x","changed":{"files":0,"added":0,"removed":0,"complete":true},
+                    "pushed":true,"unmerged":false,"read_at":"t","gh":"signed_in",
+                    "pr":{"number":3,"url":"u","state":"open","base":"main","head_oid":"abc","checks_complete":false,
+                          "checks":[{"name":"test","state":"fail","started_at":"s","completed_at":"c","url":"l",
+                                     "failure_line":"expected 2, got 3"},
+                                    {"name":"ci/x","state":"a_later_state"}]}}}
+            """)
+        guard case .runGit(let withChecks) = checked, let checks = withChecks.git?.pullRequest?.checks else {
+            return XCTFail("no checks")
+        }
+        XCTAssertEqual(withChecks.git?.pullRequest?.checksComplete, false)
+        XCTAssertEqual(checks.map(\.state), [.fail, .unknown])
+        XCTAssertEqual(checks[0].failureLine, "expected 2, got 3")
+        XCTAssertEqual(checks[0].startedAt, "s")
+        XCTAssertEqual(checks[0].completedAt, "c")
+        XCTAssertEqual(checks[0].url, "l")
+        XCTAssertNil(checks[1].startedAt)
 
         let newer = try decodeServer(
             """
@@ -345,6 +367,67 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(
             model.connection.repositoryReadTimeout, DaemonConnection.commitTimeout,
             "a read waits its turn behind a commit as long as the commit")
+    }
+
+    /// A pull request's answer as a minor-61 daemon encodes it, a commit's still its sha, the request as it is sent, the
+    /// repository a run's branch would go into, and the request sent only where `git_actions` names `create_pr`.
+    @MainActor
+    func testPullRequestFramesAndItsGate() async throws {
+        let opened = try decodeServer(
+            #"{"type":"git_action_result","request_id":"p-1","session_uid":"u-1","result":{"status":"done","pr":{"number":7,"url":"https://github.com/o/r/pull/7"}}}"#)
+        guard case .gitActionResult("p-1", "u-1", .pullRequest(7, "https://github.com/o/r/pull/7")) = opened else {
+            return XCTFail("wrong message")
+        }
+        let committed = try decodeServer(
+            #"{"type":"git_action_result","request_id":"c-1","session_uid":"u-1","result":{"status":"done","sha":"abc"}}"#)
+        guard case .gitActionResult(_, _, .done("abc")) = committed else { return XCTFail("wrong message") }
+        let repo = try decodeServer(
+            """
+            {"type":"run_git","session_id":"cc-1",
+             "git":{"branch":"feat/x","changed":{"files":0,"added":0,"removed":0,"complete":true},
+                    "pushed":false,"unmerged":false,"read_at":"t","gh":"signed_in","gh_repo":"cli/cli"}}
+            """)
+        guard case .runGit(let reply) = repo else { return XCTFail("wrong message") }
+        XCTAssertEqual(reply.git?.ghRepo, "cli/cli")
+
+        let fields = try encodeClient(.createPullRequest(requestID: "p-1", sessionUID: "u-1"))
+        XCTAssertEqual(fields["type"]?.stringValue, "git_action")
+        XCTAssertEqual(fields["request_id"]?.stringValue, "p-1")
+        XCTAssertEqual(fields["session_uid"]?.stringValue, "u-1")
+        XCTAssertEqual(fields["action"]?.objectValue?["kind"]?.stringValue, "create_pr")
+        XCTAssertEqual(fields["action"]?.objectValue?.count, 1)
+
+        let model = AppModel(cache: EventCache())
+        model.connection.simulateConnectedForTesting()
+        let sent = SentFrames()
+        model.connection.sendStub = { [weak model] message in
+            sent.frames.append(message)
+            if case .createPullRequest(let requestID, let sessionUID) = message {
+                model?.connection.injectForTesting(
+                    .gitActionResult(
+                        requestID: requestID, sessionUID: sessionUID,
+                        result: .pullRequest(number: 7, url: "https://github.com/o/r/pull/7")))
+            }
+        }
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(
+                canApproveReliably: true, sendText: true,
+                extra: ["changes": .bool(true), "git_actions": .array([.string("commit")])]),
+            minor: 60)
+        do {
+            _ = try await model.connection.createPullRequest(sessionUID: "u-1", requestID: "p-9")
+            XCTFail("a daemon whose git_actions lack create_pr is not asked")
+        } catch ConnectionError.incompatible {
+        }
+        XCTAssertTrue(sent.frames.isEmpty)
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(
+                canApproveReliably: true, sendText: true,
+                extra: ["changes": .bool(true), "git_actions": .array([.string("commit"), .string("create_pr")])]),
+            minor: 61)
+        let created = try await model.connection.createPullRequest(sessionUID: "u-1", requestID: "p-9")
+        XCTAssertEqual(created, .pullRequest(number: 7, url: "https://github.com/o/r/pull/7"))
+        XCTAssertEqual(sent.frames.count, 1)
     }
 
     // MARK: turn_complete

@@ -1,0 +1,241 @@
+{
+ "data": {
+  "repository": {
+   "pullRequest": {
+    "commits": {
+     "nodes": [
+      {
+       "commit": {
+        "oid": "8a93995195c4e5a299e227a00f236bf88199674a",
+        "statusCheckRollup": {
+         "contexts": {
+          "pageInfo": {
+           "hasNextPage": false
+          },
+          "nodes": [
+           {
+            "__typename": "CheckRun",
+            "name": "build (ubuntu)",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "startedAt": "2026-11-26T09:00:00Z",
+            "completedAt": "2026-11-26T09:04:10Z",
+            "detailsUrl": "https://github.com/cli/cli/actions/runs/1/job/11",
+            "annotations": {
+             "nodes": []
+            },
+            "checkSuite": {
+             "workflowRun": {
+              "event": "pull_request",
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "build (ubuntu)",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "startedAt": "2026-11-26T08:50:00Z",
+            "completedAt": "2026-11-26T08:53:00Z",
+            "detailsUrl": "https://github.com/cli/cli/actions/runs/1/job/10",
+            "annotations": {
+             "nodes": [
+              {
+               "annotationLevel": "FAILURE",
+               "message": "an earlier run, re-run since"
+              }
+             ]
+            },
+            "checkSuite": {
+             "workflowRun": {
+              "event": "pull_request",
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "test (macos)",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "startedAt": "2026-11-26T09:00:05Z",
+            "completedAt": "2026-11-26T09:07:00Z",
+            "detailsUrl": "https://github.com/cli/cli/actions/runs/1/job/12",
+            "annotations": {
+             "nodes": [
+              {
+               "annotationLevel": "FAILURE",
+               "message": "Process completed with exit code 1."
+              },
+              {
+               "annotationLevel": "WARNING",
+               "message": "Node.js 16 actions are deprecated."
+              },
+              {
+               "annotationLevel": "FAILURE",
+               "message": "pkg/cmd/pr/create_test.go:212: expected 2 calls, got 3\nfull diff follows"
+              }
+             ]
+            },
+            "checkSuite": {
+             "workflowRun": {
+              "event": "pull_request",
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "lint",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "startedAt": "2026-11-26T09:00:01Z",
+            "completedAt": "2026-11-26T09:01:30Z",
+            "detailsUrl": "https://github.com/cli/cli/actions/runs/1/job/13",
+            "annotations": {
+             "nodes": [
+              {
+               "annotationLevel": "FAILURE",
+               "message": "Process completed with exit code 2."
+              }
+             ]
+            },
+            "checkSuite": {
+             "workflowRun": {
+              "event": "pull_request",
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "deploy preview",
+            "status": "IN_PROGRESS",
+            "conclusion": null,
+            "startedAt": "2026-11-26T09:05:00Z",
+            "completedAt": null,
+            "detailsUrl": "https://github.com/cli/cli/actions/runs/1/job/14",
+            "annotations": {
+             "nodes": []
+            },
+            "checkSuite": {
+             "workflowRun": {
+              "event": "pull_request",
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "docs",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "startedAt": "2026-11-26T09:00:00Z",
+            "completedAt": "2026-11-26T09:00:00Z",
+            "detailsUrl": "https://github.com/cli/cli/actions/runs/1/job/15",
+            "annotations": {
+             "nodes": []
+            },
+            "checkSuite": {
+             "workflowRun": {
+              "event": "pull_request",
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "flaky e2e",
+            "status": "COMPLETED",
+            "conclusion": "CANCELLED",
+            "startedAt": "2026-11-26T09:00:00Z",
+            "completedAt": "2026-11-26T09:02:00Z",
+            "detailsUrl": "https://github.com/cli/cli/actions/runs/1/job/16",
+            "annotations": {
+             "nodes": []
+            },
+            "checkSuite": {
+             "workflowRun": {
+              "event": "pull_request",
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "a new kind",
+            "status": "COMPLETED",
+            "conclusion": "SOME_LATER_CONCLUSION",
+            "startedAt": "2026-11-26T09:00:00Z",
+            "completedAt": "2026-11-26T09:00:30Z",
+            "detailsUrl": null,
+            "annotations": {
+             "nodes": []
+            },
+            "checkSuite": {
+             "workflowRun": {
+              "event": "pull_request",
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "StatusContext",
+            "context": "ci/circleci",
+            "state": "PENDING",
+            "targetUrl": "https://circleci.com/gh/cli/cli/1"
+           },
+           {
+            "__typename": "StatusContext",
+            "context": "license/cla",
+            "state": "SUCCESS",
+            "targetUrl": "https://cla.example.org/cli/cli/1"
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "lint",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "startedAt": "2026-11-26T09:03:00Z",
+            "completedAt": "2026-11-26T09:04:00Z",
+            "detailsUrl": "https://github.com/cli/cli/actions/runs/2/job/21",
+            "annotations": {
+             "nodes": []
+            },
+            "checkSuite": {
+             "workflowRun": {
+              "event": "pull_request",
+              "workflow": {
+               "name": "Release"
+              }
+             }
+            }
+           }
+          ]
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}
