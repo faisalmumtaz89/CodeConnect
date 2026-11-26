@@ -197,6 +197,12 @@ public enum SetupAttention {
     public static func needed(serviceMissing: Bool, agentsMissing: [Bool]) -> Bool {
         serviceMissing || (!agentsMissing.isEmpty && agentsMissing.allSatisfy { $0 })
     }
+
+    /// Whether a missing agent's row is drawn as something the computer lacks: only while its setup needs the person.
+    /// Beside a ready agent, a missing one is one more on offer, drawn grey, as an optional Tailscale is.
+    public static func agentLacking(missing: Bool, serviceMissing: Bool, agentsMissing: [Bool]) -> Bool {
+        missing && needed(serviceMissing: serviceMissing, agentsMissing: agentsMissing)
+    }
 }
 
 public enum StartModels: Hashable, Sendable {

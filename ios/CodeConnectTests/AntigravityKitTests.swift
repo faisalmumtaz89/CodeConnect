@@ -214,6 +214,17 @@ final class AntigravityKitTests: XCTestCase {
         XCTAssertTrue(needed(true, [false, false, false]), "no service")
     }
 
+    /// A missing agent's row is drawn as lacking only while no agent can start: beside a ready one it is on offer.
+    func testAMissingAgentIsLackingOnlyWhenNoAgentIsReady() {
+        let lacking = { (missing: Bool, agents: [Bool]) in
+            SetupAttention.agentLacking(missing: missing, serviceMissing: false, agentsMissing: agents)
+        }
+        XCTAssertFalse(lacking(true, [false, false, true]), "Antigravity missing, Claude Code and Codex ready")
+        XCTAssertFalse(lacking(true, [false, true, true]), "Codex missing, Claude Code ready")
+        XCTAssertTrue(lacking(true, [true, true, true]), "none ready")
+        XCTAssertFalse(lacking(false, [false, true, true]), "a ready agent is never lacking")
+    }
+
     /// An Antigravity run's "/" offers model, effort, compact and diff: agy has no `/clear`. Compact's words name
     /// Antigravity, and its wait ends with the turn agy runs `/compact` in (a turn end after the send), as Claude's ends
     /// with Claude Code's own receipt; a turn end does not settle a Claude compact.
