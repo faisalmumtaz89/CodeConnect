@@ -1,5 +1,5 @@
-// An Antigravity run: `agy acp`, the Agent Client Protocol over its stdio (JSON-RPC 2.0, one message per line), in
-// the host's process group as claude is. The start initializes it (protocol version 1; no file system or terminal
+// An Antigravity run: `agy acp` (on an account of CodeConnect's, `agy acp --gemini-dir <its folder>`), the Agent
+// Client Protocol over its stdio (JSON-RPC 2.0, one message per line), in the host's process group as claude is. The start initializes it (protocol version 1; no file system or terminal
 // offered, so agy uses its own) and opens one session in the run's folder with CodeConnect's mail server, or, for a
 // relaunch (`resume`), resumes the run's session with that server again, only when agy advertises session/resume. The
 // opening's reply goes to ccd as agy's settings are (`acp`), and their menus on the start's outcome as `initialize`
@@ -95,7 +95,10 @@ type Message = { id?: number | string; method?: string; params?: any; result?: a
 type Held = { id: number | string; request: PermissionRequest; options: { optionId: string; kind: string }[] };
 
 export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: () => void) {
-  const agy = spawn(start.options.claude_path, ['acp'], { cwd: start.options.cwd, stdio: ['pipe', 'pipe', 'inherit'] });
+  // On an account of CodeConnect's, agy's home is that account's folder, which ccd names in the host's environment.
+  const home = process.env.CODECONNECT_GEMINI_DIR;
+  const args = home ? ['acp', '--gemini-dir', home] : ['acp'];
+  const agy = spawn(start.options.claude_path, args, { cwd: start.options.cwd, stdio: ['pipe', 'pipe', 'inherit'] });
   // Writes after agy has gone fail here, not in the host: agy's end is reported as `exited`.
   agy.stdin.on('error', () => {});
   const write = (message: object) => agy.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);

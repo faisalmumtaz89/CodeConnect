@@ -55,17 +55,19 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
         message,
         ClientMessage::SignInAccount { .. } | ClientMessage::RemoveAccount { .. }
     );
-    let (codex, claude) = if runs_agent {
+    let (codex, claude, agy) = if runs_agent {
         (
             codex_path(&environment, daemon.config.codex_bin.as_deref()).await,
             claude_path(&environment, daemon.config.claude_bin.as_deref()).await,
+            agy_path(&environment, daemon.config.agy_bin.as_deref()).await,
         )
     } else {
-        (None, None)
+        (None, None, None)
     };
     let agents = crate::accounts::Agents {
         codex: codex.as_deref(),
         claude: claude.as_deref(),
+        agy: agy.as_deref(),
     };
     let changes = !matches!(message, ClientMessage::ListAccounts { .. });
     // An account added or removed: the sign-ins are read again behind the answer.
@@ -111,7 +113,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                 // Signed in, its plan goes out at once and its limits follow: what is held is aged, so the refresh reads
                 // agy's /usage now rather than a FACTS_FRESH later.
                 move |said| {
-                    ended.agents.forget(&AgentKind::Antigravity);
+                    ended.agents.forget(&AgentKind::Antigravity, None);
                     let known = said.is_some();
                     let signed_in = matches!(said, Some((true, _)));
                     crate::accounts::keep_antigravity(&ended.account_facts, said);
@@ -134,6 +136,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                 agy.as_deref(),
                 request_id,
                 crate::accounts::SIGN_IN_WAIT,
+                None,
             )
             .await
             .0
@@ -149,7 +152,7 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                 request_id,
             )
             .await;
-            daemon.agents.forget(&AgentKind::Antigravity);
+            daemon.agents.forget(&AgentKind::Antigravity, None);
             // Refused, agy's sign-in is not known: read again.
             if !matches!(reply, ServerMessage::Accounts { .. }) {
                 daemon
@@ -254,12 +257,8 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
     let Ok(accounts) = daemon.store.accounts() else {
         return;
     };
-    let mut wanted: Vec<(String, AgentKind, Option<crate::store::Account>)> = vec![(
-        crate::accounts::default_key(&AgentKind::Antigravity),
-        AgentKind::Antigravity,
-        None,
-    )];
-    for agent in [AgentKind::Codex, AgentKind::Claude] {
+    let mut wanted: Vec<(String, AgentKind, Option<crate::store::Account>)> = Vec::new();
+    for agent in [AgentKind::Codex, AgentKind::Claude, AgentKind::Antigravity] {
         wanted.push((crate::accounts::default_key(&agent), agent.clone(), None));
         for account in accounts
             .iter()
@@ -282,6 +281,7 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
         let agents = crate::accounts::Agents {
             codex: codex.as_deref(),
             claude: claude.as_deref(),
+            agy: agy.as_deref(),
         };
         let store = daemon.store.clone();
         if let Ok(listing) =
@@ -299,20 +299,35 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
             let (environment, root, codex, claude, agy) =
                 (&environment, &root, &codex, &claude, &agy);
             async move {
-                // Antigravity's one sign-in: what agy offers a start (kept while it is signed in, so no new run of
-                // agy), its plan its tier's name as agy gives it.
+                // Antigravity, its Default (agy's own sign-in) or an account's folder: what agy offers a start there
+                // (kept while it is signed in, so no new run of agy), its plan its tier's name as agy gives it.
                 if *agent == AgentKind::Antigravity {
-                    let offer = match agy {
-                        Some(agy) => agy_offer(&daemon.agents, environment, agy).await,
+                    let home = match account {
+                        Some(account) => {
+                            match crate::accounts::AccountEnv::for_account(root, account) {
+                                Ok(home) => home,
+                                Err(_) => {
+                                    daemon.account_facts.read(key, None);
+                                    return;
+                                }
+                            }
+                        }
                         None => None,
                     };
-                    if let Some(offer) = &offer {
+                    let offer = match agy {
+                        Some(agy) => {
+                            agy_offer(&daemon.agents, environment, agy, home.as_ref()).await
+                        }
+                        None => None,
+                    };
+                    if let (Some(offer), None) = (&offer, account) {
                         daemon.account_facts.keep_agent_signed(key, offer.signed_in);
                     }
-                    // Signed in, its plan's limits too, from agy's own /usage: one run of agy a read, so at most one a
-                    // FACTS_FRESH, however many apps and turns ask.
+                    // The Default signed in, its plan's limits too, from agy's own /usage: one run of agy a read, so at
+                    // most one a FACTS_FRESH, however many apps and turns ask. agy's print mode takes no folder, so an
+                    // account's limits are not read.
                     let mut facts = offer.as_ref().and_then(agy_default_facts);
-                    if let (Some(facts), Some(agy)) = (facts.as_mut(), agy) {
+                    if let (Some(facts), Some(agy), None) = (facts.as_mut(), agy, account) {
                         facts.windows = agy_usage(environment, agy).await;
                     }
                     daemon.account_facts.read(key, facts);
@@ -607,10 +622,11 @@ impl KnownAgents {
             .map(|(_, offer)| offer.clone())
     }
 
-    /// What `agent` offered is forgotten, so the next list asks it again: its sign-in has changed.
-    pub(crate) fn forget(&self, agent: &AgentKind) {
+    /// What `agent` offered on `account` (an account's id; `None`, its Default) is forgotten, so the next list asks it
+    /// again: its sign-in has changed.
+    pub(crate) fn forget(&self, agent: &AgentKind, account: Option<&str>) {
         let mut offers = self.offers.lock().unwrap_or_else(|p| p.into_inner());
-        offers.remove(&offer_key(agent, None));
+        offers.remove(&account_key(agent, account));
     }
 
     fn keep(
@@ -627,8 +643,13 @@ impl KnownAgents {
 
 /// An offer is `agent`'s on one account: another account's sign-in and models are its own.
 fn offer_key(agent: &AgentKind, account: Option<&crate::accounts::AccountEnv>) -> String {
+    account_key(agent, account.map(crate::accounts::AccountEnv::id))
+}
+
+/// The key of `agent`'s offer on the account whose id is `account` (`None`, its Default).
+fn account_key(agent: &AgentKind, account: Option<&str>) -> String {
     match account {
-        Some(account) => format!("{}/{}", agent.as_str(), account.id()),
+        Some(id) => format!("{}/{}", agent.as_str(), id),
         None => agent.as_str().to_string(),
     }
 }
@@ -1448,7 +1469,7 @@ async fn agent_availability(
     if *agent == AgentKind::Antigravity {
         return match agy_path(environment, configured).await {
             Some(agy) => {
-                let offer = agy_offer(known, environment, &agy)
+                let offer = agy_offer(known, environment, &agy, account)
                     .await
                     .unwrap_or_default();
                 startable(agent, offer.signed_in, offer.models, &this_computer())
@@ -2107,7 +2128,8 @@ pub(crate) fn agy_usage_windows(text: &str) -> Vec<protocol::ws::UsageWindow> {
 }
 
 /// One `agy acp` ccd talks to itself (the start box's ask, a sign-in, a sign-out), started as an agent is
-/// ([`agent_command`], the user's environment, in the home folder, its own process group), its stderr dropped. Its
+/// ([`agent_command`], the user's environment, in the home folder, its own process group), its stderr dropped; on an
+/// account of CodeConnect's, with that account's folder as agy's home (`--gemini-dir`). Its
 /// calls are numbered from 1; a call's answer is agy's reply to it, its notifications and anything else skipped.
 pub(crate) struct Agy {
     child: tokio::process::Child,
@@ -2117,8 +2139,16 @@ pub(crate) struct Agy {
 }
 
 impl Agy {
-    pub(crate) fn start(environment: &HashMap<OsString, OsString>, agy: &Path) -> Option<Agy> {
-        let mut command = agent_command(environment, None, &[agy.as_os_str(), OsStr::new("acp")]);
+    pub(crate) fn start(
+        environment: &HashMap<OsString, OsString>,
+        agy: &Path,
+        home: Option<&Path>,
+    ) -> Option<Agy> {
+        let mut args = vec![agy.as_os_str(), OsStr::new("acp")];
+        if let Some(home) = home {
+            args.extend([OsStr::new("--gemini-dir"), home.as_os_str()]);
+        }
+        let mut command = agent_command(environment, None, &args);
         command
             .current_dir(home_in(environment))
             .stdin(Stdio::piped())
@@ -2165,26 +2195,28 @@ impl Agy {
     }
 }
 
-/// What the agy at `agy` offers a start: the model families its settings name, and whether it is signed in. agy has
+/// What the agy at `agy` offers a start on `account` (its folder agy's home; agy's own on the Default): the model
+/// families its settings name, and whether it is signed in. agy has
 /// no list of its own over ACP, so it is asked by opening one session with no prompt (`session/new`, which a signed-out
 /// agy refuses with "Authentication required") and closing it at once (`session/close`): agy 1.5.15 lists such a
 /// session in no history (measured, `session/list` before and after), though its empty conversation file stays in
 /// agy's folder. Asking starts agy and reaches Google, so a
-/// signed-in answer is kept for that binary (its size and time: agy names no version); a signed-out one is asked
+/// signed-in answer is kept for that binary and that account (its size and time: agy names no version); a signed-out one is asked
 /// again at each list, as nothing cheaper says when it is signed in. None when agy answered neither way in time.
 pub(crate) async fn agy_offer(
     known: &KnownAgents,
     environment: &HashMap<OsString, OsString>,
     agy: &Path,
+    account: Option<&crate::accounts::AccountEnv>,
 ) -> Option<Offer> {
     let version = std::fs::metadata(agy)
         .map(|meta| format!("{} {:?}", meta.len(), meta.modified().ok()))
         .unwrap_or_default();
-    if let Some(kept) = known.offered(&AgentKind::Antigravity, None, &version) {
+    if let Some(kept) = known.offered(&AgentKind::Antigravity, account, &version) {
         return Some(kept);
     }
     let home = home_in(environment);
-    let mut asking = Agy::start(environment, agy)?;
+    let mut asking = Agy::start(environment, agy, account.map(|account| account.folder()))?;
     let asked = async {
         asking
             .call(
@@ -2240,7 +2272,7 @@ pub(crate) async fn agy_offer(
         .as_ref()
         .is_some_and(|offer| offer.signed_in == Some(true))
     {
-        known.keep(&AgentKind::Antigravity, None, &version, offer.clone()?);
+        known.keep(&AgentKind::Antigravity, account, &version, offer.clone()?);
     }
     offer
 }
@@ -3228,6 +3260,55 @@ mod tests {
             .find(|d| d["agent"] == "antigravity")
             .map(|d| d["facts"]["windows"].as_array().map(Vec::len));
         assert_eq!(held, Some(Some(1)), "{told}");
+        let _ = std::fs::remove_dir_all(&rig.root);
+    }
+
+    /// **An added Antigravity account's plan is agy's tier in its own folder, and its limits are not read** (306 #5):
+    /// a refresh asks agy in the account's folder (`--gemini-dir`), whose tier is that account's, and holds it as the
+    /// account's plan with no windows (agy's print mode takes no folder, so `/usage` reads only the person's own agy,
+    /// once, for the Default).
+    #[tokio::test]
+    async fn an_added_antigravity_accounts_plan_is_read_in_its_folder() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = Rig::new("agyplan", "exit 1");
+        let agy = usage_agy(&rig);
+        let reply = |body: &str| format!(r#"printf '{{"jsonrpc":"2.0","id":%s,{body}}}\n' "$id""#);
+        std::fs::write(
+            &agy,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = -p ]; then echo \"$2\" >> \"$0.p\"; exit 0; fi\n\
+                 while read -r line; do\n  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n  \
+                 case \"$line\" in\n    *'\"initialize\"'*) {init} ;;\n    *'\"session/new\"'*) \
+                 if [ \"$2\" = --gemini-dir ]; then {ultra}; else {opened}; fi ;;\n    \
+                 *'\"session/close\"'*) {empty} ;;\n  esac\ndone\n",
+                init = reply(r#""result":{"protocolVersion":1}"#),
+                opened = reply(r#""result":{"sessionId":"s","configOptions":[{"category":"model","options":[]}]}"#),
+                ultra = reply(
+                    r#""result":{"sessionId":"s","configOptions":[{"category":"model","options":[]}],"_meta":{"antigravity":{"tier":{"name":"Google AI Ultra"}}}}"#
+                ),
+                empty = reply(r#""result":{}"#),
+            ),
+        )
+        .unwrap();
+        let b = rig.daemon.store.add_account("antigravity", "B").unwrap();
+        refresh_facts(&rig.daemon).await;
+        let told = serde_json::to_value(
+            rig.daemon
+                .account_facts
+                .told(crate::accounts::listing(&rig.daemon.store, None)),
+        )
+        .unwrap();
+        let account = told["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|account| account["id"] == b.id.as_str())
+            .cloned()
+            .unwrap();
+        assert_eq!(account["facts"]["plan"], "Google AI Ultra", "{told}");
+        assert_eq!(account["facts"].get("windows"), None, "{told}");
+        let runs = std::fs::read_to_string(format!("{}.p", agy.display())).unwrap_or_default();
+        assert_eq!(runs, "/usage\n", "agy's /usage run once, for the Default");
         let _ = std::fs::remove_dir_all(&rig.root);
     }
 
@@ -5794,6 +5875,62 @@ esac"#;
         std::fs::write(path, script).unwrap();
         std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
+    }
+
+    /// **On an Antigravity account, the start box offers what agy offers in that account's folder** (306 #5): agy is
+    /// asked in the account's own home (`--gemini-dir`), whose sign-in and models are its own, and the answer is kept
+    /// for that account alone: the person's own agy, signed in, does not stand for an account that is not.
+    #[tokio::test]
+    async fn on_an_antigravity_account_the_start_box_offers_what_its_folder_offers() {
+        let rig = Rig::new("agy-account", ANSWERING);
+        let known = KnownAgents::default();
+        let agy = rig.root.join("agy");
+        let argv = rig.root.join("agy.argv");
+        let opened = r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s","configOptions":[{"category":"model","options":[{"value":"gemini-4-neon","name":"Gemini 4 Neon"}]}]}}"#;
+        let refused = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Authentication required"}}"#;
+        std::fs::write(
+            &agy,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{argv}'\nwhile read -r line; do\n  case \"$line\" in\n    \
+                 *'\"initialize\"'*) echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":1}}}}' ;;\n    \
+                 *'\"session/new\"'*) if [ \"$2\" = --gemini-dir ]; then echo '{refused}'; else echo '{opened}'; fi ;;\n    \
+                 *'\"session/close\"'*) echo '{{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{{}}}}' ;;\n  esac\ndone\n",
+                argv = argv.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&agy, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let store = crate::store::Store::open_temp("ccd-agy-account");
+        let _db = store.temp_db();
+        let b = store.add_account("antigravity", "B").unwrap();
+        let on_b = crate::accounts::AccountEnv::for_account(&rig.root, &b)
+            .unwrap()
+            .unwrap();
+        let listed = |account| {
+            agent_availability(
+                &AgentKind::Antigravity,
+                &known,
+                &rig.env,
+                account,
+                agy.to_str(),
+            )
+        };
+        let mine = listed(None).await;
+        assert_eq!(mine.signed_in, Some(true), "{mine:?}");
+        let theirs = listed(Some(&on_b)).await;
+        assert_eq!(theirs.signed_in, Some(false), "{theirs:?}");
+        assert_eq!(theirs.models, Vec::new());
+        assert_eq!(
+            std::fs::read_to_string(&argv)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [
+                "acp",
+                &format!("acp --gemini-dir {}", on_b.folder().display())
+            ],
+        );
     }
 
     /// **Antigravity is listed with agy's own models** (S1): its start box offers the model families agy's settings

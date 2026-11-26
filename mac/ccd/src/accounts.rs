@@ -45,6 +45,8 @@ fn variable(agent: &str) -> Option<&'static str> {
     match agent {
         "claude" => Some("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
         "codex" => Some("CODEX_HOME"),
+        // agy's whole home, its sign-in and conversations, which the host gives agy as its `--gemini-dir`.
+        "antigravity" => Some("CODECONNECT_GEMINI_DIR"),
         _ => None,
     }
 }
@@ -87,6 +89,8 @@ pub(crate) struct AccountEnv {
 pub(crate) struct Agents<'a> {
     pub(crate) codex: Option<&'a Path>,
     pub(crate) claude: Option<&'a Path>,
+    /// Antigravity's `agy`, which signs its accounts in and out by its own ACP calls, never by a command of its own.
+    pub(crate) agy: Option<&'a Path>,
 }
 
 impl Agents<'_> {
@@ -104,6 +108,7 @@ impl Agents<'_> {
 fn product(agent: &str) -> &'static str {
     match agent {
         "claude" => "Claude Code",
+        "antigravity" => "Antigravity",
         _ => "Codex",
     }
 }
@@ -226,6 +231,83 @@ impl AccountEnv {
     }
 }
 
+/// agy's folders that hold a session's own files, under its home: each file or folder there named for the session's id,
+/// alone or before a `.` (`<id>.db`, `<id>.db-wal`, `<id>/`, `<id>.pbtxt`), measured on agy 1.5.15 (2026-11-26): with
+/// them copied into another signed-in home, the session resumes there with its conversation.
+const AGY_SESSION_FOLDERS: [&str; 3] = [
+    "antigravity-cli/conversations",
+    "antigravity-cli/brain",
+    "antigravity-cli/annotations",
+];
+
+/// agy's home on `account`, its folder, or on its Default agy's own (`~/.gemini`, `HOME` in `environment`).
+pub(crate) fn agy_home(
+    account: Option<&AccountEnv>,
+    environment: &HashMap<OsString, OsString>,
+) -> Option<PathBuf> {
+    match account {
+        Some(account) => Some(account.folder.clone()),
+        None => environment
+            .get(std::ffi::OsStr::new("HOME"))
+            .map(|home| Path::new(home).join(".gemini")),
+    }
+}
+
+/// Moves agy's session `id` from the home `from` into the home `to`: `to`'s files of that session are removed, then
+/// `from`'s copied in, so the session resumed in `to` is the one it left in `from`. Nothing else in either home is
+/// touched, and `from` keeps its copy. A link is neither followed nor copied. An id that is not one plain name moves
+/// nothing.
+pub(crate) fn carry_agy_session(from: &Path, to: &Path, id: &str) -> std::io::Result<()> {
+    if id.is_empty() || id.starts_with('.') || id.contains('/') {
+        return Err(std::io::Error::other(
+            "agy named its session with more than a name",
+        ));
+    }
+    let named = |name: &std::ffi::OsStr| {
+        name.to_str().is_some_and(|name| {
+            name.strip_prefix(id)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+        })
+    };
+    for folder in AGY_SESSION_FOLDERS {
+        let (source, target) = (from.join(folder), to.join(folder));
+        if let Ok(entries) = std::fs::read_dir(&target) {
+            for entry in entries.flatten().filter(|entry| named(&entry.file_name())) {
+                if entry.file_type()?.is_dir() {
+                    std::fs::remove_dir_all(entry.path())?;
+                } else {
+                    std::fs::remove_file(entry.path())?;
+                }
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(&source) else {
+            continue;
+        };
+        for entry in entries.flatten().filter(|entry| named(&entry.file_name())) {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&target)?;
+            copy_tree(&entry.path(), &target.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
+/// `from`, a file or a folder with everything in it, copied to `to`; a link is left out.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    let kind = std::fs::symlink_metadata(from)?.file_type();
+    if kind.is_dir() {
+        std::fs::DirBuilder::new().mode(0o700).create(to)?;
+        for entry in std::fs::read_dir(from)?.flatten() {
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+    } else if kind.is_file() {
+        std::fs::copy(from, to)?;
+    }
+    Ok(())
+}
+
 /// A device's ask about accounts, answered with every account and each agent's active one once the ask's change is
 /// made. An unknown agent, or an id that is not one of the agent's, is refused and nothing changes; a refusal names the
 /// request it answers (`AccountsRefused`).
@@ -309,7 +391,7 @@ pub(crate) fn listing(
         }
     };
     let mut active = Vec::new();
-    for agent in [AgentKind::Claude, AgentKind::Codex] {
+    for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity] {
         match store.active_account(agent.as_str()) {
             Ok(Some(account)) => active.push(protocol::ws::ActiveAccount {
                 agent,
@@ -798,7 +880,8 @@ pub(crate) const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_s
 
 /// `reply`, an accounts listing, with each account's `signed_in` as its agent says with its home: Codex's
 /// `login status`, and `not_separate` when that sign-in is not in the home; Claude Code's `auth status`, its config
-/// directory the account's folder. Not known for an agent not on this computer.
+/// directory the account's folder; Antigravity's agy, asked as a start asks it, in the account's folder. Not known
+/// for an agent not on this computer.
 pub(crate) async fn with_signed_in(
     environment: &HashMap<OsString, OsString>,
     agents: Agents<'_>,
@@ -817,6 +900,18 @@ pub(crate) async fn with_signed_in(
         };
         let root = &root;
         async move {
+            if row.agent == AgentKind::Antigravity.as_str() {
+                if let (Some(agy), Ok(Some(home))) =
+                    (agents.agy, AccountEnv::for_account(root, &row))
+                {
+                    let known = crate::start_session::KnownAgents::default();
+                    account.signed_in =
+                        crate::start_session::agy_offer(&known, environment, agy, Some(&home))
+                            .await
+                            .and_then(|offer| offer.signed_in);
+                }
+                return;
+            }
             let (Some(program), Ok(Some(home))) =
                 (agents.path(&row.agent), AccountEnv::for_account(root, &row))
             else {
@@ -876,6 +971,30 @@ pub(crate) async fn sign_in(
             None,
         );
     };
+    // An Antigravity account signs in as Antigravity's own sign-in does, in its own folder.
+    if account.agent == AgentKind::Antigravity.as_str() {
+        let home = match AccountEnv::for_account(&protocol::root_dir(), &account) {
+            Ok(home) => home,
+            Err(err) => {
+                return (
+                    unavailable(request_id, "set up the account's folder", err.into()),
+                    None,
+                )
+            }
+        };
+        return sign_in_agent(
+            store,
+            sign_ins,
+            move |_| on_end(),
+            environment,
+            AgentKind::Antigravity,
+            agents.agy,
+            request_id,
+            wait,
+            home.as_ref(),
+        )
+        .await;
+    }
     let Some(program) = agents.path(&account.agent) else {
         let missing = format!(
             "{} isn't installed on this computer.",
@@ -961,8 +1080,9 @@ pub(crate) async fn sign_in(
 
 /// Signs Antigravity in with agy's own sign-in, agy at `agy` (`agent`, any other refused): `authenticate` with Google's
 /// personal sign-in, for which agy opens the browser on this computer and listens for Google's answer itself. Answers
-/// at once: the listing, Antigravity `signing_in`. It takes the computer's one sign-in slot, under Antigravity's
-/// Default's key, as an account's sign-in does ([`sign_in`]); it ends when agy answers (whether it signed in or not),
+/// at once: the listing, Antigravity `signing_in`; on one of CodeConnect's accounts (`account`), in that account's
+/// folder (agy's `--gemini-dir`), that account signing in. It takes the computer's one sign-in slot, under Antigravity's
+/// Default's key or the account's, as an account's sign-in does ([`sign_in`]); it ends when agy answers (whether it signed in or not),
 /// after `wait`, or when a newer sign-in replaces it, and then agy is ended and `on_end` called with what agy said: its
 /// sign-in and its tier when it answered `authenticate` (signed in on a result, not on an error), `None` otherwise.
 #[allow(clippy::too_many_arguments)]
@@ -975,6 +1095,7 @@ pub(crate) async fn sign_in_agent(
     agy: Option<&Path>,
     request_id: String,
     wait: std::time::Duration,
+    account: Option<&AccountEnv>,
 ) -> (
     protocol::ws::ServerMessage,
     Option<tokio::task::JoinHandle<()>>,
@@ -985,7 +1106,9 @@ pub(crate) async fn sign_in_agent(
     let Some(agy) = agy else {
         return (refused(request_id, AGY_MISSING.into()), None);
     };
-    let Some(mut signing) = crate::start_session::Agy::start(environment, agy) else {
+    let Some(mut signing) =
+        crate::start_session::Agy::start(environment, agy, account.map(AccountEnv::folder))
+    else {
         return (
             unavailable(
                 request_id,
@@ -999,13 +1122,11 @@ pub(crate) async fn sign_in_agent(
     let mine = sign_ins
         .count
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some((_, _, earlier)) =
-        sign_ins
-            .going
-            .lock()
-            .unwrap()
-            .replace((mine, default_key(&agent), end))
-    {
+    if let Some((_, _, earlier)) = sign_ins.going.lock().unwrap().replace((
+        mine,
+        account.map_or_else(|| default_key(&agent), |account| account.id().to_string()),
+        end,
+    )) {
         let _ = earlier.send(tokio::sync::oneshot::channel().0);
     }
     let reply = sign_ins.marked(listing(store, Some(request_id)));
@@ -1066,7 +1187,7 @@ pub(crate) async fn sign_out_agent(
     let Some(agy) = agy else {
         return refused(request_id, AGY_MISSING.into());
     };
-    let Some(mut signing) = crate::start_session::Agy::start(environment, agy) else {
+    let Some(mut signing) = crate::start_session::Agy::start(environment, agy, None) else {
         return unavailable(
             request_id,
             "sign Antigravity out",
@@ -1172,12 +1293,12 @@ impl SignIns {
 /// How long an agent's logout may take before the removal is refused.
 const LOGOUT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The folder of the removed Claude Code account `id` deleted (`root`'s `accounts/claude/<id>`, the id ccd's own):
+/// The folder of the removed account `id` of `agent` deleted (`root`'s `accounts/<agent>/<id>`, the id ccd's own):
 /// nothing of a removed account is left. Only a real folder is deleted; one that is a link is left and logged. The
 /// deletion does not follow a link inside it (`std::fs::remove_dir_all` removes a link, never what it names). A
 /// failure is logged; the account is removed all the same.
-fn remove_claude_folder(root: &Path, id: &str) {
-    let folder = root.join("accounts").join("claude").join(id);
+fn remove_account_folder(root: &Path, agent: &str, id: &str) {
+    let folder = root.join("accounts").join(agent).join(id);
     match folder.symlink_metadata() {
         Ok(found) if found.is_dir() => {
             if let Err(err) = std::fs::remove_dir_all(&folder) {
@@ -1239,6 +1360,9 @@ pub(crate) async fn remove_with(
     }
     // A sign-in held for it is ended first, so no credential lands in its home after it is gone.
     sign_ins.end_for(&account.id).await;
+    if account.agent == AgentKind::Antigravity.as_str() {
+        return remove_antigravity(store, environment, agents.agy, request_id, &account).await;
+    }
     let Some(program) = agents.path(&account.agent) else {
         let missing = format!(
             "{} isn't installed on this computer.",
@@ -1289,9 +1413,74 @@ pub(crate) async fn remove_with(
     }
     // Signed out and its row gone: Claude Code's folder goes too. Codex's home is kept, as links its state records.
     if account.agent == "claude" {
-        remove_claude_folder(&protocol::root_dir(), &account.id);
+        remove_account_folder(&protocol::root_dir(), "claude", &account.id);
     }
     // The remaining accounts' sign-ins are what is held; the read behind the answer asks again.
+    listing(store, Some(request_id))
+}
+
+/// Removes the Antigravity account `account`, agy at `agy`: agy's own `logout` in the account's folder, by its ACP call
+/// as the Default's sign-out is ([`sign_out_agent`]); once agy has signed it out, its row, and its folder unless a run
+/// records the account. That folder holds the run's conversation, which the run's next message takes to the account
+/// then in use ([`carry_agy_session`]), so it is kept, signed out.
+async fn remove_antigravity(
+    store: &crate::store::Store,
+    environment: &HashMap<OsString, OsString>,
+    agy: Option<&Path>,
+    request_id: String,
+    account: &Account,
+) -> protocol::ws::ServerMessage {
+    let Some(agy) = agy else {
+        return refused(request_id, AGY_MISSING.into());
+    };
+    let home = match AccountEnv::for_account(&protocol::root_dir(), account) {
+        Ok(Some(home)) => home,
+        Ok(None) => {
+            return refused(
+                request_id,
+                "This agent has no accounts on this computer.".into(),
+            )
+        }
+        Err(err) => return unavailable(request_id, "find the account's folder", err.into()),
+    };
+    let Some(mut signing) = crate::start_session::Agy::start(environment, agy, Some(home.folder()))
+    else {
+        return unavailable(
+            request_id,
+            "sign the account out",
+            anyhow::anyhow!("agy did not start"),
+        );
+    };
+    let said = tokio::time::timeout(LOGOUT_WAIT, async {
+        signing
+            .call(
+                "initialize",
+                serde_json::json!({"protocolVersion": 1, "clientCapabilities": {}}),
+            )
+            .await?;
+        signing.call("logout", serde_json::json!({})).await
+    })
+    .await;
+    signing.end().await;
+    if !matches!(&said, Ok(Some(reply)) if reply.get("error").is_none()) {
+        return refused_as(
+            request_id,
+            "accounts_unavailable",
+            "Antigravity couldn't sign the account out, so nothing was removed. Try removing it again.".into(),
+        );
+    }
+    let recorded = match store.run_accounts() {
+        Ok(runs) => runs
+            .iter()
+            .any(|(_, recorded)| recorded.as_ref().is_some_and(|(id, _)| *id == account.id)),
+        Err(err) => return unavailable(request_id, "read the account's sessions", err),
+    };
+    if let Err(err) = store.remove_account(&account.id) {
+        return unavailable(request_id, "remove the account", err);
+    }
+    if !recorded {
+        remove_account_folder(&protocol::root_dir(), &account.agent, &account.id);
+    }
     listing(store, Some(request_id))
 }
 
@@ -1455,6 +1644,7 @@ pub(crate) mod tests {
             super::Agents {
                 codex: Some(&codex),
                 claude: None,
+                agy: None,
             },
             "s1".into(),
             a.id.clone(),
@@ -1485,6 +1675,7 @@ pub(crate) mod tests {
                     super::Agents {
                         codex: Some(&codex),
                         claude: None,
+                        agy: None,
                     },
                     super::listing(&store, None),
                 )
@@ -1709,6 +1900,7 @@ pub(crate) mod tests {
         let agents = super::Agents {
             codex: None,
             claude: Some(&claude),
+            agy: None,
         };
         let environment: HashMap<OsString, OsString> = HashMap::from([
             (OsString::from("HOME"), home.clone().into_os_string()),
@@ -1935,7 +2127,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(root.join("accounts").join("claude")).unwrap();
         let folder = root.join("accounts").join("claude").join(&id);
         std::os::unix::fs::symlink(&target, &folder).unwrap();
-        super::remove_claude_folder(&root, &id);
+        super::remove_account_folder(&root, "claude", &id);
         assert!(
             folder.symlink_metadata().unwrap().file_type().is_symlink(),
             "the link is left"
@@ -1975,6 +2167,7 @@ pub(crate) mod tests {
             super::Agents {
                 codex: Some(&codex),
                 claude: None,
+                agy: None,
             },
             "s1".into(),
             a.id.clone(),
@@ -1988,6 +2181,7 @@ pub(crate) mod tests {
                 super::Agents {
                     codex: Some(&codex),
                     claude: None,
+                    agy: None,
                 },
                 super::listing(&store, None),
             )
@@ -2011,7 +2205,8 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A stand-in `agy` in `root` answering `agy acp` as agy 1.5.15 does for a sign-in: `authenticate` signs it in
+    /// A stand-in `agy` in `root` answering `agy acp` (its state in `root`, or with `--gemini-dir <folder>` in that
+    /// folder) as agy 1.5.15 does for a sign-in: `authenticate` signs it in
     /// (a file `signed`; with a file `hang`, only after 30 s), `logout` out; `session/new` signed in answers a
     /// session with a model option and, when a file `tier` names one, `_meta.antigravity.tier.name` (as `authenticate`
     /// does too); signed out,
@@ -2022,6 +2217,7 @@ pub(crate) mod tests {
         let script = format!(
             r#"#!/bin/sh
 d='{d}'
+[ "$2" = --gemini-dir ] && d="$3"
 while read -r line; do
   printf '%s\n' "$line" >> "$d/asks"
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
@@ -2053,6 +2249,249 @@ done
         agy
     }
 
+    /// **The listing names Antigravity's account in use, as it names Claude Code's and Codex's** (306): an app marks
+    /// that account's row, not the Default's.
+    #[test]
+    fn the_listing_names_antigravitys_account_in_use() {
+        let store = crate::store::Store::open_temp("ccd-agy-active");
+        let _db = store.temp_db();
+        let b = store.add_account("antigravity", "B").unwrap();
+        assert!(store.activate_account("antigravity", Some(&b.id)).unwrap());
+        let listed = serde_json::to_value(super::listing(&store, None)).unwrap();
+        assert_eq!(
+            listed["active"],
+            serde_json::json!([{"agent": "antigravity", "account_id": b.id}]),
+            "{listed}"
+        );
+    }
+
+    /// **An added Antigravity account's sign-in is agy's in its own folder** (306 #5): the listing's `signed_in` for each
+    /// Antigravity account is what agy says in that account's home (`--gemini-dir`), not the person's own agy's.
+    #[tokio::test]
+    async fn an_antigravity_accounts_sign_in_is_read_in_its_own_folder() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-agysigned.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let agy = stand_in_agy(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-agysigned");
+        let _db = store.temp_db();
+        // The person's own agy is signed in; A is too, in its folder; B is not.
+        std::fs::write(root.join("signed"), "").unwrap();
+        let a = store.add_account("antigravity", "A").unwrap();
+        let b = store.add_account("antigravity", "B").unwrap();
+        let folder = |account: &crate::store::Account| {
+            super::AccountEnv::for_account(&protocol::root_dir(), account)
+                .unwrap()
+                .unwrap()
+                .folder()
+                .to_path_buf()
+        };
+        std::fs::write(folder(&a).join("signed"), "").unwrap();
+        let listed = serde_json::to_value(
+            super::with_signed_in(
+                &environment,
+                super::Agents {
+                    codex: None,
+                    claude: None,
+                    agy: Some(&agy),
+                },
+                super::listing(&store, None),
+            )
+            .await,
+        )
+        .unwrap();
+        let signed = |id: &str| {
+            listed["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|account| account["id"] == id)
+                .map(|account| account["signed_in"].clone())
+        };
+        assert_eq!(signed(&a.id), Some(serde_json::json!(true)), "{listed}");
+        assert_eq!(signed(&b.id), Some(serde_json::json!(false)), "{listed}");
+        let _ = std::fs::remove_dir_all(folder(&a));
+        let _ = std::fs::remove_dir_all(folder(&b));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **An added Antigravity account signs in in its own folder** (306 #5): its sign-in is agy's `authenticate` in the
+    /// account's home (`--gemini-dir`), answered at once with the account signing in, and the person's own agy is not
+    /// signed in by it.
+    #[tokio::test]
+    async fn an_antigravity_account_signs_in_in_its_own_folder() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-agyacctin.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let agy = stand_in_agy(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-agyacctin");
+        let _db = store.temp_db();
+        let a = store.add_account("antigravity", "A").unwrap();
+        let on_a = super::AccountEnv::for_account(&protocol::root_dir(), &a)
+            .unwrap()
+            .unwrap();
+        let (ended, heard) = std::sync::mpsc::channel::<()>();
+        let (answered, running) = super::sign_in(
+            &store,
+            &Arc::new(super::SignIns::default()),
+            move || {
+                let _ = ended.send(());
+            },
+            &environment,
+            super::Agents {
+                codex: None,
+                claude: None,
+                agy: Some(&agy),
+            },
+            "s1".into(),
+            a.id.clone(),
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(
+            serde_json::to_value(&answered).unwrap()["accounts"][0]["signing_in"],
+            true,
+            "{answered:?}"
+        );
+        running.unwrap().await.unwrap();
+        assert!(
+            heard.try_recv().is_ok(),
+            "the list is pushed when agy answers"
+        );
+        assert!(
+            on_a.folder().join("signed").exists(),
+            "A is signed in in its own folder"
+        );
+        assert!(
+            !root.join("signed").exists(),
+            "the person's own agy is not signed in by it"
+        );
+        let _ = std::fs::remove_dir_all(on_a.folder());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Removing an Antigravity account signs it out in its own folder, and keeps the folder while a run records it**
+    /// (306 #1): each account is its own home of agy's, so its removal is agy's `logout` there, the person's own agy
+    /// (the Default) left signed in. An account no run records goes with its folder; one an ended run records goes
+    /// from the list, but its folder, which holds that run's conversation, stays, so the run's next message still takes
+    /// it to the account then in use.
+    #[tokio::test]
+    async fn removing_an_antigravity_account_signs_out_its_folder_and_keeps_what_a_run_records() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-agyremove.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let agy = stand_in_agy(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-agyremove");
+        let _db = store.temp_db();
+        // The person's own agy, signed in.
+        std::fs::write(root.join("signed"), "").unwrap();
+        let a = store.add_account("antigravity", "A").unwrap();
+        let b = store.add_account("antigravity", "B").unwrap();
+        let folder = |account: &crate::store::Account| {
+            let home = super::AccountEnv::for_account(&protocol::root_dir(), account)
+                .unwrap()
+                .unwrap();
+            std::fs::write(home.folder().join("signed"), "").unwrap();
+            home.folder().to_path_buf()
+        };
+        let (on_a, on_b) = (folder(&a), folder(&b));
+        let conversation = on_a.join("antigravity-cli/conversations/sess-1.db");
+        std::fs::create_dir_all(conversation.parent().unwrap()).unwrap();
+        std::fs::write(&conversation, "the run's conversation").unwrap();
+        // An ended run recorded on A.
+        let run = protocol::uid::new().unwrap();
+        let now = protocol::time::now_rfc3339();
+        let row = crate::store::SessionRow {
+            session_uid: run.clone(),
+            session_id: "ag-1".into(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: protocol::event::Lifecycle::Live,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: protocol::agent::AgentKind::Antigravity,
+            codex_thread_id: None,
+        };
+        assert_eq!(
+            store.begin_run(&row, &run, None, Some(&a.id)).unwrap(),
+            None
+        );
+        store
+            .set_lifecycle(&run, protocol::event::Lifecycle::Exited)
+            .unwrap();
+        let agents = super::Agents {
+            codex: None,
+            claude: None,
+            agy: Some(&agy),
+        };
+        let remove = |id: &str| {
+            let (environment, store) = (&environment, &store);
+            let id = id.to_string();
+            async move {
+                serde_json::to_value(
+                    super::remove_with(
+                        store,
+                        &super::SignIns::default(),
+                        environment,
+                        agents,
+                        "r".into(),
+                        id,
+                    )
+                    .await,
+                )
+                .unwrap()
+            }
+        };
+        let left = remove(&b.id).await;
+        assert_eq!(left["accounts"].as_array().map(Vec::len), Some(1), "{left}");
+        assert!(!on_b.exists(), "B's folder is gone with it");
+        let gone = remove(&a.id).await;
+        assert_eq!(gone["accounts"], serde_json::json!([]), "{gone}");
+        assert!(
+            !on_a.join("signed").exists(),
+            "A is signed out in its own folder"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&conversation).unwrap(),
+            "the run's conversation",
+            "the folder a run records stays"
+        );
+        assert!(
+            root.join("signed").exists(),
+            "the person's own agy is still signed in"
+        );
+        let _ = std::fs::remove_dir_all(&on_a);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **Antigravity signs in and out with agy's own sign-in, and its plan is agy's tier, as agy names it** (S2):
     /// signed out, a sign-in runs agy's `authenticate` with Google's personal sign-in, answered at once with the
     /// listing marking it signing in, and pushes the list when agy answers; agy then offers a start signed in, its
@@ -2079,8 +2518,8 @@ done
         let sign_ins = Arc::new(super::SignIns::default());
         let known = crate::start_session::KnownAgents::default();
         let offered = || async {
-            known.forget(&protocol::agent::AgentKind::Antigravity);
-            crate::start_session::agy_offer(&known, &environment, &agy)
+            known.forget(&protocol::agent::AgentKind::Antigravity, None);
+            crate::start_session::agy_offer(&known, &environment, &agy, None)
                 .await
                 .expect("agy answered")
         };
@@ -2110,6 +2549,7 @@ done
             Some(&agy),
             "g1".into(),
             std::time::Duration::from_secs(10),
+            None,
         )
         .await;
         assert_eq!(
@@ -2209,6 +2649,7 @@ done
             Some(&agy),
             "g3".into(),
             std::time::Duration::from_millis(500),
+            None,
         )
         .await;
         late.unwrap().await.unwrap();
@@ -2231,6 +2672,7 @@ done
             Some(&agy),
             "g4".into(),
             std::time::Duration::from_secs(1),
+            None,
         )
         .await
         .0;
@@ -2257,8 +2699,9 @@ done
     /// Antigravity's sign-in as each listing carries it (S2), built as ccd builds one (its sign-in slot's mark, then
     /// what is held): signed in with agy's tier "Google AI Pro", signed in with no tier named, signed out, and signing
     /// in; and signed in with its plan's limits, read by agy's own /usage as ccd reads them (records shaped as agy 1.5.15
-    /// prints them; of them, its Gemini week, partly used). Its read time is fixed, so the frames are the same at every
-    /// build.
+    /// prints them; of them, its Gemini week, partly used); and, beside that Default, an added account (minor 57), signed
+    /// in in its own folder with its own plan and no windows, the one in use. Its read time is fixed, and the added
+    /// account's id written as one fixed id, so the frames are the same at every build.
     fn antigravity_sign_in_frames() -> serde_json::Value {
         let store = crate::store::Store::open_temp("ccd-agy-frames");
         let _db = store.temp_db();
@@ -2293,7 +2736,32 @@ done
             }
             serde_json::to_value(facts.told(sign_ins.marked(super::listing(&store, None)))).unwrap()
         };
+        let with_accounts = {
+            let store = crate::store::Store::open_temp("ccd-agy-accounts-frame");
+            let _db = store.temp_db();
+            let added = store.add_account("antigravity", "Antigravity 2").unwrap();
+            assert!(store
+                .activate_account("antigravity", Some(&added.id))
+                .unwrap());
+            let facts = super::Facts::default();
+            let read = |plan: &str, windows| protocol::ws::AccountFacts {
+                email: None,
+                plan: Some(plan.into()),
+                windows,
+                limits_available: None,
+                read_at: "2026-11-25T12:00:00.000Z".into(),
+            };
+            facts.keep_agent_signed(&key, Some(true));
+            facts.read(&key, Some(read("Google AI Ultra", usage.clone())));
+            facts.keep_agent_signed(&added.id, Some(true));
+            facts.read(&added.id, Some(read("Google AI Pro", Vec::new())));
+            let told = serde_json::to_string(&facts.told(super::listing(&store, None)))
+                .unwrap()
+                .replace(&added.id, "01K1B3XQ8ZC0DE5FGH7AGYACC2");
+            serde_json::from_str::<serde_json::Value>(&told).unwrap()
+        };
         serde_json::json!({
+            "with_accounts": with_accounts,
             "signed_in_pro": frame(Some(true), Some("Google AI Pro"), false),
             "signed_in_no_tier": frame(Some(true), None, false),
             "signed_out": frame(Some(false), None, false),
@@ -2357,6 +2825,7 @@ done
                 super::Agents {
                     codex: Some(&codex),
                     claude: None,
+                    agy: None,
                 },
                 super::listing(&store, None),
             )
@@ -2400,6 +2869,7 @@ done
             super::Agents {
                 codex: Some(&codex),
                 claude: None,
+                agy: None,
             },
             "s1".into(),
             a.id.clone(),
@@ -2443,6 +2913,7 @@ done
             super::Agents {
                 codex: Some(&codex),
                 claude: None,
+                agy: None,
             },
             "s2".into(),
             a.id.clone(),
@@ -2465,6 +2936,7 @@ done
             super::Agents {
                 codex: Some(&codex),
                 claude: None,
+                agy: None,
             },
             "s3".into(),
             a.id.clone(),
@@ -2532,6 +3004,7 @@ done
             super::Agents {
                 codex: Some(&codex),
                 claude: None,
+                agy: None,
             },
             "s1".into(),
             a.id.clone(),
@@ -2550,6 +3023,7 @@ done
                 super::Agents {
                     codex: Some(&codex),
                     claude: None,
+                    agy: None,
                 },
                 "r1".into(),
                 a.id.clone(),
@@ -2577,6 +3051,7 @@ done
                 super::Agents {
                     codex: Some(&codex),
                     claude: None,
+                    agy: None,
                 },
                 "r2".into(),
                 a.id.clone(),
@@ -2662,6 +3137,7 @@ done
             super::Agents {
                 codex: Some(&codex),
                 claude: None,
+                agy: None,
             },
             "s1".into(),
             a.id.clone(),
@@ -2678,6 +3154,7 @@ done
             super::Agents {
                 codex: Some(&codex),
                 claude: None,
+                agy: None,
             },
             "r1".into(),
             a.id.clone(),

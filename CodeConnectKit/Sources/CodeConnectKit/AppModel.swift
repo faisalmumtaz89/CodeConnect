@@ -1301,13 +1301,23 @@ public final class AppModel {
         return await activateAccount(agent: agent, accountID: account.id)
     }
 
+    /// A click on `agent`'s Default row: chosen, unless its own sign-in (Antigravity's) reads signed out, when it is
+    /// signed in instead, as an added account's row is ([`choose`]); while that sign-in is going on, nothing.
+    @discardableResult
+    public func chooseDefault(_ agent: StartAgent) async -> Bool {
+        if let signIn = accountBook?.agentSignIn(for: agent), !signIn.choosable {
+            return signIn.signedOut ? await signInAgent(agent) : false
+        }
+        return await activateAccount(agent: agent, accountID: nil)
+    }
+
     /// The switch `agent`'s sessions on this computer are in (their summaries' `switching`), toward the account its
     /// new starts now use; nil while none is moving.
     public func accountSwitch(for agent: StartAgent) -> AccountSwitch? {
         let moving = summaries.filter { summary in
             guard summary.switching != nil else { return false }
             switch (summary.agent, agent) {
-            case (.claude, .claude), (.codex, .codex): return true
+            case (.claude, .claude), (.codex, .codex), (.antigravity, .antigravity): return true
             default: return false
             }
         }
@@ -1359,6 +1369,15 @@ public final class AppModel {
             if fixtureAccountBook != nil { return true }
         #endif
         return keepsAccounts && connection.profile.protocolMinor >= 51
+    }
+
+    /// This computer keeps accounts for Antigravity as it does for Claude Code and Codex (minor 57), each its own home of
+    /// agy's; one before it refuses them, and offers Antigravity's one sign-in alone ([`signsAgentsIn`]).
+    public var keepsAntigravityAccounts: Bool {
+        #if DEBUG
+            if fixtureAccountBook != nil { return true }
+        #endif
+        return keepsAccounts && connection.profile.protocolMinor >= 57
     }
 
     /// Starts `agent`'s own sign-in in a browser on the computer; true once the computer has it going.

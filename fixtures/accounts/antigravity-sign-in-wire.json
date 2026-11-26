@@ -87,5 +87,48 @@
       }
     ],
     "type": "accounts"
+  },
+  "with_accounts": {
+    "accounts": [
+      {
+        "agent": "antigravity",
+        "facts": {
+          "plan": "Google AI Pro",
+          "read_at": "2026-11-25T12:00:00.000Z"
+        },
+        "id": "01K1B3XQ8ZC0DE5FGH7AGYACC2",
+        "label": "Antigravity 2",
+        "signed_in": true
+      }
+    ],
+    "active": [
+      {
+        "account_id": "01K1B3XQ8ZC0DE5FGH7AGYACC2",
+        "agent": "antigravity"
+      }
+    ],
+    "agent_sign_ins": [
+      {
+        "agent": "antigravity",
+        "signed_in": true
+      }
+    ],
+    "defaults": [
+      {
+        "agent": "antigravity",
+        "facts": {
+          "plan": "Google AI Ultra",
+          "read_at": "2026-11-25T12:00:00.000Z",
+          "windows": [
+            {
+              "resets_at": 1796258851,
+              "used_percent": 20,
+              "window_minutes": 10080
+            }
+          ]
+        }
+      }
+    ],
+    "type": "accounts"
   }
 }

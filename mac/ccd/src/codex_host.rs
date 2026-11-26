@@ -807,11 +807,9 @@ async fn link(
                     // Its own word that its account's limits changed, on this connection: no process started. A
                     // word that names no window changes nothing.
                     (Some("account/rateLimits/updated"), _, _) => {
-                        if let Ok(account) = daemon.store.run_account(&uid) {
-                            let key = account.map_or_else(
-                                || crate::accounts::default_key(&AgentKind::Codex),
-                                |account| account.id,
-                            );
+                        if let Ok(account) = daemon.store.run_account_id(&uid) {
+                            let key = account
+                                .unwrap_or_else(|| crate::accounts::default_key(&AgentKind::Codex));
                             let windows = crate::accounts::codex_windows(&frame["params"]["rateLimits"]);
                             if !windows.is_empty() && daemon.account_facts.update_windows(&key, windows) {
                                 crate::start_session::push_accounts(&daemon).await;
@@ -2544,12 +2542,7 @@ async fn launch_again(
         .map(str::to_string);
     let kept = newest.and_then(|kept| narrower_than_default(kept, switched));
     // Started on another account than the run last ran on, whose plan may not offer the thread's model.
-    let recorded = daemon
-        .store
-        .run_account(uid)
-        .ok()
-        .flatten()
-        .map(|account| account.id);
+    let recorded = daemon.store.run_account_id(uid).ok().flatten();
     let other_account = recorded != account.map(|account| account.id().to_string());
     let client = bring_up(daemon, uid, &launch, &folders, log, deadline, launched).await?;
     // On another account the run's menu becomes its plan's, and a model the plan lacks gives way to its default.

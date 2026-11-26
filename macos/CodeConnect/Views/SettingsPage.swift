@@ -407,9 +407,14 @@ private struct AccountSettings: View {
                 Text("Each agent uses the account marked here. Click another to move its sessions to it.")
                     .font(Theme.ui(13)).foregroundStyle(Theme.text2)
                 ForEach(StartAgent.withAccounts) { agent in AgentAccounts(model: model, agent: agent) }
-                // An agent with one sign-in of its own and no accounts here, where it is installed on this Mac.
+                // Antigravity, where it is installed on this Mac: its accounts, or, from a computer that keeps none of
+                // them, its one sign-in of its own.
                 if model.starter.availableAgents.contains(.antigravity) {
-                    AgentSignInGroup(model: model, agent: .antigravity)
+                    if model.keepsAntigravityAccounts {
+                        AgentAccounts(model: model, agent: .antigravity)
+                    } else {
+                        AgentSignInGroup(model: model, agent: .antigravity)
+                    }
                 }
                 if let problem = model.accountsProblem {
                     Text(problem).font(Theme.ui(12)).foregroundStyle(Theme.red)
@@ -511,11 +516,13 @@ private struct AgentSignInGroup: View {
 /// columns captioned on the group's title line; the row in use filled, with a check at its leading edge; a click on
 /// another uses it. "…" on hover (and a right-click) holds Sign In Again… on a signed-out row and Remove… on an added
 /// one. "Add Account…" is the group's quiet last row: it adds an account and starts its sign-in in the browser at once,
-/// no name asked (the row reads its email once signed in). Under the group, a switch in progress in words.
+/// no name asked (the row reads its email once signed in). Under the group, a switch in progress in words. An agent with
+/// a sign-in of its own (Antigravity) shows it on its Default: its line, Sign In… and Sign Out…, the sign-out confirmed.
 private struct AgentAccounts: View {
     let model: AppModel
     let agent: StartAgent
     @State private var removing: AgentAccount?
+    @State private var signingOut = false
 
     /// The windows the agent names across its accounts, in the order it names them: the group's columns.
     private func columns(_ book: AccountBook) -> [String] {
@@ -536,10 +543,14 @@ private struct AgentAccounts: View {
             .padding(.leading, 4)
             VStack(spacing: 0) {
                 if let book {
+                    let signIn = book.agentSignIn(for: agent)
                     AccountRow(
                         model: model, agent: agent, id: nil, facts: book.defaultFacts(for: agent), label: "Default",
-                        signedOut: false, signingIn: false, note: nil, columns: columns, inUse: active == nil,
-                        choose: { await model.activateAccount(agent: agent, accountID: nil) }, acts: [], remove: {})
+                        signedOut: signIn?.signedOut ?? false, signingIn: signIn?.signingIn ?? false,
+                        note: signIn?.line(plan: book.defaultFacts(for: agent)?.plan), columns: columns,
+                        inUse: active == nil, choose: { await model.chooseDefault(agent) },
+                        acts: model.signsAgentsIn ? signIn?.acts ?? [] : [], remove: {},
+                        signOut: { signingOut = true })
                     ForEach(book.accounts(for: agent)) { account in
                         AccountRow(
                             model: model, agent: agent, id: account.id, facts: account.facts, label: account.label,
@@ -583,6 +594,17 @@ private struct AgentAccounts: View {
                     .init(title: "Cancel", kind: .cancel, id: "settings.accounts.remove.cancel"),
                     .init(title: "Remove", kind: .destructive, id: "settings.accounts.remove.confirm") {
                         Task { await model.removeAccount(accountID: account.id) }
+                    },
+                ])
+        }
+        .confirmation(Binding(get: { signingOut ? agent : nil }, set: { signingOut = $0 != nil })) { agent in
+            Confirmation(
+                title: "Sign Out of \(agent.displayName)?",
+                message: "\(agent.displayName) sessions on this Mac stop working until it’s signed in again.",
+                answers: [
+                    .init(title: "Cancel", kind: .cancel, id: "settings.accounts.signOut.cancel"),
+                    .init(title: "Sign Out", kind: .destructive, id: "settings.accounts.signOut.confirm") {
+                        Task { await model.signOutAgent(agent) }
                     },
                 ])
         }

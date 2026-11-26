@@ -186,6 +186,15 @@ final class AntigravityKitTests: XCTestCase {
         XCTAssertEqual(AccountRowAct.signOut.title, "Sign Out…")
     }
 
+    /// **A signed-out Default is never chosen** (306, round 1 C6): a click on Antigravity's Default chooses it only while
+    /// its own sign-in reads signed in (or is not known); signed out, or signing in, the click signs it in instead, so no
+    /// session moves onto a Default that can't start.
+    func testASignedOutDefaultIsNotChoosable() throws {
+        XCTAssertEqual(try signInBook("signed_in_pro").agentSignIn(for: .antigravity)?.choosable, true)
+        XCTAssertEqual(try signInBook("signed_out").agentSignIn(for: .antigravity)?.choosable, false)
+        XCTAssertEqual(try signInBook("signing_in").agentSignIn(for: .antigravity)?.choosable, false)
+    }
+
     /// An answer to an Antigravity card, confirmed through its host, says it was handed to Antigravity, not to Claude;
     /// a Claude card's still says Claude.
     func testAnAnsweredAntigravityCardSaysItWentToAntigravity() {
