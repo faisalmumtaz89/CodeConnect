@@ -80,13 +80,6 @@ struct ChangesTab: View {
             }
         }
     }
-
-    /// How many files the run's last read diff changes, for the tab: only from a diff already read, never asked for
-    /// to fill the count, and none when it changes no file.
-    static func fileCount(model: AppModel, key: String) -> Int? {
-        guard case .loaded(_, let parsed, _) = model.diffState(for: key), !parsed.files.isEmpty else { return nil }
-        return parsed.files.count
-    }
 }
 
 /// Lines added and removed across the diff, and how many files: one reading, as drawn.
