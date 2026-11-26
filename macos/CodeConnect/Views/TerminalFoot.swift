@@ -269,9 +269,16 @@ private struct ShellHost: NSViewRepresentable {
         coordinator.leave()
         let view = Shells.shared.view(for: session)
         view.removeFromSuperview()
-        view.frame = container.bounds.insetBy(dx: 12, dy: 10)
-        view.autoresizingMask = [.width, .height]
+        // Pinned, not framed: the container is mounted before it has a size, and a frame inset from an empty one is
+        // null, which grows with the container from an origin at infinity.
+        view.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            view.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
+        ])
         view.terminalDelegate = coordinator
         coordinator.join(session: session, view: view)
         DispatchQueue.main.async { [weak view] in view?.window?.makeFirstResponder(view) }
