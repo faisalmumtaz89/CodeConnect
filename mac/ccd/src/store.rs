@@ -7563,8 +7563,9 @@ fn event_from_row(session_uid: &str, row: &rusqlite::Row<'_>) -> rusqlite::Resul
 
 /// Whether the Antigravity run `session_uid` is certainly quiet by what its process has filed since the run's newest
 /// end: agy takes each message at once and queues it behind the turn running, then ends that message's turn with the
-/// reply to its prompt, filed under its uuid. So every message and mail wake has its turn's end, no tool it began is
-/// still running, and its last turn ran no command, which may still run in the background.
+/// reply to its prompt, filed under its uuid. So every message and mail wake has its turn's end (or a Stop dropped it
+/// before it ran, filed not sent), no tool it began is still running, and its last turn ran no command, which may still
+/// run in the background.
 fn acp_quiet(conn: &Connection, session_uid: &str) -> Result<bool> {
     let mut stmt = conn.prepare(
         "SELECT kind, source_event_id, turn_id, payload FROM events
@@ -7593,10 +7594,16 @@ fn acp_quiet(conn: &Connection, session_uid: &str) -> Result<bool> {
     let Some(&last) = ends.last() else {
         return Ok(false);
     };
+    // A queued message a Stop dropped (filed not sent) runs no turn; it is not one of the turn ends either, so the last
+    // turn stays the last that ran.
+    let dropped: Vec<&str> = events
+        .iter()
+        .filter_map(|(_, id, ..)| id.strip_prefix("not_sent:"))
+        .collect();
     let mut running = std::collections::HashSet::new();
     for (kind, id, turn, payload) in &events {
         let asked = id.strip_prefix("say:").or_else(|| id.strip_prefix("wake:"));
-        if asked.is_some_and(|asked| !ends.contains(&asked)) {
+        if asked.is_some_and(|asked| !ends.contains(&asked) && !dropped.contains(&asked)) {
             return Ok(false);
         }
         let tool = serde_json::from_str::<serde_json::Value>(payload).unwrap_or_default();
@@ -14192,7 +14199,7 @@ mod tests {
     /// a message at once and queues it behind the turn running, and ends each turn with the reply to that message's
     /// prompt, filed under its uuid. Quiet: each message and mail wake since its process started answered, no tool still
     /// running, and no command run in its last turn (one may still run in the background). A turn's tools are read by
-    /// its id, so a finished Read leaves it quiet.
+    /// its id, so a finished Read leaves it quiet. A queued message a Stop dropped (filed not sent) runs no turn.
     #[test]
     fn an_antigravity_run_is_quiet_once_every_message_has_its_turns_end() {
         let filed = |steps: &[(&str, &str)]| {
@@ -14233,6 +14240,11 @@ mod tests {
                     "read" => tool("read", "completed"),
                     "run" => tool("execute", "completed"),
                     "running" => tool("read", "in_progress"),
+                    "stopped" => vec![crate::claude_host::not_sent_notice(
+                        &session.uid,
+                        turn,
+                        "r-queued",
+                    )],
                     "end" => acp(json!({"result": {"stopReason": "end_turn"}})),
                     other => unreachable!("{other}"),
                 };
@@ -14266,9 +14278,28 @@ mod tests {
                     ("end", "m2"),
                 ],
             ),
+            (
+                "a queued message a Stop dropped",
+                vec![
+                    ("say", "m1"),
+                    ("say", "m2"),
+                    ("stopped", "m2"),
+                    ("end", "m1"),
+                ],
+            ),
         ];
         let busy = [
             ("nothing answered", vec![("say", "m1")]),
+            (
+                "a command in the last turn, a queued message dropped after it",
+                vec![
+                    ("say", "m1"),
+                    ("run", "m1"),
+                    ("say", "m2"),
+                    ("stopped", "m2"),
+                    ("end", "m1"),
+                ],
+            ),
             (
                 "a queued message",
                 vec![("say", "m1"), ("say", "m2"), ("end", "m1")],
