@@ -8727,7 +8727,7 @@ mod tests {
         let pr = read.pr.as_ref().unwrap();
         assert_eq!(
             (pr.checks.as_ref().map(Vec::len), pr.checks_complete),
-            (Some(9), Some(true)),
+            (Some(10), Some(true)),
             "an open pull request's checks, from the checks query"
         );
         let calls = gh_calls(&gh);
