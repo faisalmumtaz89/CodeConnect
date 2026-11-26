@@ -181,8 +181,9 @@ private struct Composer: View {
             if !new.isEmpty, case .neutral = running?.phase { running = nil }
         }
         // A send a live Stop cancelled hands its words back here, but only into an empty reply, so a draft being typed
-        // is never overwritten. Taken or not, Kit's offer is consumed, so the words are offered once.
-        .onChange(of: model.composerRestore[key]) { _, restore in
+        // is never overwritten; offered while no box showed the run, they are taken as one appears. Taken or not, Kit's
+        // offer is consumed, so the words are offered once.
+        .onChange(of: model.composerRestore[key], initial: true) { _, restore in
             guard let restore else { return }
             if kept.reply.isEmpty { kept.reply = restore }
             model.consumeComposerRestore(for: key)
