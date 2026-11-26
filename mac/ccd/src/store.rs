@@ -2409,7 +2409,7 @@ impl Store {
     /// **Whether the run `session_uid` is certainly quiet, by what ccd has filed of it** ([`crate::switch::moves`]):
     /// a turn of its process has completed and none has begun since; no message of the person's sent it waits to be
     /// taken or answered (a claim still `applying`, or one filed after its last turn began, which may run as a turn
-    /// of its own); its last turn ran no command, subagent or task (Codex: no command or subagent), and its process
+    /// of its own); its last turn ran no command, subagent or task (Codex: no command, and no subagent in any turn), and its process
     /// scheduled no prompt; no background task it started (a command, a subagent, [`protocol::sdk_map::BACKGROUND_TASK`])
     /// is still open; and no mail wake is outstanding. `sending`, the message being sent
     /// now, is no message waiting. Anything not known reads not quiet.
@@ -2532,8 +2532,9 @@ impl Store {
                     serde_json::from_str::<serde_json::Value>(payload)
                         .is_ok_and(|payload| payload["tool"] == "file_change")
                 }
-                // A Codex subagent its last turn spawned, which may work on after the turn.
-                kind if codex && i >= before && kind == "codex_collabAgentToolCall" => false,
+                // A Codex subagent it spawned in any turn of this app-server, which may work on after that turn: Codex
+                // files no end of a subagent that ccd reads, so the run keeps its account until the app-server ends.
+                kind if codex && kind == "codex_collabAgentToolCall" => false,
                 // A prompt it scheduled may still come, whichever turn scheduled it.
                 kind if kind == EventKind::AgentMessage.as_str() => {
                     blocks(payload).iter().all(|block| {

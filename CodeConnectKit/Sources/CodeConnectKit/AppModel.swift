@@ -1959,8 +1959,9 @@ public final class AppModel {
         requestSessions()
     }
 
-    /// A message the daemon took for a run that was moving to another account is the move's last step: the list is
-    /// asked for again at once, so the run shows its new account and no move without waiting for the next refresh.
+    /// The daemon's answer to a message for a run that was moving to another account ends the move's step, whether the
+    /// move went through or not: the list is asked for again at once, so the run shows its account and where its move
+    /// stands without waiting for the next refresh.
     private func listAgainAfterAMove(_ moving: Bool) {
         if moving { requestSessions() }
     }
@@ -3627,15 +3628,16 @@ public final class AppModel {
             let result = try await connection.compose(
                 session: reference, requestID: requestID, text: text, payloadHash: hash, attachments: files)
             controls.settleCompose(result, material: hash)
+            listAgainAfterAMove(moving)
             switch result {
             case .started, .steered, .duplicate:
                 filesSent(files, from: key)
-                listAgainAfterAMove(moving)
             default: break
             }
             states[key]?.codexTurnsChanged()
             return result
         } catch let refusal as DaemonConnection.CodexRefusal {
+            listAgainAfterAMove(moving)
             controls.composeNotSent(Self.sentence(for: refusal, verb: "carry this message"))
             return nil
         } catch ConnectionError.sentButUnanswered {
@@ -3662,12 +3664,15 @@ public final class AppModel {
         guard let reference = Self.sessionReference(summary) else { return .refused(Self.noUidSentence) }
         let hash = CodexHash.compose(sessionRef: reference, text: text)
         retireSettingNoticeForSend(key)
+        let moving = summary.switching != nil
         do {
             let result = try await connection.compose(
                 session: reference, requestID: "say-" + hash, text: text, payloadHash: hash)
+            listAgainAfterAMove(moving)
             states[key]?.codexTurnsChanged()
             return Self.commentAttempt(for: result, matched: runLabel(for: key).project)
         } catch let refusal as DaemonConnection.CodexRefusal {
+            listAgainAfterAMove(moving)
             return .refused(Self.sentence(for: refusal, verb: "carry this comment"))
         } catch ConnectionError.sentButUnanswered {
             return .indeterminate(Self.sentNoAnswerSentence)
@@ -4109,11 +4114,11 @@ public final class AppModel {
             let result = try await connection.sendText(
                 session: key, text: trimmed, submit: submit,
                 requestID: requestID, payloadHash: payloadHash, attachments: files)
+            listAgainAfterAMove(moving)
             switch result {
             case .sent(let matched):
                 pendingSendIdentities[mutation] = nil
                 filesSent(files, from: key)
-                listAgainAfterAMove(moving)
                 return .sent(matched: matched)
             case .refused(let reason):
                 // A refusal promises nothing was typed, so the next attempt
@@ -4123,7 +4128,6 @@ public final class AppModel {
             case .duplicate(_, let appliedAt):
                 pendingSendIdentities[mutation] = nil
                 filesSent(files, from: key)
-                listAgainAfterAMove(moving)
                 return .alreadyApplied(appliedAt: appliedAt)
             case .indeterminate(let reason):
                 retainIdentityIfListed(mutation, requestID)

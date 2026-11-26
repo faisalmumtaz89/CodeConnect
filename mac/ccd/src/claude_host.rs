@@ -75,7 +75,7 @@ const ZOMBIE_WAIT: Duration = Duration::from_secs(5);
 const TERM_GRACE: Duration = Duration::from_secs(5);
 
 /// How long a run sent `stop` has to exit before its host's group is stopped (H5).
-pub(crate) const STOP_GRACE: Duration = Duration::from_secs(10);
+const STOP_GRACE: Duration = Duration::from_secs(10);
 
 /// The end of a run that was `stopping`, however it ended. It carries no exit code: the
 /// person asked for the stop, so claude's code (1 when it was mid-turn) says nothing.
@@ -14669,6 +14669,129 @@ mod tests {
             .map(|event| event["payload"]["switched_to"]["label"].clone())
             .collect();
         assert_eq!(ends, ["B"], "one end, the switch's");
+    }
+
+    /// **A move whose old process ignores SIGTERM still goes through with its message** (306): its host takes the stop,
+    /// never ends and ignores SIGTERM; it is stopped as End run stops one, and in time for the message to relaunch the
+    /// run on B.
+    #[tokio::test]
+    async fn a_move_whose_process_ignores_sigterm_still_goes_through() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let deaf = rig.root.join("stub-host-deaf");
+        std::fs::write(
+            &deaf,
+            format!(
+                "#!/bin/sh\necho $$ > \"$1/stub.pid\"\nprintf '{{\"protocol_version\":{HOST_PROTOCOL_VERSION},\"host_pid\":%s}}' \
+                 \"$$\" > \"$1/host.json\"\ntrap '' TERM\nexec sleep 30\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&deaf, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let b = on_a_with_b(&mut rig);
+        let mut played = live_run_on(&rig, &deaf).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        turn_ends(&mut played, 4).await;
+        choose(&rig.daemon, Some(&b)).await;
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+                let Played {
+                    dir,
+                    mut lines,
+                    write,
+                    ..
+                } = played;
+                let read = next(&mut lines).await;
+                assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+                drop((lines, write));
+                let old = pid_in(&dir, "stub.pid");
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+    }
+
+    /// **A move's message after a reboot does not wait on the old group's number** (306): the run's move ended it, and
+    /// the Mac has started again since its host was recorded; a group now has that number. The message relaunches
+    /// the run on B and signals nothing of that group.
+    #[tokio::test]
+    async fn a_moves_message_after_a_reboot_does_not_wait_on_the_old_groups_number() {
+        use std::os::unix::process::CommandExt;
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (mut played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        rig.daemon
+            .store
+            .set_switch_state(&uid, Some(Store::SWITCH_MOVED))
+            .unwrap();
+        assert!(rig.daemon.stop_through_link(&uid).await);
+        let read = next(&mut played.lines).await;
+        assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let Played {
+            dir, lines, write, ..
+        } = played;
+        drop((lines, write));
+        // Recorded before this boot, as far as ccd can tell; a group of this boot has the number now.
+        let mut other = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .execute(
+                "UPDATE run_hosts SET host_pid = ?2, boot_sec = 1, boot_usec = 1 WHERE session_uid = ?1",
+                rusqlite::params![uid, other.id() as i64],
+            )
+            .unwrap();
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        let untouched = other.try_wait().unwrap().is_none();
+        let _ = other.kill();
+        let _ = other.wait();
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert!(untouched, "the other group is not signalled");
     }
 
     /// **A message read before a restart's replay has ended moves nothing** (306): ccd restarted and attached again to a

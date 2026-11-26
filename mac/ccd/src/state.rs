@@ -2355,7 +2355,7 @@ impl Daemon {
                 return refuse(crate::codex_refusals::SESSION_LOOKUP_FAILED.to_string());
             }
         };
-        let _moving = self.move_guard(&row.session_uid).await;
+        let moving = self.move_guard(&row.session_uid).await;
         // A Claude run CodeConnect started: its lifecycle, for its own branch below.
         let mut hosted = None;
         match row.agent {
@@ -2485,7 +2485,7 @@ impl Daemon {
         };
         if let Some(commands) = engine {
             return Daemon::interrupt_result(
-                self.interrupt_on_engine(&commands, &session.uid, request_id, turn_id)
+                self.interrupt_on_engine(&commands, &session.uid, request_id, turn_id, moving)
                     .await,
             );
         }
@@ -2507,6 +2507,7 @@ impl Daemon {
         uid: &str,
         request_id: &str,
         turn_id: &str,
+        moving: Option<tokio::sync::OwnedMutexGuard<()>>,
     ) -> crate::codex_host::InterruptReport {
         use crate::codex_host::InterruptReport;
         let (reply, told) = tokio::sync::oneshot::channel();
@@ -2515,6 +2516,10 @@ impl Daemon {
             turn_id: turn_id.to_string(),
             reply,
         });
+        // Handed to the link, which takes its commands in order and reads a stop it holds as a turn running: the move
+        // gate is let go here, not when Codex ends the turn, which it may never do, so an End run is never held behind
+        // it.
+        drop(moving);
         if asked.is_ok() {
             if let Ok(report) = told.await {
                 return report;
@@ -2698,6 +2703,9 @@ impl Daemon {
         // first and relaunched by the message the same way ([`crate::switch::moves`]), all under
         // the run's move gate.
         let moving = self.move_guard(&session.uid).await;
+        // One deadline for a message's relaunch, a move's end of the old app-server included: a move's within the
+        // apps' wait for an answer, so one that cannot start is refused, nothing sent, before they stop waiting.
+        let mut deadline = tokio::time::Instant::now() + crate::start_session::START_TIMEOUT;
         let mut engine = match self.inner.lock().await.host_links.get(&session.uid) {
             Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
             _ => None,
@@ -2712,7 +2720,7 @@ impl Daemon {
                 // A message the ledger holds is answered from it, and moves nothing.
                 if !recorded && crate::switch::moves(self, &session.uid, request_id, running).await
                 {
-                    let deadline = tokio::time::Instant::now() + crate::claude_host::RELAUNCH_WAIT;
+                    deadline = tokio::time::Instant::now() + crate::claude_host::RELAUNCH_WAIT;
                     if !crate::switch::ended_for_move(self, &session.uid, deadline).await {
                         return refuse(crate::claude_host::STILL_ENDING.into());
                     }
@@ -2755,7 +2763,7 @@ impl Daemon {
             claimed_hash,
             reply,
         };
-        if crate::codex_host::relaunch(self, &session.uid, ask).await {
+        if crate::codex_host::relaunch(self, &session.uid, ask, deadline).await {
             return Daemon::compose_result(
                 self.engine_report(&session.uid, request_id, told).await,
             );

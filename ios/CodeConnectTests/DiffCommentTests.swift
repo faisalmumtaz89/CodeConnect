@@ -29,8 +29,12 @@ final class DiffCommentTests: XCTestCase {
     }
 
     /// A live app holding one of compose-stop-wire's Codex summaries; the caps advertise codex_compose.
-    private func liveCodex(_ summaryKey: String) async throws -> (AppModel, String) {
-        let fixture = try wire()
+    private func liveCodex(_ summaryKey: String, switching: String? = nil) async throws -> (AppModel, String) {
+        var fixture = try wire()
+        if let switching, case .object(var row)? = fixture[summaryKey] {
+            row["switching"] = .string(switching)
+            fixture[summaryKey] = .object(row)
+        }
         let caps = try JSONDecoder().decode(
             Capabilities.self,
             from: Data(try XCTUnwrap(fixture["hello_ack_capabilities"]).canonicalJSONString.utf8))
@@ -106,6 +110,27 @@ final class DiffCommentTests: XCTestCase {
         guard case .sent? = attempt else {
             return XCTFail("the comment is sent, got \(String(describing: attempt))")
         }
+    }
+
+    /// **A comment that moves a Codex run asks for the list again, once**, as the composer's own message does: the run
+    /// shows its new account without waiting for the next refresh.
+    func testACommentToAMovingCodexRunAsksForTheListOnce() async throws {
+        let (model, key) = try await liveCodex("session_summary", switching: "waiting")
+        var asked = 0
+        let composed = expectation(description: "the comment composed")
+        model.connection.sendStub = { [weak model] message in
+            if self.frameType(message) == "sessions" { asked += 1 }
+            guard self.frameType(message) == "compose", let session = self.field(message, "session_id"),
+                let request = self.field(message, "request_id")
+            else { return }
+            model?.connection.injectForTesting(
+                .composeResult(sessionID: session, requestID: request, result: .started(turnID: "t-1")))
+            composed.fulfill()
+        }
+        let attempt = await model.send(text: "In `Foo.swift` line 9: this is wrong", to: key)
+        await fulfillment(of: [composed], timeout: 2)
+        guard case .sent = attempt else { return XCTFail("the comment is sent, got \(attempt)") }
+        XCTAssertEqual(asked, 1, "the comment that moved the run asks for the list once")
     }
 
     // MARK: Relaunchable run

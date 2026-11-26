@@ -2294,7 +2294,12 @@ async fn new_thread(
 /// the link runs the ladder on what was launched, puts the run back to `exited`
 /// ([`crate::store::Store::undo_relaunch`]), also when the watch found the new app-server gone
 /// first and failed the run for it, and drops `ask` with nothing claimed or sent.
-pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -> bool {
+pub(crate) async fn relaunch(
+    daemon: &Arc<Daemon>,
+    uid: &str,
+    ask: ComposeAsk,
+    deadline: tokio::time::Instant,
+) -> bool {
     let Some((root, launcher)) = daemon.relaunch_from.get() else {
         return false;
     };
@@ -2319,8 +2324,8 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
         }
     };
     let mut launched = None;
-    let relaunched = tokio::time::timeout(
-        crate::start_session::START_TIMEOUT,
+    let relaunched = tokio::time::timeout_at(
+        deadline,
         launch_again(
             daemon,
             root,
@@ -2332,12 +2337,7 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
         ),
     )
     .await
-    .unwrap_or_else(|_| {
-        Err(format!(
-            "not relaunched within {} s",
-            crate::start_session::START_TIMEOUT.as_secs()
-        ))
-    });
+    .unwrap_or_else(|_| Err("not relaunched in time".to_string()));
     let live = match relaunched {
         Ok(resumed) => match daemon
             .db
@@ -2388,9 +2388,6 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
         }
         Err(why) => {
             crate::log_info!("{uid}: not relaunched: {why}");
-            if switching {
-                crate::switch::relaunch_failed(daemon, uid, why.clone()).await;
-            }
             if let Some((leader, boot)) = launched {
                 stop(uid, leader, boot).await;
             }
@@ -2401,6 +2398,10 @@ pub(crate) async fn relaunch(daemon: &Arc<Daemon>, uid: &str, ask: ComposeAsk) -
                 .await
             {
                 crate::log_error!("{uid}: could not put the run back to exited: {err:#}");
+            }
+            // Said once the run is back to ended, so no listing reads it failed while it still reads starting.
+            if switching {
+                crate::switch::relaunch_failed(daemon, uid, why).await;
             }
         }
     }
@@ -9025,6 +9026,101 @@ mod tests {
         );
     }
 
+    /// **A Stop Codex takes and never ends holds no End run** (306): a run due to move is sent the person's Stop, which
+    /// Codex answers and whose turn it never ends; End run from another device still goes through at once.
+    #[tokio::test]
+    async fn a_stop_codex_never_ends_leaves_end_run_free() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-hang", thread, turn).await;
+        turn_begun(&rig.daemon, &uid, &mut ws, thread, turn).await;
+        rig.daemon
+            .store
+            .set_switch_state(&uid, Some(Store::SWITCH_WAITING))
+            .unwrap();
+        let stop = stopping(&rig.daemon, &uid, "req-hang-1", turn);
+        let interrupt = asked(&mut ws, "turn/interrupt").await;
+        answer(&mut ws, &interrupt, json!({})).await;
+        let ended = tokio::time::timeout(Duration::from_secs(5), rig.daemon.stop_run(&uid)).await;
+        stop.abort();
+        drop(ws);
+        end_run(&rig, &uid).await;
+        assert!(ended.is_ok(), "End run is not held behind the Stop");
+    }
+
+    /// **A subagent a Codex run spawned in an earlier turn holds its move** (306): turn 1 spawns one, turn 2 is a plain
+    /// answer while it may still work; the next message goes on A, and the run stays due.
+    #[tokio::test]
+    async fn a_subagent_spawned_in_an_earlier_turn_holds_the_move() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        rig.daemon = relauncher(&rig);
+        let (uid, mut ws) = engine_run(&rig, "req-sub", "thr-sub", "turn-1").await;
+        let spawned = [json!({"method": "item/completed", "params": {
+            "threadId": "thr-sub", "turnId": "turn-1", "item": {"type": "collabAgentToolCall",
+            "id": "agent-1", "tool": "spawnAgent", "status": "completed"}}})];
+        turn_over(&rig.daemon, &uid, &mut ws, "thr-sub", "turn-1", &spawned).await;
+        turn_over(&rig.daemon, &uid, &mut ws, "thr-sub", "turn-2", &[]).await;
+        let leader = leader_of(&rig.daemon, &uid).await;
+        let b = rig.daemon.store.add_account("codex", "B").unwrap();
+        choose(&rig.daemon, &b).await;
+        let said = saying(&rig.daemon, &uid, "say-sub", "go on");
+        let sent = asked(&mut ws, "turn/start").await;
+        assert!(
+            unsafe { libc::kill(leader, 0) } == 0,
+            "its app-server runs on"
+        );
+        answer(&mut ws, &sent, json!({"turn": {"id": "turn-3"}})).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), said).await;
+        let due = serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(due["switching"], "waiting", "still due: {due}");
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A Codex move whose new app-server never answers is refused inside the apps' wait** (306): the person's message
+    /// ends the old app-server, and the new one never comes up: the message is refused, nothing sent, well inside the
+    /// apps' 20 s, and the run reads ended and failed.
+    #[tokio::test]
+    async fn a_codex_move_that_cannot_start_is_refused_inside_the_apps_wait() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        rig.daemon = relauncher(&rig);
+        let (uid, mut ws) = engine_run(&rig, "req-slow", "thr-slow", "turn-1").await;
+        turn_over(&rig.daemon, &uid, &mut ws, "thr-slow", "turn-1", &[]).await;
+        let leader = leader_of(&rig.daemon, &uid).await;
+        let b = rig.daemon.store.add_account("codex", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("codex", Some(&b.id))
+            .unwrap());
+        let asked_at = Instant::now();
+        let mut said = saying(&rig.daemon, &uid, "say-slow", "on B?");
+        ended_by_the_move(&mut said, leader, ws).await;
+        let said = said.await.unwrap();
+        let waited = asked_at.elapsed();
+        if let Some(watch) = rig.daemon.db.watched_host(uid.clone()).await.unwrap() {
+            crate::claude_host::stop_group(watch.host, watch.boot.unwrap()).await;
+        }
+        assert!(
+            matches!(said, protocol::ws::ComposeResult::Rejected { .. }),
+            "{said:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(20),
+            "answered after {waited:?}"
+        );
+        let failed = serde_json::to_value(summary_of(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(
+            (failed["lifecycle"].as_str(), failed["switching"].as_str()),
+            (Some("exited"), Some("failed")),
+            "{failed}"
+        );
+    }
+
     /// **A moved run that has had a message is never silently given a new thread, and the thread asked for is on the
     /// model it would run** (306; terminal's rehearsal; gate 9): the person's message moves a run to B whose resume
     /// finds no rollout of its thread: Codex is asked for a thread on its kept model when B's plan offers it, and on
@@ -9058,6 +9154,7 @@ mod tests {
                 .store
                 .activate_account("codex", Some(&b.id))
                 .unwrap());
+            let (window_over, window) = crate::switch::window::record(&rig.daemon, &uid);
             let mut said = saying(&rig.daemon, &uid, "say-nr", "go on");
             ended_by_the_move(&mut said, leader, ws).await;
             let dir = run_folder(&rig).await;
@@ -9106,6 +9203,18 @@ mod tests {
             assert!(
                 matches!(said, protocol::ws::ComposeResult::Rejected { .. }),
                 "{said:?}"
+            );
+            window_over.send(()).unwrap();
+            let frames = window.await.unwrap();
+            let told = frames
+                .iter()
+                .position(|frame| frame["event"]["payload"]["notification_type"] == "switch_failed")
+                .expect("its failure is told");
+            assert_eq!(
+                frames[told + 1]["sessions"][0]["lifecycle"],
+                "exited",
+                "told failed only once ended: {:?}",
+                frames[told + 1]
             );
             let row = rig
                 .daemon

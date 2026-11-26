@@ -115,21 +115,26 @@ pub(crate) async fn settle(daemon: &Daemon, uid: &str, doubt: bool) {
     set(daemon, uid, due).await;
 }
 
+/// How long a process its move stopped has to end before it is stopped as End run stops one: with the ladder's own
+/// grace after it, inside the message's [`crate::claude_host::RELAUNCH_WAIT`], with time left to start it again.
+const MOVE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// How often [`ended_for_move`] looks again.
 const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Whether the run `uid`, its process stopped by its switch, has ended by `deadline`: its row `exited` and its
 /// recorded host or app-server gone with no member left in its group, as a message's relaunch requires. What its
 /// group still holds once that host is gone (a process started outside the agent's own tracking) is stopped as a dead
-/// host's group is ([`crate::claude_host::stop_group`]), once. A process still running past End run's grace is
+/// host's group is ([`crate::claude_host::stop_group`]), once. A process still running past [`MOVE_GRACE`] is
 /// stopped as End run stops one ([`crate::claude_host::escalate_stop`]): its group, then its end filed; only the
-/// process this wait first found live, never one started since. A run with no host recorded has none to wait for.
+/// process this wait first found live, never one started since. A run with no host recorded has none to wait for, nor
+/// one whose host was recorded before this Mac last started: its group's number names nothing of the run now.
 pub(crate) async fn ended_for_move(
     daemon: &Arc<Daemon>,
     uid: &str,
     deadline: tokio::time::Instant,
 ) -> bool {
-    let escalate = tokio::time::Instant::now() + crate::claude_host::STOP_GRACE;
+    let escalate = tokio::time::Instant::now() + MOVE_GRACE;
     let mut stopping = None;
     let mut laddered = false;
     loop {
@@ -142,7 +147,11 @@ pub(crate) async fn ended_for_move(
             let gone = protocol::proc_identity::liveness(&watch.host)
                 == protocol::proc_identity::Liveness::Gone;
             if watch.lifecycle == protocol::event::Lifecycle::Exited && gone {
-                if !protocol::proc_identity::group_has_members(watch.host.pid) {
+                let earlier_boot = matches!(
+                    (watch.boot, protocol::proc_identity::boot_identity()),
+                    (Some(then), Some(now)) if then != now
+                );
+                if earlier_boot || !protocol::proc_identity::group_has_members(watch.host.pid) {
                     return true;
                 }
                 if let (false, Some(boot)) = (laddered, watch.boot) {

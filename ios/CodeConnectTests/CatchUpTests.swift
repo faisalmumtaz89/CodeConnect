@@ -724,6 +724,16 @@ final class CatchUpTests: XCTestCase {
         XCTAssertEqual(wire.sessionsAsked, before + 1, "the moving run's message asks for the list once")
     }
 
+    /// **A refused message to a moving run asks for the list again too**: its move did not go through, and the list says
+    /// where it stands.
+    func testARefusedMessageToAMovingRunAsksForTheListOnce() async throws {
+        let (model, wire) = await caughtUp([Row(uid: a, lastSeq: 2, switching: "moved")])
+        model.connection.sendTextStub = { _, _ in .refused(reason: "This session is still ending; nothing was sent.") }
+        let before = wire.sessionsAsked
+        _ = await model.send(text: "carry on", to: a)
+        XCTAssertEqual(wire.sessionsAsked, before + 1, "the moving run's refused message asks for the list once")
+    }
+
     func testALiveStoppedSendOffersItsTextToTheComposer() async throws {
         let (model, _) = await caughtUp([Row(uid: a, lastSeq: 2)])
         // The send answers `.sent`, exactly as the daemon's canonical stop sequence does, so its
