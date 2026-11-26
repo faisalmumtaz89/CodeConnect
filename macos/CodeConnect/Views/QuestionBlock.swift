@@ -63,8 +63,8 @@ struct QuestionBlock: View {
                             if held {
                                 controls(keys: false).padding(.horizontal, 28).padding(.bottom, 14)
                             } else {
-                                // Its keys answer while no sheet covers the window.
-                                ReplyBoxFrame(model: model, key: approval.sessionKey) { controls(keys: !slot.sheetUp) }
+                                // Its keys answer while they are not elsewhere (`PendingSlot.keysElsewhere`).
+                                ReplyBoxFrame(model: model, key: approval.sessionKey) { controls(keys: !slot.keysElsewhere) }
                                     .preference(key: HoldsReplyBox.self, value: true)
                             }
                         }

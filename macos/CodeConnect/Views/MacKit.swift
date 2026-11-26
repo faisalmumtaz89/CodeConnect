@@ -234,6 +234,8 @@ extension EnvironmentValues {
 extension FocusedValues {
     /// The composer is using Esc itself: its commands list is open or its field has focus.
     @Entry var composerHoldsEscape: Bool?
+    /// A field of the run's changes (a hunk's comment) has the keyboard: what waits on you takes no keys meanwhile.
+    @Entry var changesFieldFocused: Bool?
 }
 
 /// Where a panel stands across its bounds, every panel's one rule: as wide as `widest` where the bounds have the room,

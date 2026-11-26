@@ -256,10 +256,8 @@
             (UserDefaults.standard.string(forKey: "CC_ATTACH_FILES") ?? "").split(separator: ",")
                 .map { URL(fileURLWithPath: String($0)) }
         }
-        /// `-CC_SESSION_TAB changes`: the opened run shows its Changes.
-        static var sessionTab: SessionTab? {
-            UserDefaults.standard.string(forKey: "CC_SESSION_TAB") == "changes" ? .changes : nil
-        }
+        /// `-CC_SESSION_TAB changes`: the opened run shows its changes panel.
+        static var opensChanges: Bool { UserDefaults.standard.string(forKey: "CC_SESSION_TAB") == "changes" }
         /// `-CC_TERMINAL YES`: the opened run's shell is open at the panel's foot. `-CC_TERMINAL_TYPE <text>`: once it is
         /// open, these words are typed into it, then Return (`\n` for more lines).
         static var terminalOpen: Bool { UserDefaults.standard.bool(forKey: "CC_TERMINAL") }

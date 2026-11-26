@@ -65,8 +65,9 @@ struct DecisionBlock: View {
     private var held: Bool { slot?.held == true }
     /// The box holds this request…
     private var boxed: Bool { slot != nil && answerable && !held }
-    /// …and its keys answer, while no sheet covers the window: a key meant for the sheet never answers behind it.
-    private var keyed: Bool { boxed && slot?.sheetUp != true }
+    /// …and its keys answer, while the keys are not elsewhere: a key meant for a sheet over the window, or for a comment
+    /// being written on the run's changes, never answers here.
+    private var keyed: Bool { boxed && slot?.keysElsewhere != true }
     private var agentName: String { summary?.agent.displayName ?? "The agent" }
     private var placeholder: String { CardWords.denyPrompt(agentName) }
     /// The reason a Deny carries, typed in the box: the run's (`RunDrafts`), so it outlives this view.

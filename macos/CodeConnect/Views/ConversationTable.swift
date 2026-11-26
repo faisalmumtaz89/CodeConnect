@@ -209,7 +209,13 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
 
     // MARK: Heights, the app's own
 
+    /// The row's view, on the conversation's column (`Theme.conversationColumn`): the table spans the pane, its scroller at the
+    /// pane's edge, and the row is measured as it is drawn.
     private func view(_ entry: Entry) -> AnyView {
+        AnyView(content(entry).onConversationColumn())
+    }
+
+    private func content(_ entry: Entry) -> AnyView {
         guard let item = entry.item else {
             if entry.place == Self.earlier { return AnyView(Earlier(model: model, key: key).padding(Self.insets)) }
             if let notice = entry.notice {

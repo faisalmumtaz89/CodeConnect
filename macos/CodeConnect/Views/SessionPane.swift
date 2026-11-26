@@ -1,20 +1,21 @@
 import CodeConnectKit
 import SwiftUI
 
-/// One run, opened beside the list: where it runs, what it is called, how it stands, and its conversation or its
-/// changes. Opening and closing it mark the run reviewed, as the iPhone does.
+/// One run, opened beside the list: where it runs, what it is called, how it stands, its conversation, and its changes
+/// beside it or, in a narrow pane, in its place. Opening and closing it mark the run reviewed, as the iPhone does.
 struct SessionPane: View {
     let row: FleetRow
     let model: AppModel
-    /// Which tab is shown: the window's, which keeps it for the run it was chosen on.
-    @Binding var tab: SessionTab
-    @State private var height: CGFloat = 0
+    /// The run's changes panel is open: the window's, which keeps it for each run.
+    @Binding var changesOpen: Bool
+    @State private var size: CGSize = .zero
     /// A request holds the reply box's place.
     @State private var boxTaken = false
     /// How tall the reply box stands (none while a request holds its place): a request shares the half pane with it.
     @State private var replyHeight: CGFloat = 0
     /// The reply field (or its command list) holds the keyboard.
     @FocusedValue(\.composerHoldsEscape) private var composerHolds
+    @FocusedValue(\.changesFieldFocused) private var changesFieldFocused
     /// The window's Add sheet, and its setup checklist: either covers the window, and then a request's answers take no
     /// keys, as the window's own Esc stands down for the Add sheet.
     @FocusedValue(\.adding) private var adding
@@ -25,47 +26,29 @@ struct SessionPane: View {
         VStack(alignment: .leading, spacing: 0) {
             Place(summary: row.summary, computer: row.machineName)
             Rectangle().fill(Theme.hairline).frame(height: 1)
-            Heading(row: row, model: model, tab: $tab)
-            ZStack(alignment: .topLeading) {
-                if tab == .conversation {
-                    VStack(spacing: 0) {
-                        Conversation(model: model, key: row.id)
-                        // What waits on you sits at the foot, outside the conversation's scroll, in at most half the
-                        // pane with the reply box when that shows, so the window holds them both at its smallest; its
-                        // answers take the reply box's place. Not while the reply field holds the keyboard: the box
-                        // stays the writer's until it lets go. Once a request has the box, the field can't take the
-                        // keyboard back, so what holds it then is the request's own field.
-                        PendingRequests(
-                            model: model, key: row.id, maxHeight: max(0, height / 2 - replyHeight),
-                            held: composerHolds == true && !boxTaken,
-                            sheetUp: adding.map { $0.wrappedValue != nil } ?? false || setup.shown)
-                        // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its
-                        // way are kept. It takes no room, no click, no keyboard (Tab can't reach it) and no reading.
-                        // Not clipped: its command list opens above it.
-                        ComposerBar(key: row.id) { tab = .changes }
-                            .frame(height: boxTaken ? 0 : nil, alignment: .top)
-                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { replyHeight = $0 }
-                            .opacity(boxTaken ? 0 : 1)
-                            .allowsHitTesting(!boxTaken)
-                            .disabled(boxTaken)
-                            .accessibilityHidden(boxTaken)
-                    }
-                    .onPreferenceChange(HoldsReplyBox.self) { boxTaken = $0 }
-                }
-                if tab == .changes {
-                    // The run's shell at the panel's foot, until the Changes panel gives it its own place there.
-                    VStack(spacing: 0) {
-                        ChangesTab(model: model, key: row.id)
-                        TerminalFoot(row: row, model: model)
-                    }
-                }
+            Heading(row: row, model: model, changesOpen: $changesOpen)
+            // The conversation stays mounted under its changes, so neither loses its place when the pane crosses the
+            // width that holds them side by side: there the panel stands beside it, narrower it covers it. Covered, its
+            // foot goes: no request is read or answered, and no reply typed, where it can't be seen (the reply's words
+            // are the run's, kept).
+            VStack(spacing: 0) {
+                Conversation(model: model, key: row.id)
+                if !inPlace { foot }
             }
+            .onPreferenceChange(HoldsReplyBox.self) { boxTaken = $0 }
+            .padding(.trailing, changesOpen && !inPlace ? 1 + Self.panelWidth : 0)
+            .opacity(inPlace ? 0 : 1)
+            .allowsHitTesting(!inPlace)
+            .disabled(inPlace)
+            .accessibilityHidden(inPlace)
+            .overlay(alignment: .trailing) { if changesOpen { changes } }
         }
         #if DEBUG
-            .task { if let shown = RenderWindow.sessionTab { tab = shown } }
+            .task { if RenderWindow.opensChanges { changesOpen = true } }
         #endif
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+        .preference(key: ChangesInPlace.self, value: inPlace)
         .background(Theme.window)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session.pane")
@@ -73,6 +56,75 @@ struct SessionPane: View {
         .onAppear { if agentsShown { model.markReviewed(row.id) } }
         .onDisappear { if agentsShown { model.markReviewed(row.id) } }
         .onChange(of: agentsShown) { _, shown in if shown { model.markReviewed(row.id) } }
+    }
+
+    /// What waits on you and the reply box, under the conversation.
+    @ViewBuilder private var foot: some View {
+        // What waits on you sits at the foot, outside the conversation's scroll, in at most half the pane with
+        // the reply box when that shows, so the window holds them both at its smallest; its answers take the
+        // reply box's place. Not while the reply field holds the keyboard: the box stays the writer's until it
+        // lets go. Once a request has the box, the field can't take the keyboard back, so what holds it then is
+        // the request's own field.
+        PendingRequests(
+            model: model, key: row.id, maxHeight: max(0, size.height / 2 - replyHeight),
+            held: composerHolds == true && !boxTaken,
+            keysElsewhere: adding.map { $0.wrappedValue != nil } ?? false || setup.shown || changesFieldFocused == true)
+        // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its way are
+        // kept. It takes no room, no click, no keyboard (Tab can't reach it) and no reading. Not clipped: its
+        // command list opens above it.
+        ComposerBar(key: row.id) { changesOpen = true }
+            .frame(height: boxTaken ? 0 : nil, alignment: .top)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { replyHeight = $0 }
+            .opacity(boxTaken ? 0 : 1)
+            .allowsHitTesting(!boxTaken)
+            .disabled(boxTaken)
+            .accessibilityHidden(boxTaken)
+    }
+
+    /// The run's changes: beside the conversation, behind a hairline, or in its place, under the row that gives it back.
+    private var changes: some View {
+        HStack(spacing: 0) {
+            if !inPlace { Rectangle().fill(Theme.hairline).frame(width: 1) }
+            VStack(spacing: 0) {
+                if inPlace {
+                    HStack {
+                        Spacer()
+                        ActionButton(title: "‹ Conversation", key: "Esc", prominent: false, small: true,
+                            id: "session.changes.back") { changesOpen = false }
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: 38)
+                    .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+                }
+                ChangesTab(model: model, key: row.id)
+                // The run's shell at the panel's foot, sized by itself: its bar closed, its screen open.
+                TerminalFoot(row: row, model: model)
+            }
+            .frame(width: inPlace ? nil : Self.panelWidth)
+        }
+        .background(Theme.window)
+    }
+
+    /// The changes panel's width, beside the conversation.
+    static let panelWidth: CGFloat = 480
+
+    /// The changes stand in the conversation's place: the pane can't hold the conversation's column and the panel side
+    /// by side. Before the pane has a width, they stand beside it: its first frame on a wide window draws both.
+    private var inPlace: Bool {
+        changesOpen && size.width > 0 && size.width < Theme.conversationColumn + 1 + Self.panelWidth
+    }
+}
+
+/// The run's changes panel stands in the conversation's place: Esc gives the conversation back before it closes the run.
+struct ChangesInPlace: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
+}
+
+extension View {
+    /// On the conversation's column (`Theme.conversationColumn`), centred in a wider pane.
+    func onConversationColumn() -> some View {
+        frame(maxWidth: Theme.conversationColumn, alignment: .leading).frame(maxWidth: .infinity)
     }
 }
 
@@ -113,7 +165,7 @@ private struct Place: View {
 private struct Heading: View {
     let row: FleetRow
     let model: AppModel
-    @Binding var tab: SessionTab
+    @Binding var changesOpen: Bool
 
     var body: some View {
         let since = row.lastActive
@@ -149,9 +201,9 @@ private struct Heading: View {
             HStack(spacing: 20) {
                 ForEach(SessionTab.allCases, id: \.self) { each in
                     UnderlineTab(
-                        title: each.title, id: each.id, selected: tab == each,
+                        title: each.title, id: each.id, selected: (each == .changes) == changesOpen,
                         count: each == .changes ? ChangesTab.fileCount(model: model, key: row.id) : nil
-                    ) { tab = each }
+                    ) { changesOpen = each == .changes }
                 }
             }
             .padding(.top, 6)

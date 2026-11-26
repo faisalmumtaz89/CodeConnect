@@ -29,9 +29,11 @@ struct MainWindow: View {
     @Binding var pendingAdd: AddKind?
     /// Settings, in the sidebar's place and the panes', and its section; nil, and the window shows the agents.
     @Binding var settings: SettingsSection?
-    /// The tab chosen other than the conversation, with the run it was chosen on. Any other run shows its
-    /// conversation, and each run opens on it.
-    @State private var chosen: (run: String, tab: SessionTab)?
+    /// The runs whose changes panel is open: each run keeps its own, opened or closed, as it was left.
+    @State private var changesOpen: Set<String> = []
+    /// The open run's changes panel stands in its conversation's place (`ChangesInPlace`): Esc gives the conversation
+    /// back first.
+    @State private var changesInPlace = false
     /// Whether the open run's composer is using Esc: its commands list is open or its field has focus.
     @FocusedValue(\.composerHoldsEscape) private var composerHoldsEscape
     /// Raised by Return in the run list: the open run's reply box takes the cursor.
@@ -97,16 +99,17 @@ struct MainWindow: View {
                         .frame(
                             width: showsRun || showsStart ? min(580, max(290, width - (sidebarHidden ? 0 : 218) - 450)) : nil)
                         .environment(\.headerClearance, clearance(first: sidebarHidden, last: !showsRun && !showsStart))
-                        // The arrows open a run; Return then puts the cursor in its reply box.
+                        // The arrows open a run; Return then puts the cursor in its reply box, which is there only while
+                        // the run's changes don't stand in its place.
                         .onKeyPress(.return) {
-                            guard opened != nil else { return .ignored }
+                            guard opened != nil, !changesInPlace else { return .ignored }
                             replyFocus += 1
                             return .handled
                         }
                 }
                 if let open, let model, showsRun {
                     if showsList { Rectangle().fill(Theme.hairline).frame(width: 1) }
-                    SessionPane(row: open, model: model, tab: tab(of: open.id))
+                    SessionPane(row: open, model: model, changesOpen: changesOpen(of: open.id))
                         .id(open.id)
                         .environment(\.replyFocusRequest, replyFocus)
                         .environment(\.headerClearance, clearance(first: sidebarHidden && !showsList, last: true))
@@ -118,6 +121,7 @@ struct MainWindow: View {
                 EmptyFleet(adding: $adding)
             }
         }
+        .onPreferenceChange(ChangesInPlace.self) { changesInPlace = $0 }
         // Settings is drawn over the agents, which stay as they were left (a draft, where a conversation was read, what
         // was open), hidden and out of reach, for the back row and Esc to return to.
         .opacity(settings == nil ? 1 : 0)
@@ -218,7 +222,6 @@ struct MainWindow: View {
         .task { await machines.waitOutLaunch() }
         .onChange(of: opened) {
             if opened != nil { settings = nil }
-            chosen = nil
             // A run opened shows, even with its pane hidden; with none open, the list shows again.
             if opened != nil { runHidden = false } else { listHidden = false }
             // The start's own run, opened from the list as it launches: the start is done, so New Agent shows a fresh
@@ -238,15 +241,24 @@ struct MainWindow: View {
             if case .computer(let id) = filter, removed.contains(id) { filter = nil }
             if let opened, !machines.fleet.contains(where: { $0.id == opened }) { self.opened = nil }
         }
-        // Esc closes the open run; a sheet's own Esc is its Cancel, and an ask's its safe answer. Not while the composer
-        // is using it: Esc closes its list, or leaves its field, first. Nor while the run's shell has the keyboard: there
-        // Esc is the program's (an editor's own), and a window shortcut would take it before the shell saw it.
+        // Esc closes the open run, or first gives its conversation back where its changes stand in its place; a sheet's own
+        // Esc is its Cancel, and an ask's its safe answer. Not while the composer or a field of the changes is using it:
+        // Esc closes its list, or leaves its field, first. Nor while the run's shell has the keyboard: there Esc is the
+        // program's (an editor's own), and a window shortcut would take it before the shell saw it.
         .background {
             // Esc in Settings goes back to the agents, unless an ask or a sheet holds it.
             if settings != nil, adding == nil, !asks.isAsking {
                 Button("Back") { settings = nil }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("settings.close")
+                    .opacity(0)
+                    .allowsHitTesting(false)
+            } else if let opened, changesInPlace, adding == nil, composerHoldsEscape != true, !Shells.shared.holdsKeys,
+                !asks.isAsking
+            {
+                Button("Conversation") { changesOpen.remove(opened) }
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("session.changes.close")
                     .opacity(0)
                     .allowsHitTesting(false)
             } else if opened != nil, adding == nil, composerHoldsEscape != true, !Shells.shared.holdsKeys,
@@ -303,12 +315,11 @@ struct MainWindow: View {
         opened = run
     }
 
-    /// A run's tab. It is another than the conversation only while that run is the one it was chosen on, so a run
-    /// opened from another run's changes shows its conversation from its first frame.
-    private func tab(of run: String) -> Binding<SessionTab> {
+    /// Whether a run's changes panel is open.
+    private func changesOpen(of run: String) -> Binding<Bool> {
         Binding(
-            get: { chosen.flatMap { $0.run == run ? $0.tab : nil } ?? .conversation },
-            set: { chosen = $0 == .conversation ? nil : (run, $0) })
+            get: { changesOpen.contains(run) },
+            set: { if $0 { changesOpen.insert(run) } else { changesOpen.remove(run) } })
     }
 
     /// A refused computer paired again: the Add Computer sheet, its address already in the code form.
@@ -999,6 +1010,8 @@ struct ActionButton: View {
     var destructive = false
     /// A title the button is as wide as, too: a button whose word changes (Trust, Don't Trust) keeps one width.
     var sizedFor: String? = nil
+    /// The small face, for a band's own row (a panel's tabs): 22 pt tall, 11.5 pt words.
+    var small = false
     /// What a driver finds it by.
     let id: String
     let action: () -> Void
@@ -1007,14 +1020,14 @@ struct ActionButton: View {
         Button(action: action) {
             HStack(spacing: 7) {
                 ZStack {
-                    if let sizedFor { Text(sizedFor.titleStyle).font(Theme.ui(12.5, .medium)).hidden() }
-                    Text(title.titleStyle).font(Theme.ui(12.5, .medium))
+                    if let sizedFor { Text(sizedFor.titleStyle).font(Theme.ui(small ? 11.5 : 12.5, .medium)).hidden() }
+                    Text(title.titleStyle).font(Theme.ui(small ? 11.5 : 12.5, .medium))
                 }
                 if let key { KeyCap(key, onLight: prominent) }
             }
             .foregroundStyle(prominent ? Color.black : destructive ? Theme.red : Theme.text)
-            .padding(.horizontal, 10)
-            .frame(height: 26)
+            .padding(.horizontal, small ? 8 : 10)
+            .frame(height: small ? 22 : 26)
             .background(prominent ? Theme.text : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(prominent ? Color.clear : Color.white.opacity(0.06)))
         }

@@ -8,17 +8,17 @@ import SwiftUI
 /// at the computer, the command that does it stands above that line.
 struct ComposerBar: View {
     let key: String
-    /// Shows the run's Changes tab, as the header's Changes does: the box's /diff.
+    /// Opens the run's changes panel, as the header's Changes does: the box's /diff.
     let showsChanges: () -> Void
     @Environment(Machines.self) private var machines
 
     var body: some View {
         if let model = machines.model(forSession: key) {
             if let summary = model.shownSummary(for: key), summary.takesNoReply {
-                if let command = summary.resumeCommand { ResumeCommand(command: command) }
+                if let command = summary.resumeCommand { ResumeCommand(command: command).onConversationColumn() }
                 EndedLine()
             } else if let kept = model.drafts(for: key) {
-                Composer(model: model, key: key, kept: kept, showsChanges: showsChanges)
+                Composer(model: model, key: key, kept: kept, showsChanges: showsChanges).onConversationColumn()
             }
         }
     }
@@ -39,7 +39,8 @@ private struct EndedLine: View {
                     .lineLimit(1)
             }
             .padding(.horizontal, 28)
-            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+            .frame(minHeight: 34)
+            .onConversationColumn()
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("session.endedLine")
@@ -157,9 +158,9 @@ private struct Composer: View {
             if let line { note(line) }
             box
         }
-        // Docked under the conversation, 20 pt in from the pane's sides and its foot; 16 pt under the conversation's last
-        // line at its end (its row's 7 pt inset and the column's 1 pt end, then these 8).
-        .padding(.horizontal, 20)
+        // Docked under the conversation, on its column's 28 pt sides and 20 pt above the pane's foot; 16 pt under the
+        // conversation's last line at its end (its row's 7 pt inset and the column's 1 pt end, then these 8).
+        .padding(.horizontal, 28)
         .padding(.top, 8)
         .padding(.bottom, 20)
         .onChange(of: kept.reply) { old, new in
@@ -531,7 +532,7 @@ private struct Composer: View {
             opener = draft
             clearing = true
         case .nativeDiff:
-            // The run's own Changes tab, as the iPhone opens its Changes: nothing reaches the computer, and the words
+            // The run's own changes panel, as the iPhone opens its Changes: nothing reaches the computer, and the words
             // that asked for it leave the box, typed whole or a part with the row chosen.
             kept.reply = ""
             showsChanges()

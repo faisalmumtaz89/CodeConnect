@@ -38,6 +38,8 @@ enum Theme {
     /// How far a menu opened by a list row's "…" stands off it: close enough that it covers the row's second line whole
     /// rather than cutting through its text.
     static let rowMenuGap: CGFloat = 1
+    /// The conversation's column: its rows, the request at its foot and the reply box, 640 pt with their 28 pt sides.
+    static let conversationColumn: CGFloat = 640 + 2 * 28
 
     // The meaning colours and the text greys are the Kit's, shared with the iPhone; the grounds are the Mac's own.
     static let text = CC.text.primary
