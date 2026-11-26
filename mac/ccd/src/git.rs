@@ -291,7 +291,7 @@ async fn run_git_inner(
 }
 
 /// The remote `branch` pushes to (`%(push:remotename)`: its `pushRemote`,
-/// `remote.pushDefault`, or the upstream's), else `origin`, and the URL each of it and
+/// `remote.pushDefault`, or the upstream's), else `origin`: the URL it pushes to, and the URL
 /// `other` (the push remote again when `None`) fetches from: what [`crate::github`] names
 /// the head and target repositories by.
 pub(crate) async fn push_remote_urls(
@@ -316,22 +316,27 @@ pub(crate) async fn push_remote_urls(
     let push = Some(named.stdout.trim().to_string())
         .filter(|remote| !remote.is_empty())
         .unwrap_or_else(|| "origin".to_string());
-    let mut urls = Vec::new();
-    for remote in [push.as_str(), other.unwrap_or(&push)] {
-        let out = run(
-            &git,
-            cwd,
-            &["remote", "get-url", "--", remote],
-            timeout,
-            PROBE_CAP,
-        )
+    let head = remote_url(&git, cwd, &["get-url", "--push", "--", &push], timeout).await?;
+    let target = remote_url(
+        &git,
+        cwd,
+        &["get-url", "--", other.unwrap_or(&push)],
+        timeout,
+    )
+    .await?;
+    Some((head, target))
+}
+
+/// `git remote <args>`'s one URL.
+async fn remote_url(git: &Path, cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    let args: Vec<&str> = std::iter::once("remote")
+        .chain(args.iter().copied())
+        .collect();
+    run(git, cwd, &args, timeout, PROBE_CAP)
         .await
         .ok()
-        .filter(|out| out.ok && !out.stdout_truncated)?;
-        urls.push(out.stdout.trim().to_string());
-    }
-    let other = urls.pop()?;
-    Some((urls.pop()?, other))
+        .filter(|out| out.ok && !out.stdout_truncated)
+        .map(|out| out.stdout.trim().to_string())
 }
 
 /// The longest a commit's staging or the commit itself may take: a repository's hooks

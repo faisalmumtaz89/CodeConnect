@@ -1438,11 +1438,11 @@ pub struct RunGit {
     /// The index holds unresolved merge entries.
     pub unmerged: bool,
     pub read_at: String,
-    /// Whether this computer's `gh` is signed in for the repository's GitHub host (minor 60).
-    /// Absent from an older daemon.
+    /// Whether this computer's `gh` can read the repository on github.com (minor 60). Absent
+    /// from an older daemon and on a detached head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh: Option<GhState>,
-    /// The GitHub host the repository is on, e.g. `github.com`.
+    /// The GitHub host the repository is on: `github.com`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_host: Option<String>,
     /// The branch's pull request: the open one from this branch, else the newest closed or
@@ -1450,8 +1450,8 @@ pub struct RunGit {
     /// `gh` is not signed in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<PullRequest>,
-    /// When GitHub was last asked: a read within 30 s of one for the same branch is
-    /// answered from it.
+    /// When GitHub was asked: a read within 30 s of one for the same branch and commit is
+    /// answered from it. Absent while GitHub's rate limit pauses the host's reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_read_at: Option<String>,
 }
@@ -1466,7 +1466,8 @@ pub enum GhState {
     Missing,
     /// GitHub could not be reached, or asked to wait (a rate limit).
     Unknown,
-    /// The repository's remotes name no GitHub repository.
+    /// The repository's remotes name no github.com repository (GitHub Enterprise hosts and SSH
+    /// host aliases among them).
     NoGithubRemote,
 }
 

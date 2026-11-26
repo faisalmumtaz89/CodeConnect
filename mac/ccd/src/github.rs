@@ -1,6 +1,6 @@
-//! A run's GitHub state for its Changes panel: whether this computer's `gh` is signed in for
-//! the repository's host, and the branch's pull request. Read only, through `gh`, and at most
-//! once per [`WINDOW`] per branch, whatever asks.
+//! A run's GitHub state for its Changes panel: whether this computer's `gh` can read the
+//! repository on github.com, and the branch's pull request. Read only, through `gh api`, and at
+//! most once per [`WINDOW`] per branch and commit, whatever asks.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -10,16 +10,16 @@ use std::time::{Duration, Instant};
 use protocol::ws::{GhState, PrState, PullRequest};
 use tokio::sync::Mutex;
 
-/// How long one read of a branch's GitHub state answers every read of it.
+/// How long one read of a branch's GitHub state answers every read of it at the same commit.
 pub const WINDOW: Duration = Duration::from_secs(30);
 /// How long a host's reads stop after GitHub refused one for its rate limit.
 const PAUSE: Duration = Duration::from_secs(300);
-const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
-const API_TIMEOUT: Duration = Duration::from_secs(15);
-const AUTH_CAP: usize = 64 * 1024;
+/// A pulls call answers in well under a second; on a network dropping packets the Changes panel
+/// waits at most two of these.
+const API_TIMEOUT: Duration = Duration::from_secs(5);
 const API_CAP: usize = 4 * 1024 * 1024;
 
-/// A repository on a GitHub host, as a remote's URL names it.
+/// A repository on github.com, as a remote's URL names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repo {
     pub host: String,
@@ -27,9 +27,10 @@ pub struct Repo {
     pub name: String,
 }
 
-/// The repository a remote's URL names, read as data: `https://host/owner/name`,
-/// `ssh://[user@]host[:port]/owner/name` or `user@host:owner/name`, a trailing `.git` or `/`
-/// dropped. `None` for a local path, or a path that is not exactly owner and name.
+/// The github.com repository a remote's URL names, read as data: `https://github.com/owner/name`,
+/// `ssh://[user@]github.com[:port]/owner/name` or `user@github.com:owner/name`, a trailing `.git`
+/// or `/` dropped. `None` for any other host (GitHub Enterprise, `ssh.github.com`, an SSH host
+/// alias among them), a local path, or a path that is not exactly owner and name.
 pub fn parse_remote(url: &str) -> Option<Repo> {
     let url = url.trim();
     let (authority, path) = if let Some((scheme, rest)) = url.split_once("://") {
@@ -59,7 +60,7 @@ pub fn parse_remote(url: &str) -> Option<Repo> {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     };
-    (!host.is_empty() && fine(owner) && fine(name)).then(|| Repo {
+    (host == "github.com" && fine(owner) && fine(name)).then(|| Repo {
         host,
         owner: owner.to_string(),
         name: name.to_string(),
@@ -71,21 +72,27 @@ pub fn parse_remote(url: &str) -> Option<Repo> {
 pub struct Read {
     pub gh: GhState,
     pub pr: Option<PullRequest>,
-    pub read_at: String,
+    /// When GitHub was asked; `None` while the host's reads are paused.
+    pub read_at: Option<String>,
 }
 
 /// Every branch's last read, and the hosts whose reads are paused, for the daemon's life.
 #[derive(Default)]
 pub struct Reads {
-    cached: Mutex<HashMap<String, (Instant, Read)>>,
-    paused: Mutex<HashMap<String, Instant>>,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    cached: HashMap<String, (Instant, Read)>,
+    paused: HashMap<String, Instant>,
 }
 
 impl Reads {
-    /// The GitHub state of `branch` from `head`, proposed to `target`: the last read when it
-    /// is under [`WINDOW`] old, else a new one (counted, failed or not). A host GitHub asked
-    /// to wait reads `unknown` until [`PAUSE`] has passed. `gh` is looked for only then:
-    /// config `gh_bin`, else the person's login shell's `PATH`.
+    /// The GitHub state of `branch` from `head` at `head_oid`, proposed to `target`: the last
+    /// read when it is under [`WINDOW`] old, else a new one (counted, failed or not). A host
+    /// GitHub asked to wait reads `unknown` until [`PAUSE`] has passed. `gh` is looked for only
+    /// when GitHub is asked: config `gh_bin`, else the person's login shell's `PATH`.
     pub async fn read(
         &self,
         gh_bin: Option<&str>,
@@ -95,37 +102,39 @@ impl Reads {
         head_oid: Option<&str>,
     ) -> Read {
         let key = format!(
-            "{}/{}/{} {}:{branch}",
-            target.host, target.owner, target.name, head.owner
+            "{}/{}/{} {}:{branch} {}",
+            target.host,
+            target.owner,
+            target.name,
+            head.owner,
+            head_oid.unwrap_or_default()
         );
-        if let Some((at, read)) = self.cached.lock().await.get(&key) {
+        // One read at a time: reads asked together wait for the first and share its answer.
+        let mut state = self.state.lock().await;
+        if let Some((at, read)) = state.cached.get(&key) {
             if at.elapsed() < WINDOW {
                 return read.clone();
             }
         }
-        let paused = self
+        let paused = state
             .paused
-            .lock()
-            .await
             .get(&target.host)
             .is_some_and(|until| Instant::now() < *until);
         if paused {
             return Read {
                 gh: GhState::Unknown,
                 pr: None,
-                read_at: protocol::time::now_rfc3339(),
+                read_at: None,
             };
         }
         let (read, rate_limited) = read_github(gh_bin, head, target, branch, head_oid).await;
         if rate_limited {
-            self.paused
-                .lock()
-                .await
+            state
+                .paused
                 .insert(target.host.clone(), Instant::now() + PAUSE);
         }
-        let mut cached = self.cached.lock().await;
-        cached.retain(|_, (at, _)| at.elapsed() < WINDOW);
-        cached.insert(key, (Instant::now(), read.clone()));
+        state.cached.retain(|_, (at, _)| at.elapsed() < WINDOW);
+        state.cached.insert(key, (Instant::now(), read.clone()));
         read
     }
 }
@@ -152,7 +161,9 @@ fn gh_command(
     command
 }
 
-/// One read, and whether GitHub refused a call for its rate limit.
+/// One read, and whether GitHub refused a call for its rate limit. The sign-in state is the
+/// pulls call's own answer: no `gh auth status`, whose flags differ across gh releases and
+/// which reads a network failure as a bad token.
 async fn read_github(
     gh_bin: Option<&str>,
     head: &Repo,
@@ -163,40 +174,15 @@ async fn read_github(
     let read = |gh, pr| Read {
         gh,
         pr,
-        read_at: protocol::time::now_rfc3339(),
+        read_at: Some(protocol::time::now_rfc3339()),
     };
     let environment = &crate::start_session::phone_environment();
     let Some(gh) = crate::start_session::gh_path(environment, gh_bin).await else {
         return (read(GhState::Missing, None), false);
     };
-    let gh = gh.as_path();
-    let auth = [
-        "auth",
-        "status",
-        "--active",
-        "--hostname",
-        target.host.as_str(),
-    ];
-    let state = match crate::git::run_program(
-        gh_command(gh, environment, &auth),
-        &auth,
-        AUTH_TIMEOUT,
-        AUTH_CAP,
-    )
-    .await
-    {
-        Ok(out) if out.ok => GhState::SignedIn,
-        Ok(out) if said(&out, &["error connecting", "timeout", "could not resolve"]) => {
-            GhState::Unknown
-        }
-        Ok(_) => GhState::SignedOut,
-        Err(_) => GhState::Unknown,
-    };
-    if state != GhState::SignedIn {
-        return (read(state, None), false);
-    }
-    match pull_request(gh, environment, head, target, branch, head_oid).await {
+    match pull_request(&gh, environment, head, target, branch, head_oid).await {
         Ok(pr) => (read(GhState::SignedIn, pr), false),
+        Err(Failed::SignedOut) => (read(GhState::SignedOut, None), false),
         Err(Failed::RateLimited) => (read(GhState::Unknown, None), true),
         Err(Failed::Other) => (read(GhState::Unknown, None), false),
     }
@@ -207,8 +193,13 @@ fn said(out: &crate::git::Output, words: &[&str]) -> bool {
     words.iter().any(|word| text.contains(word))
 }
 
+/// Why a pulls call gave no answer.
 enum Failed {
+    /// gh has no account for the host (it says to run `gh auth login`), or GitHub refused its
+    /// token (HTTP 401).
+    SignedOut,
     RateLimited,
+    /// Anything else: GitHub unreachable, slow, or an answer that is not the pulls list.
     Other,
 }
 
@@ -302,14 +293,16 @@ async fn pulls(
     )
     .await
     .map_err(|_| Failed::Other)?;
-    if !out.ok || out.stdout_truncated {
-        return Err(if said(&out, &["rate limit"]) {
-            Failed::RateLimited
-        } else {
-            Failed::Other
-        });
+    if out.ok && !out.stdout_truncated {
+        return serde_json::from_str(&out.stdout).map_err(|_| Failed::Other);
     }
-    serde_json::from_str(&out.stdout).map_err(|_| Failed::Other)
+    Err(if said(&out, &["rate limit"]) {
+        Failed::RateLimited
+    } else if said(&out, &["gh auth login", "http 401"]) {
+        Failed::SignedOut
+    } else {
+        Failed::Other
+    })
 }
 
 /// A pulls entry from `branch` of `head`.
@@ -365,11 +358,11 @@ mod tests {
         ] {
             assert_eq!(parse_remote(url), Some(repo("cli", "cli")), "{url}");
         }
-        assert_eq!(
-            parse_remote("git@ghe.example.com:team/app.git").map(|repo| repo.host),
-            Some("ghe.example.com".into())
-        );
         for url in [
+            "git@ghe.example.com:team/app.git",
+            "https://gitlab.com/team/app.git",
+            "ssh://git@ssh.github.com:443/cli/cli.git",
+            "git@github-work:cli/cli.git",
             "/srv/git/app.git",
             "file:///srv/git/app.git",
             "https://gitlab.com/group/sub/app.git",

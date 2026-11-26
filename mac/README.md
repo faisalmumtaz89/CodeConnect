@@ -1339,11 +1339,13 @@ to probe credentials.
   `missing`, `unknown`: GitHub unreachable or rate-limited, `no_github_remote`),
   `gh_host`, `gh_read_at` and `pr{number, url, state: open|merged|closed, base,
   head_oid, merged_at?}`: the open pull request from this branch of the push
-  remote's repository, on the base's remote's repository (so a fork's PR on its
-  parent), else the newest closed one from it whose head is `HEAD`. Read through
-  `gh auth status` and `gh api` (no prompt, no pager), outside the folder's git
-  lock, at most once per branch every 30 seconds whatever asks, and not at all for
-  5 minutes after GitHub refuses a read for its rate limit.
+  remote's repository (its push URL), on the base's remote's repository (so a
+  fork's PR on its parent), else the newest closed one from it whose head is
+  `HEAD`. Only github.com is read; any other host is `no_github_remote`. Read
+  through `gh api` alone (no prompt, no pager, 5 seconds a call, at most two),
+  outside the folder's git lock, one read at a time and at most once per branch
+  and commit every 30 seconds whatever asks; for 5 minutes after GitHub refuses a
+  read for its rate limit it is not asked, and `gh_read_at` is absent.
 * **`git_action{request_id, session_uid, action}`** (`>= 59`, `git_actions` names
   each action; paired devices only) → `git_action_result{request_id, session_uid,
   result}`, `done{sha}` or `refused{code, detail?}`. `action` is

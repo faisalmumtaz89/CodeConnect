@@ -977,7 +977,7 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     [`ws::RunGit`] gains `gh` (whether this computer's `gh` is signed in for the repository's host, [`ws::GhState`]),
 ///     `gh_host`, `pr` ([`ws::PullRequest`]: the open one from the branch, else the newest closed or merged one at
 ///     the commit checked out, looked up by the branch's owner, so a fork's PR on its parent is found) and
-///     `gh_read_at`; GitHub is asked at most once per 30 s per branch. A daemon below 60 sends none of them.
+///     `gh_read_at`; GitHub is asked at most once per 30 s per branch and commit. A daemon below 60 sends none of them.
 pub const PROTOCOL_MINOR: u32 = 60;
 
 #[cfg(test)]

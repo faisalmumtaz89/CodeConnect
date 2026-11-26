@@ -5237,7 +5237,7 @@ impl Daemon {
             ))
         });
         match repos {
-            Some((head, target)) if head.host == target.host => {
+            Some((head, target)) => {
                 let read = self
                     .github
                     .read(
@@ -5251,7 +5251,7 @@ impl Daemon {
                 git.gh = Some(read.gh);
                 git.gh_host = Some(target.host);
                 git.pr = read.pr;
-                git.gh_read_at = Some(read.read_at);
+                git.gh_read_at = read.read_at;
             }
             _ => git.gh = Some(protocol::ws::GhState::NoGithubRemote),
         }
@@ -8398,10 +8398,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A stand-in `gh` in its own folder, answering from the files beside it, as gh 2.87.3 does:
-    /// `auth.out`/`auth.exit` for `auth status`, `open.json`/`closed.json` and `api.err`/`api.exit`
-    /// for the pulls; every call it is asked is logged to `calls`, after `prompt=` and its
-    /// `GH_PROMPT_DISABLED`.
+    /// A stand-in `gh` in its own folder, answering `gh api` for the pulls from the files beside
+    /// it, as gh 2.87.3 does: `open.json`/`closed.json` on stdout, `api.err` on stderr, exit
+    /// `api.exit`; every call is logged to `calls`, after `prompt=` and its `GH_PROMPT_DISABLED`.
+    /// Signed in by default: exit 0 and GitHub's own cli/cli answers (no credential captures
+    /// gh's signed-in run; its body is that answer).
     fn stand_in_gh() -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
@@ -8415,27 +8416,37 @@ mod tests {
         std::fs::write(
             &gh,
             "#!/bin/sh\nd=$(dirname \"$0\")\necho \"prompt=${GH_PROMPT_DISABLED:-on} $*\" >> \"$d/calls\"\ncase \"$*\" in\n\
-             \"auth status\"*) cat \"$d/auth.out\"; exit $(cat \"$d/auth.exit\");;\n\
              *state=open*) cat \"$d/api.err\" >&2; cat \"$d/open.json\"; exit $(cat \"$d/api.exit\");;\n\
              *state=closed*) cat \"$d/api.err\" >&2; cat \"$d/closed.json\"; exit $(cat \"$d/api.exit\");;\n\
              esac\nexit 2\n",
         )
         .unwrap();
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let fixtures =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/github");
-        // Signed in: gh's own words, written from its source (no credential captures them).
-        std::fs::write(
-            dir.join("auth.out"),
-            "github.com\n  ✓ Logged in to github.com account a-person (keyring)\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("auth.exit"), "0").unwrap();
+        let fixtures = github_fixtures();
         std::fs::copy(fixtures.join("pulls-open.json"), dir.join("open.json")).unwrap();
         std::fs::copy(fixtures.join("pulls-closed.json"), dir.join("closed.json")).unwrap();
         std::fs::write(dir.join("api.err"), "").unwrap();
         std::fs::write(dir.join("api.exit"), "0").unwrap();
         gh
+    }
+
+    fn github_fixtures() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/github")
+    }
+
+    /// The stand-in answers the pulls calls as gh did in the capture `name` (`*.stderr`, `*.exit`).
+    fn gh_answers_as(gh: &std::path::Path, name: &str) {
+        let fixtures = github_fixtures();
+        std::fs::copy(
+            fixtures.join(format!("{name}.stderr")),
+            gh.with_file_name("api.err"),
+        )
+        .unwrap();
+        std::fs::copy(
+            fixtures.join(format!("{name}.exit")),
+            gh.with_file_name("api.exit"),
+        )
+        .unwrap();
     }
 
     fn rand_suffix() -> u32 {
@@ -8452,20 +8463,19 @@ mod tests {
             .collect()
     }
 
-    /// **A run's GitHub state, read through gh at most once per window**: signed out (gh's own
-    /// capture), signed in with the branch's open PR (GitHub's own answer for cli/cli), a second
-    /// read inside the window asking gh nothing, a rate limit stopping the host's reads, no gh at
-    /// all, and a remote that names no GitHub repository.
+    /// **A run's GitHub state, read through gh at most once per window**: signed out and offline
+    /// (gh's own captures), signed in with the branch's open PR (GitHub's own answer for cli/cli),
+    /// reads asked together and inside the window sharing one call, a new commit asking again, a
+    /// push URL naming the PR's owner, a rate limit stopping the host's reads, no gh at all, and
+    /// remotes that name no github.com repository.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_runs_github_state_is_read_through_gh_once_per_window() {
         use protocol::agent::AgentKind;
         use protocol::ws::GhState;
         let _env = crate::ProcessEnvRead::take();
-        let fixtures =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/github");
         let branch = "dependabot/go_modules/github.com/sigstore/sigstore-go-1.4.1";
-        let at = |gh: &std::path::Path, uid: &str| {
+        let at = |gh: &std::path::Path, uid: &str, branch: &str| {
             let daemon = daemon_on(
                 shared_store(),
                 Config {
@@ -8481,58 +8491,109 @@ mod tests {
             git_in(&dir, &["switch", "-q", "-c", branch]);
             (daemon, dir)
         };
+        let done = |gh: &std::path::Path, dir: &std::path::Path| {
+            let _ = std::fs::remove_dir_all(dir);
+            let _ = std::fs::remove_dir_all(gh.parent().unwrap());
+        };
+
+        for (capture, state) in [
+            ("api-signed-out", GhState::SignedOut),
+            ("api-offline", GhState::Unknown),
+        ] {
+            let gh = stand_in_gh();
+            gh_answers_as(&gh, capture);
+            let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP20", branch);
+            let read = daemon
+                .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP20")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (
+                    read.gh,
+                    read.gh_host.as_deref(),
+                    read.pr,
+                    read.gh_read_at.is_some()
+                ),
+                (Some(state), Some("github.com"), None, true),
+                "{capture}"
+            );
+            done(&gh, &dir);
+        }
 
         let gh = stand_in_gh();
-        std::fs::copy(
-            fixtures.join("auth-signed-out.stdout"),
-            gh.with_file_name("auth.out"),
-        )
-        .unwrap();
-        std::fs::copy(
-            fixtures.join("auth-signed-out.exit"),
-            gh.with_file_name("auth.exit"),
-        )
-        .unwrap();
-        let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP20");
-        let read = daemon
-            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP20")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            (read.gh, read.gh_host.as_deref(), read.pr),
-            (Some(GhState::SignedOut), Some("github.com"), None)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let gh = stand_in_gh();
-        let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP21");
-        let read = daemon
-            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP21")
-            .await
-            .unwrap()
-            .unwrap();
+        let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP21", branch);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP21";
+        let (one, two) = tokio::join!(daemon.run_git(uid), daemon.run_git(uid));
+        let read = one.unwrap().unwrap();
         assert_eq!(read.gh, Some(GhState::SignedIn));
         assert_eq!(read.pr.as_ref().map(|pr| pr.number), Some(15173));
+        assert_eq!(two.unwrap().unwrap().pr, read.pr);
         let calls = gh_calls(&gh);
-        assert_eq!(calls.len(), 2, "auth, then the open pulls: {calls:?}");
+        assert_eq!(
+            calls.len(),
+            1,
+            "two reads at once, one open pulls call: {calls:?}"
+        );
         assert!(
-            calls.iter().all(|call| call.starts_with("prompt=1 ")),
+            calls[0].starts_with("prompt=1 "),
             "gh never prompts: {calls:?}"
         );
         assert!(
-            calls[1].contains("repos/cli/cli/pulls")
-                && calls[1].contains(&format!("head=cli:{branch}")),
+            calls[0].contains("repos/cli/cli/pulls")
+                && calls[0].contains(&format!("head=cli:{branch}")),
             "{calls:?}"
         );
-        let again = daemon
-            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP21")
+        let again = daemon.run_git(uid).await.unwrap().unwrap();
+        assert_eq!(
+            (again.pr, again.gh_read_at),
+            (read.pr.clone(), read.gh_read_at.clone())
+        );
+        assert_eq!(gh_calls(&gh).len(), 1, "inside the window gh is not asked");
+        git_in(
+            &dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "next",
+            ],
+        );
+        daemon.run_git(uid).await.unwrap().unwrap();
+        assert_eq!(gh_calls(&gh).len(), 2, "a new commit is read again");
+        done(&gh, &dir);
+
+        let gh = stand_in_gh();
+        let fork = "fix/issue-14946-existing-linked-branch";
+        let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP24", fork);
+        git_in(
+            &dir,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                "https://github.com/lazerg/cli-2.git",
+            ],
+        );
+        let read = daemon
+            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP24")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(again.pr, read.pr);
-        assert_eq!(gh_calls(&gh).len(), 2, "inside the window gh is not asked");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(read.pr.as_ref().map(|pr| pr.number), Some(15111));
+        let calls = gh_calls(&gh);
+        assert!(
+            calls[0].contains("repos/cli/cli/pulls")
+                && calls[0].contains(&format!("head=lazerg:{fork}")),
+            "the PR's owner is the push URL's: {calls:?}"
+        );
+        done(&gh, &dir);
 
         let gh = stand_in_gh();
         std::fs::write(
@@ -8541,7 +8602,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(gh.with_file_name("api.exit"), "1").unwrap();
-        let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP22");
+        let (daemon, dir) = at(&gh, "01K1B3XQ8ZC0DE5FGH7JKMNP22", branch);
         let read = daemon
             .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP22")
             .await
@@ -8555,29 +8616,36 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(paused.gh, Some(GhState::Unknown));
+        assert_eq!(
+            (paused.gh, paused.gh_read_at),
+            (Some(GhState::Unknown), None),
+            "GitHub is not asked"
+        );
         assert_eq!(gh_calls(&gh).len(), calls, "the host's reads stopped");
-        let _ = std::fs::remove_dir_all(&dir);
+        done(&gh, &dir);
 
         let gone = gh.with_file_name("no-gh-here");
-        let (daemon, dir) = at(&gone, "01K1B3XQ8ZC0DE5FGH7JKMNP23");
+        let (daemon, dir) = at(&gone, "01K1B3XQ8ZC0DE5FGH7JKMNP23", branch);
         let read = daemon
             .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP23")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(read.gh, Some(GhState::Missing));
-        git_in(&dir, &["remote", "set-url", "origin", "/srv/git/app.git"]);
         let local = daemon_on(Arc::clone(&daemon.store), Config::default());
-        let read = local
-            .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP23")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            (read.gh, read.gh_host),
-            (Some(GhState::NoGithubRemote), None)
-        );
+        for url in ["/srv/git/app.git", "https://gitlab.com/team/app.git"] {
+            git_in(&dir, &["remote", "set-url", "origin", url]);
+            let read = local
+                .run_git("01K1B3XQ8ZC0DE5FGH7JKMNP23")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (read.gh, read.gh_host),
+                (Some(GhState::NoGithubRemote), None),
+                "{url}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
