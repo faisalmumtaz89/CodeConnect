@@ -5085,6 +5085,21 @@ impl Daemon {
         .await)
     }
 
+    /// A run's repository for its Changes panel, read in the run's own folder from our
+    /// registry, as [`Self::diff`] is. The inner `Err` is the note saying why git gave none.
+    pub async fn run_git(
+        &self,
+        session_ref: &str,
+    ) -> Result<std::result::Result<protocol::ws::RunGit, String>> {
+        let row = self.resolve(session_ref).await?;
+        Ok(crate::git::run_git(
+            &row.cwd,
+            self.config.git_bin.as_deref(),
+            Duration::from_millis(self.config.diff_timeout_ms),
+        )
+        .await)
+    }
+
     /// Read a run's branch and line counts from git into the session list, on a
     /// task of its own so no caller waits on git. A run whose row is gone is
     /// left alone.

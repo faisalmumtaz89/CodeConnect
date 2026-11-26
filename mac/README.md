@@ -667,8 +667,8 @@ gate then refuses.
 `send_text`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
 `codex_compose`, `question_card`, `hook_only_approvals`, `history_pages`, `supported_agents`,
 `can_approve_reliably`, `command_catalog`, `private_transport`, `start_session`,
-`start_worktree`, `browse_folders`, `machine_stats`, `stop_run`, `uploads` and `run_terminal` (a run's
-shell, to a paired device on a private transport only; see [`SECURITY.md`](../SECURITY.md)) so the app disables
+`start_worktree`, `browse_folders`, `machine_stats`, `stop_run`, `uploads`, `run_terminal` (a run's
+shell, to a paired device on a private transport only; see [`SECURITY.md`](../SECURITY.md)) and `changes` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
@@ -1319,6 +1319,21 @@ to probe credentials.
   the phone, so without them, asking for a diff of a working tree somebody else
   prepared would run their program as the daemon's user. Observing a working tree
   must not be a way to execute anything.
+* **`get_run_git{session_id}`** (`>= 57`, `changes`, paired devices only) →
+  `run_git{session_id, git?, note?}`: the run's `branch`, `head_oid`, `base`
+  (`{name, remote, ref}`, the default branch that `refs/remotes/<remote>/HEAD`
+  names, for a remote named `upstream` (a fork's parent), else the upstream's
+  remote, else `origin`, else the only remote with one),
+  `changed{files, added, removed, complete}` counted as `get_diff`'s `files`
+  (every file, before that reply's row and frame limits), `ahead` of the base,
+  `pushed` (the push remote git names for the branch, else `origin`, has this
+  branch at `HEAD`) and `unmerged`. Read in the run's folder by
+  `git status --porcelain=v2 --branch`, `for-each-ref` and `rev-list --count`
+  beside the diff's own listing, with the same switches, one child at a time,
+  off the connection's loop and within 20 seconds in all; nothing is fetched. As
+  with `get_diff`, a filter the repository's attributes name (Git LFS) still runs
+  and the listing may refresh the index. Outside a repository, or for an unknown
+  run, `git` is absent and `note` says why.
 * **`EventKind::TurnComplete`** marks the end of a turn. For Claude it is filed
   from the SDK's `result`, which the run's agent host relays as each turn ends.
   `SessionEnd` now means only what it says: the run ended.

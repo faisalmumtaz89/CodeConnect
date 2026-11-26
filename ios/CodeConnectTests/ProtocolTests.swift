@@ -167,6 +167,93 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(fields["session_id"]?.stringValue, "cc-2")
     }
 
+    // MARK: run_git
+
+    /// A run's repository as a minor-57 daemon encodes it, a repository-less answer as a bare note, and the request
+    /// sent only where `changes` is advertised.
+    func testRunGitFrameDecodes() throws {
+        let message = try decodeServer(
+            """
+            {"type":"run_git","session_id":"cc-1",
+             "git":{"branch":"feat/x","head_oid":"abc",
+                    "base":{"name":"main","remote":"origin","ref":"refs/remotes/origin/main"},
+                    "changed":{"files":2,"added":5,"removed":1,"complete":true},
+                    "ahead":1,"pushed":false,"unmerged":false,"read_at":"t"}}
+            """)
+        guard case .runGit(let reply) = message else { return XCTFail("wrong message") }
+        XCTAssertEqual(reply.sessionID, "cc-1")
+        XCTAssertNil(reply.note)
+        let git = try XCTUnwrap(reply.git)
+        XCTAssertEqual(git.branch, "feat/x")
+        XCTAssertEqual(git.headOID, "abc")
+        XCTAssertEqual(git.base?.reference, "refs/remotes/origin/main")
+        XCTAssertEqual(git.changed.added, 5)
+        XCTAssertTrue(git.changed.complete)
+        XCTAssertEqual(git.ahead, 1)
+        XCTAssertFalse(git.pushed)
+
+        let bare = try decodeServer(#"{"type":"run_git","session_id":"cc-1","note":"not a git repository"}"#)
+        guard case .runGit(let none) = bare else { return XCTFail("wrong message") }
+        XCTAssertNil(none.git)
+        XCTAssertEqual(none.note, "not a git repository")
+
+        let unborn = try decodeServer(
+            """
+            {"type":"run_git","session_id":"cc-1",
+             "git":{"branch":"main","changed":{"files":1,"added":1,"removed":0,"complete":true},
+                    "pushed":false,"unmerged":false,"read_at":"t"}}
+            """)
+        guard case .runGit(let first) = unborn else { return XCTFail("wrong message") }
+        XCTAssertNil(first.git?.headOID)
+        XCTAssertNil(first.git?.base)
+        XCTAssertNil(first.git?.ahead)
+
+        let fields = try encodeClient(.getRunGit(session: "cc-2"))
+        XCTAssertEqual(fields["type"]?.stringValue, "get_run_git")
+        XCTAssertEqual(fields["session_id"]?.stringValue, "cc-2")
+
+        let ack = try decodeServer(
+            #"{"type":"hello_ack","protocol_version":1,"server_time":"t","capabilities":{"changes":true}}"#)
+        guard case .helloAck(let paired) = ack else { return XCTFail("wrong message") }
+        XCTAssertTrue(paired.capabilities.readsRunGit)
+        let older = try decodeServer(#"{"type":"hello_ack","protocol_version":1,"server_time":"t","capabilities":{}}"#)
+        guard case .helloAck(let olderAck) = older else { return XCTFail("wrong message") }
+        XCTAssertFalse(olderAck.capabilities.readsRunGit)
+    }
+
+    private final class SentFrames {
+        var frames: [ClientMessage] = []
+    }
+
+    /// `get_run_git` is sent only to a daemon that advertises `changes`: an older one would answer `bad_request` and
+    /// leave the request waiting out its timeout.
+    @MainActor
+    func testRunGitIsAskedOnlyWhereChangesIsAdvertised() async throws {
+        let model = AppModel(cache: EventCache())
+        model.connection.simulateConnectedForTesting()
+        model.connection.simulateCapabilitiesForTesting(Capabilities(canApproveReliably: true, sendText: true), minor: 53)
+        let sent = SentFrames()
+        model.connection.sendStub = { [weak model] message in
+            sent.frames.append(message)
+            if case .getRunGit(let session) = message {
+                model?.connection.injectForTesting(
+                    .runGit(RunGitReply(sessionID: session, git: nil, note: "not a git repository")))
+            }
+        }
+        do {
+            _ = try await model.connection.runGit(session: "cc-1")
+            XCTFail("an older daemon is not asked")
+        } catch ConnectionError.incompatible {
+        }
+        XCTAssertTrue(sent.frames.isEmpty)
+
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(canApproveReliably: true, sendText: true, extra: ["changes": .bool(true)]), minor: 57)
+        let reply = try await model.connection.runGit(session: "cc-1")
+        XCTAssertEqual(reply.note, "not a git repository")
+        XCTAssertEqual(sent.frames.count, 1)
+    }
+
     // MARK: turn_complete
 
     func testTurnCompleteIsItsOwnKind() throws {

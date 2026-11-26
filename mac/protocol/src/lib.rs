@@ -950,7 +950,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     and a new one gets a reset and the last output the daemon holds. One viewer at a time: an open with
 ///     `takeover` takes the shell from another. Offered only to a paired device on a private transport
 ///     ([`ws::Capabilities::run_terminal`]); a daemon below 56 answers the frames as undecodable.
-pub const PROTOCOL_MINOR: u32 = 56;
+///   * `57` — **A run's repository, for its Changes panel.**
+///
+///     [`ws::ClientMessage::GetRunGit`] is answered with [`ws::ServerMessage::RunGit`]: the branch, head and base,
+///     the changed files' lines (untracked included), commits ahead of the base, whether it is pushed and whether a
+///     merge is unresolved ([`ws::RunGit`]). Paired devices only, advertised as `changes`. A daemon below 57 answers
+///     `get_run_git` with `bad_request` and advertises no `changes`.
+pub const PROTOCOL_MINOR: u32 = 57;
 
 #[cfg(test)]
 mod ledger_tests {

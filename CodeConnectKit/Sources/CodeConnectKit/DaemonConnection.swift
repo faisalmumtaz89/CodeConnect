@@ -324,6 +324,7 @@ public final class DaemonConnection {
     private var folderTrustWaiters: [String: [Waiter<[FolderAnswer]>]] = [:]
     private var accountsWaiters: [String: [Waiter<AccountBook>]] = [:]
     private var diffWaiters: [String: [Waiter<SessionDiff>]] = [:]
+    private var runGitWaiters: [String: [Waiter<RunGitReply>]] = [:]
     /// Keyed by the phone's own `request_id`, not by session: the reply echoes
     /// it back, and a phone may hold a stop and a message in flight on one run.
     private var interruptWaiters: [String: [Waiter<InterruptResult>]] = [:]
@@ -1194,6 +1195,19 @@ public final class DaemonConnection {
             send: .getDiff(session: session))
     }
 
+    /// A run's repository for its Changes panel (`get_run_git`), correlated by the reference as `diff` is.
+    public func runGit(session: String) async throws -> RunGitReply {
+        guard capabilities?.readsRunGit == true else {
+            throw ConnectionError.incompatible(
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can't show a run's branch on this connection."
+            )
+        }
+        return try await request(
+            key: session,
+            store: \.runGitWaiters,
+            send: .getRunGit(session: session))
+    }
+
     // MARK: - Codex mutations
 
     /// Why a Codex mutation was not sent, in the phone's own words.
@@ -1420,6 +1434,10 @@ public final class DaemonConnection {
         diffWaiters = [:]
         for queue in diffs.values { for w in queue { w.continuation?.resume(throwing: error) } }
 
+        let runGits = runGitWaiters
+        runGitWaiters = [:]
+        for queue in runGits.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
         // Every waiter store belongs in here. One left out does not just leak: it
         // becomes a tombstone after its timeout, and the *next* good answer for
         // that key is handed to the dead waiter and dropped, so the request that
@@ -1567,6 +1585,8 @@ public final class DaemonConnection {
                 keepTombstone: false)
         case .diff(let diff):
             deliver(store: \.diffWaiters, key: diff.sessionID, value: diff)
+        case .runGit(let reply):
+            deliver(store: \.runGitWaiters, key: reply.sessionID, value: reply)
         // **The echoed session is checked, not ignored.** Correlation is by
         // request id, which is this phone's own UUID, so a collision is
         // negligible — but a daemon bug that answered one session's request with

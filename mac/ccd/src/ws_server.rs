@@ -695,6 +695,31 @@ where
                     continue;
                 }
 
+                // Off the loop, for a paired device: git in a large repository takes
+                // seconds, and an approval on this connection must not wait behind it.
+                if let ClientMessage::GetRunGit { session_id } = parsed {
+                    if device_id.is_none() {
+                        send(&mut sink, &ServerMessage::Error {
+                            code: "not_authorised".into(),
+                            message: "only a paired device may read a run's repository".into(),
+                        }).await?;
+                        continue;
+                    }
+                    let daemon = daemon.clone();
+                    let replies = replies_tx.clone();
+                    tokio::spawn(async move {
+                        // Whatever git, or the registry, could not say is the answer's note,
+                        // so the reply always names the run it answers.
+                        let (git, note) = match daemon.run_git(&session_id).await {
+                            Ok(Ok(git)) => (Some(git), None),
+                            Ok(Err(note)) => (None, Some(note)),
+                            Err(err) => (None, Some(format!("{err}"))),
+                        };
+                        let _ = replies.send(ServerMessage::RunGit { session_id, git, note });
+                    });
+                    continue;
+                }
+
                 // Starting, the folder and project frames that choose where, and the
                 // folders' answers to "trust this folder?": any paired device, on any
                 // transport the listener admits, with the authority that saying and
@@ -1123,7 +1148,8 @@ where
             }
         }
         // Answered off the loop by `handle_client`, which never passes them here.
-        ClientMessage::ListProjects
+        ClientMessage::GetRunGit { .. }
+        | ClientMessage::ListProjects
         | ClientMessage::GetProjectGit { .. }
         | ClientMessage::ListFolder { .. }
         | ClientMessage::CreateFolder { .. }
@@ -2373,6 +2399,9 @@ pub(crate) fn capabilities(
         uploads: paired,
         // A run's shell: a paired device, over a transport nothing on the path can read.
         run_terminal: paired && private_transport,
+        // A run's repository for its Changes panel: read for a paired device, as its diff's
+        // actions will be.
+        changes: paired,
     }
 }
 
@@ -7557,6 +7586,118 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(gone, "the closed connection's pending file was removed");
+    }
+
+    /// **A run's repository is read for a paired device only** (minor 57): advertised to it
+    /// and not to the bootstrap token, which is refused; the paired device gets the run's
+    /// branch, and a run outside a repository answers with a note.
+    #[tokio::test]
+    async fn a_runs_repository_is_read_for_a_paired_device_only() {
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let repo = std::env::temp_dir().join(format!(
+            "ccd-rungit-ws-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = crate::git::git_bin(None).expect("git must be installed");
+        let status = std::process::Command::new(git)
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q", "-b", "trunk"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        register_stub_session(&server.store, repo.to_str().unwrap().into());
+        let ask = Message::Text(
+            serde_json::json!({"type": "get_run_git", "session_id": "cc-9"}).to_string(),
+        );
+
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(ack["capabilities"]["changes"], false, "{ack}");
+        bootstrap.send(ask.clone()).await.unwrap();
+        let reply = next_json(&mut bootstrap).await.unwrap();
+        assert_eq!(reply["type"], "error", "{reply}");
+        assert_eq!(reply["code"], "not_authorised", "{reply}");
+
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["changes"], true, "{ack}");
+        phone.send(ask.clone()).await.unwrap();
+        let reply = next_json(&mut phone).await.unwrap();
+        assert_eq!(reply["type"], "run_git", "{reply}");
+        assert_eq!(reply["session_id"], "cc-9", "{reply}");
+        assert_eq!(reply["git"]["branch"], "trunk", "{reply}");
+
+        std::fs::remove_dir_all(repo.join(".git")).unwrap();
+        phone.send(ask).await.unwrap();
+        let reply = next_json(&mut phone).await.unwrap();
+        assert_eq!(
+            reply,
+            serde_json::json!({"type": "run_git", "session_id": "cc-9", "note": "not a git repository"})
+        );
+
+        phone
+            .send(Message::Text(
+                serde_json::json!({"type": "get_run_git", "session_id": "no-such-run"}).to_string(),
+            ))
+            .await
+            .unwrap();
+        let reply = next_json(&mut phone).await.unwrap();
+        assert_eq!(
+            reply["type"], "run_git",
+            "an unknown run is answered by name: {reply}"
+        );
+        assert_eq!(reply["session_id"], "no-such-run", "{reply}");
+        assert!(reply["note"].is_string(), "{reply}");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// **A slow repository read holds nothing else on the connection**: with git taking two
+    /// seconds, a ping sent after `get_run_git` is answered first.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_slow_repository_read_does_not_hold_the_connection() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "ccd-rungit-slow-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = crate::git::git_bin(None).expect("git must be installed");
+        let slow = dir.join("slow-git");
+        std::fs::write(
+            &slow,
+            format!("#!/bin/sh\nsleep 2\nexec '{}' \"$@\"\n", real.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = protocol::config::Config {
+            git_bin: Some(slow.to_str().unwrap().into()),
+            ..protocol::config::Config::default()
+        };
+        let (server, _) = live_server(config).await;
+        register_stub_session(&server.store, dir.to_str().unwrap().into());
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        phone
+            .send(Message::Text(
+                serde_json::json!({"type": "get_run_git", "session_id": "cc-9"}).to_string(),
+            ))
+            .await
+            .unwrap();
+        phone
+            .send(Message::Text(r#"{"type":"ping"}"#.into()))
+            .await
+            .unwrap();
+        let first = next_json_within(&mut phone, Duration::from_secs(1))
+            .await
+            .expect("the ping is answered while git is still reading");
+        assert_eq!(first["type"], "pong", "{first}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **Accounts are kept and chosen by a paired device only** (minor 48): advertised to it and not to the bootstrap

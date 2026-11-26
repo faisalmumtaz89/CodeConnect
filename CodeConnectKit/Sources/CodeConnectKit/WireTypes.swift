@@ -1091,6 +1091,9 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// paired device on a transport nothing on the path can read. An older one answers `terminal_open` with
     /// `bad_request`, so nothing is sent unless this is set.
     public var servesRunTerminal: Bool { advertises(["run_terminal"]) }
+    /// This daemon answers `get_run_git` (minor 57) for this paired device. An older one answers it with
+    /// `bad_request`, so nothing is sent unless this is set.
+    public var readsRunGit: Bool { advertises(["changes"]) }
     /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
     /// 21): its question cards carry `question_hold` and it takes the
     /// `answers` and `decline` decisions. Absent is false — an older daemon
@@ -1981,6 +1984,61 @@ public struct PeerComputer: Decodable, Sendable, Hashable {
 
 /// Answer to `get_diff`. On-demand only: a diff is a thing you ask for when you
 /// are about to read it, never a thing that streams at you.
+/// The answer to `get_run_git`: `git` is nil, with the computer's note saying why, outside a repository and when git
+/// could not answer.
+public struct RunGitReply: Sendable, Hashable {
+    public let sessionID: String
+    public let git: RunGit?
+    public let note: String?
+}
+
+/// A run's repository, as `get_run_git` reads it (minor 57).
+public struct RunGit: Decodable, Sendable, Hashable {
+    /// Absent on a detached head.
+    public let branch: String?
+    /// Absent before the first commit.
+    public let headOID: String?
+    /// The branch this one is measured against; absent when the computer knows no remote default branch.
+    public let base: Base?
+    public let changed: Changed
+    /// Commits on the head that are not on `base`; absent without a head or a base.
+    public let ahead: UInt32?
+    /// The remote this branch pushes to has the branch of this name at the commit checked out.
+    public let pushed: Bool
+    /// A merge is unresolved.
+    public let unmerged: Bool
+    public let readAt: String
+
+    public struct Base: Decodable, Sendable, Hashable {
+        /// e.g. `main`.
+        public let name: String
+        /// e.g. `origin`.
+        public let remote: String
+        /// e.g. `refs/remotes/origin/main`.
+        public let reference: String
+
+        private enum CodingKeys: String, CodingKey {
+            case name, remote
+            case reference = "ref"
+        }
+    }
+
+    /// The changed files, untracked ones included, as a diff's `files` count them.
+    public struct Changed: Decodable, Sendable, Hashable {
+        public let files: UInt64
+        public let added: UInt64
+        public let removed: UInt64
+        /// False when the computer stopped short of listing or counting every file: the numbers are at least these.
+        public let complete: Bool
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case branch, base, changed, ahead, pushed, unmerged
+        case headOID = "head_oid"
+        case readAt = "read_at"
+    }
+}
+
 public struct SessionDiff: Sendable, Hashable {
     public let sessionID: String
     /// `git -C <cwd> diff HEAD` plus untracked names, exactly as the daemon
@@ -2125,6 +2183,8 @@ public enum ClientMessage: Sendable {
         session: String, text: String, submit: Bool, requestID: String?, payloadHash: String?,
         attachments: [String] = [])
     case getDiff(session: String)
+    /// A run's repository for its Changes panel (minor 57, `changes`), answered with `runGit`.
+    case getRunGit(session: String)
     case getCommandCatalog(session: String)
     /// "Push me here." Sent whenever Apple issues a token, not only at
     /// handshake: permission can be granted mid-session and the token is
@@ -2310,6 +2370,9 @@ extension ClientMessage: Encodable {
             try c.encodeIfPresent(deviceName, forKey: .deviceName)
         case .getDiff(let session):
             try c.encode("get_diff", forKey: .type)
+            try c.encode(session, forKey: .sessionID)
+        case .getRunGit(let session):
+            try c.encode("get_run_git", forKey: .type)
             try c.encode(session, forKey: .sessionID)
         case .getCommandCatalog(let session):
             try c.encode("get_command_catalog", forKey: .type)
@@ -2749,6 +2812,8 @@ public enum ServerMessage: Sendable {
     case deleteSessionResult(sessionUID: String, result: DeleteSessionResult)
     case testPushResult(requestID: String, result: TestPushResult)
     case diff(SessionDiff)
+    /// The answer to `getRunGit`.
+    case runGit(RunGitReply)
     /// The answer to one `interrupt`. `sessionID` and `requestID` are echoed
     /// back as the phone sent them, so correlation is exact-string on the id
     /// this end minted.
@@ -2849,6 +2914,7 @@ extension ServerMessage: Decodable {
         case offset
         case bytes
         case reason
+        case note
     }
 
     public init(from decoder: Decoder) throws {
@@ -2871,6 +2937,12 @@ extension ServerMessage: Decodable {
                     machineID: try c.decodeIfPresent(String.self, forKey: .machineID)))
         case "diff":
             self = .diff(try SessionDiff(from: decoder))
+        case "run_git":
+            self = .runGit(
+                RunGitReply(
+                    sessionID: try c.decode(String.self, forKey: .sessionID),
+                    git: try c.decodeIfPresent(RunGit.self, forKey: .git),
+                    note: try c.decodeIfPresent(String.self, forKey: .note)))
         case "sessions":
             self = .sessions(try c.decode([SessionSummary].self, forKey: .sessions))
         case "event":
