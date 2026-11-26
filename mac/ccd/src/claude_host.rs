@@ -2308,10 +2308,18 @@ pub(crate) async fn send_text(
         return refuse("This session isn’t running, so nothing was sent.");
     }
     let uuid = send_uuid(uid, &request_id);
+    // Claude's own commands (`/compact`, `/clear`, a custom one) go as typed; any other message
+    // tells the agent of the commits made from the panel since it was last told. The person's
+    // row keeps their words.
+    let (said, told) = if text.trim_start().starts_with('/') {
+        (text.clone(), None)
+    } else {
+        daemon.with_commit_note(uid, &text).await
+    };
     let taken = daemon.await_host_send(uid, &uuid).await;
     let say = ToHost::Say {
         uuid: uuid.clone(),
-        text: text.clone(),
+        text: said,
     };
     if !daemon.send_to_host(uid, say).await {
         daemon.host_send_taken(&uuid, false).await;
@@ -2322,7 +2330,10 @@ pub(crate) async fn send_text(
         );
     }
     match tokio::time::timeout(SEND_WAIT, taken).await {
-        Ok(Ok(true)) => SendTextResult::Sent { matched: text },
+        Ok(Ok(true)) => {
+            daemon.commits_told(uid, told).await;
+            SendTextResult::Sent { matched: text }
+        }
         Ok(Ok(false)) => refuse("This session stopped taking messages; nothing was sent."),
         Ok(Err(_)) => SendTextResult::Indeterminate {
             reason: format!(
@@ -6189,6 +6200,65 @@ mod tests {
             }
         }
         assert_eq!(live, [serde_json::json!("and the docs")], "broadcast live");
+        stop(&played.dir);
+    }
+
+    /// **A message tells the agent of the commits made from its Changes panel, once**: the
+    /// newest five of seven, oldest first, above the words, while the person's row keeps their
+    /// words; the next message carries nothing; a `/compact` goes as typed and leaves a later
+    /// commit to the next message.
+    #[tokio::test]
+    async fn a_message_tells_the_agent_of_the_panels_commits_once() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        let commit = |oid: String, files: u64| {
+            PendingEvent::new(
+                &SessionKey::new(&uid, &uid),
+                EventKind::Notification,
+                serde_json::json!({"notification_type": "committed", "oid": oid,
+                                   "files": files, "message": "m"}),
+                Source::Daemon,
+            )
+        };
+        for at in 1..=7u64 {
+            rig.daemon
+                .ingest(commit(format!("{at}{at}{at}{at}{at}{at}{at}0ff"), at))
+                .await
+                .unwrap();
+        }
+        let (_, (_, text)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-1", "and the docs"),
+            host_takes(&mut played, 3, "done")
+        );
+        assert_eq!(
+            text,
+            "You committed 3 files · 3333333\nYou committed 4 files · 4444444\n\
+             You committed 5 files · 5555555\nYou committed 6 files · 6666666\n\
+             You committed 7 files · 7777777\n\nand the docs"
+        );
+        assert_eq!(words(&rig, &uid), ["fix the tests", "and the docs"]);
+
+        let (_, (_, text)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-2", "again"),
+            host_takes(&mut played, 4, "done")
+        );
+        assert_eq!(text, "again", "told once");
+
+        rig.daemon
+            .ingest(commit("8888888fff".into(), 1))
+            .await
+            .unwrap();
+        let (_, (_, text)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-3", "/compact"),
+            host_takes(&mut played, 5, "done")
+        );
+        assert_eq!(text, "/compact", "a command goes as typed");
+        let (_, (_, text)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-4", "go on"),
+            host_takes(&mut played, 6, "done")
+        );
+        assert_eq!(text, "You committed 1 file · 8888888\n\ngo on");
         stop(&played.dir);
     }
 

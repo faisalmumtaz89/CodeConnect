@@ -927,6 +927,51 @@ impl Daemon {
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
     }
 
+    /// `text` as a run's agent is sent it: led, when commits were made from the run's Changes
+    /// panel since it was last told, by one line for each (the newest
+    /// [`crate::store::MAX_COMMIT_LINES`], oldest first, in the panel's words), and the seq of
+    /// the newest notice that carries, to pass to [`Daemon::commits_told`] once it is sent.
+    pub(crate) async fn with_commit_note(
+        &self,
+        session_uid: &str,
+        text: &str,
+    ) -> (String, Option<u64>) {
+        let commits = match self.db.untold_commits(session_uid.to_string()).await {
+            Ok(commits) => commits,
+            Err(err) => {
+                crate::log_error!(
+                    "{session_uid}: could not read the commits to tell its agent: {err:#}"
+                );
+                Vec::new()
+            }
+        };
+        let Some(&(through, _, _)) = commits.last() else {
+            return (text.to_string(), None);
+        };
+        let lines: Vec<String> = commits
+            .iter()
+            .map(|(_, oid, files)| {
+                let files = if *files == 1 {
+                    "1 file".to_string()
+                } else {
+                    format!("{files} files")
+                };
+                format!("You committed {files} · {}", oid.get(..7).unwrap_or(oid))
+            })
+            .collect();
+        (format!("{}\n\n{text}", lines.join("\n")), Some(through))
+    }
+
+    /// The run's agent was sent the commits through `through` ([`Daemon::with_commit_note`]).
+    pub(crate) async fn commits_told(&self, session_uid: &str, through: Option<u64>) {
+        let Some(through) = through else { return };
+        if let Err(err) = self.db.commits_told(session_uid.to_string(), through).await {
+            crate::log_error!(
+                "{session_uid}: could not record the commits its agent was told: {err:#}"
+            );
+        }
+    }
+
     /// Whether the run `row` may be writing to its folder: a card open, or, until it has
     /// ended, a turn running. Starting or stopping, it may be; live, a Codex run's turn is as
     /// its link says (a resumed turn's items are not filed, so the log cannot) and a Claude

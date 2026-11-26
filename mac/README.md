@@ -1345,7 +1345,11 @@ to probe credentials.
   person's own commit, and a
   `committed {oid, files, message}` notice (the message as committed, a
   `commit-msg` hook's rewrite included) is filed into the run's conversation with
-  the outcome. Refused, nothing staged, while any run in the folder waits on a
+  the outcome. The agent is told at the next message it is sent: one line per
+  commit since it was last told ("You committed 2 files · <sha7>", the newest
+  five, oldest first) goes above the words ccd hands it, never above a Claude
+  `/` command, while the person's row keeps their words; a message that relaunches
+  an ended run carries none. Refused, nothing staged, while any run in the folder waits on a
   card or may be working (starting or stopping; live, a Codex run as its live
   link says, a Claude run from its log, any other, or a Codex run not yet linked,
   counted as working), on a detached head, while a merge has unresolved files

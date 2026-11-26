@@ -798,6 +798,7 @@ const SESSION_TABLES: &[&str] = &["sessions", "codex_sessions"];
 /// *globally*, so they carry the open obligation described on [`create_schema`].
 const SESSION_SCOPED_TABLES: &[&str] = &[
     "events",
+    "commit_notes",
     "answers",
     "pending_approvals",
     // Agent-scoped, and still swept by THIS daemon: isolation from a rolled-back
@@ -1101,6 +1102,9 @@ pub fn replayed_interrupt_sentence(outcome: &str) -> String {
         other => crate::codex_refusals::replay_interrupt_unknown_word(other),
     }
 }
+
+/// The most commits one message tells its agent of: the newest, oldest first.
+pub const MAX_COMMIT_LINES: usize = 5;
 
 /// **The one `operation_kind` a phone answer is claimed under.**
 ///
@@ -1621,6 +1625,49 @@ impl Store {
         };
         conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
             .expect("test fixture");
+    }
+
+    /// The run's `committed` notices its agent has not been told of, the newest [`MAX_COMMIT_LINES`]
+    /// oldest first: each one's seq, commit and file count.
+    pub fn untold_commits(&self, session_uid: &str) -> Result<Vec<(u64, String, u64)>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT seq, json_extract(payload, '$.oid'), json_extract(payload, '$.files')
+               FROM events
+              WHERE session_uid = ?1 AND kind = ?2
+                AND json_extract(payload, '$.notification_type') = ?3
+                AND seq > COALESCE((SELECT told_through FROM commit_notes WHERE session_uid = ?1), 0)
+              ORDER BY seq DESC LIMIT ?4",
+        )?;
+        let mut commits = stmt
+            .query_map(
+                params![
+                    session_uid,
+                    EventKind::Notification.as_str(),
+                    protocol::event::notice::COMMITTED,
+                    MAX_COMMIT_LINES as i64
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as u64,
+                        row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                        row.get::<_, Option<i64>>(2)?.unwrap_or(0) as u64,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        commits.reverse();
+        Ok(commits)
+    }
+
+    /// The run's agent has been told of its commits through `through` (never backwards).
+    pub fn commits_told(&self, session_uid: &str, through: &u64) -> Result<()> {
+        self.write().execute(
+            "INSERT INTO commit_notes(session_uid, told_through) VALUES (?1, ?2)
+             ON CONFLICT(session_uid) DO UPDATE SET told_through = MAX(told_through, excluded.told_through)",
+            params![session_uid, *through as i64],
+        )?;
+        Ok(())
     }
 
     pub fn max_seq(&self, session_uid: &str) -> Result<u64> {
@@ -6118,6 +6165,13 @@ fn answer_claim_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerClaim> {
 fn create_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
+        -- How far a run's agent has been told of the commits made from its Changes panel: the
+        -- seq of the newest `committed` notice a message it was sent carried.
+        CREATE TABLE IF NOT EXISTS commit_notes(
+            session_uid  TEXT PRIMARY KEY,
+            told_through INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS sessions(
             -- The run's identity: a ULID minted when the run begins. Never reused.
             session_uid       TEXT PRIMARY KEY,

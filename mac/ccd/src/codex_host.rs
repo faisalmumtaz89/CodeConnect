@@ -1572,9 +1572,12 @@ async fn compose(
         }
     }
     let uuid = crate::claude_host::send_uuid(uid, &ask.request_id);
+    // Codex has no commands of its own: every message tells the agent of the commits made from
+    // the panel since it was last told. The person's row keeps their words.
+    let (said, told) = daemon.with_commit_note(uid, &ask.text).await;
     let params = json!({
         "threadId": thread,
-        "input": [{"type": "text", "text": ask.text}],
+        "input": [{"type": "text", "text": said}],
         "clientUserMessageId": uuid,
     });
     let asked = tokio::time::timeout(
@@ -1629,6 +1632,7 @@ async fn compose(
     } else {
         crate::store::COMPOSE_ROUTE_START
     };
+    daemon.commits_told(uid, told).await;
     let words = crate::claude_host::person_row(uid, &uuid, &ask.text, Some(&ask.request_id), None)
         .with_turn_id(Some(turn.to_string()));
     file(daemon, uid, vec![words]).await;
@@ -6774,6 +6778,51 @@ mod tests {
         );
         after["thread"]["turns"][1]["items"][0] = item.clone();
         after
+    }
+
+    /// **A message tells a Codex run's agent of the commits made from its Changes panel**:
+    /// `turn/start` carries the line above the words, the person's row keeps their words, and
+    /// a second message carries nothing.
+    #[tokio::test]
+    async fn a_message_tells_a_codex_agent_of_the_panels_commits() {
+        let rig = rig();
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let turns = &capture["answerAfter"]["result"]["thread"]["turns"];
+        let thread = capture["answerAfter"]["result"]["thread"]["id"]
+            .as_str()
+            .unwrap();
+        let (first, turn) = (
+            turns[0]["id"].as_str().unwrap(),
+            turns[1]["id"].as_str().unwrap(),
+        );
+        let (uid, mut ws) = engine_run(&rig, "req-note", thread, first).await;
+        rig.daemon
+            .ingest(PendingEvent::new(
+                &SessionKey::new(&uid, &uid),
+                EventKind::Notification,
+                json!({"notification_type": "committed", "oid": "abc1234def",
+                       "files": 2, "message": "m"}),
+                Source::Daemon,
+            ))
+            .await
+            .unwrap();
+        let sent = saying(&rig.daemon, &uid, "say-1", "and the docs");
+        let start = asked(&mut ws, "turn/start").await;
+        assert_eq!(
+            start["params"]["input"][0]["text"],
+            "You committed 2 files · abc1234\n\nand the docs"
+        );
+        answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
+        assert!(sent.await.is_ok());
+        assert_eq!(
+            words(&rig.daemon, &uid, "and the docs").await,
+            [json!({"text": "and the docs", "request_id": "say-1"})]
+        );
+        let again = saying(&rig.daemon, &uid, "say-2", "again");
+        let start = asked(&mut ws, "turn/start").await;
+        assert_eq!(start["params"]["input"][0]["text"], "again", "told once");
+        answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
+        let _ = again.await;
     }
 
     /// **X5-1 G1: a phone's message to an idle engine run starts a turn, and its words are
