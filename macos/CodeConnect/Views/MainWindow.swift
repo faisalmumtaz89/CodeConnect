@@ -262,8 +262,8 @@ struct MainWindow: View {
             .task {
                 // A test launch's fleet is in place a moment after the window is.
                 try? await Task.sleep(for: .seconds(1))
-                if RenderWindow.filter == "computer" {
-                    filter = FleetScope.active.rows(machines.fleet).first?.machineID.map { .computer($0) }
+                if let name = RenderWindow.filter {
+                    filter = machines.models.first { $0.machineName == name }?.machineID.map { .computer($0) }
                 }
             }
         #endif
