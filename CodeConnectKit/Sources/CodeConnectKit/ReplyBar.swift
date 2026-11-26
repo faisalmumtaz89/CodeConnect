@@ -24,6 +24,9 @@ public struct ReplyBar: Equatable, Sendable {
     /// The account's windows, shortest first; empty when the account or its facts are not known, when its agent names
     /// none, or when no plan limits apply.
     public let limits: [Limit]
+    /// The windows drawn beside the box (its card holds all of `limits`): all of them; by model group (Antigravity's),
+    /// the one nearest its limit, standing for them all, as the bar has room for few.
+    public let figures: [Limit]
     /// In the limits' place, the Accounts page's words when the account's agent says no plan limits apply.
     public let limitsNote: String?
     /// The account by the Kit's name rule: its email as the account book knows it, else its label; nil when the run
@@ -47,18 +50,17 @@ public struct ReplyBar: Equatable, Sendable {
             return Context(used: tokens(used), window: tokens(window))
         }.first
         guard let account = summary.account, let agent = StartAgent(rawValue: summary.agent.rawValue) else {
-            return ReplyBar(context: context, limits: [], limitsNote: nil, account: nil)
+            return ReplyBar(context: context, limits: [], figures: [], limitsNote: nil, account: nil)
         }
         let facts = book?.facts(for: agent, accountID: account.id)
         return ReplyBar(
-            context: context, limits: barLimits(facts, now: now),
+            context: context, limits: limits(facts, now: now), figures: figures(facts, now: now),
             limitsNote: facts?.limitsAvailable == false ? AccountSwitchWords.noPlanLimits : nil,
             account: facts?.email ?? account.label)
     }
 
-    /// The windows this bar shows: all of them; by model group (Antigravity's), the one nearest its limit, standing for
-    /// them all, as the bar has room for few.
-    public static func barLimits(_ facts: AccountFacts?, now: Date) -> [Limit] {
+    /// The bar's `figures` of `facts`.
+    public static func figures(_ facts: AccountFacts?, now: Date) -> [Limit] {
         let all = limits(facts, now: now)
         guard facts?.windows.contains(where: { $0.group != nil }) == true else { return all }
         return all.max { $0.usedPercent < $1.usedPercent }.map { [$0] } ?? []

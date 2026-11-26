@@ -251,10 +251,10 @@ final class AntigravityKitTests: XCTestCase {
             ])
         XCTAssertEqual(limits.first?.resets, "resets in 3h 20m")
         XCTAssertEqual(limits.last?.resets, "not started")
-        XCTAssertEqual(ReplyBar.barLimits(agy, now: now).map(\.caption), ["Gemini Models · 5-hour"], "the fullest")
+        XCTAssertEqual(ReplyBar.figures(agy, now: now).map(\.caption), ["Gemini Models · 5-hour"], "the fullest")
         let claude = try facts(#"{"used_percent": 10, "window_minutes": 300, "resets_at": 1795670000}"#)
         XCTAssertEqual(ReplyBar.limits(claude, now: now).map(\.caption), ["5-hour"], "no group: its length alone")
-        XCTAssertEqual(ReplyBar.barLimits(claude, now: now).count, 1, "no group: the bar shows every window")
+        XCTAssertEqual(ReplyBar.figures(claude, now: now).count, 1, "no group: the bar shows every window")
     }
 
     /// An Antigravity run's "/" offers model, effort, compact and diff: agy has no `/clear`. Compact's words name
