@@ -354,11 +354,15 @@ public enum FleetStatusRule {
         if summary.lifecycle == .exited {
             return endedAbnormally(shown) ? .failed : .ended
         }
+        // Its start failed before its agent existed: the daemon says so, and it waits on the person, never "ended".
+        if summary.lifecycle == .failed { return .failed }
         // A prompt can start a turn and draw nothing — a scheduled prompt,
         // another session's message — so the last row alone would still say
         // the previous turn was the latest thing that happened.
         let prompt = shown?.lastPromptSeq ?? 0
         guard let shown, let last = lastSubstantiveItem(in: shown.timeline) else {
+            // Still starting is working, whether or not its first message is filed yet.
+            if summary.lifecycle == .starting { return .running }
             guard summary.lifecycle == .live else { return .ended }
             return prompt > 0 ? .running : .idle
         }
