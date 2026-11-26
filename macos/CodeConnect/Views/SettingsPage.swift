@@ -376,6 +376,9 @@ private struct ComputerSettings: View {
                             }
                         }
                     }
+                    // The notice's whole sentence, as the sidebar's row said it: which computer to update, what to
+                    // turn on.
+                    .help(connected ? "" : computer.linkHealth.notice?.sentence ?? "")
                 }
             }
             if !unjoined.isEmpty {
