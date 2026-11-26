@@ -13,7 +13,8 @@ account stops nothing, and new sessions use it at once. An open session moves to
 send it a message, if nothing is running in it: its app server is ended, and your message starts it
 again on the same thread with the new sign-in. If something is running (a turn, a command or subagent it
 started in its last turn, a message of yours it hasn't answered), that message goes on the old account and
-the session moves at the next one. Its menus and settings stay as they are throughout. A message
+the session moves at the next one. Its menus and settings stay as they are throughout. An app server
+that does not end within 10 seconds of being stopped for the move is ended as End Run ends one. A message
 queued in Codex itself (`codex queue`) is not kept across a move, and a process a session started
 outside Codex's own tracking (a background command from an earlier turn) ends when the session moves
 accounts. When the new account's

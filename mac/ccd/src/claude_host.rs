@@ -75,7 +75,7 @@ const ZOMBIE_WAIT: Duration = Duration::from_secs(5);
 const TERM_GRACE: Duration = Duration::from_secs(5);
 
 /// How long a run sent `stop` has to exit before its host's group is stopped (H5).
-const STOP_GRACE: Duration = Duration::from_secs(10);
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(10);
 
 /// The end of a run that was `stopping`, however it ended. It carries no exit code: the
 /// person asked for the stop, so claude's code (1 when it was mid-turn) says nothing.
@@ -911,6 +911,9 @@ async fn link(
     mut write: OwnedWriteHalf,
 ) {
     let (to_link, mut commands) = tokio::sync::mpsc::unbounded_channel();
+    if !linked.replayed {
+        daemon.set_replaying(&uid, true).await;
+    }
     daemon
         .host_link_attached(&uid, crate::state::HostLink::Claude(to_link))
         .await;
@@ -1030,6 +1033,7 @@ async fn link(
                     break why;
                 }
                 turns.replayed = true;
+                daemon.set_replaying(&uid, false).await;
                 if live {
                     crate::mail::waiter_registered(&daemon, &uid);
                 }
@@ -14488,8 +14492,165 @@ mod tests {
         );
         let live = serde_json::to_value(summary(&restarted, &uid).await).unwrap();
         assert_eq!(live.get("switching"), None, "{live}");
+        // The message its start carried is settled by it, found by that start's uuid: its retry is answered as
+        // sent, filed once, and nothing of it is left claimed to hold a later move.
+        let retried = send_as_app(&restarted, &uid, "r-1", "go on").await;
+        assert!(
+            matches!(retried, SendTextResult::Duplicate { .. }),
+            "{retried:?}"
+        );
+        assert_eq!(
+            words(&rig, &uid)
+                .iter()
+                .filter(|text| *text == "go on")
+                .count(),
+            1
+        );
+        let claims: i64 = rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM text_mutations WHERE session_uid = ?1 AND status = 'applying'",
+                [&uid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(claims, 0);
         sending.abort();
         stop(&dir);
+    }
+
+    /// **A move whose old process does not end is ended as End run ends one** (306): the person's message moves a quiet
+    /// run, but its host takes the stop and never ends; past End run's grace its group is stopped and its end filed as
+    /// the switch's, and the message relaunches it on B.
+    #[tokio::test]
+    async fn a_move_whose_process_does_not_end_is_ended_as_end_run_ends_one() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+                let Played {
+                    dir,
+                    mut lines,
+                    write,
+                    ..
+                } = played;
+                let read = next(&mut lines).await;
+                assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+                // The host takes the stop and does nothing more.
+                drop((lines, write));
+                let old = pid_in(&dir, "stub.pid");
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        let ends: Vec<_> = stored(&rig, &uid)
+            .into_iter()
+            .filter(|event| event["kind"] == "session_end")
+            .map(|event| event["payload"]["switched_to"]["label"].clone())
+            .collect();
+        assert_eq!(ends, ["B"], "one end, the switch's");
+    }
+
+    /// **A message read before a restart's replay has ended moves nothing** (306): ccd restarted and attached again to a
+    /// due run's host, which has not yet sent the end of what it kept, so what ccd has filed of the run may be behind
+    /// it: the person's message goes to that host as any message does, and the run stays due.
+    #[tokio::test]
+    async fn a_message_before_a_restarts_replay_ends_moves_nothing() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        choose(&rig.daemon, Some(&b)).await;
+        let claude = rig.root.join("bin").join("claude");
+        let host = rig.root.join("stub-host");
+        let Played { uid, dir, .. } = played;
+        let (restarted, mut lines, _write) =
+            restarted_as(&rig, &dir, relauncher(&rig.root, &claude, &host)).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 4 }));
+        rig.daemon = restarted;
+        let sending = {
+            let (daemon, uid) = (Arc::clone(&rig.daemon), uid.clone());
+            tokio::spawn(async move { send_as_app(&daemon, &uid, "r-1", "go on").await })
+        };
+        let read = next(&mut lines).await;
+        sending.abort();
+        stop(&dir);
+        assert!(
+            matches!(read, Some(ToHost::Say { .. })),
+            "the message goes to its host: {read:?}"
+        );
+        let due = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(due["switching"], "waiting", "still due: {due}");
+    }
+
+    /// **A run whose host was running before an upgrade keeps its account until that host ends** (306, G1): ccd
+    /// restarted from a build that filed no background tasks (its store last written at version 6) and attached again
+    /// to a quiet run's host, whose claude may run a task that build acknowledged unfiled: the person's message goes on
+    /// A, and the run stays due.
+    #[tokio::test]
+    async fn a_host_from_before_an_upgrade_keeps_its_account() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        choose(&rig.daemon, Some(&b)).await;
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .pragma_update(None, "user_version", 6i64)
+            .unwrap();
+        let claude = rig.root.join("bin").join("claude");
+        let host = rig.root.join("stub-host");
+        let Played {
+            uid,
+            dir,
+            record,
+            start,
+            ..
+        } = played;
+        let (restarted, mut lines, mut write) =
+            restarted_as(&rig, &dir, relauncher(&rig.root, &claude, &host)).await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Attach { after: 4 }));
+        say(
+            &mut write,
+            serde_json::json!({"type": "state", "seq": 5, "pending": []}),
+        )
+        .await;
+        assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 5 }));
+        rig.daemon = restarted;
+        let mut again = Played {
+            uid: uid.clone(),
+            dir,
+            lines,
+            write,
+            record,
+            start,
+        };
+        let (read, sent) = first_line_of_a_message(&rig, &mut again, 6).await;
+        stop(&again.dir);
+        assert!(
+            matches!(read, Some(ToHost::Say { .. })),
+            "the message goes on A: {read:?}"
+        );
+        assert!(
+            matches!(sent, Some(SendTextResult::Sent { .. })),
+            "{sent:?}"
+        );
+        let due = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        assert_eq!(due["switching"], "waiting", "still due: {due}");
     }
 
     /// **A ccd restarted with a run's message claimed and never sent lets the run move** (306, decision 311 v4): opened

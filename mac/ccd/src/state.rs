@@ -302,6 +302,9 @@ struct Inner {
     /// Hosted runs whose agent host or app-server this daemon is attached to now, by
     /// `session_uid`: what makes such a run's link read attached.
     host_links: HashMap<String, HostLink>,
+    /// Claude runs whose link attached again to a running host whose replay has not ended yet: what ccd has filed of
+    /// such a run may be behind what its host holds ([`Daemon::replaying`]).
+    replaying: HashSet<String>,
     /// Messages sent to a run's agent host and waiting for its outcome, by the message's
     /// uuid, each with its run's `session_uid`: told `true` once the host has taken the
     /// message into claude's input, `false` once it refused it. Dropped when the run's
@@ -3754,6 +3757,23 @@ impl Daemon {
             .await;
     }
 
+    /// Whether the Claude run `session_uid`'s link, attached again to its running host, has yet to read the end of that
+    /// host's replay: until it has, what ccd has filed of the run may be behind what its host holds, so no message moves
+    /// the run ([`crate::switch::moves`]).
+    pub(crate) async fn replaying(&self, session_uid: &str) -> bool {
+        self.inner.lock().await.replaying.contains(session_uid)
+    }
+
+    /// The Claude run `session_uid`'s link has begun reading its host's replay (`true`) or has read its end (`false`).
+    pub(crate) async fn set_replaying(&self, session_uid: &str, replaying: bool) {
+        let mut inner = self.inner.lock().await;
+        if replaying {
+            inner.replaying.insert(session_uid.to_string());
+        } else {
+            inner.replaying.remove(session_uid);
+        }
+    }
+
     /// A hosted run's link change as a `link_state` fact.
     async fn file_host_link_state(&self, session_uid: &str, link: &str, reason: &str) {
         let pending = PendingEvent::new(
@@ -4115,6 +4135,7 @@ impl Daemon {
         {
             let mut inner = self.inner.lock().await;
             inner.host_links.remove(session_uid);
+            inner.replaying.remove(session_uid);
             inner.host_sends.retain(|_, (uid, _)| uid != session_uid);
             inner.host_stops.retain(|_, (uid, _)| uid != session_uid);
             inner

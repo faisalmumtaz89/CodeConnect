@@ -122,7 +122,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 ///     forgotten once. A version gate, as `3` is. No schema changes, so an
 ///     older daemon reads everything; a rollback writes its own number back,
 ///     and the way back up forgets the rows it ended, once more.
-const SCHEMA_VERSION: i64 = 6;
+///   * `7` — a Claude run's background tasks are filed ([`protocol::sdk_map::BACKGROUND_TASK`]); an earlier build
+///     acknowledged them unfiled, so on the way up each Claude run whose host may still be running is filed one task
+///     open whose id names none, once ([`file_unknown_tasks`]): it moves to another account only once that host has
+///     ended. A version gate, as `6` is. No schema changes.
+const SCHEMA_VERSION: i64 = 7;
 
 pub struct Store {
     /// The only connection that writes. One, so `BEGIN IMMEDIATE` never has to
@@ -1423,6 +1427,16 @@ impl Store {
             ),
             [],
         )?;
+        // The one-shot for `7`: see [`SCHEMA_VERSION`].
+        if from_version < 7 {
+            let filed = file_unknown_tasks(&tx)?;
+            if filed > 0 {
+                crate::log_info!(
+                    "schema: {filed} running Claude run(s) keep their account until their process ends: what \
+                     they run in the background was not recorded before"
+                );
+            }
+        }
         tx.commit()?;
         // An earlier build's transcript cursors, name tombstones and run tombstones:
         // nothing reads them, and a cursor names a run's transcript, so they do not
@@ -7304,6 +7318,36 @@ fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Resul
     }))
 }
 
+/// The task id [`file_unknown_tasks`] files: no task claude names.
+pub(crate) const UNKNOWN_TASK: &str = "unknown";
+
+/// Each Claude run whose host may still be running (`starting`, `live` or `stopping`), launched by a build that filed
+/// none of its claude's background tasks: one task filed open under [`UNKNOWN_TASK`], which no end closes, so the run
+/// is never certainly quiet while that host runs ([`Store::certainly_quiet`]). The runs filed.
+fn file_unknown_tasks(tx: &rusqlite::Transaction<'_>) -> Result<usize> {
+    let uids = tx
+        .prepare(
+            "SELECT s.session_uid FROM sessions s JOIN run_hosts h ON h.session_uid = s.session_uid
+              WHERE s.agent = ?1 AND s.lifecycle IN ('starting', 'live', 'stopping')",
+        )?
+        .query_map(params![AgentKind::Claude.as_str()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for uid in &uids {
+        append_in_tx(
+            tx,
+            &PendingEvent::new(
+                &protocol::event::SessionKey::new(uid, uid),
+                EventKind::Other(protocol::sdk_map::BACKGROUND_TASK.into()),
+                serde_json::json!({"task_id": UNKNOWN_TASK, "ended": false}),
+                Source::Daemon,
+            ),
+        )?;
+    }
+    Ok(uids.len())
+}
+
 fn session_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     Ok(SessionRow {
         session_uid: row.get(0)?,
@@ -12214,7 +12258,7 @@ mod tests {
         // Written out rather than compared against the constant that produced
         // it: a version on disk is a fact other builds read, and a test that
         // asks the schema what the schema said would agree with any answer.
-        assert_eq!(version, 6, "the schema version other builds will read");
+        assert_eq!(version, 7, "the schema version other builds will read");
         assert_eq!(version, SCHEMA_VERSION);
         // **One answer ledger, and it is the generalized one.** `mutation_ledger`
         // was built for "answer, compose, interrupt" and its conflict law is

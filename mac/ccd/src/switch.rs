@@ -15,7 +15,8 @@
 //! The decision and the send are one step under the run's move gate ([`crate::state::Daemon::move_gate`]): a
 //! second message, a mail wake, a settings change or a Stop waits for it. A background task claude runs (a command
 //! run in the background, a subagent) holds the move from its start until its end, as the SDK reports both: a
-//! finished one lets the next message move the run, one that never ends keeps it on its account. Accepted misses: a
+//! finished one lets the next message move the run, one that never ends keeps it on its account; a host running from
+//! before ccd filed them keeps it there until that host ends ([`crate::store::UNKNOWN_TASK`]). Accepted misses: a
 //! message queued inside Codex itself (`codex queue`) does not survive the app-server's end; and a process a session
 //! started outside its agent's own tracking (a Claude `cmd &`, a Codex background command from an earlier turn) ends
 //! when the session moves.
@@ -38,7 +39,8 @@ pub(crate) fn switched_reason(label: &str) -> String {
 /// What the person's message `request_id` to the run `uid`, read live under its move gate, does with a switch: `false`, it is
 /// sent as any message is; `true`, its process is being ended by its switch ([`Store::SWITCH_MOVED`]) and the
 /// message relaunches it once it has ([`ended_for_move`]). A run due to move moves only when certainly quiet
-/// ([`crate::store::Store::certainly_quiet`], a card, and `turn_running`, a Codex link's own word on its turn); a
+/// ([`crate::store::Store::certainly_quiet`], a card, `turn_running`, a Codex link's own word on its turn, and a
+/// Claude link's replay read to its end, [`Daemon::replaying`]); a
 /// run on the active account already loses its mark and is not moved. A run already moving goes on moving.
 pub(crate) async fn moves(
     daemon: &Arc<Daemon>,
@@ -71,6 +73,7 @@ pub(crate) async fn moves(
         return false;
     }
     if turn_running
+        || daemon.replaying(uid).await
         || !daemon
             .db
             .certainly_quiet(uid.to_string(), request_id.to_string())
@@ -118,19 +121,22 @@ const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 /// Whether the run `uid`, its process stopped by its switch, has ended by `deadline`: its row `exited` and its
 /// recorded host or app-server gone with no member left in its group, as a message's relaunch requires. What its
 /// group still holds once that host is gone (a process started outside the agent's own tracking) is stopped as a dead
-/// host's group is ([`crate::claude_host::stop_group`]), once.
+/// host's group is ([`crate::claude_host::stop_group`]), once. A process still running past End run's grace is
+/// stopped as End run stops one ([`crate::claude_host::escalate_stop`]): its group, then its end filed; only the
+/// process this wait first found live, never one started since.
 pub(crate) async fn ended_for_move(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     uid: &str,
     deadline: tokio::time::Instant,
 ) -> bool {
+    let escalate = tokio::time::Instant::now() + crate::claude_host::STOP_GRACE;
+    let mut stopping = None;
     let mut laddered = false;
     loop {
         if let Ok(Some(watch)) = daemon.db.watched_host(uid.to_string()).await {
-            if watch.lifecycle == protocol::event::Lifecycle::Exited
-                && protocol::proc_identity::liveness(&watch.host)
-                    == protocol::proc_identity::Liveness::Gone
-            {
+            let gone = protocol::proc_identity::liveness(&watch.host)
+                == protocol::proc_identity::Liveness::Gone;
+            if watch.lifecycle == protocol::event::Lifecycle::Exited && gone {
                 if !protocol::proc_identity::group_has_members(watch.host.pid) {
                     return true;
                 }
@@ -139,6 +145,16 @@ pub(crate) async fn ended_for_move(
                     crate::claude_host::stop_group(watch.host, boot).await;
                     continue;
                 }
+            }
+            if watch.lifecycle == protocol::event::Lifecycle::Live
+                && *stopping.get_or_insert(watch.host) == watch.host
+                && tokio::time::Instant::now() >= escalate
+            {
+                if let (false, false, Some(boot)) = (gone, laddered, watch.boot) {
+                    laddered = true;
+                    crate::claude_host::stop_group(watch.host, boot).await;
+                }
+                crate::claude_host::end_if_host_gone(daemon, uid).await;
             }
         }
         if tokio::time::Instant::now() >= deadline {
