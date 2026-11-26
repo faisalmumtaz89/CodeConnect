@@ -1135,9 +1135,11 @@ mod tests {
     async fn ending_the_run_ends_the_shell_and_its_jobs() {
         let rig = Rig::new("end");
         let mut viewer = rig.open(rig.request("t1")).await;
+        // `$!` stands before a blank: an interactive bash (3.2 is macOS's /bin/bash) reads a `!` followed by anything
+        // else as a history event and refuses the whole line.
         type_line(
             &viewer,
-            r#"echo shell=$$; sleep 1000 & echo background=$!; echo mark-$((1+1))"#,
+            r#"echo shell=$$; sleep 1000 & echo background=$! ; echo mark-$((1+1))"#,
         );
         let (output, _, _) = read_until(&mut viewer, "mark-2").await;
         let (shell, background) = (printed(&output, "shell"), printed(&output, "background"));
