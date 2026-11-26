@@ -667,8 +667,8 @@ gate then refuses.
 `send_text`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
 `codex_compose`, `question_card`, `hook_only_approvals`, `history_pages`, `supported_agents`,
 `can_approve_reliably`, `command_catalog`, `private_transport`, `start_session`,
-`start_worktree`, `browse_folders`, `machine_stats`, `stop_run`, `uploads` and `run_terminal` (a run's
-shell, to a paired device on a private transport only; see [`SECURITY.md`](../SECURITY.md)) so the app disables
+`start_worktree`, `browse_folders`, `machine_stats`, `stop_run`, `uploads`, `run_terminal` (a run's
+shell, to a paired device on a private transport only; see [`SECURITY.md`](../SECURITY.md)), `changes` and `git_actions` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
@@ -1299,7 +1299,8 @@ to probe credentials.
   files only, within one 4 MB reading budget), whole even when `unified` is cut;
   at most 1000 and 256KB of the frame, `files_truncated` when there were more. The client names a session, never a path. A non-git directory returns
   an empty diff *with a `note`* — an empty diff and "this was never a repository"
-  must not look the same on screen.
+  must not look the same on screen. An unknown run is answered the same way, its
+  `note` saying so.
 
   The cap is applied **at the read**, not after it. `Command::output()` reads a
   child to EOF into memory and only then lets the caller trim, so the cap bounded
@@ -1319,6 +1320,62 @@ to probe credentials.
   the phone, so without them, asking for a diff of a working tree somebody else
   prepared would run their program as the daemon's user. Observing a working tree
   must not be a way to execute anything.
+* **`get_run_git{session_id}`** (`>= 58`, `changes`, paired devices only) →
+  `run_git{session_id, git?, note?}`: the run's `branch`, `head_oid`, `base`
+  (`{name, remote, ref}`, the default branch that `refs/remotes/<remote>/HEAD`
+  names, for a remote named `upstream` (a fork's parent), else the upstream's
+  remote, else `origin`, else the only remote with one),
+  `changed{files, added, removed, complete}` counted as `get_diff`'s `files`
+  (every file, before that reply's row and frame limits), `ahead` of the base,
+  `pushed` (the push remote git names for the branch, else `origin`, has this
+  branch at `HEAD`) and `unmerged`. Read in the run's folder by
+  `git status --porcelain=v2 --branch`, `for-each-ref` and `rev-list --count`
+  beside the diff's own listing, with the same switches, one child at a time,
+  off the connection's loop and within 20 seconds in all; nothing is fetched. As
+  with `get_diff`, a filter the repository's attributes name (Git LFS) still runs
+  and the listing may refresh the index. Outside a repository, or for an unknown
+  run, `git` is absent and `note` says why.
+  From `>= 60`, on a branch, `git` also carries `gh` (`signed_in`, `signed_out`,
+  `missing`, `unknown`: GitHub unreachable or rate-limited, `no_github_remote`),
+  `gh_host`, `gh_read_at` and `pr{number, url, state: open|merged|closed, base,
+  head_oid, merged_at?}`: the open pull request from this branch of the push
+  remote's repository (its push URL), on the repository of the remote named
+  `upstream` (a fork's parent), else of the base's remote; else the newest
+  closed one from it whose head is `HEAD`. Only github.com is read; any other host is `no_github_remote`. Read
+  through `gh api` alone (no prompt, no pager, 5 seconds a call, at most two),
+  outside the folder's git lock, one read at a time and at most once per branch
+  and commit every 30 seconds whatever asks, and not for 5 minutes after GitHub
+  refuses a read for its rate limit. `gh_read_at` is when GitHub was asked for the
+  answer; it is absent when GitHub was not asked (no gh, no account in gh, or
+  the pause). A branch whose remote is a URL (as `gh pr checkout` sets for a
+  fork's PR) is read from that URL.
+* **`git_action{request_id, session_uid, action}`** (`>= 59`, `git_actions` names
+  each action; paired devices only) → `git_action_result{request_id, session_uid,
+  result}`, `done{sha}` or `refused{code, detail?}`. `action` is
+  `{kind: "commit", message}`: every change in the run's folder, tracked and
+  untracked, is committed on its branch (`git add -A`, `git commit -q -m`, run
+  through the person's login shell as `git worktree add` is, so a hook finds the
+  tools a terminal does), the repository's hooks and signing running as for the
+  person's own commit, and a
+  `committed {oid, files, message}` notice (the message as committed, a
+  `commit-msg` hook's rewrite included) is filed into the run's conversation with
+  the outcome. The agent is told at the person's next message: one line per
+  commit since it was last told ("You committed 2 files · <sha7>", the newest
+  five, oldest first) goes above the words ccd hands it, never above a Claude
+  `/` command, while the person's row keeps their words. A message a Stop drops
+  told nothing, so the next one carries the lines again; a message that relaunches
+  an ended Claude or Antigravity run carries none, and the one after it does. Refused, nothing staged, while any run in the folder waits on a
+  card or may be working (starting or stopping; live, a Codex run as its live
+  link says, a Claude run from its log, any other, or a Codex run not yet linked,
+  counted as working), on a detached head, while a merge has unresolved files
+  (`unmerged`, checked before staging), and when nothing changed. Kept per
+  `request_id` in the mutation ledger: the same id replays its answer and acts
+  nothing twice, another message under it is `bad_request`, and one whose first
+  try did not finish is `indeterminate`, never tried again. A write's git output
+  is read until git exits, never cut off; staging and the commit each have 120 s.
+  A refused commit leaves what it staged staged. Every git child for a run's folder
+  (`get_diff`, `get_run_git`, the session-list refresh and actions) runs one at a
+  time, and each is answered off the connection's loop.
 * **`EventKind::TurnComplete`** marks the end of a turn. For Claude it is filed
   from the SDK's `result`, which the run's agent host relays as each turn ends.
   `SessionEnd` now means only what it says: the run ended.
@@ -1409,6 +1466,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `ws_loopback` | `true` | Also listen on `127.0.0.1`, for tools on this Mac. The token is still required. |
 | `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. A start checks the claude this list finds. |
 | `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
+| `gh_bin` | auto | Explicit path to GitHub's `gh`, which a run's Changes panel reads the branch's pull request with. Unset, it is the first `gh` on `PATH` as your shell finds it. |
 | `agy_bin` | auto | Explicit path to Antigravity's `agy`. Unset, it is the first `agy` on `PATH` as your shell finds it, then `~/.local/bin/agy`, where its installer puts it. |
 | `agent_host_bin` | beside ccd | Explicit path to `cc-agent-host`, the agent host ccd runs for each Claude run started from the app. Unset, it is the `cc-agent-host` next to ccd's own executable, where every install puts it. |
 | `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |

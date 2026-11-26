@@ -959,7 +959,26 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     agy). A run on an account runs agy in that home; a run moving to another account at its next message takes its
 ///     conversation's files there. Removing an account a run records keeps its folder, signed out, for that run. A
 ///     daemon below 57 refuses Antigravity in `add_account`, so an app offers its accounts only from 57.
-pub const PROTOCOL_MINOR: u32 = 57;
+///   * `58` — **A run's repository, for its Changes panel.**
+///
+///     [`ws::ClientMessage::GetRunGit`] is answered with [`ws::ServerMessage::RunGit`]: the branch, head and base,
+///     the changed files' lines (untracked included), commits ahead of the base, whether it is pushed and whether a
+///     merge is unresolved ([`ws::RunGit`]). Paired devices only, advertised as `changes`. A daemon below 58 answers
+///     `get_run_git` with `bad_request` and advertises no `changes`.
+///   * `59` — **A commit from the Changes panel.**
+///
+///     [`ws::ClientMessage::GitAction`] with [`ws::GitAction::Commit`] commits every change in a run's folder,
+///     answered with [`ws::ServerMessage::GitActionResult`] (`done {sha}`, or `refused` with a [`ws::git_refusal`]
+///     code), kept per `request_id`, and files a [`event::notice::COMMITTED`] notice into the run's conversation.
+///     Paired devices only; `git_actions` names the actions a daemon takes. A daemon below 59 answers `git_action`
+///     with `bad_request` and advertises no `git_actions`.
+///   * `60` — **A run's GitHub state and its pull request.**
+///
+///     [`ws::RunGit`] gains `gh` (whether this computer's `gh` is signed in for the repository's host, [`ws::GhState`]),
+///     `gh_host`, `pr` ([`ws::PullRequest`]: the open one from the branch, else the newest closed or merged one at
+///     the commit checked out, looked up by the branch's owner, so a fork's PR on its parent is found) and
+///     `gh_read_at`; GitHub is asked at most once per 30 s per branch and commit. A daemon below 60 sends none of them.
+pub const PROTOCOL_MINOR: u32 = 60;
 
 #[cfg(test)]
 mod ledger_tests {

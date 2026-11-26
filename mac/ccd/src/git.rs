@@ -180,6 +180,509 @@ pub async fn diff_stat(
     })
 }
 
+/// The longest one [`run_git`] read takes, its git children together.
+const RUN_GIT_DEADLINE: Duration = Duration::from_secs(20);
+
+/// A run's repository for its Changes panel; `Err` is the note saying why there is none.
+/// Git's children run one after another, each within `timeout`, all within
+/// [`RUN_GIT_DEADLINE`], with the diff's switches: no fsmonitor, external diff or textconv
+/// program runs. A filter the repository's attributes name (Git LFS) still runs, and the
+/// diff listing may refresh the index, as any `git status` or `git diff` does. `changed`
+/// counts every file listed, before the row and frame limits of a `diff` reply.
+pub async fn run_git(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    timeout: Duration,
+) -> Result<protocol::ws::RunGit, String> {
+    tokio::time::timeout(
+        RUN_GIT_DEADLINE,
+        run_git_inner(cwd, configured_bin, timeout),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(format!(
+            "git did not answer within {} s",
+            RUN_GIT_DEADLINE.as_secs()
+        ))
+    })
+}
+
+async fn run_git_inner(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    timeout: Duration,
+) -> Result<protocol::ws::RunGit, String> {
+    if cwd.is_empty() || !Path::new(cwd).is_dir() {
+        return Err(format!("session directory {cwd:?} is not readable"));
+    }
+    let git = git_bin(configured_bin).ok_or("git is not installed at a known location")?;
+    let failed = |err: anyhow::Error| format!("could not read git: {err:#}");
+    let inside = run(
+        &git,
+        cwd,
+        &["rev-parse", "--is-inside-work-tree"],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .map_err(failed)?;
+    if !inside.ok || inside.stdout.trim() != "true" {
+        return Err("not a git repository".into());
+    }
+    let status = run(&git, cwd, STATUS_ARGS, timeout, LISTING_CAP)
+        .await
+        .map_err(failed)?;
+    if !status.ok {
+        return Err(format!(
+            "git status failed: {}",
+            status.stderr.lines().next().unwrap_or_default()
+        ));
+    }
+    let head = parse_status(&status.stdout);
+    let listed = files(&git, cwd, head.oid.is_some(), timeout)
+        .await
+        .ok_or("git could not list the changed files")?;
+    let Remotes { base, pushed } = remotes(
+        &git,
+        cwd,
+        head.branch.as_deref(),
+        head.oid.as_deref(),
+        timeout,
+    )
+    .await;
+    // Counted from the commit status read, so a commit made during the read cannot make
+    // `ahead` disagree with `head_oid`.
+    let ahead = match (&head.oid, &base) {
+        (Some(oid), Some(base)) => {
+            let range = format!("{}..{oid}", base.reference);
+            run(
+                &git,
+                cwd,
+                &["rev-list", "--count", &range],
+                timeout,
+                PROBE_CAP,
+            )
+            .await
+            .ok()
+            .filter(|out| out.ok)
+            .and_then(|out| out.stdout.trim().parse().ok())
+        }
+        _ => None,
+    };
+    Ok(protocol::ws::RunGit {
+        branch: head.branch,
+        head_oid: head.oid,
+        base,
+        changed: protocol::ws::ChangedFiles {
+            files: listed.files.len() as u64,
+            added: listed.files.iter().filter_map(|file| file.added).sum(),
+            removed: listed.files.iter().filter_map(|file| file.removed).sum(),
+            complete: !listed.truncated && !listed.uncounted,
+        },
+        ahead,
+        pushed,
+        unmerged: head.unmerged,
+        read_at: protocol::time::now_rfc3339(),
+        gh: None,
+        gh_host: None,
+        pr: None,
+        gh_read_at: None,
+    })
+}
+
+/// The remote `branch` pushes to (`%(push:remotename)`: its `pushRemote`,
+/// `remote.pushDefault`, or the upstream's), else `origin`: the URL it pushes to; and the URL
+/// the remote named `upstream` (a fork's parent) fetches from, else `other`, else the push
+/// remote: what [`crate::github`] names the head and target repositories by.
+pub(crate) async fn push_remote_urls(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    branch: &str,
+    other: Option<&str>,
+    timeout: Duration,
+) -> Option<(String, String)> {
+    let git = git_bin(configured_bin)?;
+    let local = format!("refs/heads/{branch}");
+    let named = run(
+        &git,
+        cwd,
+        &["for-each-ref", "--format=%(push:remotename)", &local],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()
+    .filter(|out| out.ok)?;
+    let push = Some(named.stdout.trim().to_string())
+        .filter(|remote| !remote.is_empty())
+        .unwrap_or_else(|| "origin".to_string());
+    let head = remote_url(&git, cwd, &push, true, timeout).await?;
+    let target = match remote_url(&git, cwd, "upstream", false, timeout).await {
+        Some(parent) => parent,
+        None => remote_url(&git, cwd, other.unwrap_or(&push), false, timeout).await?,
+    };
+    Some((head, target))
+}
+
+/// The URL `remote` pushes to (`push`) or fetches from. A name holding a `:` is itself the URL:
+/// git refuses one in a remote's name, and `gh pr checkout` of a fork's PR sets the fork's URL
+/// as the branch's remote.
+async fn remote_url(
+    git: &Path,
+    cwd: &str,
+    remote: &str,
+    push: bool,
+    timeout: Duration,
+) -> Option<String> {
+    if remote.contains(':') {
+        return Some(remote.to_string());
+    }
+    let mut args = vec!["remote", "get-url"];
+    if push {
+        args.push("--push");
+    }
+    args.extend(["--", remote]);
+    run(git, cwd, &args, timeout, PROBE_CAP)
+        .await
+        .ok()
+        .filter(|out| out.ok && !out.stdout_truncated)
+        .map(|out| out.stdout.trim().to_string())
+}
+
+/// The longest a commit's staging or the commit itself may take: a repository's hooks
+/// (a formatter, a test run) work inside it.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// What [`commit`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// Committed as `sha`, changing `files` files, with `message` as the commit has it (a
+    /// `commit-msg` hook may have rewritten the one asked for).
+    Committed {
+        sha: String,
+        files: u64,
+        message: String,
+    },
+    /// Nothing committed: a [`protocol::ws::git_refusal`] code and, for some, git's words.
+    Refused {
+        code: &'static str,
+        detail: Option<String>,
+    },
+    /// It may have committed, and git could not say: never tried again.
+    Unknown(String),
+}
+
+fn refused(code: &'static str, detail: Option<String>) -> CommitOutcome {
+    CommitOutcome::Refused { code, detail }
+}
+
+/// The first line git, or a hook, said: its error, else what it printed.
+fn first_words(out: &Output) -> Option<String> {
+    [&out.stderr, &out.stdout]
+        .into_iter()
+        .flat_map(|text| text.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(300).collect())
+}
+
+/// Commit every change at `cwd`, tracked and untracked, with `message`, on the branch
+/// checked out. Refused without staging anything on a detached head or while a merge has
+/// unresolved files (`git add` would mark them resolved), and when nothing changed. The
+/// repository's hooks and signing run as for the person's own `git commit`; staging and
+/// the commit each have [`COMMIT_TIMEOUT`], the probes `timeout`.
+pub async fn commit(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    message: &str,
+    timeout: Duration,
+    environment: &std::collections::HashMap<std::ffi::OsString, std::ffi::OsString>,
+) -> CommitOutcome {
+    use protocol::ws::git_refusal as code;
+    if cwd.is_empty() || !Path::new(cwd).is_dir() {
+        return refused(
+            code::NOT_A_REPOSITORY,
+            Some(format!("{cwd:?} is not readable")),
+        );
+    }
+    let Some(git) = git_bin(configured_bin) else {
+        return refused(
+            code::GIT_FAILED,
+            Some("git is not installed at a known location".into()),
+        );
+    };
+    let failed = |err: anyhow::Error| refused(code::GIT_FAILED, Some(format!("{err:#}")));
+    let inside = match run(
+        &git,
+        cwd,
+        &["rev-parse", "--is-inside-work-tree"],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    {
+        Ok(out) => out,
+        Err(err) => return failed(err),
+    };
+    if !inside.ok || inside.stdout.trim() != "true" {
+        return refused(code::NOT_A_REPOSITORY, None);
+    }
+    if branch(cwd, configured_bin, timeout).await.is_none() {
+        return refused(code::DETACHED, None);
+    }
+    // One byte of output is the proof; nothing more is read.
+    match run(
+        &git,
+        cwd,
+        &["ls-files", "--unmerged", "-z", "--", ":/"],
+        timeout,
+        0,
+    )
+    .await
+    {
+        Ok(out) if out.stdout_truncated => return refused(code::UNMERGED, None),
+        Ok(out) if out.ok => {}
+        Ok(out) => return refused(code::GIT_FAILED, first_words(&out)),
+        Err(err) => return failed(err),
+    }
+    match run_write(
+        &git,
+        cwd,
+        &["-c", "core.fsmonitor=false", "add", "-A", "--", ":/"],
+        COMMIT_TIMEOUT,
+        environment,
+    )
+    .await
+    {
+        Ok(out) if out.ok => {}
+        Ok(out) => return refused(code::GIT_FAILED, first_words(&out)),
+        Err(_) => return refused(code::TIMEOUT, Some("add".into())),
+    }
+    match run(
+        &git,
+        cwd,
+        &[
+            "diff",
+            "--cached",
+            "--no-relative",
+            "--ignore-submodules=none",
+            "--name-only",
+            "-z",
+        ],
+        timeout,
+        0,
+    )
+    .await
+    {
+        Ok(out) if out.stdout_truncated => {}
+        Ok(out) if out.ok => return refused(code::NOTHING_TO_COMMIT, None),
+        Ok(out) => return refused(code::GIT_FAILED, first_words(&out)),
+        Err(err) => return failed(err),
+    }
+    match run_write(
+        &git,
+        cwd,
+        &["commit", "-q", "-m", message],
+        COMMIT_TIMEOUT,
+        environment,
+    )
+    .await
+    {
+        Ok(out) if out.ok => {}
+        Ok(out) => return refused(code::GIT_FAILED, first_words(&out)),
+        // Killed at the deadline, a commit may have written its ref already.
+        Err(err) => return CommitOutcome::Unknown(format!("{err:#}")),
+    }
+    let unnamed = || CommitOutcome::Unknown("committed, but git did not name the commit".into());
+    let named = match run(
+        &git,
+        cwd,
+        // A person's `log.showSignature` would print the signature's check before the sha.
+        &[
+            "log",
+            "-1",
+            "--no-show-signature",
+            "--format=%H%x00%B",
+            "HEAD",
+        ],
+        timeout,
+        LISTING_CAP,
+    )
+    .await
+    {
+        Ok(out) if out.ok && !out.stdout_truncated => out.stdout,
+        _ => return unnamed(),
+    };
+    let Some((sha, message)) = named.split_once('\0') else {
+        return unnamed();
+    };
+    let (sha, message) = (sha.to_string(), message.trim_end().to_string());
+    // A count, not a listing: a commit of many thousand files is one line.
+    let counted = run(
+        &git,
+        cwd,
+        &[
+            "diff-tree",
+            "--root",
+            "--diff-merges=first-parent",
+            "--no-commit-id",
+            "-r",
+            "--shortstat",
+            &sha,
+        ],
+        timeout,
+        PROBE_CAP,
+    )
+    .await;
+    match counted {
+        Ok(out) if out.ok => CommitOutcome::Committed {
+            files: out
+                .stdout
+                .split_whitespace()
+                .next()
+                .and_then(|count| count.parse().ok())
+                .unwrap_or(0),
+            sha,
+            message,
+        },
+        _ => CommitOutcome::Unknown(format!("committed {sha}, but git did not count its files")),
+    }
+}
+
+/// The branch header and the unresolved entries, tracked files only, no fsmonitor run.
+const STATUS_ARGS: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "status",
+    "--porcelain=v2",
+    "--branch",
+    "--no-ahead-behind",
+    "-z",
+    "--untracked-files=no",
+];
+
+/// What `git status --porcelain=v2 --branch` says of `HEAD`.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StatusHead {
+    /// Absent before the first commit.
+    oid: Option<String>,
+    /// Absent on a detached head.
+    branch: Option<String>,
+    unmerged: bool,
+}
+
+/// `# branch.*` headers, then one entry per changed file; an unresolved one starts `u `,
+/// and a rename's (`2 `) is followed by its original path. Read from as much as fit in
+/// [`LISTING_CAP`]: an unresolved entry past it is not seen.
+fn parse_status(listing: &str) -> StatusHead {
+    let mut head = StatusHead::default();
+    let mut entries = listing.split('\0');
+    while let Some(entry) = entries.next() {
+        if let Some(oid) = entry.strip_prefix("# branch.oid ") {
+            head.oid = (oid != "(initial)").then(|| oid.to_string());
+        } else if let Some(branch) = entry.strip_prefix("# branch.head ") {
+            head.branch = (branch != "(detached)").then(|| branch.to_string());
+        } else if entry.starts_with("u ") {
+            head.unmerged = true;
+        } else if entry.starts_with("2 ") {
+            entries.next();
+        }
+    }
+    head
+}
+
+/// What the remotes say of `HEAD`.
+#[derive(Debug, Default)]
+struct Remotes {
+    /// The default branch, as `refs/remotes/<remote>/HEAD` names it, of the remote named
+    /// `upstream` (a fork's parent, as `gh repo fork` names it), else of the upstream's
+    /// remote, else of `origin`, else of the only remote that has one.
+    base: Option<protocol::ws::RunGitBase>,
+    /// `HEAD` is the branch of the same name on the push remote git names for it
+    /// (`%(push:remotename)`: its `pushRemote`, `remote.pushDefault`, or the upstream's),
+    /// else on `origin`.
+    pushed: bool,
+}
+
+/// [`Remotes`] from one `for-each-ref`. A remote whose name holds a `/` is not seen.
+async fn remotes(
+    git: &Path,
+    cwd: &str,
+    branch: Option<&str>,
+    head_oid: Option<&str>,
+    timeout: Duration,
+) -> Remotes {
+    let local = branch.map(|name| format!("refs/heads/{name}"));
+    let tracking = branch.map(|name| format!("refs/remotes/*/{name}"));
+    let mut args = vec![
+        "for-each-ref",
+        "--format=%(refname)%00%(symref)%00%(upstream:remotename)%00%(objectname)%00%(push:remotename)",
+        "refs/remotes/*/HEAD",
+    ];
+    args.extend(local.as_deref());
+    args.extend(tracking.as_deref());
+    let Some(out) = run(git, cwd, &args, timeout, LISTING_CAP)
+        .await
+        .ok()
+        .filter(|out| out.ok && !out.stdout_truncated)
+    else {
+        return Remotes::default();
+    };
+    let mut upstream_remote = None;
+    let mut push_remote = None;
+    let mut heads = Vec::new();
+    let mut pushed_to = Vec::new();
+    for line in out.stdout.lines() {
+        let mut fields = line.split('\0');
+        let (Some(refname), Some(target), Some(remote), Some(oid), Some(push)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            continue;
+        };
+        if Some(refname) == local.as_deref() {
+            upstream_remote = Some(remote.to_string()).filter(|remote| !remote.is_empty());
+            push_remote = Some(push.to_string()).filter(|remote| !remote.is_empty());
+            continue;
+        }
+        let Some((remote, name)) = refname
+            .strip_prefix("refs/remotes/")
+            .and_then(|rest| rest.split_once('/'))
+        else {
+            continue;
+        };
+        if name == "HEAD" {
+            if let Some(default) = target
+                .strip_prefix("refs/remotes/")
+                .and_then(|rest| rest.strip_prefix(remote))
+                .and_then(|rest| rest.strip_prefix('/'))
+            {
+                heads.push(protocol::ws::RunGitBase {
+                    name: default.to_string(),
+                    remote: remote.to_string(),
+                    reference: target.to_string(),
+                });
+            }
+        } else if Some(name) == branch {
+            pushed_to.push((remote.to_string(), oid.to_string()));
+        }
+    }
+    let push_remote = push_remote.as_deref().unwrap_or("origin");
+    let pushed = pushed_to
+        .iter()
+        .any(|(remote, oid)| remote == push_remote && Some(oid.as_str()) == head_oid);
+    let named = |remote: &str| heads.iter().position(|head| head.remote == remote);
+    let base = named("upstream")
+        .or_else(|| upstream_remote.as_deref().and_then(named))
+        .or_else(|| named("origin"))
+        .or_else(|| (heads.len() == 1).then_some(0))
+        .map(|at| heads.swap_remove(at));
+    Remotes { base, pushed }
+}
+
 /// Bytes read from untracked files, all of them together, to count their lines.
 const UNTRACKED_READ_BUDGET: u64 = 4 * 1024 * 1024;
 
@@ -204,6 +707,9 @@ struct Files {
     files: Vec<protocol::ws::DiffFile>,
     /// The untracked listing passed [`LISTING_CAP`]: `files` holds the names that fit.
     truncated: bool,
+    /// An untracked file was left uncounted or unlisted: past the reading budget, unreadable,
+    /// or in a folder git could not open (it warns and lists what it can).
+    uncounted: bool,
 }
 
 /// The changed files at `cwd`, from the repository's top: the tracked ones against `HEAD`
@@ -236,7 +742,7 @@ async fn files(git: &Path, cwd: &str, has_head: bool, timeout: Duration) -> Opti
     let mut names: Vec<String> = untracked.stdout.split('\0').map(String::from).collect();
     // The last name is whole only when the listing ended with its NUL: a cut one is dropped.
     names.pop();
-    let new_files = tokio::task::spawn_blocking(move || count_untracked(&top, names))
+    let (new_files, uncounted) = tokio::task::spawn_blocking(move || count_untracked(&top, names))
         .await
         .ok()?;
     let mut files = parse_raw_numstat(&tracked.stdout);
@@ -244,6 +750,7 @@ async fn files(git: &Path, cwd: &str, has_head: bool, timeout: Duration) -> Opti
     Some(Files {
         files,
         truncated: untracked.stdout_truncated,
+        uncounted: uncounted || !untracked.stderr.trim().is_empty(),
     })
 }
 
@@ -329,69 +836,69 @@ fn parse_raw_numstat(listing: &str) -> Vec<protocol::ws::DiffFile> {
         .collect()
 }
 
-/// The untracked files under `top`, each with its lines: every line is added. Only a
-/// regular file is read, never followed through a symlink; a symlink, socket or pipe has no
-/// lines. A file with a NUL in its first [`BINARY_PROBE`] bytes is binary, git's own content
-/// test; a `.gitattributes` `-diff` or `binary` is not read for an untracked file.
+/// The untracked files under `top`, each with its lines: every line is added, and whether a
+/// regular file was left uncounted. Only a regular file is read, never followed through a
+/// symlink; a symlink, socket or pipe has no lines. A file with a NUL in its first
+/// [`BINARY_PROBE`] bytes is binary, git's own content test; a `.gitattributes` `-diff` or
+/// `binary` is not read for an untracked file.
 /// Every byte read counts against [`UNTRACKED_READ_BUDGET`]: a file larger than what is left
 /// of it is not opened, and it and a file that cannot be read have no count; later files
 /// still may.
-fn count_untracked(top: &Path, names: Vec<String>) -> Vec<protocol::ws::DiffFile> {
+fn count_untracked(top: &Path, names: Vec<String>) -> (Vec<protocol::ws::DiffFile>, bool) {
     use std::io::Read;
     let mut budget = UNTRACKED_READ_BUDGET;
-    let mut lines_of = |path: &Path| -> (Option<u64>, bool) {
+    // `None` for a regular file left uncounted, else its lines (none for one that is not a
+    // regular file or is binary) and whether it is binary.
+    let mut lines_of = |path: &Path| -> Option<(Option<u64>, bool)> {
         if budget == 0 {
-            return (None, false);
+            return None;
         }
-        let Ok(meta) = std::fs::symlink_metadata(path) else {
-            return (None, false);
-        };
-        if !meta.is_file() || meta.len() > budget {
-            return (None, false);
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        if !meta.is_file() {
+            return Some((None, false));
         }
-        let Ok(mut file) = std::fs::File::open(path) else {
-            return (None, false);
-        };
+        if meta.len() > budget {
+            return None;
+        }
+        let mut file = std::fs::File::open(path).ok()?;
         let mut text = Vec::new();
-        if (&mut file)
+        (&mut file)
             .take(BINARY_PROBE.min(budget))
             .read_to_end(&mut text)
-            .is_err()
-        {
-            return (None, false);
-        }
+            .ok()?;
         budget -= text.len() as u64;
         if text.contains(&0) {
-            return (None, true);
+            return Some((None, true));
         }
         let probed = text.len();
-        if (&mut file).take(budget + 1).read_to_end(&mut text).is_err() {
-            return (None, false);
-        }
+        (&mut file).take(budget + 1).read_to_end(&mut text).ok()?;
         let rest = (text.len() - probed) as u64;
         if rest > budget {
             budget = 0;
-            return (None, false);
+            return None;
         }
         budget -= rest;
         let breaks = text.iter().filter(|byte| **byte == b'\n').count() as u64;
         let unended = u64::from(text.last().is_some_and(|byte| *byte != b'\n'));
-        (Some(breaks + unended), false)
+        Some((Some(breaks + unended), false))
     };
-    names
-        .into_iter()
-        .map(|path| {
-            let (added, binary) = lines_of(&top.join(&path));
-            protocol::ws::DiffFile {
-                path,
-                old_path: None,
-                status: protocol::ws::DiffFileStatus::Untracked,
-                added,
-                removed: added.map(|_| 0),
-                binary,
-            }
-        })
-        .collect()
+    let mut uncounted = false;
+    let mut files = Vec::with_capacity(names.len());
+    for path in names {
+        let (added, binary) = lines_of(&top.join(&path)).unwrap_or_else(|| {
+            uncounted = true;
+            (None, false)
+        });
+        files.push(protocol::ws::DiffFile {
+            path,
+            old_path: None,
+            status: protocol::ws::DiffFileStatus::Untracked,
+            added,
+            removed: added.map(|_| 0),
+            binary,
+        });
+    }
+    (files, uncounted)
 }
 
 /// Ceiling for a listing of worktrees or branch names.
@@ -687,12 +1194,15 @@ fn truncate_on_char_boundary(text: &mut String, max: usize) {
 /// is not diagnostics, and it only ever reaches a log or a `note`.
 const MAX_STDERR_BYTES: usize = 8 * 1024;
 
-/// Read at most `cap` bytes from a pipe, then **close it**.
+/// Keep at most `cap` bytes from a pipe, then **close it**, or, `drain`ing, read the
+/// rest to its end and drop it.
 ///
 /// The close is the mechanism, not a side effect: the reader owns the pipe, so
 /// returning drops it, the child takes `EPIPE` on its next write, and everything
-/// else unblocks without anybody having to hold a kill handle.
-async fn read_capped<R>(mut pipe: R, cap: usize) -> std::io::Result<Vec<u8>>
+/// else unblocks without anybody having to hold a kill handle. A write (a commit,
+/// whose hooks may print at length) drains instead: a hook killed by `EPIPE` would
+/// fail the commit, or leave it half done.
+async fn read_capped<R>(mut pipe: R, cap: usize, drain: bool) -> std::io::Result<Vec<u8>>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -702,16 +1212,30 @@ where
         .take(cap as u64)
         .read_to_end(&mut buffer)
         .await?;
+    if drain {
+        tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await?;
+    }
     Ok(buffer)
 }
 
 #[derive(Debug)]
-struct Output {
-    ok: bool,
-    stdout: String,
-    stderr: String,
+pub(crate) struct Output {
+    pub(crate) ok: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
     /// The child produced more than the cap and was stopped.
-    stdout_truncated: bool,
+    pub(crate) stdout_truncated: bool,
+}
+
+/// Run `command`, any short read-only child of ccd's (`gh`), as [`run`] runs git's: bounded
+/// in time and bytes, stdin closed, killed on drop; `label` names it in errors.
+pub(crate) async fn run_program(
+    command: tokio::process::Command,
+    label: &[&str],
+    timeout: Duration,
+    stdout_cap: usize,
+) -> Result<Output> {
+    run_child(command, label, timeout, stdout_cap, false).await
 }
 
 /// Run one git subcommand against `cwd`, bounded in time **and in bytes**.
@@ -743,6 +1267,56 @@ async fn run(
 ) -> Result<Output> {
     let mut command = tokio::process::Command::new(git);
     command.arg("-C").arg(cwd).args(args);
+    run_child(command, args, timeout, stdout_cap, false).await
+}
+
+/// Output kept from a git child that writes (a commit): its hooks' words for a refusal.
+const WRITE_OUTPUT_CAP: usize = 64 * 1024;
+
+/// How long a write's output is still read once git has exited.
+const WRITE_OUTPUT_GRACE: Duration = Duration::from_secs(1);
+
+/// What a pipe's reader has within [`WRITE_OUTPUT_GRACE`]; past it the reader is stopped,
+/// dropping the pipe, and what it had is lost.
+async fn read_within_grace(
+    task: &mut tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> Vec<u8> {
+    match tokio::time::timeout(WRITE_OUTPUT_GRACE, &mut *task).await {
+        Ok(Ok(Ok(bytes))) => bytes,
+        _ => {
+            task.abort();
+            Vec::new()
+        }
+    }
+}
+
+/// [`run`] for a git child that changes the repository, run through the person's login
+/// shell with `environment` ([`crate::start_session::login_shell_command`]), so its hooks
+/// find the tools a terminal finds (a `cargo fmt` or `npm` hook), as `git worktree add`
+/// does. Every byte it prints is read (past [`WRITE_OUTPUT_CAP`], read and dropped), so it
+/// is never cut off part way, and its exit status alone is the answer.
+async fn run_write(
+    git: &Path,
+    cwd: &str,
+    args: &[&str],
+    timeout: Duration,
+    environment: &std::collections::HashMap<std::ffi::OsString, std::ffi::OsString>,
+) -> Result<Output> {
+    use std::ffi::OsStr;
+    let mut argv: Vec<&OsStr> = vec![git.as_os_str(), OsStr::new("-C"), OsStr::new(cwd)];
+    argv.extend(args.iter().map(OsStr::new));
+    let command = crate::start_session::login_shell_command(environment, None, &argv);
+    run_child(command, args, timeout, WRITE_OUTPUT_CAP, true).await
+}
+
+/// Run `command`, a git child (`args` names it in errors), as [`run`] describes.
+async fn run_child(
+    mut command: tokio::process::Command,
+    args: &[&str],
+    timeout: Duration,
+    stdout_cap: usize,
+    drain: bool,
+) -> Result<Output> {
     // Git will happily block on a credential prompt or a pager. Neither has a
     // terminal here, and either would hang the request until the timeout.
     command
@@ -773,8 +1347,33 @@ async fn run(
     // `cap + 1` is the whole trick: one byte past the cap proves there was
     // more, and it is the only extra byte ever allocated. A truncated diff that
     // does not know it is truncated is the one result that must not be produced.
-    let out_task = tokio::spawn(read_capped(stdout, stdout_cap.saturating_add(1)));
-    let err_task = tokio::spawn(read_capped(stderr, MAX_STDERR_BYTES));
+    let mut out_task = tokio::spawn(read_capped(stdout, stdout_cap.saturating_add(1), drain));
+    let mut err_task = tokio::spawn(read_capped(stderr, MAX_STDERR_BYTES, drain));
+
+    if drain {
+        // A write is over when git exits, not when its pipes close: a hook may leave a
+        // background job holding them. What was printed by then is read for a moment more.
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => status.ok(),
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                out_task.abort();
+                err_task.abort();
+                anyhow::bail!("git {} timed out", args.join(" "));
+            }
+        };
+        let mut out_bytes = read_within_grace(&mut out_task).await;
+        let err_bytes = read_within_grace(&mut err_task).await;
+        let stdout_truncated = out_bytes.len() > stdout_cap;
+        out_bytes.truncate(stdout_cap);
+        return Ok(Output {
+            ok: status.is_some_and(|status| status.success()),
+            stdout: String::from_utf8_lossy(&out_bytes).into_owned(),
+            stderr: String::from_utf8_lossy(&err_bytes).into_owned(),
+            stdout_truncated,
+        });
+    }
 
     let collected = tokio::time::timeout(timeout, async {
         let out = out_task.await;
@@ -1287,6 +1886,714 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    async fn run_git_of(dir: &Path) -> Result<protocol::ws::RunGit, String> {
+        run_git(dir.to_str().unwrap(), None, Duration::from_secs(30)).await
+    }
+
+    /// A repository on `main` with one commit, pushed to a bare `origin` whose `HEAD` is
+    /// `main`, so `refs/remotes/origin/HEAD` names it.
+    fn repo_with_origin(tag: &str) -> (PathBuf, PathBuf) {
+        let remote = temp_dir(&format!("{tag}-origin"));
+        git_sync(&remote, &["init", "-q", "--bare", "-b", "main"]);
+        let dir = temp_dir(tag);
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "1\n2\n").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "first"]);
+        git_sync(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git_sync(&dir, &["push", "-q", "-u", "origin", "main"]);
+        git_sync(&dir, &["remote", "set-head", "origin", "main"]);
+        (dir, remote)
+    }
+
+    fn head_of(dir: &Path) -> String {
+        let out = std::process::Command::new(git_bin(None).unwrap())
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    /// **A run's repository as its Changes panel reads it**: a branch pushed and level with
+    /// its upstream, then a commit past it with a modified and an untracked file: ahead of
+    /// the base, not pushed, and the changed lines the diff's files count.
+    #[tokio::test]
+    async fn a_runs_repository_reads_branch_base_lines_and_push_state() {
+        let (dir, remote) = repo_with_origin("rungit");
+        git_sync(&dir, &["switch", "-q", "-c", "feat/x"]);
+        git_sync(&dir, &["push", "-q", "-u", "origin", "feat/x"]);
+        let base = protocol::ws::RunGitBase {
+            name: "main".into(),
+            remote: "origin".into(),
+            reference: "refs/remotes/origin/main".into(),
+        };
+        let level = run_git_of(&dir).await.unwrap();
+        assert_eq!(level.branch.as_deref(), Some("feat/x"));
+        assert_eq!(level.head_oid, Some(head_of(&dir)));
+        assert_eq!(level.base.as_ref(), Some(&base));
+        assert_eq!(level.ahead, Some(0));
+        assert!(level.pushed, "level with its upstream is pushed");
+        assert!(!level.unmerged);
+        assert_eq!(
+            level.changed,
+            protocol::ws::ChangedFiles {
+                files: 0,
+                added: 0,
+                removed: 0,
+                complete: true
+            }
+        );
+
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        git_sync(&dir, &["add", "b.txt"]);
+        git_sync(&dir, &["commit", "-qm", "second"]);
+        std::fs::write(dir.join("a.txt"), "1\ntwo\n3\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "x\ny\n").unwrap();
+        let ahead = run_git_of(&dir).await.unwrap();
+        assert_eq!(ahead.ahead, Some(1));
+        assert!(
+            !ahead.pushed,
+            "a commit past the remote branch is not pushed"
+        );
+        let stat = diff_stat(dir.to_str().unwrap(), None, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(
+            ahead.changed,
+            protocol::ws::ChangedFiles {
+                files: 2,
+                added: stat.added,
+                removed: stat.removed,
+                complete: true
+            }
+        );
+        assert_eq!((stat.added, stat.removed), (4, 1));
+
+        std::fs::write(
+            dir.join("big.txt"),
+            vec![b'x'; UNTRACKED_READ_BUDGET as usize + 1],
+        )
+        .unwrap();
+        let past = run_git_of(&dir).await.unwrap();
+        assert_eq!(past.changed.files, 3);
+        assert!(!past.changed.complete, "a file left uncounted");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    /// **Pushed means the remote has this branch at `HEAD`**: a branch made from
+    /// `origin/main` tracks it and is not pushed; pushed without `-u` it is, with a commit
+    /// past it it is not, and a remote branch of the same name on another remote is not the
+    /// one it pushes to.
+    #[tokio::test]
+    async fn pushed_is_the_same_branch_on_its_remote_at_head() {
+        let (dir, origin) = repo_with_origin("rungit-pushed");
+        git_sync(
+            &dir,
+            &["switch", "-q", "-c", "from-main", "--track", "origin/main"],
+        );
+        let tracking_main = run_git_of(&dir).await.unwrap();
+        assert!(
+            !tracking_main.pushed,
+            "level with origin/main, but origin has no from-main"
+        );
+        git_sync(&dir, &["push", "-q", "origin", "from-main"]);
+        assert!(
+            run_git_of(&dir).await.unwrap().pushed,
+            "on origin at HEAD, though its upstream is still origin/main"
+        );
+        git_sync(&dir, &["commit", "-q", "--allow-empty", "-m", "more"]);
+        assert!(!run_git_of(&dir).await.unwrap().pushed);
+
+        let fork = temp_dir("rungit-pushed-fork");
+        git_sync(&fork, &["init", "-q", "--bare", "-b", "main"]);
+        git_sync(&dir, &["remote", "add", "fork", fork.to_str().unwrap()]);
+        git_sync(&dir, &["push", "-q", "fork", "from-main"]);
+        assert!(
+            !run_git_of(&dir).await.unwrap().pushed,
+            "on fork at HEAD, but it pushes to origin"
+        );
+        git_sync(&dir, &["push", "-q", "-u", "fork", "from-main"]);
+        assert!(
+            run_git_of(&dir).await.unwrap().pushed,
+            "its upstream is fork's now"
+        );
+
+        git_sync(&dir, &["switch", "-q", "-c", "fork-only"]);
+        git_sync(&dir, &["push", "-q", "origin", "fork-only"]);
+        git_sync(&dir, &["config", "branch.fork-only.pushRemote", "fork"]);
+        assert!(
+            !run_git_of(&dir).await.unwrap().pushed,
+            "on origin at HEAD, but it pushes to fork, which has no fork-only"
+        );
+        git_sync(&dir, &["push", "-q", "fork", "fork-only"]);
+        assert!(
+            run_git_of(&dir).await.unwrap().pushed,
+            "now on fork at HEAD"
+        );
+        for path in [&dir, &origin, &fork] {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    /// **Before the first commit, on a detached head, and outside a repository.**
+    #[tokio::test]
+    async fn a_runs_repository_without_a_head_branch_or_repository() {
+        let dir = temp_dir("rungit-unborn");
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "1\n").unwrap();
+        let unborn = run_git_of(&dir).await.unwrap();
+        assert_eq!(unborn.branch.as_deref(), Some("main"));
+        assert_eq!(
+            (unborn.head_oid, unborn.base, unborn.ahead),
+            (None, None, None)
+        );
+        assert!(!unborn.pushed);
+        assert_eq!((unborn.changed.files, unborn.changed.added), (1, 1));
+
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "first"]);
+        git_sync(&dir, &["checkout", "-q", "--detach"]);
+        let detached = run_git_of(&dir).await.unwrap();
+        assert_eq!(detached.branch, None);
+        assert_eq!(detached.head_oid, Some(head_of(&dir)));
+        assert_eq!(detached.base, None, "no remote, no base");
+        assert_eq!(detached.ahead, None);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let plain = temp_dir("rungit-plain");
+        assert_eq!(
+            run_git_of(&plain).await,
+            Err("not a git repository".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&plain);
+    }
+
+    /// **An unresolved merge reads `unmerged`.**
+    #[tokio::test]
+    async fn a_runs_repository_with_an_unresolved_merge() {
+        let dir = temp_dir("rungit-conflict");
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "base\n").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "base"]);
+        git_sync(&dir, &["switch", "-q", "-c", "other"]);
+        std::fs::write(dir.join("a.txt"), "other\n").unwrap();
+        git_sync(&dir, &["commit", "-qam", "other"]);
+        git_sync(&dir, &["switch", "-q", "main"]);
+        std::fs::write(dir.join("a.txt"), "main\n").unwrap();
+        git_sync(&dir, &["commit", "-qam", "main"]);
+        assert!(!run_git_of(&dir).await.unwrap().unmerged);
+        let git = git_bin(None).unwrap();
+        let merged = std::process::Command::new(git)
+            .arg("-C")
+            .arg(&dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@e",
+                "merge",
+                "-q",
+                "other",
+            ])
+            .output()
+            .unwrap();
+        assert!(!merged.status.success(), "the merge must conflict");
+        assert!(run_git_of(&dir).await.unwrap().unmerged);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The base is a fork's parent's default branch, else the upstream's remote's, else
+    /// origin's, else the only remote's**; with no remote `HEAD` there is none.
+    #[tokio::test]
+    async fn a_runs_base_follows_the_upstreams_remote() {
+        let (dir, origin) = repo_with_origin("rungit-base");
+        let fork = temp_dir("rungit-base-fork");
+        git_sync(&fork, &["init", "-q", "--bare", "-b", "trunk"]);
+        git_sync(&dir, &["remote", "add", "fork", fork.to_str().unwrap()]);
+        git_sync(&dir, &["push", "-q", "fork", "main:trunk"]);
+        git_sync(&dir, &["remote", "set-head", "fork", "trunk"]);
+        git_sync(&dir, &["switch", "-q", "-c", "feat"]);
+        assert_eq!(
+            run_git_of(&dir).await.unwrap().base.map(|base| base.remote),
+            Some("origin".into()),
+            "no upstream: origin"
+        );
+        git_sync(&dir, &["push", "-q", "-u", "fork", "feat"]);
+        let base = run_git_of(&dir).await.unwrap().base.unwrap();
+        assert_eq!(
+            (
+                base.name.as_str(),
+                base.remote.as_str(),
+                base.reference.as_str()
+            ),
+            ("trunk", "fork", "refs/remotes/fork/trunk"),
+            "the upstream's remote"
+        );
+        let parent = temp_dir("rungit-base-parent");
+        git_sync(&parent, &["init", "-q", "--bare", "-b", "main"]);
+        git_sync(
+            &dir,
+            &["remote", "add", "upstream", parent.to_str().unwrap()],
+        );
+        git_sync(&dir, &["push", "-q", "upstream", "main"]);
+        git_sync(&dir, &["remote", "set-head", "upstream", "main"]);
+        assert_eq!(
+            run_git_of(&dir)
+                .await
+                .unwrap()
+                .base
+                .map(|base| base.reference),
+            Some("refs/remotes/upstream/main".into()),
+            "a fork's parent, whatever the branch is pushed to"
+        );
+        git_sync(&dir, &["remote", "remove", "upstream"]);
+        let _ = std::fs::remove_dir_all(&parent);
+        git_sync(&dir, &["remote", "remove", "origin"]);
+        git_sync(&dir, &["branch", "-q", "--unset-upstream"]);
+        assert_eq!(
+            run_git_of(&dir).await.unwrap().base.map(|base| base.remote),
+            Some("fork".into()),
+            "the only remote with a HEAD"
+        );
+        git_sync(&dir, &["remote", "set-head", "fork", "-d"]);
+        let none = run_git_of(&dir).await.unwrap();
+        assert_eq!((none.base, none.ahead), (None, None));
+        for path in [&dir, &origin, &fork] {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    /// **A folder git cannot open leaves the count incomplete**: git lists what it can and
+    /// warns, and a tree that only looks clean is not called complete.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_untracked_folder_git_cannot_open_leaves_the_count_incomplete() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, remote) = repo_with_origin("rungit-unreadable");
+        let data = dir.join("data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("x.txt"), "x\n").unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let still_readable = std::fs::read_dir(&data).is_ok();
+        let read = run_git_of(&dir).await.unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !still_readable {
+            assert_eq!(read.changed.files, 0, "git listed nothing inside it");
+            assert!(!read.changed.complete, "{:?}", read.changed);
+        }
+        assert!(
+            run_git_of(&dir).await.unwrap().changed.complete,
+            "readable again"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    /// **`ahead` counts from the commit the read reports**: a commit made while the read is
+    /// under way (here by a git that commits just before `rev-list`) changes neither.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ahead_is_counted_from_the_head_the_read_reports() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, remote) = repo_with_origin("rungit-race");
+        let before = head_of(&dir);
+        let real = git_bin(None).unwrap();
+        let racing = dir.join("..").join(format!(
+            "{}-racing-git",
+            dir.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::write(
+            &racing,
+            format!(
+                "#!/bin/sh\ncase \" $* \" in *\" rev-list \"*) '{git}' -C '{dir}' -c user.name=t -c user.email=t@e commit -q --allow-empty -m race ;; esac\nexec '{git}' \"$@\"\n",
+                git = real.display(),
+                dir = dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&racing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let read = run_git(
+            dir.to_str().unwrap(),
+            Some(racing.to_str().unwrap()),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        assert_ne!(head_of(&dir), before, "the racing commit landed");
+        assert_eq!(read.head_oid, Some(before));
+        assert_eq!(read.ahead, Some(0), "counted from the head it reports");
+        let _ = std::fs::remove_file(&racing);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    async fn commit_in(dir: &Path, message: &str) -> CommitOutcome {
+        commit(
+            dir.to_str().unwrap(),
+            None,
+            message,
+            Duration::from_secs(30),
+            &login_environment(dir, "/usr/bin:/bin"),
+        )
+        .await
+    }
+
+    /// A login shell's environment for a test: a temporary home inside `dir`, `/bin/sh`,
+    /// and `path`.
+    fn login_environment(
+        dir: &Path,
+        path: &str,
+    ) -> std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> {
+        let home = dir.join(".git").join("test-home");
+        std::fs::create_dir_all(&home).unwrap();
+        [
+            ("HOME", home.into_os_string()),
+            ("SHELL", "/bin/sh".into()),
+            ("PATH", path.into()),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.into(), value))
+        .collect()
+    }
+
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new(git_bin(None).unwrap())
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// A repository on `main` with one commit, its own identity, and nothing else.
+    fn committable(tag: &str) -> PathBuf {
+        let dir = temp_dir(tag);
+        git_sync(&dir, &["init", "-q", "-b", "main"]);
+        git_sync(&dir, &["config", "user.name", "t"]);
+        git_sync(&dir, &["config", "user.email", "t@example.com"]);
+        std::fs::write(dir.join("a.txt"), "1\n").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "first"]);
+        dir
+    }
+
+    /// **Commit takes every change**: a modified and an untracked file, committed as HEAD
+    /// with the message, two files, and a clean tree after; the first commit of a new
+    /// repository too.
+    #[tokio::test]
+    async fn a_commit_takes_every_change_and_names_its_commit() {
+        let dir = committable("commit");
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "n\n").unwrap();
+        let CommitOutcome::Committed {
+            sha,
+            files,
+            message,
+        } = commit_in(&dir, "Fix the thing").await
+        else {
+            panic!("not committed");
+        };
+        assert_eq!(message, "Fix the thing");
+        assert_eq!(sha, head_of(&dir));
+        assert_eq!(files, 2);
+        assert_eq!(
+            git_out(&dir, &["log", "-1", "--format=%s"]).trim(),
+            "Fix the thing"
+        );
+        assert_eq!(
+            git_out(&dir, &["status", "--porcelain"]),
+            "",
+            "nothing left"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let fresh = temp_dir("commit-unborn");
+        git_sync(&fresh, &["init", "-q", "-b", "main"]);
+        git_sync(&fresh, &["config", "user.name", "t"]);
+        git_sync(&fresh, &["config", "user.email", "t@example.com"]);
+        std::fs::write(fresh.join("a.txt"), "1\n").unwrap();
+        assert!(matches!(
+            commit_in(&fresh, "first").await,
+            CommitOutcome::Committed { files: 1, .. }
+        ));
+        let _ = std::fs::remove_dir_all(&fresh);
+    }
+
+    /// **What git commits is what is told**: a change outside the run's subfolder counts with
+    /// `diff.relative` set, a `commit-msg` hook's rewritten message is the one named, a commit
+    /// of more files than a listing holds is counted, and a `post-commit` hook's background
+    /// job holding the output does not hold the answer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_commit_tells_what_git_committed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = committable("commit-told");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        git_sync(&dir, &["config", "diff.relative", "true"]);
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        let sub = dir.join("sub");
+        assert!(
+            matches!(
+                commit_in(&sub, "outside the subfolder").await,
+                CommitOutcome::Committed { files: 1, .. }
+            ),
+            "a relative diff hides nothing that was staged"
+        );
+
+        let hook = dir.join(".git/hooks/commit-msg");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf '[T-1] %s' \"$(cat \"$1\")\" > \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "3\n").unwrap();
+        let CommitOutcome::Committed { message, .. } = commit_in(&dir, "Fix it").await else {
+            panic!("not committed");
+        };
+        assert_eq!(message, "[T-1] Fix it");
+        std::fs::remove_file(&hook).unwrap();
+
+        let many = dir.join("node_modules/a-package-with-a-rather-long-name/lib");
+        std::fs::create_dir_all(&many).unwrap();
+        for at in 0..16_000 {
+            std::fs::write(many.join(format!("index-file-number-{at:05}.js")), "x\n").unwrap();
+        }
+        assert!(
+            matches!(
+                commit_in(&dir, "many").await,
+                CommitOutcome::Committed { files: 16_000, .. }
+            ),
+            "counted past what one listing holds"
+        );
+
+        let post = dir.join(".git/hooks/post-commit");
+        std::fs::write(&post, "#!/bin/sh\n( sleep 5 ) &\nexit 0\n").unwrap();
+        std::fs::set_permissions(&post, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "4\n").unwrap();
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            commit_in(&dir, "bg").await,
+            CommitOutcome::Committed { .. }
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A commit's hooks find what the person's login shell finds**: a pre-commit hook
+    /// running a tool that only the person's `~/.profile` puts on `PATH` (as `cargo` or
+    /// `npm` are in a terminal, not in the service's environment) lets it commit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_commits_hooks_find_the_login_shells_tools() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = committable("commit-path");
+        let tools = dir.join(".git/test-tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let tool = tools.join("fmtcheck-only-in-a-terminal");
+        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hook = dir.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nfmtcheck-only-in-a-terminal\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        let environment = login_environment(&dir, "/usr/bin:/bin");
+        // A login shell's own profile may set PATH outright (Debian's does); the person's
+        // `~/.profile` is read after it.
+        std::fs::write(
+            Path::new(&environment[std::ffi::OsStr::new("HOME")]).join(".profile"),
+            format!("PATH=\"{}:$PATH\"\nexport PATH\n", tools.display()),
+        )
+        .unwrap();
+        let outcome = commit(
+            dir.to_str().unwrap(),
+            None,
+            "with the tool",
+            Duration::from_secs(30),
+            &environment,
+        )
+        .await;
+        assert!(
+            matches!(outcome, CommitOutcome::Committed { .. }),
+            "{outcome:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A signed commit is named with `log.showSignature` set**: git's check of the signature
+    /// is not read as the sha.
+    #[tokio::test]
+    async fn a_signed_commit_is_named_whatever_the_log_shows() {
+        let dir = committable("commit-signed");
+        let key = dir.join(".git/test-signing-key");
+        let made = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", "t@example.com", "-f"])
+            .arg(&key)
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            eprintln!("no ssh-keygen here: a signed commit is not made");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        let signers = dir.join(".git/allowed-signers");
+        std::fs::write(&signers, format!("t@example.com {public}")).unwrap();
+        for (name, value) in [
+            ("gpg.format", "ssh"),
+            (
+                "user.signingkey",
+                key.with_extension("pub").to_str().unwrap(),
+            ),
+            ("commit.gpgsign", "true"),
+            ("gpg.ssh.allowedSignersFile", signers.to_str().unwrap()),
+            ("log.showSignature", "true"),
+        ] {
+            git_sync(&dir, &["config", name, value]);
+        }
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        let outcome = commit_in(&dir, "signed").await;
+        assert_eq!(
+            outcome,
+            CommitOutcome::Committed {
+                sha: head_of(&dir),
+                files: 1,
+                message: "signed".into()
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Refused without staging anything**: nothing changed, a merge with unresolved files
+    /// (its index left as it was), and a detached head.
+    #[tokio::test]
+    async fn a_commit_is_refused_before_it_stages_anything() {
+        use protocol::ws::git_refusal as code;
+        let dir = committable("commit-refused");
+        assert_eq!(
+            commit_in(&dir, "m").await,
+            CommitOutcome::Refused {
+                code: code::NOTHING_TO_COMMIT,
+                detail: None
+            }
+        );
+
+        git_sync(&dir, &["switch", "-q", "-c", "other"]);
+        std::fs::write(dir.join("a.txt"), "other\n").unwrap();
+        git_sync(&dir, &["commit", "-qam", "other"]);
+        git_sync(&dir, &["switch", "-q", "main"]);
+        std::fs::write(dir.join("a.txt"), "main\n").unwrap();
+        git_sync(&dir, &["commit", "-qam", "main"]);
+        let _ = std::process::Command::new(git_bin(None).unwrap())
+            .arg("-C")
+            .arg(&dir)
+            .args(["merge", "-q", "other"])
+            .output();
+        let unresolved = git_out(&dir, &["ls-files", "--unmerged"]);
+        assert!(!unresolved.is_empty(), "the merge conflicts");
+        std::fs::write(dir.join("loose.txt"), "x\n").unwrap();
+        assert_eq!(
+            commit_in(&dir, "m").await,
+            CommitOutcome::Refused {
+                code: code::UNMERGED,
+                detail: None
+            }
+        );
+        assert_eq!(
+            git_out(&dir, &["ls-files", "--unmerged"]),
+            unresolved,
+            "the index is as it was"
+        );
+        assert_eq!(
+            git_out(&dir, &["ls-files", "--", "loose.txt"]),
+            "",
+            "nothing staged"
+        );
+        git_sync(&dir, &["merge", "--abort"]);
+
+        git_sync(&dir, &["checkout", "-q", "--detach"]);
+        assert_eq!(
+            commit_in(&dir, "m").await,
+            CommitOutcome::Refused {
+                code: code::DETACHED,
+                detail: None
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The repository's hooks run as for the person's own commit**: a failing pre-commit
+    /// hook refuses it with the hook's words, and one printing far past the runner's cap on
+    /// both streams (git sends a hook's output to its stderr) lets it commit: every byte is
+    /// read, so the hook, stopping at its first failure as hooks do, is never cut short.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_commits_hooks_run_and_a_verbose_one_is_never_cut_short() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = committable("commit-hooks");
+        let hook = dir.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho 'lint: 3 problems' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        assert_eq!(
+            commit_in(&dir, "m").await,
+            CommitOutcome::Refused {
+                code: protocol::ws::git_refusal::GIT_FAILED,
+                detail: Some("lint: 3 problems".into())
+            }
+        );
+
+        let mark = dir.join("hook-finished");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nset -e\nhead -c 2000000 /dev/zero | tr '\\0' o\nhead -c 2000000 /dev/zero | tr '\\0' e >&2\ntouch '{}'\n",
+                mark.display()
+            ),
+        )
+        .unwrap();
+        let outcome = commit_in(&dir, "m").await;
+        assert!(
+            matches!(outcome, CommitOutcome::Committed { files: 1, .. }),
+            "{outcome:?}"
+        );
+        assert!(mark.exists(), "the hook ran to its end");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `git status --porcelain=v2 --branch -z`, read as git writes it: a rename's original
+    /// path that looks like an entry is not one.
+    #[test]
+    fn status_reads_as_git_writes_it() {
+        assert_eq!(
+            parse_status(
+                "# branch.oid abc\0# branch.head feat/x\0# branch.upstream origin/feat/x\0\
+                 # branch.ab +0 -0\x002 R. N... 100644 100644 100644 1 1 R100 new\0u fake\0"
+            ),
+            StatusHead {
+                oid: Some("abc".into()),
+                branch: Some("feat/x".into()),
+                unmerged: false,
+            }
+        );
+        assert_eq!(
+            parse_status("# branch.oid (initial)\0# branch.head (detached)\0# branch.ab +1 -0\0u UU N... 1 2 3 4 a b c a.txt\0"),
+            StatusHead {
+                oid: None,
+                branch: None,
+                unmerged: true,
+            }
+        );
+    }
+
     /// **No read runs the repository's fsmonitor**: with `core.fsmonitor` naming a program
     /// that leaves a mark, neither the diff nor the session list's read runs it.
     #[cfg(unix)]
@@ -1310,6 +2617,7 @@ mod tests {
         let diff = diff_of(&dir, 512 * 1024).await;
         assert!(diff.unified.contains("loose.txt"), "{}", diff.unified);
         let _ = tree_of(&dir).await;
+        assert!(run_git_of(&dir).await.is_ok());
         assert!(!mark.exists(), "a read ran the configured fsmonitor");
         let _ = std::fs::remove_dir_all(&dir);
     }

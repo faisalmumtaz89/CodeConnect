@@ -798,6 +798,7 @@ const SESSION_TABLES: &[&str] = &["sessions", "codex_sessions"];
 /// *globally*, so they carry the open obligation described on [`create_schema`].
 const SESSION_SCOPED_TABLES: &[&str] = &[
     "events",
+    "commit_notes",
     "answers",
     "pending_approvals",
     // Agent-scoped, and still swept by THIS daemon: isolation from a rolled-back
@@ -1102,6 +1103,9 @@ pub fn replayed_interrupt_sentence(outcome: &str) -> String {
     }
 }
 
+/// The most commits one message tells its agent of: the newest, oldest first.
+pub const MAX_COMMIT_LINES: usize = 5;
+
 /// **The one `operation_kind` a phone answer is claimed under.**
 ///
 /// Spelled once so a typo is a compile error rather than a claim nothing can find
@@ -1134,6 +1138,12 @@ pub const OPERATION_INTERRUPT: &str = "interrupt";
 /// words would be said twice. One kind with the route in the immutable material is the
 /// shape where a retry replays what actually happened.
 pub const OPERATION_COMPOSE: &str = "compose";
+
+/// **The `operation_kind` an action on a run's repository is claimed under**
+/// ([`protocol::ws::ClientMessage::GitAction`]): one kind for every action, the action in
+/// [`ClaimedMaterial::route`], so an id used for a commit and then for another action is a
+/// conflict, never a second actuation.
+pub const OPERATION_GIT_ACTION: &str = "git_action";
 
 /// A compose that began a turn on an idle thread.
 pub const COMPOSE_ROUTE_START: &str = "turn_start";
@@ -1615,6 +1625,59 @@ impl Store {
         };
         conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
             .expect("test fixture");
+    }
+
+    /// The run's `committed` notices its agent has not been told of (past the newest one a message
+    /// carried that no Stop dropped), the newest [`MAX_COMMIT_LINES`] oldest first: each one's seq,
+    /// commit and file count.
+    pub fn untold_commits(&self, session_uid: &str) -> Result<Vec<(u64, String, u64)>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT seq, json_extract(payload, '$.oid'), json_extract(payload, '$.files')
+               FROM events
+              WHERE session_uid = ?1 AND kind = ?2
+                AND json_extract(payload, '$.notification_type') = ?3
+                AND seq > COALESCE((
+                    SELECT MAX(told_through) FROM commit_notes
+                     WHERE session_uid = ?1
+                       AND request_id NOT IN (
+                           SELECT json_extract(payload, '$.request_id') FROM events
+                            WHERE session_uid = ?1 AND kind = ?2
+                              AND json_extract(payload, '$.notification_type') = ?5
+                              AND json_extract(payload, '$.request_id') IS NOT NULL)
+                ), 0)
+              ORDER BY seq DESC LIMIT ?4",
+        )?;
+        let mut commits = stmt
+            .query_map(
+                params![
+                    session_uid,
+                    EventKind::Notification.as_str(),
+                    protocol::event::notice::COMMITTED,
+                    MAX_COMMIT_LINES as i64,
+                    protocol::event::notice::SEND_NOT_SENT
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as u64,
+                        row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                        row.get::<_, Option<i64>>(2)?.unwrap_or(0) as u64,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        commits.reverse();
+        Ok(commits)
+    }
+
+    /// The message `request_id` told the run's agent of its commits through `through`.
+    pub fn commits_told(&self, session_uid: &str, request_id: &str, through: &u64) -> Result<()> {
+        self.write().execute(
+            "INSERT OR REPLACE INTO commit_notes(session_uid, request_id, told_through)
+             VALUES (?1, ?2, ?3)",
+            params![session_uid, request_id, *through as i64],
+        )?;
+        Ok(())
     }
 
     pub fn max_seq(&self, session_uid: &str) -> Result<u64> {
@@ -6112,6 +6175,16 @@ fn answer_claim_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerClaim> {
 fn create_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
+        -- The messages that told a run's agent of commits made from its Changes panel: each
+        -- one's request and the seq of the newest `committed` notice it carried. One a Stop
+        -- dropped (its `send_not_sent` notice filed) told nothing.
+        CREATE TABLE IF NOT EXISTS commit_notes(
+            session_uid  TEXT NOT NULL,
+            request_id   TEXT NOT NULL,
+            told_through INTEGER NOT NULL,
+            PRIMARY KEY(session_uid, request_id)
+        );
+
         CREATE TABLE IF NOT EXISTS sessions(
             -- The run's identity: a ULID minted when the run begins. Never reused.
             session_uid       TEXT PRIMARY KEY,

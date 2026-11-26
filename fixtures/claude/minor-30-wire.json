@@ -74,12 +74,16 @@
     "accounts": true,
     "browse_folders": true,
     "can_approve_reliably": true,
+    "changes": true,
     "claude_interrupt": true,
     "codex_compose": true,
     "codex_interrupt": true,
     "command_catalog": true,
     "delete_session": true,
     "diff": true,
+    "git_actions": [
+      "commit"
+    ],
     "history_pages": true,
     "hook_only_approvals": true,
     "machine_stats": true,

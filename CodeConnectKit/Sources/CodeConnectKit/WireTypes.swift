@@ -1091,6 +1091,14 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// paired device on a transport nothing on the path can read. An older one answers `terminal_open` with
     /// `bad_request`, so nothing is sent unless this is set.
     public var servesRunTerminal: Bool { advertises(["run_terminal"]) }
+    /// This daemon answers `get_run_git` (minor 58) for this paired device. An older one answers it with
+    /// `bad_request`, so nothing is sent unless this is set.
+    public var readsRunGit: Bool { advertises(["changes"]) }
+    /// This daemon commits a run's changes from its Changes panel for this paired device (`git_actions` naming
+    /// `commit`, minor 59). An older one answers `git_action` with `bad_request`, so nothing is sent unless this is set.
+    public var commitsChanges: Bool {
+        advertised["git_actions"]?.arrayValue?.contains { $0.stringValue == "commit" } == true
+    }
     /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
     /// 21): its question cards carry `question_hold` and it takes the
     /// `answers` and `decline` decisions. Absent is false — an older daemon
@@ -1576,6 +1584,34 @@ public enum PutFileResult: Decodable, Sendable, Hashable {
     }
 }
 
+/// What became of an action on a run's repository (`git_action`, minor 59).
+public enum GitActionResult: Decodable, Sendable, Hashable {
+    /// Done; for a commit, the commit it made.
+    case done(sha: String)
+    /// Not done: `code` is one of the computer's codes (`busy`, `unmerged`, `nothing_to_commit`, `git_failed`,
+    /// `indeterminate`, …), and `detail`, for some, git's own words, to be shown verbatim.
+    case refused(code: String, detail: String?)
+    /// A status this build has never seen: it claims neither that it was done nor that it was not.
+    case unknown(status: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case status, sha, code, detail
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let status = try c.decode(String.self, forKey: .status)
+        switch status {
+        case "done": self = .done(sha: try c.decode(String.self, forKey: .sha))
+        case "refused":
+            self = .refused(
+                code: try c.decode(String.self, forKey: .code),
+                detail: try c.decodeIfPresent(String.self, forKey: .detail))
+        default: self = .unknown(status: status)
+        }
+    }
+}
+
 public enum StopRunResult: Decodable, Sendable, Hashable {
     /// The stop is accepted: the run is `stopping`, and reads ended once it has exited.
     case stopping
@@ -1981,6 +2017,116 @@ public struct PeerComputer: Decodable, Sendable, Hashable {
 
 /// Answer to `get_diff`. On-demand only: a diff is a thing you ask for when you
 /// are about to read it, never a thing that streams at you.
+/// The answer to `get_run_git`: `git` is nil, with the computer's note saying why, outside a repository and when git
+/// could not answer.
+public struct RunGitReply: Sendable, Hashable {
+    public let sessionID: String
+    public let git: RunGit?
+    public let note: String?
+}
+
+/// A run's repository, as `get_run_git` reads it (minor 58).
+public struct RunGit: Decodable, Sendable, Hashable {
+    /// Absent on a detached head.
+    public let branch: String?
+    /// Absent before the first commit.
+    public let headOID: String?
+    /// The branch this one is measured against; absent when the computer knows no remote default branch.
+    public let base: Base?
+    public let changed: Changed
+    /// Commits on the head that are not on `base`; absent without a head or a base.
+    public let ahead: UInt32?
+    /// The remote this branch pushes to has the branch of this name at the commit checked out.
+    public let pushed: Bool
+    /// A merge is unresolved.
+    public let unmerged: Bool
+    public let readAt: String
+    /// Whether the computer's `gh` can read the repository on GitHub (minor 60); nil from an older daemon and on a
+    /// detached head.
+    public let gh: GhState?
+    /// e.g. `github.com`.
+    public let ghHost: String?
+    /// The branch's pull request: the open one from it, else a closed or merged one whose head is the commit checked out.
+    public let pullRequest: PullRequest?
+    /// When GitHub was asked; the computer asks at most every 30 s per commit. Nil when GitHub was not asked: no `gh`, no account in it, or its rate limit pausing reads.
+    public let ghReadAt: String?
+
+    public enum GhState: String, Decodable, Sendable, Hashable {
+        case signedIn = "signed_in"
+        case signedOut = "signed_out"
+        /// No `gh` on the computer.
+        case missing
+        /// GitHub could not be reached or asked to wait, and a state this build does not name.
+        case unknown
+        /// The repository's remotes name no github.com repository.
+        case noGithubRemote = "no_github_remote"
+
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = GhState(rawValue: raw) ?? .unknown
+        }
+    }
+
+    public struct PullRequest: Decodable, Sendable, Hashable {
+        public let number: UInt64
+        public let url: String
+        public let state: State
+        /// The branch it merges into.
+        public let base: String
+        public let headOID: String
+        public let mergedAt: String?
+
+        public enum State: String, Decodable, Sendable, Hashable {
+            case open, merged, closed
+            /// A state this build does not name, from a newer daemon. Said so, never read as one of the others.
+            case unknown
+
+            public init(from decoder: Decoder) throws {
+                let raw = try decoder.singleValueContainer().decode(String.self)
+                self = State(rawValue: raw) ?? .unknown
+            }
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case number, url, state, base
+            case headOID = "head_oid"
+            case mergedAt = "merged_at"
+        }
+    }
+
+    public struct Base: Decodable, Sendable, Hashable {
+        /// e.g. `main`.
+        public let name: String
+        /// e.g. `origin`.
+        public let remote: String
+        /// e.g. `refs/remotes/origin/main`.
+        public let reference: String
+
+        private enum CodingKeys: String, CodingKey {
+            case name, remote
+            case reference = "ref"
+        }
+    }
+
+    /// The changed files, untracked ones included, as a diff's `files` count them.
+    public struct Changed: Decodable, Sendable, Hashable {
+        public let files: UInt64
+        public let added: UInt64
+        public let removed: UInt64
+        /// False when the computer stopped short of listing or counting every file: the numbers are at least these.
+        public let complete: Bool
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case branch, base, changed, ahead, pushed, unmerged, gh
+        case headOID = "head_oid"
+        case readAt = "read_at"
+        case ghHost = "gh_host"
+        case pullRequest = "pr"
+        case ghReadAt = "gh_read_at"
+    }
+}
+
 public struct SessionDiff: Sendable, Hashable {
     public let sessionID: String
     /// `git -C <cwd> diff HEAD` plus untracked names, exactly as the daemon
@@ -2125,6 +2271,8 @@ public enum ClientMessage: Sendable {
         session: String, text: String, submit: Bool, requestID: String?, payloadHash: String?,
         attachments: [String] = [])
     case getDiff(session: String)
+    /// A run's repository for its Changes panel (minor 58, `changes`), answered with `runGit`.
+    case getRunGit(session: String)
     case getCommandCatalog(session: String)
     /// "Push me here." Sent whenever Apple issues a token, not only at
     /// handshake: permission can be granted mid-session and the token is
@@ -2148,6 +2296,9 @@ public enum ClientMessage: Sendable {
     /// **End a run CodeConnect started**, Claude's or Codex's. Minor 35, sent only when
     /// `Capabilities.endsRuns`. `session` is the run's `session_uid`.
     case stopRun(session: String, requestID: String)
+    /// Commit every change in a run's folder (minor 59, `git_actions` naming `commit`), by `session_uid`, answered with
+    /// `gitActionResult` carrying `requestID`. The same id again replays the first answer.
+    case commit(requestID: String, sessionUID: String, message: String)
     /// **Say something to a Codex session.** Minor 18, and the one message an
     /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
     case compose(
@@ -2244,6 +2395,7 @@ extension ClientMessage: Encodable {
         case deviceName = "device_name"
         case sessionID = "session_id"
         case sessionUID = "session_uid"
+        case action
         case afterSeq = "after_seq"
         case beforeSeq = "before_seq"
         case limit
@@ -2311,6 +2463,9 @@ extension ClientMessage: Encodable {
         case .getDiff(let session):
             try c.encode("get_diff", forKey: .type)
             try c.encode(session, forKey: .sessionID)
+        case .getRunGit(let session):
+            try c.encode("get_run_git", forKey: .type)
+            try c.encode(session, forKey: .sessionID)
         case .getCommandCatalog(let session):
             try c.encode("get_command_catalog", forKey: .type)
             try c.encode(session, forKey: .sessionID)
@@ -2376,6 +2531,11 @@ extension ClientMessage: Encodable {
             try c.encode("stop_run", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encode(requestID, forKey: .requestID)
+        case .commit(let requestID, let sessionUID, let message):
+            try c.encode("git_action", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(sessionUID, forKey: .sessionUID)
+            try c.encode(["kind": "commit", "message": message], forKey: .action)
         case .compose(let session, let requestID, let text, let payloadHash, let attachments):
             try c.encode("compose", forKey: .type)
             try c.encode(session, forKey: .sessionID)
@@ -2749,12 +2909,16 @@ public enum ServerMessage: Sendable {
     case deleteSessionResult(sessionUID: String, result: DeleteSessionResult)
     case testPushResult(requestID: String, result: TestPushResult)
     case diff(SessionDiff)
+    /// The answer to `getRunGit`.
+    case runGit(RunGitReply)
     /// The answer to one `interrupt`. `sessionID` and `requestID` are echoed
     /// back as the phone sent them, so correlation is exact-string on the id
     /// this end minted.
     case interruptResult(sessionID: String, requestID: String, result: InterruptResult)
     /// The answer to one `stop_run`, same correlation.
     case stopRunResult(sessionID: String, requestID: String, result: StopRunResult)
+    /// The answer to a `commit` (`git_action`), by its request.
+    case gitActionResult(requestID: String, sessionUID: String, result: GitActionResult)
     /// The answer to one `compose`, same correlation.
     case composeResult(sessionID: String, requestID: String, result: ComposeResult)
     /// The answer to one `put_file` chunk, by its upload.
@@ -2849,6 +3013,7 @@ extension ServerMessage: Decodable {
         case offset
         case bytes
         case reason
+        case note
     }
 
     public init(from decoder: Decoder) throws {
@@ -2871,6 +3036,12 @@ extension ServerMessage: Decodable {
                     machineID: try c.decodeIfPresent(String.self, forKey: .machineID)))
         case "diff":
             self = .diff(try SessionDiff(from: decoder))
+        case "run_git":
+            self = .runGit(
+                RunGitReply(
+                    sessionID: try c.decode(String.self, forKey: .sessionID),
+                    git: try c.decodeIfPresent(RunGit.self, forKey: .git),
+                    note: try c.decodeIfPresent(String.self, forKey: .note)))
         case "sessions":
             self = .sessions(try c.decode([SessionSummary].self, forKey: .sessions))
         case "event":
@@ -2940,6 +3111,11 @@ extension ServerMessage: Decodable {
             self = .putFileResult(
                 uploadID: try c.decode(String.self, forKey: .uploadID),
                 result: try c.decode(PutFileResult.self, forKey: .result))
+        case "git_action_result":
+            self = .gitActionResult(
+                requestID: try c.decode(String.self, forKey: .requestID),
+                sessionUID: try c.decode(String.self, forKey: .sessionUID),
+                result: try c.decode(GitActionResult.self, forKey: .result))
         case "stop_run_result":
             self = .stopRunResult(
                 sessionID: try c.decode(String.self, forKey: .sessionID),

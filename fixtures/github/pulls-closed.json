@@ -1,0 +1,18 @@
+[
+ {
+  "number": 15172,
+  "state": "closed",
+  "html_url": "https://github.com/cli/cli/pull/15172",
+  "merged_at": "2026-11-26T12:46:59Z",
+  "base": {
+   "ref": "trunk"
+  },
+  "head": {
+   "ref": "babakks/fix-skill-install-windows-test",
+   "sha": "f7327901174bb23fcfdc1ef51d52e9055eed9693",
+   "repo": {
+    "full_name": "cli/cli"
+   }
+  }
+ }
+]

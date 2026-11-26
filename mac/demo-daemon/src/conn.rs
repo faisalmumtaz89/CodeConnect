@@ -297,6 +297,18 @@ where
             )
             .await?
         }
+        // Not advertised (`changes` is false, `git_actions` empty): answered as a daemon below
+        // minors 58 and 59 answers them.
+        ClientMessage::GetRunGit { .. } | ClientMessage::GitAction { .. } => {
+            send(
+                sink,
+                &ServerMessage::Error {
+                    code: "bad_request".into(),
+                    message: "the demo daemon does not read repositories".into(),
+                },
+            )
+            .await?
+        }
         // Not advertised (`machine_stats` is false): answered as a daemon below
         // minor 31 answers it.
         ClientMessage::GetMachineStats => {
@@ -560,6 +572,8 @@ fn capabilities() -> Capabilities {
         accounts: false,
         uploads: false,
         run_terminal: false,
+        changes: false,
+        git_actions: Vec::new(),
     }
 }
 

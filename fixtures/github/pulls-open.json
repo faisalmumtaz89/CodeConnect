@@ -1,0 +1,34 @@
+[
+ {
+  "number": 15173,
+  "state": "open",
+  "html_url": "https://github.com/cli/cli/pull/15173",
+  "merged_at": null,
+  "base": {
+   "ref": "trunk"
+  },
+  "head": {
+   "ref": "dependabot/go_modules/github.com/sigstore/sigstore-go-1.4.1",
+   "sha": "8a93995195c4e5a299e227a00f236bf88199674a",
+   "repo": {
+    "full_name": "cli/cli"
+   }
+  }
+ },
+ {
+  "number": 15111,
+  "state": "open",
+  "html_url": "https://github.com/cli/cli/pull/15111",
+  "merged_at": null,
+  "base": {
+   "ref": "trunk"
+  },
+  "head": {
+   "ref": "fix/issue-14946-existing-linked-branch",
+   "sha": "0a4c026604c7ea2d24c447e246900b0c004b5757",
+   "repo": {
+    "full_name": "lazerg/cli-2"
+   }
+  }
+ }
+]

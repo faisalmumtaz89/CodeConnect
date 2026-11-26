@@ -261,6 +261,11 @@ pub struct Config {
     #[serde(default)]
     pub agy_bin: Option<String>,
 
+    /// Explicit path to GitHub's `gh`, tried before the login shell's `PATH`: what a run's
+    /// Changes panel reads the repository's GitHub state with.
+    #[serde(default)]
+    pub gh_bin: Option<String>,
+
     /// Explicit path to the agent host (`cc-agent-host`) ccd runs for each Claude
     /// run. Unset, it is the one beside ccd's own executable, where the Mac app
     /// installs it.
@@ -372,6 +377,7 @@ impl Default for Config {
             claude_bin: None,
             codex_bin: None,
             agy_bin: None,
+            gh_bin: None,
             agent_host_bin: None,
             tailscale_bin: None,
             log_max_bytes: default_log_max_bytes(),

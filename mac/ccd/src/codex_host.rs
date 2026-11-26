@@ -1572,9 +1572,12 @@ async fn compose(
         }
     }
     let uuid = crate::claude_host::send_uuid(uid, &ask.request_id);
+    // Codex has no commands of its own: every message tells the agent of the commits made from
+    // the panel since it was last told. The person's row keeps their words.
+    let (said, told) = daemon.with_commit_note(uid, &ask.text).await;
     let params = json!({
         "threadId": thread,
-        "input": [{"type": "text", "text": ask.text}],
+        "input": [{"type": "text", "text": said}],
         "clientUserMessageId": uuid,
     });
     let asked = tokio::time::timeout(
@@ -1629,6 +1632,7 @@ async fn compose(
     } else {
         crate::store::COMPOSE_ROUTE_START
     };
+    daemon.commits_told(uid, &ask.request_id, told).await;
     let words = crate::claude_host::person_row(uid, &uuid, &ask.text, Some(&ask.request_id), None)
         .with_turn_id(Some(turn.to_string()));
     file(daemon, uid, vec![words]).await;
@@ -1697,6 +1701,7 @@ async fn heard(daemon: &Daemon, uid: &str, sends: &mut Vec<WaitingSend>, frame: 
                             notice,
                         )
                         .await
+                        .map(|_| ())
                 } else {
                     daemon
                         .db
@@ -6775,6 +6780,53 @@ mod tests {
         after
     }
 
+    /// **A message tells a Codex run's agent of the commits made from its Changes panel**:
+    /// `turn/start` carries the line above the words, the person's row keeps their words, and
+    /// a second message carries nothing.
+    #[tokio::test]
+    async fn a_message_tells_a_codex_agent_of_the_panels_commits() {
+        let rig = rig();
+        let capture: serde_json::Value = serde_json::from_str(FOLLOW_UP).unwrap();
+        let turns = &capture["answerAfter"]["result"]["thread"]["turns"];
+        let thread = capture["answerAfter"]["result"]["thread"]["id"]
+            .as_str()
+            .unwrap();
+        let (first, turn) = (
+            turns[0]["id"].as_str().unwrap(),
+            turns[1]["id"].as_str().unwrap(),
+        );
+        let (uid, mut ws) = engine_run(&rig, "req-note", thread, first).await;
+        rig.daemon
+            .ingest(PendingEvent::new(
+                &SessionKey::new(&uid, &uid),
+                EventKind::Notification,
+                json!({"notification_type": "committed", "oid": "abc1234def",
+                       "files": 2, "message": "m"}),
+                Source::Daemon,
+            ))
+            .await
+            .unwrap();
+        let sent = saying(&rig.daemon, &uid, "say-1", "and the docs");
+        let start = asked(&mut ws, "turn/start").await;
+        assert_eq!(
+            start["params"]["input"][0]["text"],
+            "You committed 2 files · abc1234\n\nand the docs"
+        );
+        answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
+        assert!(sent.await.is_ok());
+        assert_eq!(
+            words(&rig.daemon, &uid, "and the docs").await,
+            [json!({"text": "and the docs", "request_id": "say-1"})]
+        );
+        let again = saying(&rig.daemon, &uid, "say-2", "again");
+        let start = asked(&mut ws, "turn/start").await;
+        assert_eq!(start["params"]["input"][0]["text"], "again", "told once");
+        answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
+        let _ = again.await;
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
     /// **X5-1 G1: a phone's message to an idle engine run starts a turn, and its words are
     /// filed once.** The link claims it and sends `turn/start` on the run's thread under the
     /// message's uuid. Codex's answer names a new turn: the phone is told `Started`, and the
@@ -6920,6 +6972,57 @@ mod tests {
             "the message that joined the turn: {:?}",
             named(Arc::clone(&rig.daemon), uid.clone()).await
         );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A steer a Stop cuts off told the agent nothing**: it carried the commit's line, Codex
+    /// never read it, and the message sent after carries the line again.
+    #[tokio::test]
+    async fn a_steer_a_stop_cuts_off_leaves_its_commit_lines_for_the_next() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-cut-note", thread, turn).await;
+        rig.daemon
+            .ingest(PendingEvent::new(
+                &SessionKey::new(&uid, &uid),
+                EventKind::Notification,
+                json!({"notification_type": "committed", "oid": "eeeeeee111",
+                       "files": 1, "message": "m"}),
+                Source::Daemon,
+            ))
+            .await
+            .unwrap();
+        turn_begun(&rig.daemon, &uid, &mut ws, thread, turn).await;
+        let sent = saying(&rig.daemon, &uid, "say-a", "steered");
+        let start = asked(&mut ws, "turn/start").await;
+        assert_eq!(
+            start["params"]["input"][0]["text"],
+            "You committed 1 file · eeeeeee\n\nsteered"
+        );
+        answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
+        let _ = sent.await;
+        let stop = stopping(&rig.daemon, &uid, "stop-note", turn);
+        let interrupt = asked(&mut ws, "turn/interrupt").await;
+        answer(&mut ws, &interrupt, json!({})).await;
+        tell(&mut ws, &its_turn_ended("interrupted")).await;
+        assert_eq!(
+            stop.await.unwrap(),
+            protocol::ws::InterruptResult::Aborted {
+                turn_id: turn.into()
+            }
+        );
+        settled_as(&rig.daemon, &uid, "say-a", crate::store::COMPOSE_STOPPED).await;
+        let again = saying(&rig.daemon, &uid, "say-b", "after the stop");
+        let start = asked(&mut ws, "turn/start").await;
+        assert_eq!(
+            start["params"]["input"][0]["text"],
+            "You committed 1 file · eeeeeee\n\nafter the stop"
+        );
+        answer(&mut ws, &start, json!({"turn": {"id": "turn-after"}})).await;
+        let _ = again.await;
         drop(ws);
         end_run(&rig, &uid).await;
     }

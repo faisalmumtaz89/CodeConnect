@@ -263,6 +263,24 @@ pub enum ClientMessage {
     GetDiff {
         session_id: String,
     },
+    /// **A run's repository as its Changes panel shows it** (minor 58, `changes`), answered
+    /// with one [`ServerMessage::RunGit`]: branch, head, base, the changed files' lines, how
+    /// far the branch is ahead of its base, whether it is pushed, and whether a merge is
+    /// unresolved. Read from git in the run's folder; nothing is fetched.
+    /// Paired devices only.
+    GetRunGit {
+        session_id: String,
+    },
+    /// **An action on a run's repository from its Changes panel** (minor 59, `git_actions`
+    /// names the ones this daemon takes), answered with one [`ServerMessage::GitActionResult`]
+    /// carrying the same `request_id`. Paired devices only. By `session_uid`, never by name.
+    /// Kept per `request_id`: the same id again replays the first answer and acts nothing
+    /// twice, and the same id with other arguments is refused `bad_request`.
+    GitAction {
+        request_id: String,
+        session_uid: String,
+        action: GitAction,
+    },
     /// "Which slash commands does this session's Claude Code actually have?"
     ///
     /// Answered from the installed binary's own machine-readable init message,
@@ -769,6 +787,23 @@ pub enum ServerMessage {
         /// untracked names than the daemon lists at once, or more than one message carries.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         files_truncated: bool,
+    },
+    /// The answer to [`ClientMessage::GetRunGit`]. `git` is absent, with a `note` saying why,
+    /// outside a repository, for an unknown run, and when git could not answer.
+    RunGit {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        git: Option<RunGit>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// What became of a [`ClientMessage::GitAction`]. A client reads the run's repository
+    /// again after it ([`ClientMessage::GetRunGit`]): a read answered before this one was
+    /// read before the action.
+    GitActionResult {
+        request_id: String,
+        session_uid: String,
+        result: GitActionResult,
     },
     Error {
         code: String,
@@ -1378,6 +1413,170 @@ pub enum DiffFileStatus {
     Untracked,
 }
 
+/// A run's repository, as [`ClientMessage::GetRunGit`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunGit {
+    /// The branch checked out. Absent on a detached head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The commit checked out. Absent before the first commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_oid: Option<String>,
+    /// The branch this one is measured against: the default branch of the remote named
+    /// `upstream` (a fork's parent), else of the upstream's remote, else of `origin`, else of
+    /// the only remote, as its `refs/remotes/<remote>/HEAD` names it. Absent when no such
+    /// remote HEAD is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<RunGitBase>,
+    /// The changed files, as [`ServerMessage::Diff`]'s `files` count them: every one, before
+    /// that reply's row and frame limits.
+    pub changed: ChangedFiles,
+    /// Commits on `HEAD` that are not on [`RunGitBase::reference`]. Absent without a head or
+    /// a base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<u32>,
+    /// The push remote git names for this branch (its `pushRemote`, `remote.pushDefault`, or
+    /// the upstream's), else `origin`, has the branch of this name at `HEAD`.
+    pub pushed: bool,
+    /// The index holds unresolved merge entries.
+    pub unmerged: bool,
+    pub read_at: String,
+    /// Whether this computer's `gh` can read the repository on github.com (minor 60). Absent
+    /// from an older daemon and on a detached head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh: Option<GhState>,
+    /// The GitHub host the repository is on: `github.com`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_host: Option<String>,
+    /// The branch's pull request: the open one from this branch, else the newest closed or
+    /// merged one whose head is the commit checked out. Absent when there is none, and when
+    /// `gh` is not signed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PullRequest>,
+    /// When GitHub was asked: a read within 30 s of one for the same branch and commit is
+    /// answered from it. Absent when GitHub was not asked: no `gh`, no account in it,
+    /// or its rate limit pausing the host's reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_read_at: Option<String>,
+}
+
+/// Whether `gh` can read a [`RunGit`]'s repository on GitHub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GhState {
+    SignedIn,
+    SignedOut,
+    /// No `gh` on this computer.
+    Missing,
+    /// GitHub could not be reached, or asked to wait (a rate limit).
+    Unknown,
+    /// The repository's remotes name no github.com repository (GitHub Enterprise hosts and SSH
+    /// host aliases among them).
+    NoGithubRemote,
+}
+
+/// A [`RunGit`]'s pull request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequest {
+    pub number: u64,
+    pub url: String,
+    pub state: PrState,
+    /// The branch it would merge into.
+    pub base: String,
+    /// The commit its head is at.
+    pub head_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
+}
+
+/// A [`PullRequest`]'s state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
+}
+
+/// One action of [`ClientMessage::GitAction`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GitAction {
+    /// Every change in the run's folder, tracked and untracked, committed on its branch with
+    /// `message` (at most [`MAX_COMMIT_MESSAGE_BYTES`]), the repository's hooks and signing
+    /// running as they do for the person's own `git commit`. Files a
+    /// [`crate::event::notice::COMMITTED`] notice into the run's conversation.
+    Commit { message: String },
+}
+
+/// Ceiling on a [`GitAction::Commit`]'s message, the same as a typed message's.
+pub const MAX_COMMIT_MESSAGE_BYTES: usize = MAX_SEND_TEXT_BYTES;
+
+/// What became of a [`ClientMessage::GitAction`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum GitActionResult {
+    /// Done; for a commit, `sha` is the commit made.
+    Done { sha: String },
+    /// Not done, with one of [`git_refusal`]'s codes and, for some, git's own words.
+    Refused {
+        code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+}
+
+/// The codes of a refused [`GitActionResult`]; an app words each itself.
+pub mod git_refusal {
+    /// The request was malformed, named another action under an id already used, or a
+    /// message that is empty, too long or holds a NUL.
+    pub const BAD_REQUEST: &str = "bad_request";
+    /// No such run on this computer.
+    pub const UNKNOWN_SESSION: &str = "unknown_session";
+    /// The run is working, or waits on a card.
+    pub const BUSY: &str = "busy";
+    /// The run's folder is not in a git repository.
+    pub const NOT_A_REPOSITORY: &str = "not_a_repository";
+    /// No branch is checked out.
+    pub const DETACHED: &str = "detached";
+    /// A merge has unresolved files.
+    pub const UNMERGED: &str = "unmerged";
+    /// Nothing changed since the last commit.
+    pub const NOTHING_TO_COMMIT: &str = "nothing_to_commit";
+    /// Git refused or failed; `detail` is its first line (a hook's, a signer's).
+    pub const GIT_FAILED: &str = "git_failed";
+    /// A step took past its time; `detail` names it. Nothing was committed.
+    pub const TIMEOUT: &str = "timeout";
+    /// Whether it was done is not known (an earlier try under this id did not finish, or
+    /// git did not answer after it may have committed). Never tried again under this id: the
+    /// run's repository, read again, shows what git has.
+    pub const INDETERMINATE: &str = "indeterminate";
+}
+
+/// A [`RunGit`]'s base branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunGitBase {
+    /// The branch's name on its remote, e.g. `main`.
+    pub name: String,
+    /// The remote, e.g. `origin`.
+    pub remote: String,
+    /// Its full local ref, e.g. `refs/remotes/origin/main`.
+    #[serde(rename = "ref")]
+    pub reference: String,
+}
+
+/// The changed files of a [`RunGit`], untracked ones included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangedFiles {
+    pub files: u64,
+    pub added: u64,
+    pub removed: u64,
+    /// Every changed file was listed and every one with lines was counted. False when the
+    /// untracked names or the bytes read to count them ran past the daemon's limits, or git
+    /// could not open a folder to list it: the numbers are then at least these.
+    pub complete: bool,
+}
+
 /// What CodeConnect can actually do, reported honestly rather than assumed.
 /// Mirrors ACP's capability shape; the iPhone disables affordances it does not
 /// see advertised instead of failing at tap time.
@@ -1591,6 +1790,15 @@ pub struct Capabilities {
     /// advertised.
     #[serde(default)]
     pub run_terminal: bool,
+    /// **This daemon answers [`ClientMessage::GetRunGit`]** (minor 58), to paired devices
+    /// only. Absent decodes `false`: an older daemon answers it with `bad_request`.
+    #[serde(default)]
+    pub changes: bool,
+    /// **The [`ClientMessage::GitAction`] kinds this daemon takes** (minor 59, `commit`), to
+    /// paired devices only; absent or empty, none. Named one by one so each later action is
+    /// offered only by a daemon that has it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git_actions: Vec<String>,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -2567,9 +2775,21 @@ mod tests {
             crate::PROTOCOL_MINOR >= 57,
             "Antigravity's accounts (`add_account` and the rest for `antigravity`) are minor 57"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 58,
+            "a run's repository for its Changes panel (`get_run_git`, `run_git`, `changes`) is minor 58"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 59,
+            "a commit from the Changes panel (`git_action`, `git_action_result`, `git_actions`, `committed`) is minor 59"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 60,
+            "a run's GitHub state and its pull request (`gh`, `gh_host`, `pr`, `gh_read_at`) is minor 60"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 57);
+        assert_eq!(crate::PROTOCOL_MINOR, 60);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3282,6 +3502,8 @@ mod tests {
             accounts: true,
             uploads: true,
             run_terminal: true,
+            changes: true,
+            git_actions: vec!["commit".into()],
         }
     }
 
@@ -4474,6 +4696,77 @@ mod tests {
         assert_eq!(encoded["files_truncated"], true);
         let decoded: ServerMessage = serde_json::from_value(encoded.clone()).unwrap();
         assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded);
+    }
+
+    /// **A run's repository, as the apps read it**: the request by session, the base's
+    /// `ref` spelled as git spells it, absent fields omitted, and a repository-less answer
+    /// as a bare note.
+    #[test]
+    fn a_runs_repository_encodes_as_the_apps_read_it() {
+        let ask: ClientMessage =
+            serde_json::from_str(r#"{"type":"get_run_git","session_id":"cc-1"}"#).unwrap();
+        assert!(matches!(ask, ClientMessage::GetRunGit { ref session_id } if session_id == "cc-1"));
+        let reply = ServerMessage::RunGit {
+            session_id: "cc-1".into(),
+            git: Some(RunGit {
+                branch: Some("feat/x".into()),
+                head_oid: Some("abc".into()),
+                base: Some(RunGitBase {
+                    name: "main".into(),
+                    remote: "origin".into(),
+                    reference: "refs/remotes/origin/main".into(),
+                }),
+                changed: ChangedFiles {
+                    files: 2,
+                    added: 5,
+                    removed: 1,
+                    complete: true,
+                },
+                ahead: Some(1),
+                pushed: false,
+                unmerged: false,
+                read_at: "t".into(),
+                gh: Some(GhState::SignedIn),
+                gh_host: Some("github.com".into()),
+                pr: Some(PullRequest {
+                    number: 7,
+                    url: "https://github.com/o/r/pull/7".into(),
+                    state: PrState::Open,
+                    base: "main".into(),
+                    head_oid: "abc".into(),
+                    merged_at: None,
+                }),
+                gh_read_at: Some("u".into()),
+            }),
+            note: None,
+        };
+        let encoded = serde_json::to_value(&reply).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "run_git", "session_id": "cc-1",
+                "git": {
+                    "branch": "feat/x", "head_oid": "abc",
+                    "base": {"name": "main", "remote": "origin", "ref": "refs/remotes/origin/main"},
+                    "changed": {"files": 2, "added": 5, "removed": 1, "complete": true},
+                    "ahead": 1, "pushed": false, "unmerged": false, "read_at": "t",
+                    "gh": "signed_in", "gh_host": "github.com", "gh_read_at": "u",
+                    "pr": {"number": 7, "url": "https://github.com/o/r/pull/7", "state": "open",
+                           "base": "main", "head_oid": "abc"},
+                },
+            })
+        );
+        let decoded: ServerMessage = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded);
+        let bare = ServerMessage::RunGit {
+            session_id: "cc-1".into(),
+            git: None,
+            note: Some("not a git repository".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({"type": "run_git", "session_id": "cc-1", "note": "not a git repository"})
+        );
     }
 
     #[test]

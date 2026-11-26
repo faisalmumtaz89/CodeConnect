@@ -108,6 +108,8 @@ db_ops! {
     /// Append one fact. `None` means it was a duplicate.
     fn append_event(pending: PendingEvent) -> Option<Event>;
     fn max_seq(session_uid: String) -> u64;
+    fn untold_commits(session_uid: String) -> Vec<(u64, String, u64)>;
+    fn commits_told(session_uid: String, request_id: String, through: u64) -> ();
     fn filed_event(session_uid: String, source: Source, source_event_id: String) -> Option<(u64, Option<String>)>;
     fn session_facts(session_uid: String) -> protocol::facts::SessionFacts;
     /// The settings Codex last named for a Codex run's thread, as filed.
@@ -898,7 +900,7 @@ impl Db {
         operation_kind: &'static str,
         session_uid: String,
         client_request_id: String,
-        outcome: &'static str,
+        outcome: String,
         settled_at: String,
         event: PendingEvent,
     ) -> Result<Vec<Event>> {
@@ -907,7 +909,7 @@ impl Db {
                 operation_kind,
                 &session_uid,
                 &client_request_id,
-                outcome,
+                &outcome,
                 &settled_at,
                 &event,
             )
