@@ -783,6 +783,16 @@ public enum Format {
         return "\(Int(seconds / 86400))d"
     }
 
+    /// A time as a list gives it: its clock time on `now`'s day ("9:40 PM"), else its weekday ("Mon").
+    public static func clock(_ date: Date, now: Date, calendar: Calendar = .current) -> String {
+        let format = DateFormatter()
+        format.calendar = calendar
+        format.timeZone = calendar.timeZone
+        format.locale = calendar.locale ?? Locale(identifier: "en_US")
+        format.setLocalizedDateFormatFromTemplate(calendar.isDate(date, inSameDayAs: now) ? "h:mm a" : "EEE")
+        return format.string(from: date)
+    }
+
     public static func age(since date: Date?, now: Date = Date()) -> String {
         guard let date else { return "never" }
         return age(now.timeIntervalSince(date))

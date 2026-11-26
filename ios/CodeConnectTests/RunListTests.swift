@@ -66,5 +66,24 @@ final class RunListTests: XCTestCase {
         XCTAssertEqual(RunListWords.ended(9), "9 ended ›")
         XCTAssertEqual(RunListWords.noneOn("lumen5090"), "None on lumen5090")
         XCTAssertEqual(RunListWords.allComputers, "all computers")
+        XCTAssertEqual(RunListWords.allTitle, "All computers")
+        XCTAssertEqual(RunListWords.offline, "· Offline")
+    }
+
+    /// D2 and D4: a time on the same day reads as its clock time, an earlier or later day as the day; an offline
+    /// computer's line names when it was last seen, else how many runs wait for it, else nothing.
+    func testTimesReadAsTheClockTodayAndTheDayElse() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        calendar.locale = Locale(identifier: "en_US")
+        let now = Date(timeIntervalSince1970: 1_795_660_000)  // Thu 26 Nov 2026, 02:26 UTC
+        XCTAssertEqual(Format.clock(now.addingTimeInterval(16 * 3600), now: now, calendar: calendar), "6:26 PM")
+        XCTAssertEqual(Format.clock(now.addingTimeInterval(4 * 86400), now: now, calendar: calendar), "Mon")
+        XCTAssertEqual(Format.clock(now.addingTimeInterval(-3 * 86400), now: now, calendar: calendar), "Mon")
+        XCTAssertEqual(
+            RunListWords.offlineLine(lastSeen: now.addingTimeInterval(-60), waiting: 3, now: now, calendar: calendar),
+            "Last seen 2:25 AM")
+        XCTAssertEqual(RunListWords.offlineLine(lastSeen: nil, waiting: 2, now: now, calendar: calendar), "2 runs")
+        XCTAssertNil(RunListWords.offlineLine(lastSeen: nil, waiting: 0, now: now, calendar: calendar))
     }
 }

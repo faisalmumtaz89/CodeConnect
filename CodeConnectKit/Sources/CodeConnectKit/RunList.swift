@@ -39,4 +39,16 @@ public enum RunListWords {
 
     /// Needs you's note while the list is narrowed to one computer: it still holds every computer's runs.
     public static let allComputers = "all computers"
+
+    /// The head menu's first row, every computer's runs.
+    public static let allTitle = "All computers"
+
+    /// A computer not reached, in words (D1).
+    public static let offline = "· Offline"
+
+    /// An offline computer's line: when it was last reached (D4), else how many runs wait for it, else nothing.
+    public static func offlineLine(lastSeen: Date?, waiting: Int, now: Date, calendar: Calendar = .current) -> String? {
+        if let lastSeen { return "Last seen \(Format.clock(lastSeen, now: now, calendar: calendar))" }
+        return waiting > 0 ? runs(waiting) : nil
+    }
 }
