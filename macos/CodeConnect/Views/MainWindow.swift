@@ -100,7 +100,7 @@ struct MainWindow: View {
             if let section = settings {
                 HStack(spacing: 0) {
                     SettingsList(section: Binding(get: { section }, set: { settings = $0 })) { settings = nil }
-                        .frame(width: 216)
+                        .frame(width: 256)
                     Rectangle().fill(Theme.hairline).frame(width: 1)
                     SettingsPage(section: section, add: { adding = .computer }, pairAgain: pairAgain)
                 }
