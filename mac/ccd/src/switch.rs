@@ -62,12 +62,7 @@ pub(crate) async fn moves(
         .ok()
         .flatten()
         .map(|account| account.id);
-    let current = daemon
-        .store
-        .run_account(uid)
-        .ok()
-        .flatten()
-        .map(|account| account.id);
+    let current = daemon.store.run_account_id(uid).ok().flatten();
     if active == current {
         set(daemon, uid, None).await;
         return false;
@@ -105,12 +100,7 @@ pub(crate) async fn settle(daemon: &Daemon, uid: &str, doubt: bool) {
         .ok()
         .flatten()
         .map(|account| account.id);
-    let current = daemon
-        .store
-        .run_account(uid)
-        .ok()
-        .flatten()
-        .map(|account| account.id);
+    let current = daemon.store.run_account_id(uid).ok().flatten();
     let due = (doubt || active != current).then_some(Store::SWITCH_WAITING);
     set(daemon, uid, due).await;
 }

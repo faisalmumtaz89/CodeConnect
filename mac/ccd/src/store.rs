@@ -3339,7 +3339,8 @@ impl Store {
     }
 
     /// The id of the account the run `session_uid` records, whether that account is still here or removed since; `None`
-    /// for its agent's Default.
+    /// for its agent's Default. What decides where a run is and where it goes reads this, never the account's row, which
+    /// a removed account no longer has.
     pub fn run_account_id(&self, session_uid: &str) -> Result<Option<String>> {
         Ok(self
             .read()
@@ -3352,6 +3353,8 @@ impl Store {
             .flatten())
     }
 
+    /// The run `session_uid`'s account with its label, while that account is still here: what a test reads.
+    #[cfg(test)]
     pub fn run_account(&self, session_uid: &str) -> Result<Option<Account>> {
         Ok(self
             .read()

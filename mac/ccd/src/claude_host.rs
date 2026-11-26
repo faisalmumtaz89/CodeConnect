@@ -13307,6 +13307,44 @@ mod tests {
         assert_eq!(live.get("switching"), None, "not due to move: {live}");
     }
 
+    /// **A run on a removed account is still due to move** (306, round 2): an Antigravity run live on account A, the
+    /// Default chosen, then A removed (its row gone, its folder kept for the run); the run's account is still A, not the
+    /// Default it would read through a removed row, so it stays due and moves at its next message.
+    #[tokio::test]
+    async fn a_run_on_a_removed_account_is_still_due_to_move() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let a = rig.daemon.store.add_account("antigravity", "A").unwrap();
+        let uid = protocol::uid::new().unwrap();
+        let now = protocol::time::now_rfc3339();
+        let row = crate::store::SessionRow {
+            session_uid: uid.clone(),
+            session_id: "ag-1".into(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: Lifecycle::Live,
+            created_at: now.clone(),
+            updated_at: now,
+            agent: AgentKind::Antigravity,
+            codex_thread_id: None,
+        };
+        assert_eq!(
+            rig.daemon
+                .store
+                .begin_run(&row, &uid, None, Some(&a.id))
+                .unwrap(),
+            None
+        );
+        rig.daemon.store.remove_account(&a.id).unwrap();
+        crate::switch::settle(&rig.daemon, &uid, false).await;
+        assert_eq!(
+            rig.daemon.store.switch_state(&uid).unwrap(),
+            Some(Store::SWITCH_WAITING),
+            "a run on removed A, the Default in use, is due to move"
+        );
+    }
+
     /// **A quiet Antigravity run moves with the person's next message** (306, decision 311 v4 for Antigravity; G3): a run
     /// on account A, its turn over, is due once B is chosen; the next message stops it, its end filed typed as a switch
     /// to B, carries its session's files to B's folder, and is the prompt of its relaunch there, resuming agy's same
