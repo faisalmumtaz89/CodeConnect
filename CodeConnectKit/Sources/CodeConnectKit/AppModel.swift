@@ -2469,8 +2469,9 @@ public final class AppModel {
             // Nothing to do here. `removeSession` awaits the reply itself and does
             // the local clean-up, because only it knows which row asked.
             break
-        case .testPushResult:
-            // Same shape: the sheet's own request awaits the reply by id.
+        case .testPushResult, .runGit:
+            // Same shape: the sheet's own request awaits the reply by id, and a run's
+            // repository is awaited by the Changes panel that asked for it.
             break
         case .accounts(nil, let book):
             // Pushed when the list changes on the computer (from any device, or a sign-in's end): the latest is kept.

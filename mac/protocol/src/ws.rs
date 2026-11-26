@@ -263,6 +263,14 @@ pub enum ClientMessage {
     GetDiff {
         session_id: String,
     },
+    /// **A run's repository as its Changes panel shows it** (minor 58, `changes`), answered
+    /// with one [`ServerMessage::RunGit`]: branch, head, base, the changed files' lines, how
+    /// far the branch is ahead of its base, whether it is pushed, and whether a merge is
+    /// unresolved. Read from git in the run's folder; nothing is fetched.
+    /// Paired devices only.
+    GetRunGit {
+        session_id: String,
+    },
     /// "Which slash commands does this session's Claude Code actually have?"
     ///
     /// Answered from the installed binary's own machine-readable init message,
@@ -769,6 +777,15 @@ pub enum ServerMessage {
         /// untracked names than the daemon lists at once, or more than one message carries.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         files_truncated: bool,
+    },
+    /// The answer to [`ClientMessage::GetRunGit`]. `git` is absent, with a `note` saying why,
+    /// outside a repository, for an unknown run, and when git could not answer.
+    RunGit {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        git: Option<RunGit>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     Error {
         code: String,
@@ -1375,6 +1392,60 @@ pub enum DiffFileStatus {
     Untracked,
 }
 
+/// A run's repository, as [`ClientMessage::GetRunGit`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunGit {
+    /// The branch checked out. Absent on a detached head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The commit checked out. Absent before the first commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_oid: Option<String>,
+    /// The branch this one is measured against: the default branch of the remote named
+    /// `upstream` (a fork's parent), else of the upstream's remote, else of `origin`, else of
+    /// the only remote, as its `refs/remotes/<remote>/HEAD` names it. Absent when no such
+    /// remote HEAD is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<RunGitBase>,
+    /// The changed files, as [`ServerMessage::Diff`]'s `files` count them: every one, before
+    /// that reply's row and frame limits.
+    pub changed: ChangedFiles,
+    /// Commits on `HEAD` that are not on [`RunGitBase::reference`]. Absent without a head or
+    /// a base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<u32>,
+    /// The push remote git names for this branch (its `pushRemote`, `remote.pushDefault`, or
+    /// the upstream's), else `origin`, has the branch of this name at `HEAD`.
+    pub pushed: bool,
+    /// The index holds unresolved merge entries.
+    pub unmerged: bool,
+    pub read_at: String,
+}
+
+/// A [`RunGit`]'s base branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunGitBase {
+    /// The branch's name on its remote, e.g. `main`.
+    pub name: String,
+    /// The remote, e.g. `origin`.
+    pub remote: String,
+    /// Its full local ref, e.g. `refs/remotes/origin/main`.
+    #[serde(rename = "ref")]
+    pub reference: String,
+}
+
+/// The changed files of a [`RunGit`], untracked ones included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangedFiles {
+    pub files: u64,
+    pub added: u64,
+    pub removed: u64,
+    /// Every changed file was listed and every one with lines was counted. False when the
+    /// untracked names or the bytes read to count them ran past the daemon's limits, or git
+    /// could not open a folder to list it: the numbers are then at least these.
+    pub complete: bool,
+}
+
 /// What CodeConnect can actually do, reported honestly rather than assumed.
 /// Mirrors ACP's capability shape; the iPhone disables affordances it does not
 /// see advertised instead of failing at tap time.
@@ -1588,6 +1659,10 @@ pub struct Capabilities {
     /// advertised.
     #[serde(default)]
     pub run_terminal: bool,
+    /// **This daemon answers [`ClientMessage::GetRunGit`]** (minor 58), to paired devices
+    /// only. Absent decodes `false`: an older daemon answers it with `bad_request`.
+    #[serde(default)]
+    pub changes: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -2564,9 +2639,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 57,
             "Antigravity's accounts (`add_account` and the rest for `antigravity`) are minor 57"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 58,
+            "a run's repository for its Changes panel (`get_run_git`, `run_git`, `changes`) is minor 58"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 57);
+        assert_eq!(crate::PROTOCOL_MINOR, 58);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3279,6 +3358,7 @@ mod tests {
             accounts: true,
             uploads: true,
             run_terminal: true,
+            changes: true,
         }
     }
 
@@ -4471,6 +4551,63 @@ mod tests {
         assert_eq!(encoded["files_truncated"], true);
         let decoded: ServerMessage = serde_json::from_value(encoded.clone()).unwrap();
         assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded);
+    }
+
+    /// **A run's repository, as the apps read it**: the request by session, the base's
+    /// `ref` spelled as git spells it, absent fields omitted, and a repository-less answer
+    /// as a bare note.
+    #[test]
+    fn a_runs_repository_encodes_as_the_apps_read_it() {
+        let ask: ClientMessage =
+            serde_json::from_str(r#"{"type":"get_run_git","session_id":"cc-1"}"#).unwrap();
+        assert!(matches!(ask, ClientMessage::GetRunGit { ref session_id } if session_id == "cc-1"));
+        let reply = ServerMessage::RunGit {
+            session_id: "cc-1".into(),
+            git: Some(RunGit {
+                branch: Some("feat/x".into()),
+                head_oid: Some("abc".into()),
+                base: Some(RunGitBase {
+                    name: "main".into(),
+                    remote: "origin".into(),
+                    reference: "refs/remotes/origin/main".into(),
+                }),
+                changed: ChangedFiles {
+                    files: 2,
+                    added: 5,
+                    removed: 1,
+                    complete: true,
+                },
+                ahead: Some(1),
+                pushed: false,
+                unmerged: false,
+                read_at: "t".into(),
+            }),
+            note: None,
+        };
+        let encoded = serde_json::to_value(&reply).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "run_git", "session_id": "cc-1",
+                "git": {
+                    "branch": "feat/x", "head_oid": "abc",
+                    "base": {"name": "main", "remote": "origin", "ref": "refs/remotes/origin/main"},
+                    "changed": {"files": 2, "added": 5, "removed": 1, "complete": true},
+                    "ahead": 1, "pushed": false, "unmerged": false, "read_at": "t",
+                },
+            })
+        );
+        let decoded: ServerMessage = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded);
+        let bare = ServerMessage::RunGit {
+            session_id: "cc-1".into(),
+            git: None,
+            note: Some("not a git repository".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({"type": "run_git", "session_id": "cc-1", "note": "not a git repository"})
+        );
     }
 
     #[test]

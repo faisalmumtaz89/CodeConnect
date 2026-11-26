@@ -959,7 +959,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     agy). A run on an account runs agy in that home; a run moving to another account at its next message takes its
 ///     conversation's files there. Removing an account a run records keeps its folder, signed out, for that run. A
 ///     daemon below 57 refuses Antigravity in `add_account`, so an app offers its accounts only from 57.
-pub const PROTOCOL_MINOR: u32 = 57;
+///   * `58` — **A run's repository, for its Changes panel.**
+///
+///     [`ws::ClientMessage::GetRunGit`] is answered with [`ws::ServerMessage::RunGit`]: the branch, head and base,
+///     the changed files' lines (untracked included), commits ahead of the base, whether it is pushed and whether a
+///     merge is unresolved ([`ws::RunGit`]). Paired devices only, advertised as `changes`. A daemon below 58 answers
+///     `get_run_git` with `bad_request` and advertises no `changes`.
+pub const PROTOCOL_MINOR: u32 = 58;
 
 #[cfg(test)]
 mod ledger_tests {
