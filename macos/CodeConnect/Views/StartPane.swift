@@ -15,6 +15,8 @@ struct StartPane: View {
     /// so what was typed and chosen is there when the link is back.
     @State private var formShown = false
     @State private var height: CGFloat = 0
+    /// Where the form, or the page standing in its place, is in the panel: the ground stays calm around it.
+    @State private var standing: CGRect = .zero
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,12 +30,13 @@ struct StartPane: View {
                     noComputer
                 }
             }
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(StartForm.space)) } action: { standing = $0 }
             .padding(.horizontal, 32)
             Spacer(minLength: 16)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // One rounded panel inset from the window's edges, clear of the window's controls along its top.
-        .background(DottedFade().clipShape(RoundedRectangle(cornerRadius: 12)))
+        .background(NumericGround(clear: standing).clipShape(RoundedRectangle(cornerRadius: 12)))
         .background(Theme.window, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.hairline))
         .coordinateSpace(.named(StartForm.space))
@@ -83,27 +86,4 @@ struct StartPane: View {
 
     /// Why no computer can start an agent, in the words the iPhone says it with.
     private var why: String { machines.noStartReason }
-}
-
-/// A faint grid of dots at the top of the main area, gone a third of the way down.
-private struct DottedFade: View {
-    var body: some View {
-        Canvas { context, size in
-            let step: CGFloat = 14
-            var y = step / 2
-            while y < size.height * 0.4 {
-                var x = step / 2
-                while x < size.width {
-                    context.fill(
-                        Path(ellipseIn: CGRect(x: x - 0.6, y: y - 0.6, width: 1.2, height: 1.2)),
-                        with: .color(.white.opacity(0.11)))
-                    x += step
-                }
-                y += step
-            }
-        }
-        .mask(LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.4)))
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
 }
