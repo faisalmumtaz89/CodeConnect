@@ -656,6 +656,9 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// A move to another account under way (minor 48): its agent's active account changed and this run has not yet
     /// started on it. `nil` when none is pending, from an older daemon, and for a value this build does not know.
     public let switching: RunSwitching?
+    /// The usage limit the run stopped at (minor 54), as its agent said it: `nil` while it is at none, from the run's
+    /// next turn on, and from an older daemon. An ended run keeps its last one.
+    public let limit: RunLimit?
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
     /// last ended. `nil` outside a repository, on a detached head, before the
     /// first read, and from an older daemon.
@@ -694,6 +697,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case modelLabel = "model_label"
         case account
         case switching
+        case limit
         case gitBranch = "git_branch"
         case diffStat = "diff_stat"
         case title
@@ -725,6 +729,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         modelLabel = try c.decodeIfPresent(String.self, forKey: .modelLabel)
         account = try c.decodeIfPresent(RunAccount.self, forKey: .account)
         switching = try c.decodeIfPresent(String.self, forKey: .switching).flatMap(RunSwitching.init(rawValue:))
+        limit = try c.decodeIfPresent(RunLimit.self, forKey: .limit)
         gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
         diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
         title = try c.decodeIfPresent(String.self, forKey: .title)
@@ -846,6 +851,39 @@ public enum RunSwitching: String, Codable, Sendable, Hashable {
     case moved
     /// Its start on the new account was refused: it reads as the relaunchable end it is, its own line says why.
     case failed
+}
+
+/// The usage limit a run stopped at (`SessionSummary.limit`, minor 54).
+public struct RunLimit: Codable, Sendable, Hashable {
+    public let which: LimitKind
+    /// When the agent said so (RFC 3339).
+    public let at: String
+}
+
+/// Which usage limit a run stopped at (`RunLimit.which`). A word this build does not know is `unknown`.
+public enum LimitKind: String, Codable, Sendable, Hashable {
+    case fiveHour = "five_hour"
+    case weekly
+    case weeklyOpus = "weekly_opus"
+    case weeklySonnet = "weekly_sonnet"
+    case extraUsage = "extra_usage"
+    case credits
+    case workspace
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        self = LimitKind(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
+
+    /// The length of the run's account's usage window (`UsageWindow.windowMinutes`) whose `resetsAt` is this limit's
+    /// reset; `nil` for a limit with no such window.
+    public var windowMinutes: Int? {
+        switch self {
+        case .fiveHour: 300
+        case .weekly: 10080
+        default: nil
+        }
+    }
 }
 
 /// An account a run runs on, as the daemon names it (`SessionSummary.account`, minor 48).
