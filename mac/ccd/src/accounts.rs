@@ -880,7 +880,8 @@ pub(crate) const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_s
 
 /// `reply`, an accounts listing, with each account's `signed_in` as its agent says with its home: Codex's
 /// `login status`, and `not_separate` when that sign-in is not in the home; Claude Code's `auth status`, its config
-/// directory the account's folder. Not known for an agent not on this computer.
+/// directory the account's folder; Antigravity's agy, asked as a start asks it, in the account's folder. Not known
+/// for an agent not on this computer.
 pub(crate) async fn with_signed_in(
     environment: &HashMap<OsString, OsString>,
     agents: Agents<'_>,
@@ -899,6 +900,18 @@ pub(crate) async fn with_signed_in(
         };
         let root = &root;
         async move {
+            if row.agent == AgentKind::Antigravity.as_str() {
+                if let (Some(agy), Ok(Some(home))) =
+                    (agents.agy, AccountEnv::for_account(root, &row))
+                {
+                    let known = crate::start_session::KnownAgents::default();
+                    account.signed_in =
+                        crate::start_session::agy_offer(&known, environment, agy, Some(&home))
+                            .await
+                            .and_then(|offer| offer.signed_in);
+                }
+                return;
+            }
             let (Some(program), Ok(Some(home))) =
                 (agents.path(&row.agent), AccountEnv::for_account(root, &row))
             else {
@@ -2234,6 +2247,65 @@ done
         std::fs::set_permissions(&agy, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         agy
+    }
+
+    /// **An added Antigravity account's sign-in is agy's in its own folder** (306 #5): the listing's `signed_in` for each
+    /// Antigravity account is what agy says in that account's home (`--gemini-dir`), not the person's own agy's.
+    #[tokio::test]
+    async fn an_antigravity_accounts_sign_in_is_read_in_its_own_folder() {
+        let _env = crate::ProcessEnvRead::take();
+        let root = std::env::temp_dir().join(format!(
+            "ccs-agysigned.{}",
+            &protocol::uid::new().unwrap()[20..]
+        ));
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let agy = stand_in_agy(&root);
+        let environment: HashMap<OsString, OsString> = HashMap::from([
+            (OsString::from("HOME"), home.into_os_string()),
+            (OsString::from("SHELL"), OsString::from("/bin/sh")),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        let store = crate::store::Store::open_temp("ccd-agysigned");
+        let _db = store.temp_db();
+        // The person's own agy is signed in; A is too, in its folder; B is not.
+        std::fs::write(root.join("signed"), "").unwrap();
+        let a = store.add_account("antigravity", "A").unwrap();
+        let b = store.add_account("antigravity", "B").unwrap();
+        let folder = |account: &crate::store::Account| {
+            super::AccountEnv::for_account(&protocol::root_dir(), account)
+                .unwrap()
+                .unwrap()
+                .folder()
+                .to_path_buf()
+        };
+        std::fs::write(folder(&a).join("signed"), "").unwrap();
+        let listed = serde_json::to_value(
+            super::with_signed_in(
+                &environment,
+                super::Agents {
+                    codex: None,
+                    claude: None,
+                    agy: Some(&agy),
+                },
+                super::listing(&store, None),
+            )
+            .await,
+        )
+        .unwrap();
+        let signed = |id: &str| {
+            listed["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|account| account["id"] == id)
+                .map(|account| account["signed_in"].clone())
+        };
+        assert_eq!(signed(&a.id), Some(serde_json::json!(true)), "{listed}");
+        assert_eq!(signed(&b.id), Some(serde_json::json!(false)), "{listed}");
+        let _ = std::fs::remove_dir_all(folder(&a));
+        let _ = std::fs::remove_dir_all(folder(&b));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **An added Antigravity account signs in in its own folder** (306 #5): its sign-in is agy's `authenticate` in the

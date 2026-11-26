@@ -257,12 +257,8 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
     let Ok(accounts) = daemon.store.accounts() else {
         return;
     };
-    let mut wanted: Vec<(String, AgentKind, Option<crate::store::Account>)> = vec![(
-        crate::accounts::default_key(&AgentKind::Antigravity),
-        AgentKind::Antigravity,
-        None,
-    )];
-    for agent in [AgentKind::Codex, AgentKind::Claude] {
+    let mut wanted: Vec<(String, AgentKind, Option<crate::store::Account>)> = Vec::new();
+    for agent in [AgentKind::Codex, AgentKind::Claude, AgentKind::Antigravity] {
         wanted.push((crate::accounts::default_key(&agent), agent.clone(), None));
         for account in accounts
             .iter()
@@ -303,20 +299,35 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
             let (environment, root, codex, claude, agy) =
                 (&environment, &root, &codex, &claude, &agy);
             async move {
-                // Antigravity's one sign-in: what agy offers a start (kept while it is signed in, so no new run of
-                // agy), its plan its tier's name as agy gives it.
+                // Antigravity, its Default (agy's own sign-in) or an account's folder: what agy offers a start there
+                // (kept while it is signed in, so no new run of agy), its plan its tier's name as agy gives it.
                 if *agent == AgentKind::Antigravity {
-                    let offer = match agy {
-                        Some(agy) => agy_offer(&daemon.agents, environment, agy, None).await,
+                    let home = match account {
+                        Some(account) => {
+                            match crate::accounts::AccountEnv::for_account(root, account) {
+                                Ok(home) => home,
+                                Err(_) => {
+                                    daemon.account_facts.read(key, None);
+                                    return;
+                                }
+                            }
+                        }
                         None => None,
                     };
-                    if let Some(offer) = &offer {
+                    let offer = match agy {
+                        Some(agy) => {
+                            agy_offer(&daemon.agents, environment, agy, home.as_ref()).await
+                        }
+                        None => None,
+                    };
+                    if let (Some(offer), None) = (&offer, account) {
                         daemon.account_facts.keep_agent_signed(key, offer.signed_in);
                     }
-                    // Signed in, its plan's limits too, from agy's own /usage: one run of agy a read, so at most one a
-                    // FACTS_FRESH, however many apps and turns ask.
+                    // The Default signed in, its plan's limits too, from agy's own /usage: one run of agy a read, so at
+                    // most one a FACTS_FRESH, however many apps and turns ask. agy's print mode takes no folder, so an
+                    // account's limits are not read.
                     let mut facts = offer.as_ref().and_then(agy_default_facts);
-                    if let (Some(facts), Some(agy)) = (facts.as_mut(), agy) {
+                    if let (Some(facts), Some(agy), None) = (facts.as_mut(), agy, account) {
                         facts.windows = agy_usage(environment, agy).await;
                     }
                     daemon.account_facts.read(key, facts);
@@ -3243,6 +3254,55 @@ mod tests {
             .find(|d| d["agent"] == "antigravity")
             .map(|d| d["facts"]["windows"].as_array().map(Vec::len));
         assert_eq!(held, Some(Some(1)), "{told}");
+        let _ = std::fs::remove_dir_all(&rig.root);
+    }
+
+    /// **An added Antigravity account's plan is agy's tier in its own folder, and its limits are not read** (306 #5):
+    /// a refresh asks agy in the account's folder (`--gemini-dir`), whose tier is that account's, and holds it as the
+    /// account's plan with no windows (agy's print mode takes no folder, so `/usage` reads only the person's own agy,
+    /// once, for the Default).
+    #[tokio::test]
+    async fn an_added_antigravity_accounts_plan_is_read_in_its_folder() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = Rig::new("agyplan", "exit 1");
+        let agy = usage_agy(&rig);
+        let reply = |body: &str| format!(r#"printf '{{"jsonrpc":"2.0","id":%s,{body}}}\n' "$id""#);
+        std::fs::write(
+            &agy,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = -p ]; then echo \"$2\" >> \"$0.p\"; exit 0; fi\n\
+                 while read -r line; do\n  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n  \
+                 case \"$line\" in\n    *'\"initialize\"'*) {init} ;;\n    *'\"session/new\"'*) \
+                 if [ \"$2\" = --gemini-dir ]; then {ultra}; else {opened}; fi ;;\n    \
+                 *'\"session/close\"'*) {empty} ;;\n  esac\ndone\n",
+                init = reply(r#""result":{"protocolVersion":1}"#),
+                opened = reply(r#""result":{"sessionId":"s","configOptions":[{"category":"model","options":[]}]}"#),
+                ultra = reply(
+                    r#""result":{"sessionId":"s","configOptions":[{"category":"model","options":[]}],"_meta":{"antigravity":{"tier":{"name":"Google AI Ultra"}}}}"#
+                ),
+                empty = reply(r#""result":{}"#),
+            ),
+        )
+        .unwrap();
+        let b = rig.daemon.store.add_account("antigravity", "B").unwrap();
+        refresh_facts(&rig.daemon).await;
+        let told = serde_json::to_value(
+            rig.daemon
+                .account_facts
+                .told(crate::accounts::listing(&rig.daemon.store, None)),
+        )
+        .unwrap();
+        let account = told["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|account| account["id"] == b.id.as_str())
+            .cloned()
+            .unwrap();
+        assert_eq!(account["facts"]["plan"], "Google AI Ultra", "{told}");
+        assert_eq!(account["facts"].get("grouped_windows"), None, "{told}");
+        let runs = std::fs::read_to_string(format!("{}.p", agy.display())).unwrap_or_default();
+        assert_eq!(runs, "/usage\n", "agy's /usage run once, for the Default");
         let _ = std::fs::remove_dir_all(&rig.root);
     }
 
