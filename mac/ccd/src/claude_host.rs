@@ -3909,6 +3909,63 @@ mod tests {
         (started_uid(&result), played)
     }
 
+    /// **A run started on an Antigravity account runs agy in that account's folder, and records the account** (306
+    /// G2): the account's folder is ccd's (`accounts/antigravity/<id>`), given to the host as
+    /// `CODECONNECT_GEMINI_DIR`, which the host gives agy as its `--gemini-dir`.
+    #[tokio::test]
+    async fn a_run_on_an_antigravity_account_runs_in_its_folder_and_records_it() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        let host = rig.root.join("stub-host");
+        std::fs::write(
+            &host,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"${{CODECONNECT_GEMINI_DIR-unset}}\" > \"$1/folder\"\n\
+                 echo $$ > \"$1/stub.pid\"\nprintf '{{\"protocol_version\":{HOST_PROTOCOL_VERSION},\"host_pid\":%s}}' \
+                 \"$$\" > \"$1/host.json\"\nexec sleep 20\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let b = rig.daemon.store.add_account("antigravity", "B").unwrap();
+        rig.account = crate::accounts::AccountEnv::for_account(&rig.root, &b).unwrap();
+        assert!(rig.account.is_some(), "an Antigravity account has a folder");
+        let cwd = rig.root.to_str().unwrap().to_string();
+        let daemon = Arc::clone(&rig.daemon);
+        let (result, played) = tokio::join!(
+            start(
+                &daemon,
+                Run {
+                    agent: AgentKind::Antigravity,
+                    claude_path: "/nonexistent/agy",
+                    ..run(&rig, "req-agy", &cwd, &host)
+                }
+            ),
+            async {
+                let mut played = play_to_start(&rig).await;
+                let uuid = played.start_uuid();
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid, "status": "done",
+                                       "initialize": agy_menus()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        let uid = started_uid(&result);
+        let folder = rig.root.join("accounts").join("antigravity").join(&b.id);
+        assert_eq!(
+            std::fs::read_to_string(played.dir.join("folder"))
+                .unwrap()
+                .trim_end(),
+            folder.to_str().unwrap()
+        );
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        stop(&played.dir);
+    }
+
     /// **An Antigravity run its switch ended names Antigravity's account, not Claude Code's** (306): with a Claude
     /// Code account active and Antigravity on its Default, the end of an Antigravity run its move stopped says it goes
     /// on Antigravity's Default.

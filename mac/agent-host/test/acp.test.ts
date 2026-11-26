@@ -67,6 +67,21 @@ test('a start initializes agy at version 1, opens a session in the folder with t
   });
 }, 15_000);
 
+test('a run on an account of CodeConnect\'s runs agy with that account\'s folder as its --gemini-dir', async () => {
+  const dir = runDir();
+  const work = join(dir, 'work');
+  const folder = join(dir, 'account');
+  mkdirSync(work);
+  mkdirSync(folder);
+  const agy = writeAgy(dir, {});
+  startHost(dir, { CODECONNECT_GEMINI_DIR: folder });
+  const ccd = await open(dir);
+  await ccd.attach(0, 1);
+  ccd.send({ ...antigravityStart, options: { ...antigravityStart.options, cwd: work, claude_path: agy } });
+  await ccd.line('the start outcome', (line) => line.type === 'outcome');
+  expect(stubLog(dir)[0]).toStrictEqual({ argv: ['acp', '--gemini-dir', folder], cwd: realpathSync(work) });
+}, 15_000);
+
 test('Allow answers with the request\'s own allow_once option; the turn goes on to its end', async () => {
   const { dir, ccd } = await run();
   const permission = await ccd.line('the permission request', (line) => line.type === 'permission');

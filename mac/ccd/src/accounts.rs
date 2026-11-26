@@ -45,6 +45,8 @@ fn variable(agent: &str) -> Option<&'static str> {
     match agent {
         "claude" => Some("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
         "codex" => Some("CODEX_HOME"),
+        // agy's whole home, its sign-in and conversations, which the host gives agy as its `--gemini-dir`.
+        "antigravity" => Some("CODECONNECT_GEMINI_DIR"),
         _ => None,
     }
 }
