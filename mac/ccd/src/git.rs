@@ -371,7 +371,15 @@ pub async fn push(
     ];
     match run_write(&git, cwd, &args, PUSH_TIMEOUT, environment).await {
         Ok(out) if out.ok => Ok(()),
-        Ok(out) => Err(PushFailure::Refused(first_words(&out).unwrap_or_default())),
+        // Git's first line names the remote ("To <url>"); the reason follows it.
+        Ok(out) => Err(PushFailure::Refused(
+            out.stderr
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with("To "))
+                .map(|line| line.chars().take(300).collect())
+                .unwrap_or_default(),
+        )),
         Err(err) if format!("{err:#}").contains("timed out") => Err(PushFailure::Timeout),
         Err(err) => Err(PushFailure::Refused(format!("{err:#}"))),
     }

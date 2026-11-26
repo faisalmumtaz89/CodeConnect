@@ -220,16 +220,15 @@ pub enum Created {
     Unknown,
 }
 
-/// `gh pr create` from `branch` of `head` into `target` (onto `base` when known, else the
-/// repository's default branch), its title and body gh's own from the branch's commits, which
-/// it reads with git in `cwd`, the run's folder.
+/// `gh pr create` from `branch` of `head` into `target` onto `base`, its title and body gh's
+/// own from the branch's commits, which it reads with git in `cwd`, the run's folder.
 pub async fn create_pr(
     cwd: &str,
     gh_bin: Option<&str>,
     head: &Repo,
     target: &Repo,
     branch: &str,
-    base: Option<&str>,
+    base: &str,
 ) -> Created {
     let environment = &crate::start_session::phone_environment();
     let Some(gh) = crate::start_session::gh_path(environment, gh_bin).await else {
@@ -243,18 +242,17 @@ pub async fn create_pr(
     } else {
         format!("{}:{branch}", head.owner)
     };
-    let mut args = vec![
+    let args = [
         "pr",
         "create",
         "--repo",
         repo.as_str(),
         "--head",
         from.as_str(),
+        "--base",
+        base,
         "--fill",
     ];
-    if let Some(base) = base {
-        args.extend(["--base", base]);
-    }
     let mut command = gh_command(&gh, environment, &args);
     command.current_dir(cwd);
     match crate::git::run_program(command, &args, CREATE_TIMEOUT, CREATE_CAP).await {
