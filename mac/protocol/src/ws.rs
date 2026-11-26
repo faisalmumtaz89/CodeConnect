@@ -1573,12 +1573,16 @@ pub mod git_refusal {
     pub const GH_MISSING: &str = "gh_missing";
     /// `gh` has no account for the repository's host, or GitHub refused its token.
     pub const GH_SIGNED_OUT: &str = "gh_signed_out";
-    /// GitHub could not be reached or asked to wait; `detail` is gh's line. Nothing was pushed.
+    /// GitHub could not be reached, asked to wait, or gave no answer gh could read. Nothing was
+    /// pushed.
     pub const GITHUB_UNAVAILABLE: &str = "github_unavailable";
     /// No remote names a github.com repository.
     pub const NO_GITHUB_REMOTE: &str = "no_github_remote";
     /// The branch checked out is the base branch itself.
     pub const ON_BASE_BRANCH: &str = "on_base_branch";
+    /// No base branch is known (no `refs/remotes/<remote>/HEAD`, as a repository made by
+    /// `git init` and pushed has none): nothing is pushed.
+    pub const BASE_UNKNOWN: &str = "base_unknown";
     /// The branch has no commits the base lacks.
     pub const NOTHING_TO_PROPOSE: &str = "nothing_to_propose";
     /// gh refused to open the pull request; `detail` is its line, after "pushed; " when the

@@ -5533,8 +5533,11 @@ impl Daemon {
         if git.unmerged {
             return ActionOutcome::Refused(code::UNMERGED, None);
         }
-        let base = git.base.as_ref().map(|base| base.name.as_str());
-        if base == Some(branch.as_str()) {
+        // Without a known base nothing says this branch is not the default one: never pushed.
+        let Some(base) = git.base.as_ref().map(|base| base.name.as_str()) else {
+            return ActionOutcome::Refused(code::BASE_UNKNOWN, None);
+        };
+        if base == branch {
             return ActionOutcome::Refused(code::ON_BASE_BRANCH, None);
         }
         if git.ahead == Some(0) {
@@ -5601,15 +5604,18 @@ impl Daemon {
                 break 'outcome done(pr);
             }
             // A lost answer or a race: the pull request may be there, and is never opened twice.
-            if let Ok(Some(pr)) = crate::github::open_pr(gh_bin, &head, &target, &branch).await {
-                break 'outcome done(link(pr));
-            }
-            match created {
-                Created::Failed(detail) => {
+            match (
+                crate::github::open_pr(gh_bin, &head, &target, &branch).await,
+                created,
+            ) {
+                (Ok(Some(pr)), _) => done(link(pr)),
+                (Ok(None), Created::Failed(detail)) => {
                     ActionOutcome::Refused(code::CREATE_FAILED, Some(format!("pushed; {detail}")))
                 }
+                // gh gave no answer, or GitHub could not be asked again: it may have one.
                 _ => ActionOutcome::Unknown(
-                    "pushed; gh did not answer, and GitHub may have the pull request".into(),
+                    "pushed; GitHub may have the pull request: read the run's repository again"
+                        .into(),
                 ),
             }
         };
@@ -8971,6 +8977,16 @@ mod tests {
             ],
         );
         git_in(&dir, &["config", "core.sshCommand", ssh.to_str().unwrap()]);
+        // As a clone has it: `origin/HEAD` names `main`, at the first commit.
+        git_in(&dir, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git_in(
+            &dir,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
         git_in(&dir, &["switch", "-q", "-c", branch]);
         git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "Second"]);
         (dir, bare)
@@ -9065,12 +9081,9 @@ mod tests {
             "{calls:?}"
         );
         assert!(
-            calls[read + 1].contains("pr create --repo cli/cli --head w2-feature --fill"),
+            calls[read + 1]
+                .contains("pr create --repo cli/cli --head w2-feature --base main --fill"),
             "{calls:?}"
-        );
-        assert!(
-            !calls[read + 1].contains("--base"),
-            "no base known: the repository's default: {calls:?}"
         );
         assert_eq!(
             std::fs::read_to_string(gh.with_file_name("create.cwd"))
@@ -9103,9 +9116,13 @@ mod tests {
             &dir,
             &["update-ref", "refs/remotes/origin/w2-moved", "HEAD"],
         );
-        assert_eq!(
-            refused_as(&daemon.git_action(uid, "p-10", &create).await).0,
-            code::GIT_FAILED
+        let (refused, reason) = refused_as(&daemon.git_action(uid, "p-10", &create).await);
+        assert_eq!(refused, code::GIT_FAILED);
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|line| line.starts_with("! [rejected]")),
+            "git's reason, not the line naming the remote: {reason:?}"
         );
         assert_eq!(
             gh_calls(&gh).len(),
@@ -9203,6 +9220,43 @@ mod tests {
         );
         assert_eq!(refs(&bare), "");
         assert_eq!(gh_calls(&gh).len(), 1, "only the lookup");
+        done(&gh, &dir, &bare);
+
+        // No base known (a repository made by `git init` and pushed has no `origin/HEAD`):
+        // nothing says this is not the default branch, so nothing is pushed or asked.
+        let gh = stand_in_gh();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP38";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-nobase");
+        git_in(
+            &dir,
+            &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+        );
+        assert_eq!(
+            refused_as(&daemon.git_action(uid, "p-11", &create).await).0,
+            code::BASE_UNKNOWN
+        );
+        assert_eq!(refs(&bare), "");
+        assert!(gh_calls(&gh).is_empty(), "{:?}", gh_calls(&gh));
+        done(&gh, &dir, &bare);
+
+        // gh fails, and GitHub cannot be asked again (its answer is not a pulls list): not known
+        // whether it opened one, so never said to have failed.
+        let gh = stand_in_gh();
+        std::fs::write(
+            gh.with_file_name("create.err"),
+            "error connecting to api.github.com\n",
+        )
+        .unwrap();
+        std::fs::write(gh.with_file_name("create.exit"), "1").unwrap();
+        std::fs::write(gh.with_file_name("open.after"), "not a pulls list").unwrap();
+        let daemon = on(&gh);
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP39";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-lost");
+        assert_eq!(
+            refused_as(&daemon.git_action(uid, "p-12", &create).await).0,
+            code::INDETERMINATE
+        );
         done(&gh, &dir, &bare);
 
         // The base branch itself, then a branch with nothing past it, then no GitHub remote.

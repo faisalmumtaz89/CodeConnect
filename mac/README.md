@@ -1385,12 +1385,14 @@ to probe credentials.
   refs/heads/<b>:refs/heads/<b>`, no force, through the login shell with the
   repository's `pre-push` hook, 120 s; nothing when the remote has `HEAD`, refused
   when the branch there moved on) and opened, in the run's folder, with `gh pr create --repo
-  <gh_repo> --head <[owner:]b> --fill [--base <base>]` (title and body from the
+  <gh_repo> --head <[owner:]b> --base <base> --fill` (title and body from the
   commits, 30 s). If gh refuses or gives no answer, GitHub is asked once more, and
   a pull request found there is the answer, so one is never opened twice; else
   `create_failed{"pushed; " + gh's line}`, or `indeterminate` when gh gave no
-  answer. Refused before anything is sent on a detached head, while unmerged, on
-  the base branch itself (`on_base_branch`), with no commits past the base
+  answer or GitHub could not be asked again. Refused before anything is sent on a detached head, while unmerged, with
+  no base known (`base_unknown`: no `refs/remotes/<remote>/HEAD`, as in a
+  repository made by `git init` and pushed rather than cloned), on the base branch
+  itself (`on_base_branch`), with no commits past the base
   (`nothing_to_propose`), with no github.com remote (`no_github_remote`), and when
   gh is missing, signed out, or GitHub cannot be reached (`gh_missing`,
   `gh_signed_out`, `github_unavailable`); a refused push is `git_failed` with
