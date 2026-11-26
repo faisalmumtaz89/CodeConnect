@@ -2329,9 +2329,10 @@ pub(crate) const STILL_ENDING: &str =
 /// `uid`, which relaunches it** (decision 210) when its claude ended without ccd stopping it
 /// ([`crate::store::Store::claude_relaunch`]); every other ended run refuses it, as before.
 /// Never at ccd start. Before anything is launched, the warrant: the run's old host is gone
-/// and its group has no member, unless it was recorded in an earlier boot, whose numbers mean
-/// nothing now; then a start's own checks. The start line resumes claude's session in the
-/// folder claude ran in, with the run's model as its menu marks it chosen
+/// and its group has no member, one it left (a process claude started) stopped by the ladder
+/// within `deadline` ([`crate::switch::ended_for_move`]), unless it was recorded in an earlier
+/// boot, whose numbers mean nothing now; then a start's own checks. The start line resumes
+/// claude's session in the folder claude ran in, with the run's model as its menu marks it chosen
 /// ([`Daemon::selected_model`]), else the start's; the kept folder answer, lowered when the
 /// folder has since been answered not trusted; the mode the run was in when it is one an app
 /// may choose without the person's confirmation ([`relaunch_mode`]), so a run never gains
@@ -2378,7 +2379,9 @@ async fn relaunch(
             (Some(then), Some(now)) if then != now
         );
         if !earlier_boot
-            && (liveness(&old.host) != Liveness::Gone || group_has_members(old.host.pid))
+            && (liveness(&old.host) != Liveness::Gone
+                || group_has_members(old.host.pid)
+                    && !crate::switch::ended_for_move(daemon, uid, deadline).await)
         {
             return refuse_relaunch(daemon, uid, request_id, STILL_ENDING).await;
         }
@@ -16183,6 +16186,66 @@ mod tests {
         );
         assert_eq!(kept(&rig, &alive.uid).0, "exited", "put back as it was");
         assert!(summary(&rig.daemon, &alive.uid).await.relaunchable);
+    }
+
+    /// **A run whose claude ended on its own while a process it started lives on is relaunched by the next
+    /// message.** Its host is gone but its group still has that member, which ignores SIGTERM: the message stops it
+    /// by the ladder, then relaunches the run, and is sent.
+    #[tokio::test]
+    async fn a_message_relaunches_a_run_whose_claude_left_a_process_behind() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = relaunch_rig();
+        let host = stub_host_with_child(&rig);
+        let mut played = live_run_on(&rig, &host).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 4, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let child = pid_in(&played.dir, "child.pid");
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let Played {
+            dir, lines, write, ..
+        } = played;
+        drop((lines, write));
+        assert!(
+            running(child),
+            "the process claude started outlives its host"
+        );
+        let (sent, played) = tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+            let mut played = play_relaunched(&dir, old).await;
+            let ToHost::Start { uuid, .. } = played.start.clone() else {
+                panic!("not a start: {:?}", played.start);
+            };
+            say(
+                &mut played.write,
+                serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                   "status": "done", "initialize": initialize_answer()}),
+            )
+            .await;
+            assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+            played
+        });
+        let alive = running(child);
+        if alive {
+            // SAFETY: kill(2) of the test's own stand-in child.
+            unsafe { libc::kill(child, libc::SIGKILL) };
+        }
+        assert_eq!(
+            sent,
+            SendTextResult::Sent {
+                matched: "go on".into()
+            }
+        );
+        assert!(!alive, "the process left behind was stopped");
+        assert_eq!(kept(&rig, &uid).0, "live");
+        stop(&played.dir);
     }
 
     /// **Decision 210 G3: a relaunch claude refuses leaves the run relaunchable.** The host's
