@@ -61,18 +61,29 @@ struct ModelButton: View {
         }
     }
 
+    /// The agents the menu has a section for: each that offers its models, or hasn't answered yet.
+    private var shownAgents: [StartAgent] {
+        context.startAgents.filter {
+            switch context.models($0) {
+            case .checking, .choices: true
+            case .missing, .signedOut: false
+            }
+        }
+    }
+
     /// As tall as its entries, up to what fits above the composer; longer, it scrolls.
     private var menu: some View {
         let order = rows
         return PanelScroll {
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(context.startAgents.enumerated()), id: \.element) { index, agent in
+                // An agent that can't start here is left out (screen 31); the form says why under the folder where it
+                // concerns the person (`AgentNotice`).
+                ForEach(Array(shownAgents.enumerated()), id: \.element) { index, agent in
                     if index > 0 { divider }
                     header(agent.displayName)
-                    switch context.models(agent) {
-                    case .checking: note(StartContext.checkingTitle)
-                    case .missing(let reason), .signedOut(let reason): note(reason)
-                    case .choices:
+                    if context.models(agent) == .checking {
+                        note(StartContext.checkingTitle)
+                    } else {
                         ForEach(context.modelChoices.filter { $0.agent == agent }, id: \.self) { choice in
                             row(choice, index: order.firstIndex(of: choice) ?? 0)
                         }

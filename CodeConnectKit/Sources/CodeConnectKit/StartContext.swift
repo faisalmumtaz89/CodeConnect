@@ -132,6 +132,30 @@ public struct StartContext {
     /// When neither agent can start here.
     public var noAgent: String { "Neither Claude Code nor Codex can start on \(machineName)." }
 
+    /// An agent the form names under its folder, in the computer's own sentence.
+    public struct AgentNotice: Hashable, Sendable {
+        public let agent: StartAgent
+        public let sentence: String
+    }
+
+    /// What the start form says about agents that can't start here (screen 31; one rule for every agent).
+    public var agentNotices: [AgentNotice] { Self.notices(startAgents.map { ($0, models($0)) }) }
+
+    /// Each agent installed but signed out, while another can start; every agent, when none can. One that can't start
+    /// for another reason is not mentioned while another can: the computer's answer doesn't say whether it is missing or
+    /// below the floor, and one agent is enough. Nothing while the computer hasn't answered.
+    nonisolated static func notices(_ states: [(StartAgent, StartModels)]) -> [AgentNotice] {
+        guard !states.contains(where: { $0.1 == .checking }) else { return [] }
+        let none = !states.contains { if case .choices = $0.1 { true } else { false } }
+        return states.compactMap { agent, state in
+            switch state {
+            case .signedOut(let sentence): AgentNotice(agent: agent, sentence: sentence)
+            case .missing(let sentence) where none: AgentNotice(agent: agent, sentence: sentence)
+            case .missing, .checking, .choices: nil
+            }
+        }
+    }
+
     /// What the model menu holds for an agent here. The agent's own models, in
     /// its order and words, with Default first: Claude Code's own `default`
     /// entry, or, for an agent that lists none (Codex), a Default that names no

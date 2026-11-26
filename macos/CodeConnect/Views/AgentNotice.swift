@@ -2,19 +2,25 @@ import AppKit
 import CodeConnectKit
 import SwiftUI
 
-/// Why Claude Code can't start on the form's computer, under its folders: the computer's own sentence and, when it is
-/// signed out on a computer other than this Mac, how to sign in there (the owner's 2A). Nothing while it can start.
+/// Why an agent can't start on the form's computer, under its folders, by the Kit's one rule for every agent
+/// (`StartContext.agentNotices`): the computer's own sentence for each, and for Claude Code signed out on a computer
+/// other than this Mac, how to sign in there (the owner's 2A). Nothing while each agent it would name can start.
 struct AgentNotice: View {
     let context: StartContext
     /// The form's computer is not this Mac.
     let elsewhere: Bool
 
     var body: some View {
-        switch context.models(.claude) {
-        case .missing(let sentence): notice(sentence, signIn: false)
-        case .signedOut(let sentence): notice(sentence, signIn: elsewhere)
-        case .checking, .choices: EmptyView()
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(context.agentNotices, id: \.agent) { notice in
+                self.notice(notice.sentence, signIn: elsewhere && notice.agent == .claude && claudeSignedOut)
+            }
         }
+    }
+
+    private var claudeSignedOut: Bool {
+        if case .signedOut = context.models(.claude) { return true }
+        return false
     }
 
     private func notice(_ sentence: String, signIn: Bool) -> some View {
