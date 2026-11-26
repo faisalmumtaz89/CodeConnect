@@ -221,7 +221,7 @@ struct MainWindow: View {
             chosen = nil
             // A run opened shows, even with its pane hidden; with none open, the list shows again.
             if opened != nil { runHidden = false } else { listHidden = false }
-            // The start's own run, opened from the list as it launches: the start is done, so New Agent shows a fresh
+            // The start's own run, opened from the list as it launches: the start is done, so New Run shows a fresh
             // form rather than the start's progress opening it again.
             if let opened, let id = startDraft.sent?.requestID,
                 case .started(let uid, _)? = machines.models.lazy.compactMap({ $0.starter.starts[id] }).first?.outcome,
@@ -336,12 +336,12 @@ extension MainWindow {
 }
 
 extension FocusedValues {
-    /// What the main window is adding: the File menu's New Agent opens its start form; Add Computer and Add iPhone its
+    /// What the main window is adding: the File menu's New Run opens its start form; Add Computer and Add iPhone its
     /// sheet.
     @Entry var adding: Binding<AddKind?>?
 }
 
-/// File > New Agent (⌘N), Add Computer (⇧⌘N) and Add iPhone, in place of New Window: the app has one window,
+/// File > New Run (⌘N), Add Computer (⇧⌘N) and Add iPhone, in place of New Window: the app has one window,
 /// and these open its start form or its sheet, opening the window first when it is closed or behind another.
 /// Unavailable while its sheet is open.
 struct AddCommands: Commands {
