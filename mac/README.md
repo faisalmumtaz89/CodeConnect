@@ -1363,7 +1363,8 @@ to probe credentials.
   (`clean|blocked|behind|dirty|unstable|draft|has_hooks|unknown`: GitHub's
   `mergeStateStatus`, `draft` from `isDraft`, `unknown` while GitHub works it
   out, as just after a push) and `merge_methods` (what the repository allows, in
-  the order merge, squash, rebase), from the same request. `failure_line` is, among a
+  the order merge, squash, rebase) and `merge_queued` (a merge queue holds it, or
+  GitHub's auto-merge will queue it), from the same request. `failure_line` is, among a
   failed check run's first 10 annotations, the first at failure level that says
   more than the runner's "Process completed with exit code N.", its first line. A branch whose remote is a URL (as `gh pr checkout` sets for a
   fork's PR) is read from that URL.
@@ -1418,7 +1419,7 @@ to probe credentials.
   queue holds open. On a branch whose merge queue is required, gh enqueues it
   (GitHub's auto-merge), and the queue merges it later by the method the queue is
   set to, which may not be `method`. `done` carries no state: the panel's next
-  `get_run_git` reads it merged or still open. Refused, with nothing merged, when
+  `get_run_git` reads it merged, or open with `merge_queued`. Refused, with nothing merged, when
   there is no open pull request (`no_pull_request`), it is not pull request
   `number` or its head is not `head_oid` (`head_moved`, also when GitHub says so as
   it merges), or the repository does not

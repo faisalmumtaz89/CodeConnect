@@ -1509,6 +1509,11 @@ pub struct PullRequest {
     /// Absent when not read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_methods: Option<Vec<MergeMethod>>,
+    /// An open one waits to be merged: a merge queue holds it, or GitHub's auto-merge will
+    /// queue it, as a merge on a branch whose queue is required does (minor 64). Absent when not
+    /// read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_queued: Option<bool>,
 }
 
 /// A [`PullRequest`]'s merge state: GitHub's `mergeStateStatus`, `draft` from `isDraft`.
@@ -4943,6 +4948,7 @@ mod tests {
                     checks_complete: Some(true),
                     merge_state: Some(MergeState::Blocked),
                     merge_methods: Some(vec![MergeMethod::Squash]),
+                    merge_queued: Some(false),
                 }),
                 gh_read_at: Some("u".into()),
                 gh_repo: Some("o/r".into()),
@@ -4964,7 +4970,7 @@ mod tests {
                            "base": "main", "head_oid": "abc", "checks_complete": true,
                            "checks": [{"name": "test", "state": "fail", "started_at": "s", "url": "l",
                                        "failure_line": "expected 2, got 3"}],
-                           "merge_state": "blocked", "merge_methods": ["squash"]},
+                           "merge_state": "blocked", "merge_methods": ["squash"], "merge_queued": false},
                 },
             })
         );

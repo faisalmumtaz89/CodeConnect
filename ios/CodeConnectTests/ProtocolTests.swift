@@ -241,11 +241,12 @@ final class ProtocolTests: XCTestCase {
              "git":{"branch":"feat/x","changed":{"files":0,"added":0,"removed":0,"complete":true},
                     "pushed":true,"unmerged":false,"read_at":"t","gh":"signed_in",
                     "pr":{"number":3,"url":"u","state":"open","base":"main","head_oid":"abc",
-                          "merge_state":"has_hooks","merge_methods":["merge","a_later_way","rebase"]}}}
+                          "merge_state":"has_hooks","merge_methods":["merge","a_later_way","rebase"],"merge_queued":true}}}
             """)
         guard case .runGit(let mergeable) = merging else { return XCTFail("wrong message") }
         XCTAssertEqual(mergeable.git?.pullRequest?.mergeState, .hasHooks)
         XCTAssertEqual(mergeable.git?.pullRequest?.mergeMethods, [.merge, .rebase])
+        XCTAssertEqual(mergeable.git?.pullRequest?.mergeQueued, true)
         let later = try decodeServer(
             #"{"type":"run_git","session_id":"cc-1","git":{"branch":"x","changed":{"files":0,"added":0,"removed":0,"complete":true},"pushed":true,"unmerged":false,"read_at":"t","pr":{"number":3,"url":"u","state":"open","base":"main","head_oid":"abc","merge_state":"a_later_state"}}}"#)
         guard case .runGit(let laterReply) = later else { return XCTFail("wrong message") }

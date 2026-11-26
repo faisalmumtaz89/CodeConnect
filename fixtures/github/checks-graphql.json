@@ -236,7 +236,9 @@
      ]
     },
     "mergeStateStatus": "BLOCKED",
-    "isDraft": false
+    "isDraft": false,
+    "isInMergeQueue": false,
+    "autoMergeRequest": null
    },
    "mergeCommitAllowed": true,
    "squashMergeAllowed": true,

@@ -2134,6 +2134,9 @@ public struct RunGit: Decodable, Sendable, Hashable {
         /// A method this build does not name is left out.
         public var mergeMethods: [MergeMethod]? { mergeMethodNames?.compactMap(MergeMethod.init(rawValue:)) }
         private let mergeMethodNames: [String]?
+        /// An open one waits to be merged: a merge queue holds it, or GitHub's auto-merge will queue it (minor 64), as
+        /// a merge on a branch whose queue is required leaves it. Nil when not read.
+        public let mergeQueued: Bool?
 
         public enum MergeState: String, Decodable, Sendable, Hashable {
             case clean, blocked, behind, dirty, unstable, draft
@@ -2197,6 +2200,7 @@ public struct RunGit: Decodable, Sendable, Hashable {
             case checksComplete = "checks_complete"
             case mergeState = "merge_state"
             case mergeMethodNames = "merge_methods"
+            case mergeQueued = "merge_queued"
         }
     }
 

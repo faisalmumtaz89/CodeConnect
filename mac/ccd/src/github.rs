@@ -461,6 +461,7 @@ async fn read_github(
                         pr.checks_complete = Some(complete);
                     }
                     (pr.merge_state, pr.merge_methods) = merge_from(&answer);
+                    pr.merge_queued = queued_from(&answer);
                 }
                 Err(Failed::RateLimited) => return (read(GhState::SignedIn, Some(pr)), true),
                 // Not read: the pull request stands without them.
@@ -615,7 +616,7 @@ fn from_branch(pr: &serde_json::Value, head: &Repo, branch: &str) -> bool {
 /// allows, and its last commit's checks, each check run with its first annotations: one request.
 const DETAILS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { \
     mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed \
-    pullRequest(number: $number) { mergeStateStatus isDraft commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { \
+    pullRequest(number: $number) { mergeStateStatus isDraft isInMergeQueue autoMergeRequest { enabledAt } commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { \
     pageInfo { hasNextPage } nodes { __typename \
     ... on CheckRun { name status conclusion startedAt completedAt detailsUrl annotations(first: 10) { nodes { annotationLevel message } } \
     checkSuite { workflowRun { event workflow { name } } } } \
@@ -785,6 +786,14 @@ fn merge_from(
     (state, methods)
 }
 
+/// Whether an open pull request waits to be merged (a merge queue holds it, or GitHub's
+/// auto-merge will put it there), from the details query's answer.
+fn queued_from(answer: &serde_json::Value) -> Option<bool> {
+    let pr = &answer["data"]["repository"]["pullRequest"];
+    let in_queue = pr["isInMergeQueue"].as_bool()?;
+    Some(in_queue || pr["autoMergeRequest"].is_object())
+}
+
 /// A check run's state from its `status` and `conclusion`.
 fn run_state(status: Option<&str>, conclusion: Option<&str>) -> protocol::ws::CheckState {
     use protocol::ws::CheckState::*;
@@ -844,6 +853,7 @@ fn pull(pr: &serde_json::Value) -> Option<PullRequest> {
         checks_complete: None,
         merge_state: None,
         merge_methods: None,
+        merge_queued: None,
     })
 }
 
@@ -1077,6 +1087,21 @@ mod tests {
             ])
         );
         assert_eq!(merge_from(&serde_json::json!({"errors": []})), (None, None));
+    }
+
+    /// **A pull request waiting to be merged says so**: a merge queue holds it, or GitHub's
+    /// auto-merge will queue it (as gh enqueues on a branch whose queue is required).
+    #[test]
+    fn a_queued_pull_request_says_so() {
+        let mut answer: serde_json::Value = serde_json::from_str(CHECKS).unwrap();
+        assert_eq!(queued_from(&answer), Some(false));
+        answer["data"]["repository"]["pullRequest"]["autoMergeRequest"] =
+            serde_json::json!({"enabledAt": "2026-11-27T10:00:00Z"});
+        assert_eq!(queued_from(&answer), Some(true));
+        answer["data"]["repository"]["pullRequest"]["autoMergeRequest"] = serde_json::Value::Null;
+        answer["data"]["repository"]["pullRequest"]["isInMergeQueue"] = true.into();
+        assert_eq!(queued_from(&answer), Some(true));
+        assert_eq!(queued_from(&serde_json::json!({"errors": []})), None);
     }
 
     /// **Checks of another commit are not shown, and a list past 100 says so**: the head moved
