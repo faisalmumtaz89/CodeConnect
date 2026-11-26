@@ -163,7 +163,7 @@ struct FolderBrowser: View {
                     .truncationMode(.middle)
             }
         }
-        .buttonStyle(.hover(radius: 8, id: "start.browse.folder.\(name)"))
+        .buttonStyle(.menuRow(id: "start.browse.folder.\(name)"))
         .simultaneousGesture(TapGesture(count: 2).onEnded { go(target) })
         .focusable(false)
         .accessibilityIdentifier("start.browse.folder.\(name)")

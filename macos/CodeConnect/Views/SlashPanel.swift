@@ -2,7 +2,7 @@ import CodeConnectKit
 import SwiftUI
 
 /// The slash palette above a Claude run's reply box (Kit's `SlashPalette`): the commands this app answers itself, the
-/// lit one plated as every panel's is (`PanelLight.fill`), the caption under a bare `/`. A click runs a row; the
+/// lit one lit as every panel's row is (`MenuRow`), the caption under a bare `/`. A click runs a row; the
 /// pointer entering a row lights it (`light`), and the keys are the reply box's (`SlashPalette.outcome`).
 struct SlashPanel: View {
     let content: SlashPalette.Content
@@ -22,7 +22,7 @@ struct SlashPanel: View {
                         Text(verbatim: row.title).font(Theme.mono(12)).foregroundStyle(Theme.text).fixedSize()
                         ModelDetail(text: row.subtitle)
                     }
-                    .background(index == lit ? PanelLight.fill : .clear, in: RoundedRectangle(cornerRadius: 8))
+                    .environment(\.menuRowLit, index == lit)
                 }
                 .buttonStyle(.panelRow)
                 .onHover { if $0 { light(index) } }

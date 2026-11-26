@@ -207,10 +207,11 @@ struct BranchMenu: View {
     let choose: (StartPlace?) -> Void
 
     static let width: CGFloat = 440
-    static let rowHeight: CGFloat = 32
+    /// A line: a menu row and its gap (`MenuRow`).
+    static let rowHeight: CGFloat = MenuMetrics.rowHeight + MenuMetrics.rowGap
     static let mostRows = 12
     /// The card's padding (`menuCard`), above and below the rows.
-    private static let inset: CGFloat = 6
+    private static let inset = MenuMetrics.inset
 
     /// The menu's lines for this folder: each section's heading and entries.
     static func rows(git: StartGit, folder: StartProject) -> Int {
@@ -281,7 +282,7 @@ struct BranchMenu: View {
             }
             .overlay(alignment: .top) { MenuDivider() }
         }
-        .frame(width: width - 12, alignment: .leading)
+        .frame(width: width - 2 * MenuMetrics.inset, alignment: .leading)
         .menuCard()
     }
 
@@ -315,7 +316,6 @@ struct BranchMenu: View {
     ) -> some View {
         Button(action: choose) {
             MenuRow(chosen: checked) { content() }
-                .frame(height: Self.rowHeight)
         }
         .buttonStyle(.panelRow)
         .panelRow(index, id: id, choose: choose)
