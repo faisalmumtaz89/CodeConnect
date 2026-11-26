@@ -35,19 +35,29 @@ struct ChangesPanel: View {
             // computer, the branch the run's summary names and the diff's own count. A read that found no repository
             // names no branch.
             if let git {
-                BranchLine(branch: git.branch?.displaySafe, base: git.base?.name.displaySafe)
-                // Changes the computer can commit: the line under the state says whether it can now, and the commit
-                // row follows.
+                BranchLine(
+                    branch: git.branch?.displaySafe, base: git.base?.name.displaySafe,
+                    pullRequest: git.pullRequest.flatMap { URL(string: $0.url) }, host: git.ghHost ?? "github.com")
+                // The panel's one action: a commit while there are changes; once they are committed, a pull request
+                // into the repository the computer names, while the branch has none. The line under the state says
+                // whether it can be done now, and the action's row follows.
                 let committable = model.commitsChanges && git.changed.files > 0
+                let target = git.ghRepo.map { ChangesWords.pullRequestTarget(repo: $0, base: git.base?.name) }
+                let proposable =
+                    !committable && model.opensPullRequests && git.pullRequest == nil && (git.ahead ?? 0) > 0
+                    && git.branch != nil && target != nil
                 VStack(alignment: .leading, spacing: 0) {
                     StateLine(
                         text: ChangesWords.state(git), delta: nil, read: ISO8601.parse(git.readAt),
-                        note: committable ? commitWait(git) ?? ChangesWords.commitReady : nil)
+                        note: committable
+                            ? commitWait(git) ?? ChangesWords.commitReady
+                            : proposable ? commitWait(git) ?? target : nil)
                     if committable { CommitRow(row: row, model: model, ready: commitWait(git) == nil) }
+                    if proposable { PullRequestRow(row: row, model: model, ready: commitWait(git) == nil) }
                 }
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             } else if reply == nil, let branch = row.summary.gitBranch?.displaySafe {
-                BranchLine(branch: branch, base: nil)
+                BranchLine(branch: branch, base: nil, pullRequest: nil, host: "")
             }
             // One branch draws a read diff, the one on hand or, while it is read again, the last one, so a reread keeps
             // the same views and their folds, scroll and unsent comment.
@@ -170,6 +180,9 @@ private struct BranchLine: View {
     /// Nil on a detached head.
     let branch: String?
     let base: String?
+    /// The branch's pull request on its host, once it has one.
+    let pullRequest: URL?
+    let host: String
 
     var body: some View {
         HStack(spacing: 8) {
@@ -183,6 +196,12 @@ private struct BranchLine: View {
                 Text(verbatim: base).font(Theme.mono(12)).foregroundStyle(Theme.text3).lineLimit(1)
             }
             Spacer(minLength: 0)
+            if let pullRequest {
+                Link(destination: pullRequest) { Text(verbatim: "\(host) ↗") }
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.text3)
+                    .accessibilityIdentifier("changes.pullRequest.link")
+            }
         }
         .padding(.horizontal, 20)
         .padding(.top, 14)
@@ -241,9 +260,9 @@ private struct CommitRow: View {
     }
 
     var body: some View {
-        let state = model.commitState(for: row.id)
+        let state = model.gitActionState(for: row.id)
         let words = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        let enabled = ready && state != .committing && !words.isEmpty
+        let enabled = ready && state != .working && !words.isEmpty
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 TextField("Commit message", text: $message)
@@ -254,7 +273,7 @@ private struct CommitRow: View {
                     .frame(height: 30)
                     .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.hairline))
-                    .disabled(!ready || state == .committing)
+                    .disabled(!ready || state == .working)
                     .onSubmit { if enabled { model.commit(key: row.id, message: words) } }
                     .accessibilityIdentifier("changes.commit.message")
                 ActionButton(title: "Commit", key: "↩", prominent: true, id: "changes.commit") {
@@ -262,7 +281,7 @@ private struct CommitRow: View {
                 }
                 .disabled(!enabled)
             }
-            if case .refused(let why) = state {
+            if case .refused(let why, .commit) = state {
                 Text(why)
                     .font(Theme.ui(12))
                     .foregroundStyle(Theme.amber)
@@ -271,6 +290,38 @@ private struct CommitRow: View {
                     .accessibilityIdentifier("changes.commit.refused")
             }
         }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 12)
+    }
+}
+
+/// The pull request row: Create PR (⇧⌘P), which pushes the branch and opens its pull request where the line above says.
+/// Only while the run's agent is quiet; what the computer said when it did not open one stays under it.
+private struct PullRequestRow: View {
+    let row: FleetRow
+    let model: AppModel
+    /// The agent is quiet, so the pull request can be opened.
+    let ready: Bool
+
+    var body: some View {
+        let state = model.gitActionState(for: row.id)
+        VStack(alignment: .trailing, spacing: 6) {
+            ActionButton(title: "Create PR", key: "⇧⌘P", prominent: true, id: "changes.createPR") {
+                model.createPullRequest(key: row.id)
+            }
+            .keyboardShortcut("p", modifiers: [.command, .shift])
+            .disabled(!ready || state == .working)
+            if case .refused(let why, .pullRequest) = state {
+                Text(why)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.amber)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("changes.createPR.refused")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.horizontal, 20)
         .padding(.bottom, 12)
     }

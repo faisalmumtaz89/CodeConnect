@@ -241,37 +241,64 @@ public enum ChangesWords {
     public static let commitWaitsCard = "Waiting on you · actions wait until the agent stops"
     public static let commitWaitsMerge = "A merge has unresolved files · resolve them to commit"
     public static let commitWaitsBranch = "No branch is checked out · check one out to commit"
-    /// Why the computer did not commit, by its code (`git_refusal`), with git's own words after where it gave them.
-    public static func commitRefused(code: String, detail: String?) -> String {
+    /// Where Create PR opens its pull request: the base branch, when the computer knows it, on the repository it opens
+    /// it in (a fork's parent when there is one).
+    public static func pullRequestTarget(repo: String, base: String?) -> String {
+        base.map { "Pushes the branch, then opens a PR into \($0) on \(repo)" }
+            ?? "Pushes the branch, then opens a PR into \(repo)"
+    }
+    /// Why the computer did not commit or open a pull request, by its code (`git_refusal`), with git's or gh's own words
+    /// after where it gave them.
+    public static func actionRefused(code: String, detail: String?) -> String {
         let reason: String
         switch code {
         case "busy": reason = "A run in this folder is working or waiting for you, so nothing was committed."
         case "unmerged": reason = "A merge has unresolved files, so nothing was committed."
         case "nothing_to_commit": reason = "Nothing has changed since the last commit."
-        case "detached": reason = "No branch is checked out, so nothing was committed."
+        case "detached": reason = "No branch is checked out, so nothing was done."
         case "not_a_repository": reason = "This run’s folder is not in a git repository."
         case "unknown_session": reason = "This run is no longer on its computer."
-        case "bad_request": reason = "The computer could not take this message, so nothing was committed."
+        case "bad_request": reason = "The computer could not take this request, so nothing was done."
         case "git_failed": reason = "Git did not commit."
         case "timeout": reason = "Git took too long, so nothing was committed."
-        default: return commitUnknown
+        case "gh_missing": reason = "This computer has no gh, so no PR was opened."
+        case "gh_signed_out": reason = "This computer’s gh isn’t signed in to GitHub, so no PR was opened."
+        case "github_unavailable": reason = "GitHub could not be reached, so nothing was pushed."
+        case "no_github_remote": reason = "No remote of this repository is on GitHub, so no PR was opened."
+        case "on_base_branch": reason = "The branch checked out is the base branch itself, so no PR was opened."
+        case "base_unknown": reason = "No base branch is known for this repository, so nothing was pushed."
+        case "nothing_to_propose": reason = "The branch has no commits its base lacks, so no PR was opened."
+        case "create_failed": reason = "GitHub did not open the PR."
+        default: return actionUnknown
         }
         guard let detail, !detail.isEmpty else { return reason }
         return "\(reason) \(detail)"
     }
-    /// A commit whose outcome is not known: the panel's repository, read again, shows what git has.
-    public static let commitUnknown = "It is not known whether the commit was made; the changes below are what git has now."
+    /// An action whose outcome is not known: the panel's repository, read again, shows what git and GitHub have now.
+    public static let actionUnknown = "It is not known whether it was done; the panel below shows what git and GitHub have now."
     /// A Changes panel's state line from its run's repository: an unresolved merge, the files changed (at least so
     /// many when the computer could not count them all), and the commits not on the base, pushed or not, or nothing
     /// committed yet. Only what the computer read; nothing from an agent's words.
     public static func state(_ git: RunGit) -> String {
         var parts: [String] = []
+        // A branch's pull request speaks for its commits and its push.
+        if let pr = git.pullRequest {
+            switch pr.state {
+            case .open: parts.append("PR #\(pr.number) · Open")
+            case .merged: parts.append("PR #\(pr.number) · Merged into \(pr.base)")
+            case .closed: parts.append("PR #\(pr.number) · Closed")
+            case .unknown: parts.append("PR #\(pr.number)")
+            }
+        }
         if git.unmerged { parts.append("Merge conflicts") }
         let changed = Int(git.changed.files)
         if changed > 0 {
             parts.append(git.changed.complete ? "\(files(changed)) changed" : "At least \(files(changed)) changed")
         } else if !git.changed.complete {
             parts.append("Changes not all counted")
+        }
+        if git.pullRequest != nil {
+            return parts.joined(separator: " · ")
         }
         if let ahead = git.ahead, ahead > 0 {
             parts.append(ahead == 1 ? "1 commit" : "\(ahead) commits")

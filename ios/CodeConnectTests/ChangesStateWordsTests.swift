@@ -7,10 +7,10 @@ import XCTest
 final class ChangesStateWordsTests: XCTestCase {
     private func git(
         branch: String? = "fix/login", files: Int = 0, complete: Bool = true, ahead: Int? = 0, pushed: Bool = false,
-        unmerged: Bool = false
+        unmerged: Bool = false, pr: String? = nil
     ) throws -> RunGit {
         let branchJSON = branch.map { #""branch":"\#($0)","# } ?? ""
-        let aheadJSON = ahead.map { #","ahead":\#($0)"# } ?? ""
+        let aheadJSON = (ahead.map { #","ahead":\#($0)"# } ?? "") + (pr.map { #","pr":\#($0)"# } ?? "")
         let json = #"""
             {\#(branchJSON)"head_oid":"1234567","base":{"name":"main","remote":"origin","ref":"refs/remotes/origin/main"},
              "changed":{"files":\#(files),"added":3,"removed":1,"complete":\#(complete)}\#(aheadJSON),
@@ -52,14 +52,51 @@ final class ChangesStateWordsTests: XCTestCase {
     /// an outcome not known (or a code this build does not know) never claimed either way.
     func testACommitsRefusalIsWordedByItsCode() {
         XCTAssertEqual(
-            ChangesWords.commitRefused(code: "nothing_to_commit", detail: nil), "Nothing has changed since the last commit.")
+            ChangesWords.actionRefused(code: "nothing_to_commit", detail: nil), "Nothing has changed since the last commit.")
         XCTAssertEqual(
-            ChangesWords.commitRefused(code: "git_failed", detail: "pre-commit hook: fmtcheck failed"),
+            ChangesWords.actionRefused(code: "git_failed", detail: "pre-commit hook: fmtcheck failed"),
             "Git did not commit. pre-commit hook: fmtcheck failed", "git's words, as it gave them")
         XCTAssertEqual(
-            ChangesWords.commitRefused(code: "busy", detail: nil),
+            ChangesWords.actionRefused(code: "busy", detail: nil),
             "A run in this folder is working or waiting for you, so nothing was committed.", "any run in the folder")
-        XCTAssertEqual(ChangesWords.commitRefused(code: "indeterminate", detail: nil), ChangesWords.commitUnknown)
-        XCTAssertEqual(ChangesWords.commitRefused(code: "a_newer_code", detail: "x"), ChangesWords.commitUnknown)
+        XCTAssertEqual(ChangesWords.actionRefused(code: "indeterminate", detail: nil), ChangesWords.actionUnknown)
+        XCTAssertEqual(ChangesWords.actionRefused(code: "a_newer_code", detail: "x"), ChangesWords.actionUnknown)
+    }
+
+    /// A branch with a pull request (minor 60): the line names it first, by its number and what became of it, then any
+    /// changes not yet committed; the commits and the push are the pull request's now.
+    func testABranchsPullRequestLeadsTheLine() throws {
+        func pr(_ state: String) -> String {
+            #"{"number":12,"url":"https://github.com/acme/app/pull/12","state":"\#(state)","base":"main","head_oid":"1234567"}"#
+        }
+        XCTAssertEqual(ChangesWords.state(try git(files: 0, ahead: 2, pushed: true, pr: pr("open"))), "PR #12 · Open")
+        XCTAssertEqual(
+            ChangesWords.state(try git(files: 1, ahead: 2, pushed: true, pr: pr("open"))), "PR #12 · Open · 1 file changed")
+        XCTAssertEqual(ChangesWords.state(try git(files: 0, ahead: 0, pr: pr("merged"))), "PR #12 · Merged into main")
+        XCTAssertEqual(ChangesWords.state(try git(files: 0, ahead: 2, pr: pr("closed"))), "PR #12 · Closed")
+    }
+
+    /// Before Create PR is pressed, the line names where the pull request goes: the base branch on the repository the
+    /// computer will open it in (a fork's parent when it has one), so a pull request into another repository is never a
+    /// surprise.
+    func testCreatePRNamesItsRepositoryBeforeThePress() {
+        XCTAssertEqual(
+            ChangesWords.pullRequestTarget(repo: "acme/app", base: "main"),
+            "Pushes the branch, then opens a PR into main on acme/app")
+        XCTAssertEqual(
+            ChangesWords.pullRequestTarget(repo: "acme/app", base: nil), "Pushes the branch, then opens a PR into acme/app")
+    }
+
+    /// Why the computer did not open a pull request, by its code, with gh's own words after where it gave them.
+    func testAPullRequestsRefusalIsWordedByItsCode() {
+        XCTAssertEqual(
+            ChangesWords.actionRefused(code: "base_unknown", detail: nil),
+            "No base branch is known for this repository, so nothing was pushed.")
+        XCTAssertEqual(
+            ChangesWords.actionRefused(code: "gh_signed_out", detail: nil),
+            "This computer’s gh isn’t signed in to GitHub, so no PR was opened.")
+        XCTAssertEqual(
+            ChangesWords.actionRefused(code: "create_failed", detail: "pushed; a pull request already exists"),
+            "GitHub did not open the PR. pushed; a pull request already exists")
     }
 }

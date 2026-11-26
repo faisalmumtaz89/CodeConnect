@@ -110,12 +110,19 @@ public enum DiffFailure: Sendable, Equatable {
     }
 }
 
-/// Where a run's commit from its Changes panel stands (`AppModel.commitState(for:)`).
-public enum CommitState: Sendable, Equatable {
+/// Where a run's action from its Changes panel stands (`AppModel.gitActionState(for:)`): one at a time, a commit or a
+/// pull request.
+public enum GitActionState: Sendable, Equatable {
     case idle
-    case committing
-    /// The computer did not commit, or may not have: why, in the app's words.
-    case refused(String)
+    case working
+    /// The computer did not do `step`, or may not have: why, in the app's words.
+    case refused(String, step: GitStep)
+}
+
+/// The step a Changes panel action takes.
+public enum GitStep: Sendable, Equatable {
+    case commit
+    case pullRequest
 }
 
 /// The state of one session's on-demand diff.
@@ -273,8 +280,8 @@ public final class AppModel {
     /// Each run's repository as its computer last read it (`runGit(for:)`), and the runs a read is on its way for.
     private(set) var runGits: [String: RunGitReply] = [:]
     private var runGitsReading: Set<String> = []
-    /// Each run's commit from its Changes panel: on its way, or what the computer said when it did not commit.
-    private(set) var commits: [String: CommitState] = [:]
+    /// Each run's action from its Changes panel: on its way, or what the computer said when it did not do it.
+    private(set) var gitActions: [String: GitActionState] = [:]
 
     /// How far back to backfill a session we have never cached. The daemon pages
     /// at 500; this keeps a cold open bounded without hiding recent work.
@@ -1904,7 +1911,7 @@ public final class AppModel {
         answersInFlight = []
         diffs = [:]
         runGits = [:]
-        commits = [:]
+        gitActions = [:]
         // **The mutation controllers go with the fleet.** They were left
         // behind, so a reconnect that re-created a session under the same key
         // inherited the previous fleet's in-flight ids and settled banners —
@@ -3118,7 +3125,7 @@ public final class AppModel {
         if departedMarks.remove(key) != nil { ReviewMarks.forget(sessionKey: key) }
         diffs[key] = nil
         runGits[key] = nil
-        commits[key] = nil
+        gitActions[key] = nil
         catchUp?.list?.removeAll { $0.sessionKey == key }
         catchUp?.progressed = true
         #if DEBUG
@@ -4304,30 +4311,48 @@ public final class AppModel {
     /// The computer commits a run's changes from its Changes panel (minor 59).
     public var commitsChanges: Bool { connection.capabilities?.commitsChanges == true }
 
-    /// Where the run's commit from its Changes panel stands.
-    public func commitState(for key: String) -> CommitState { commits[key] ?? .idle }
+    /// The computer opens a pull request from a run's branch (minor 61).
+    public var opensPullRequests: Bool { connection.capabilities?.opensPullRequests == true }
 
-    /// Commits every change in the run's folder with `message`, unless a commit of it is on its way. Each is its own
-    /// request: once a commit has landed, another finds nothing to commit. Done, the panel's diff and repository are
-    /// read again and the run's conversation shows the computer's own note of it; refused, the computer's reason is
-    /// kept, in the app's words, until the next commit.
+    /// Where the run's action from its Changes panel stands.
+    public func gitActionState(for key: String) -> GitActionState { gitActions[key] ?? .idle }
+
+    /// Commits every change in the run's folder with `message`. Each is its own request: once a commit has landed,
+    /// another finds nothing to commit.
     public func commit(key: String, message: String) {
-        guard commits[key] != .committing else { return }
-        commits[key] = .committing
+        perform(key: key, step: .commit) { [connection] in
+            try await connection.commit(sessionUID: key, message: message, requestID: UUID().uuidString)
+        }
+    }
+
+    /// Opens a pull request from the run's branch, pushed first, into the repository its `run_git` names. Each press is
+    /// its own request: once one is open, the computer answers with it.
+    public func createPullRequest(key: String) {
+        perform(key: key, step: .pullRequest) { [connection] in
+            try await connection.createPullRequest(sessionUID: key, requestID: UUID().uuidString)
+        }
+    }
+
+    /// One action of the run's Changes panel, unless one is on its way. Done, the panel's diff and repository are read
+    /// again, and they show what the action made; refused, the computer's reason is kept, in the app's words, until the
+    /// step it was for has passed.
+    private func perform(key: String, step: GitStep, _ request: @escaping () async throws -> GitActionResult) {
+        guard gitActions[key] != .working else { return }
+        gitActions[key] = .working
         Task { [weak self] in
             guard let self else { return }
             let refusal: String?
             do {
-                switch try await self.connection.commit(sessionUID: key, message: message, requestID: UUID().uuidString) {
-                case .done: refusal = nil
-                case .refused(let code, let detail): refusal = ChangesWords.commitRefused(code: code, detail: detail)
-                case .unknown: refusal = ChangesWords.commitUnknown
+                switch try await request() {
+                case .done, .pullRequest: refusal = nil
+                case .refused(let code, let detail): refusal = ChangesWords.actionRefused(code: code, detail: detail)
+                case .unknown: refusal = ChangesWords.actionUnknown
                 }
             } catch {
-                refusal = ChangesWords.commitUnknown
+                refusal = ChangesWords.actionUnknown
             }
-            self.commits[key] = refusal.map(CommitState.refused) ?? .idle
-            // A read already on its way waits behind the commit on the computer, so it shows the commit's result.
+            self.gitActions[key] = refusal.map { .refused($0, step: step) } ?? .idle
+            // A read already on its way waits behind the action on the computer, so it shows the action's result.
             if self.diffs[key]?.isLoading != true { self.loadDiff(key: key, force: true) }
             self.loadRunGit(key: key)
         }
@@ -4346,8 +4371,14 @@ public final class AppModel {
             guard let reply = try? await self.connection.runGit(session: key) else { return }
             self.runGits[key] = reply
             // A clean repository ends what a refused commit said: the next changes are another commit.
-            if let changed = reply.git?.changed, changed.files == 0, changed.complete, case .refused = self.commits[key] {
-                self.commits[key] = nil
+            // A refusal's step has passed: a whole clean repository ends a commit's, a pull request a pull request's.
+            if case .refused(_, let step) = self.gitActions[key], let git = reply.git {
+                let passed =
+                    switch step {
+                    case .commit: git.changed.files == 0 && git.changed.complete
+                    case .pullRequest: git.pullRequest != nil
+                    }
+                if passed { self.gitActions[key] = nil }
             }
         }
     }
