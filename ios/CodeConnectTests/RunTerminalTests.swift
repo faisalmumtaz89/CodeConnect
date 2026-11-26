@@ -2,7 +2,7 @@ import XCTest
 
 @testable import CodeConnectKit
 
-/// **A run's shell as one computer's link carries it** (minor 55), counted at the socket: the open and what it asks
+/// **A run's shell as one computer's link carries it** (minor 56), counted at the socket: the open and what it asks
 /// for, output fed in order with its credit given back, typing held for the open and for credit, a fold and a resume
 /// from the offset fed, a stopped view opened again by a keystroke, a reconnect that resumes without taking over, an
 /// open before the handshake, a size taken while opening, and a new screen that asks for the kept output.
@@ -13,7 +13,7 @@ final class RunTerminalTests: XCTestCase {
         let model = AppModel(cache: EventCache())
         model.connection.simulateConnectedForTesting()
         model.connection.simulateCapabilitiesForTesting(
-            Capabilities(canApproveReliably: true, sendText: true, extra: ["run_terminal": .bool(serves)]), minor: 55)
+            Capabilities(canApproveReliably: true, sendText: true, extra: ["run_terminal": .bool(serves)]), minor: 56)
         let recorder = Recorder()
         model.connection.sendStub = { recorder.frames.append($0) }
         model.terminal.output = { data, reset in recorder.fed.append((data, reset, model.terminal.replaying)) }
@@ -169,7 +169,7 @@ final class RunTerminalTests: XCTestCase {
         XCTAssertTrue(recorder.frames.isEmpty, "\(recorder.frames)")
         XCTAssertEqual(model.terminal.phase, .opening)
         model.connection.simulateCapabilitiesForTesting(
-            Capabilities(canApproveReliably: true, sendText: true, extra: ["run_terminal": .bool(true)]), minor: 55)
+            Capabilities(canApproveReliably: true, sendText: true, extra: ["run_terminal": .bool(true)]), minor: 56)
         model.terminal.linkUp()
         XCTAssertEqual(recorder.opens.count, 1)
         opened(model, try XCTUnwrap(recorder.opens.first?.id))

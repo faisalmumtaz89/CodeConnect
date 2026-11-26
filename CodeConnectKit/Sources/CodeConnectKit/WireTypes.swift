@@ -1087,7 +1087,7 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// This daemon takes files for a session's agent (`put_file`, and `attachments` on `send_text` and `compose`, minor
     /// 50). An older one answers `put_file` with `bad_request`, so nothing is sent unless this is set.
     public var takesUploads: Bool { advertises(["uploads"]) }
-    /// This daemon serves a run's shell (`terminal_open` and the terminal frames, minor 55), to this connection: a
+    /// This daemon serves a run's shell (`terminal_open` and the terminal frames, minor 56), to this connection: a
     /// paired device on a transport nothing on the path can read. An older one answers `terminal_open` with
     /// `bad_request`, so nothing is sent unless this is set.
     public var servesRunTerminal: Bool { advertises(["run_terminal"]) }
@@ -2156,7 +2156,7 @@ public enum ClientMessage: Sendable {
     /// `put_file_result`. The first chunk names the file and its size; each next one starts at the bytes the last answer
     /// says were received. `data` is base64 of at most `Attachment.chunkBytes`.
     case putFile(session: String?, uploadID: String, name: String, size: Int, offset: Int, data: String)
-    /// **Open, or attach to, a run's shell** (minor 55, `Capabilities.servesRunTerminal`), answered `terminal_opened` and
+    /// **Open, or attach to, a run's shell** (minor 56, `Capabilities.servesRunTerminal`), answered `terminal_opened` and
     /// its output, or `terminal_closed`. `resumeAfter` is the output offset this end already shows; `takeover` takes the
     /// shell from another viewer, as the person's own open or keystroke does and a reconnect's resume does not.
     case terminalOpen(

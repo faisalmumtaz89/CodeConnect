@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// **A run's shell, as one computer's link carries it** (minor 55, `Capabilities.servesRunTerminal`).
+/// **A run's shell, as one computer's link carries it** (minor 56, `Capabilities.servesRunTerminal`).
 ///
 /// The shell is the run's and lives on the computer: this end only views it. One view at a time per link: showing
 /// another run's shell lets the first go. Folding the view lets the shell go too (it runs on), and showing it again
