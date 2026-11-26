@@ -391,7 +391,7 @@ pub(crate) fn listing(
         }
     };
     let mut active = Vec::new();
-    for agent in [AgentKind::Claude, AgentKind::Codex] {
+    for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity] {
         match store.active_account(agent.as_str()) {
             Ok(Some(account)) => active.push(protocol::ws::ActiveAccount {
                 agent,
@@ -2249,6 +2249,22 @@ done
         agy
     }
 
+    /// **The listing names Antigravity's account in use, as it names Claude Code's and Codex's** (306): an app marks
+    /// that account's row, not the Default's.
+    #[test]
+    fn the_listing_names_antigravitys_account_in_use() {
+        let store = crate::store::Store::open_temp("ccd-agy-active");
+        let _db = store.temp_db();
+        let b = store.add_account("antigravity", "B").unwrap();
+        assert!(store.activate_account("antigravity", Some(&b.id)).unwrap());
+        let listed = serde_json::to_value(super::listing(&store, None)).unwrap();
+        assert_eq!(
+            listed["active"],
+            serde_json::json!([{"agent": "antigravity", "account_id": b.id}]),
+            "{listed}"
+        );
+    }
+
     /// **An added Antigravity account's sign-in is agy's in its own folder** (306 #5): the listing's `signed_in` for each
     /// Antigravity account is what agy says in that account's home (`--gemini-dir`), not the person's own agy's.
     #[tokio::test]
@@ -2683,8 +2699,9 @@ done
     /// Antigravity's sign-in as each listing carries it (S2), built as ccd builds one (its sign-in slot's mark, then
     /// what is held): signed in with agy's tier "Google AI Pro", signed in with no tier named, signed out, and signing
     /// in; and signed in with its plan's limits, read by agy's own /usage as ccd reads them (records shaped as agy 1.5.15
-    /// prints them; of them, its Gemini week, partly used). Its read time is fixed, so the frames are the same at every
-    /// build.
+    /// prints them; of them, its Gemini week, partly used); and, beside that Default, an added account (minor 56), signed
+    /// in in its own folder with its own plan and no windows, the one in use. Its read time is fixed, and the added
+    /// account's id written as one fixed id, so the frames are the same at every build.
     fn antigravity_sign_in_frames() -> serde_json::Value {
         let store = crate::store::Store::open_temp("ccd-agy-frames");
         let _db = store.temp_db();
@@ -2719,7 +2736,33 @@ done
             }
             serde_json::to_value(facts.told(sign_ins.marked(super::listing(&store, None)))).unwrap()
         };
+        let with_accounts = {
+            let store = crate::store::Store::open_temp("ccd-agy-accounts-frame");
+            let _db = store.temp_db();
+            let added = store.add_account("antigravity", "Antigravity 2").unwrap();
+            assert!(store
+                .activate_account("antigravity", Some(&added.id))
+                .unwrap());
+            let facts = super::Facts::default();
+            let read = |plan: &str, grouped_windows| protocol::ws::AccountFacts {
+                email: None,
+                plan: Some(plan.into()),
+                windows: Vec::new(),
+                grouped_windows,
+                limits_available: None,
+                read_at: "2026-11-25T12:00:00.000Z".into(),
+            };
+            facts.keep_agent_signed(&key, Some(true));
+            facts.read(&key, Some(read("Google AI Ultra", usage.clone())));
+            facts.keep_agent_signed(&added.id, Some(true));
+            facts.read(&added.id, Some(read("Google AI Pro", Vec::new())));
+            let told = serde_json::to_string(&facts.told(super::listing(&store, None)))
+                .unwrap()
+                .replace(&added.id, "01K1B3XQ8ZC0DE5FGH7AGYACC2");
+            serde_json::from_str::<serde_json::Value>(&told).unwrap()
+        };
         serde_json::json!({
+            "with_accounts": with_accounts,
             "signed_in_pro": frame(Some(true), Some("Google AI Pro"), false),
             "signed_in_no_tier": frame(Some(true), None, false),
             "signed_out": frame(Some(false), None, false),
