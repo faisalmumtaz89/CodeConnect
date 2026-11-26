@@ -3,6 +3,11 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.27
+
+- On the Mac, Set Up shows an agent that isn't installed in grey, not amber, while another agent can start: one
+  agent is enough.
+
 ## CodeConnect 0.19.26
 
 - On the Mac, Antigravity is an agent you can start beside Claude Code and Codex, on a Mac where Google's Antigravity

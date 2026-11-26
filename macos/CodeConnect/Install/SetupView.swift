@@ -21,9 +21,9 @@ struct SetupView: View {
             .padding(.bottom, 16)
             VStack(spacing: 0) {
                 row("Background service", setup.service, id: "setup.service")
-                row("Claude Code", setup.agent(.claude, in: machines), id: "setup.claude")
-                row("Codex", setup.agent(.codex, in: machines), id: "setup.codex")
-                row("Antigravity", setup.agent(.antigravity, in: machines), id: "setup.antigravity")
+                row("Claude Code", setup.agent(.claude, in: machines), id: "setup.claude", agent: true)
+                row("Codex", setup.agent(.codex, in: machines), id: "setup.codex", agent: true)
+                row("Antigravity", setup.agent(.antigravity, in: machines), id: "setup.antigravity", agent: true)
                 commandLine
             }
             .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
@@ -53,11 +53,17 @@ struct SetupView: View {
         .task(id: machines.startContexts.map(\.id)) { setup.thisMacContext(in: machines)?.load() }
     }
 
-    /// A row's answer: a word beside its name, or, for a row that isn't ready, its sentence under it.
-    private func row(_ title: String, _ state: Setup.Row, id: String) -> some View {
+    /// A row's answer: a word beside its name, or, for a row that isn't ready, its sentence under it. An agent's
+    /// missing row is amber only while no agent can start (`SetupAttention.agentLacking`); one agent is enough.
+    private func row(_ title: String, _ state: Setup.Row, id: String, agent: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                mark(state, id: id)
+                mark(
+                    state, id: id,
+                    lacking: !agent
+                        || SetupAttention.agentLacking(
+                            missing: state.isMissing, serviceMissing: setup.service.isMissing,
+                            agentsMissing: StartAgent.allCases.map { setup.agent($0, in: machines).isMissing }))
                 Text(title).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text)
                 Spacer(minLength: 12)
                 if !state.isMissing {
@@ -116,11 +122,13 @@ struct SetupView: View {
         .accessibilityIdentifier("setup.commandLine")
     }
 
-    private func mark(_ state: Setup.Row, id: String) -> some View {
+    /// Grey but for a row the computer lacks: an i for an agent on offer, as the Tailscale note draws one.
+    private func mark(_ state: Setup.Row, id: String, lacking: Bool = true) -> some View {
         Group {
             switch state {
             case .checking: Image(systemName: "circle.dotted").foregroundStyle(Theme.text3)
             case .ready: Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.text2)
+            case .missing where !lacking: Image(systemName: "info.circle").foregroundStyle(Theme.text3)
             case .missing: Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Theme.amber)
             }
         }

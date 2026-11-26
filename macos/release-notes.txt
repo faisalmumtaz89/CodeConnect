@@ -1,1 +1,1 @@
-Antigravity joins Claude Code and Codex: on a Mac with Google’s Antigravity CLI installed, start an Antigravity session from New Agent, choose its model, thinking level and mode from Antigravity’s own lists, and see in Settings › Accounts whether it is signed in. Set Up now needs your attention only when none of the three agents can start. Antigravity sessions message your other sessions and read the files you send, as the other agents do.
+Set Up now shows an agent that isn’t installed in grey rather than amber while another agent can start, since one agent is enough.
