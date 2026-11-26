@@ -1200,4 +1200,34 @@ final class AgentSeamDecodeSafetyTests: XCTestCase {
         XCTAssertEqual(future.agent, .claude)
         XCTAssertEqual(future.sessionUID, "u-1")
     }
+
+    /// A run at its usage limit (minor 54), as the daemon sends it (`run-limit-wire.json`, byte-identical to
+    /// `fixtures/claude/`): its limit decodes with the length of the window whose reset is its own. A word this build
+    /// does not know reads `unknown`, with no window; a summary with no limit has none.
+    func testSessionSummaryDecodesTheRunsUsageLimit() throws {
+        let url = try XCTUnwrap(
+            Bundle(for: type(of: self)).url(forResource: "run-limit-wire", withExtension: "json"),
+            "run-limit-wire.json is not in the test bundle (checked in at ios/CodeConnectTests/Resources/)")
+        let wire = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url))
+        let run = try XCTUnwrap(wire.objectValue?["sessions"]?.arrayValue?.first?.decoded(SessionSummary.self))
+        let limit = try XCTUnwrap(run.limit, "the daemon's frame names the run's limit")
+        XCTAssertEqual(limit.which, .fiveHour)
+        XCTAssertEqual(limit.which.windowMinutes, 300)
+        XCTAssertEqual(limit.at, "2026-11-26T10:05:00.000Z")
+
+        func summary(_ extra: String) throws -> SessionSummary {
+            try JSONDecoder().decode(
+                SessionSummary.self,
+                from: Data(
+                    """
+                    {"session_uid":"u-1","session_id":"cc-1","cwd":"/x",
+                     "lifecycle":"live","link":"attached","last_seq":3,
+                     "created_at":"t","updated_at":"t"\(extra)}
+                    """.utf8))
+        }
+        let newer = try summary(#","limit":{"which":"daily","at":"t"}"#)
+        XCTAssertEqual(newer.limit?.which, .unknown)
+        XCTAssertNil(newer.limit?.which.windowMinutes)
+        XCTAssertNil(try summary("").limit)
+    }
 }
