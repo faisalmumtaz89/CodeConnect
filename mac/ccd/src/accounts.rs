@@ -443,7 +443,6 @@ impl Facts {
     }
 
     /// What is held for `key` is as old as [`FACTS_FRESH`], so the next refresh reads it again.
-    #[cfg(test)]
     pub(crate) fn age(&self, key: &str) {
         if let Some((_, at)) = self.known.lock().unwrap().get_mut(key) {
             *at = at.checked_sub(FACTS_FRESH).unwrap();

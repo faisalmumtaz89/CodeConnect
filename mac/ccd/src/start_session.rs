@@ -108,14 +108,23 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                 &daemon.store,
                 &daemon.sign_ins,
                 // What agy said is the sign-in the list carries at once; with no answer of agy's, it is read again.
+                // Signed in, its plan goes out at once and its limits follow: what is held is aged, so the refresh reads
+                // agy's /usage now rather than a FACTS_FRESH later.
                 move |said| {
                     ended.agents.forget(&AgentKind::Antigravity);
                     let known = said.is_some();
+                    let signed_in = matches!(said, Some((true, _)));
                     crate::accounts::keep_antigravity(&ended.account_facts, said);
                     tokio::spawn(async move {
                         if known {
-                            push_accounts(&ended).await
-                        } else {
+                            push_accounts(&ended).await;
+                        }
+                        if signed_in {
+                            ended
+                                .account_facts
+                                .age(&crate::accounts::default_key(&AgentKind::Antigravity));
+                        }
+                        if !known || signed_in {
                             refresh_facts(&ended).await
                         }
                     });
@@ -3186,13 +3195,9 @@ mod tests {
         );
     }
 
-    /// **Antigravity's plan limits are read at most once a FACTS_FRESH, however many ask**: ten refreshes in a row and
-    /// ten more at once (an app's accounts call and an Antigravity turn's end each ask one) run agy's `/usage` once;
-    /// the listing then carries its four windows, by group, on Antigravity's Default (`grouped_windows`, never `windows`).
-    #[tokio::test]
-    async fn antigravity_limits_are_read_once_however_many_ask() {
-        let _env = crate::ProcessEnvRead::take();
-        let rig = Rig::new("agyuse", "exit 1");
+    /// The rig's agy as a stand-in signed in: it answers an offer (`initialize`, `session/new`, `session/close`) and
+    /// prints [`AGY_USAGE`] for `agy -p "/usage"`, noting each such run in `<agy>.p`.
+    fn usage_agy(rig: &Rig) -> PathBuf {
         let agy = rig.root.join("stand-in-agy");
         let reply = |body: &str| format!(r#"printf '{{"jsonrpc":"2.0","id":%s,{body}}}\n' "$id""#);
         let records = AGY_USAGE
@@ -3212,6 +3217,51 @@ mod tests {
             ),
         )
         .unwrap();
+        agy
+    }
+
+    /// **A sign-in's limits are read at once** (as the sign-in does: agy's answer kept, then aged): the refresh after
+    /// it runs agy's `/usage` once and holds its windows; held as fresh instead (the must-fail), it runs none.
+    #[tokio::test]
+    async fn a_sign_ins_limits_are_read_at_once() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = Rig::new("agysig", "exit 1");
+        let agy = usage_agy(&rig);
+        let key = crate::accounts::default_key(&AgentKind::Antigravity);
+        let runs = || std::fs::read_to_string(format!("{}.p", agy.display())).unwrap_or_default();
+        crate::accounts::keep_antigravity(
+            &rig.daemon.account_facts,
+            Some((true, Some("Google AI Ultra".into()))),
+        );
+        refresh_facts(&rig.daemon).await;
+        assert_eq!(runs(), "", "held as fresh, nothing is read");
+        rig.daemon.account_facts.age(&key);
+        refresh_facts(&rig.daemon).await;
+        assert_eq!(runs(), "/usage\n", "aged, /usage is read at once");
+        let told = serde_json::to_value(
+            rig.daemon
+                .account_facts
+                .told(crate::accounts::listing(&rig.daemon.store, None)),
+        )
+        .unwrap();
+        let held = told["defaults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["agent"] == "antigravity")
+            .map(|d| d["facts"]["grouped_windows"].as_array().map(Vec::len));
+        assert_eq!(held, Some(Some(4)), "{told}");
+        let _ = std::fs::remove_dir_all(&rig.root);
+    }
+
+    /// **Antigravity's plan limits are read at most once a FACTS_FRESH, however many ask**: ten refreshes in a row and
+    /// ten more at once (an app's accounts call and an Antigravity turn's end each ask one) run agy's `/usage` once;
+    /// the listing then carries its four windows, by group, on Antigravity's Default (`grouped_windows`, never `windows`).
+    #[tokio::test]
+    async fn antigravity_limits_are_read_once_however_many_ask() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = Rig::new("agyuse", "exit 1");
+        let agy = usage_agy(&rig);
         for _ in 0..10 {
             refresh_facts(&rig.daemon).await;
         }
