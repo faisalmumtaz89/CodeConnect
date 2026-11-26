@@ -214,10 +214,12 @@ public enum ChangesWords {
         if let ahead = git.ahead, ahead > 0 {
             parts.append(ahead == 1 ? "1 commit" : "\(ahead) commits")
             if git.branch != nil { parts.append(git.pushed ? "pushed" : "not pushed") }
-        } else if git.ahead == 0, changed > 0 {
+        } else if git.ahead == 0 || git.headOID == nil, changed > 0 {
             parts.append("nothing committed")
         }
-        return parts.isEmpty ? "No changes" : parts.joined(separator: " · ")
+        // Clean, with no base to count commits against: nothing more is known than that nothing is uncommitted.
+        if parts.isEmpty { return git.ahead == nil && git.headOID != nil ? "No uncommitted changes" : "No changes" }
+        return parts.joined(separator: " · ")
     }
     public static func showMoreLines(_ count: Int) -> String { "Show \(count) more line\(count == 1 ? "" : "s")" }
     public static func unchangedLines(_ count: Int) -> String {
