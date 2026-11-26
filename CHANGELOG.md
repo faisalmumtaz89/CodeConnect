@@ -5,6 +5,11 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.30
 
+- On the Mac, every menu looks and works the same way: the chosen item has a check at its start, only the row under the
+  pointer is lit, and a mode that acts without asking (Bypass permissions, Full Access) is shown in red.
+- Settings › Accounts and the reply bar show Antigravity's weekly Gemini limit on its own, as they show Claude Code's
+  and Codex's limits, and an account's line under its name shows just its plan.
+
 ## CodeConnect 0.19.29
 
 - On the Mac, the reply and Start bars stay on one row: when space runs short their words are cut with "…", the
