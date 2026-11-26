@@ -46,7 +46,8 @@ public struct AgentAccount: Decodable, Hashable, Sendable, Identifiable {
 }
 
 /// What an agent says of one of its accounts, read by the computer on demand and held in its memory only: the address,
-/// the plan in the agent's own word, and each usage window it names (a window it doesn't name is absent).
+/// the plan in the agent's own word, and each usage window it names (a window it doesn't name is absent; of
+/// Antigravity's, only the Gemini models' week).
 public struct AccountFacts: Decodable, Hashable, Sendable {
     public let email: String?
     public let plan: String?
@@ -59,7 +60,6 @@ public struct AccountFacts: Decodable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case email, plan, windows
-        case groupedWindows = "grouped_windows"
         case limitsAvailable = "limits_available"
         case readAt = "read_at"
     }
@@ -68,11 +68,7 @@ public struct AccountFacts: Decodable, Hashable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         email = try c.decodeIfPresent(String.self, forKey: .email)
         plan = try c.decodeIfPresent(String.self, forKey: .plan)
-        // Windows by model group (minor 54, Antigravity's) come in a field of their own, which an older app ignores;
-        // here they are windows like any other, each naming its group.
-        windows =
-            (try c.decodeIfPresent([UsageWindow].self, forKey: .windows) ?? [])
-            + (try c.decodeIfPresent([UsageWindow].self, forKey: .groupedWindows) ?? [])
+        windows = try c.decodeIfPresent([UsageWindow].self, forKey: .windows) ?? []
         limitsAvailable = try c.decodeIfPresent(Bool.self, forKey: .limitsAvailable)
         readAt = try c.decode(String.self, forKey: .readAt)
     }
@@ -82,24 +78,19 @@ public struct AccountFacts: Decodable, Hashable, Sendable {
 public struct UsageWindow: Decodable, Hashable, Sendable {
     public let usedPercent: Int
     public let windowMinutes: Int
-    /// Unix seconds; 0 for a window the agent has not opened yet (minor 54: Antigravity's, unused).
+    /// Unix seconds; 0 for a window the agent has not opened yet (Antigravity's, unused).
     public let resetsAt: Int
-    /// The models it counts, in the agent's own words (minor 54: Antigravity's "Gemini Models"); nil where one window
-    /// counts all the agent's models.
-    public let group: String?
 
-    public init(usedPercent: Int, windowMinutes: Int, resetsAt: Int, group: String? = nil) {
+    public init(usedPercent: Int, windowMinutes: Int, resetsAt: Int) {
         self.usedPercent = usedPercent
         self.windowMinutes = windowMinutes
         self.resetsAt = resetsAt
-        self.group = group
     }
 
     private enum CodingKeys: String, CodingKey {
         case usedPercent = "used_percent"
         case windowMinutes = "window_minutes"
         case resetsAt = "resets_at"
-        case group
     }
 }
 
@@ -131,11 +122,12 @@ public struct AgentSignIn: Decodable, Hashable, Sendable {
         signingIn = try c.decodeIfPresent(Bool.self, forKey: .signingIn) ?? false
     }
 
-    /// The words its one row says, beside its plan as the agent names it (`plan`, passed through as sent): "Signed in ·
-    /// <plan>", "Signed in" when it names none; nil otherwise, where the row says it is signed out or signing in.
+    /// The words its one row says signed in: its plan as the agent names it (`plan`, passed through as sent), as Claude
+    /// Code's row says "Max"; "Signed in" when it names none; nil otherwise, where the row says it is signed out or
+    /// signing in.
     public func line(plan: String?) -> String? {
         guard signedIn == true, !signingIn else { return nil }
-        return plan.map { "Signed in · \($0)" } ?? "Signed in"
+        return plan ?? "Signed in"
     }
 
     /// Signed out, as its row says it: the agent says so and no sign-in is going on.
@@ -237,11 +229,6 @@ public enum AccountSwitchWords {
     }
 
     /// A usage window's caption, from its own length as the service names it.
-    /// A window's caption: its length, after its model group where the agent names one ("Gemini Models · 5-hour").
-    public static func caption(_ window: UsageWindow) -> String {
-        window.group.map { "\($0) · \(caption(minutes: window.windowMinutes))" } ?? caption(minutes: window.windowMinutes)
-    }
-
     public static func caption(minutes: Int) -> String {
         switch minutes {
         case 300: "5-hour"

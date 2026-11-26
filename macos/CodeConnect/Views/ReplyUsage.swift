@@ -44,10 +44,10 @@ struct ReplyUsage: View {
                 let window = Text(" / \(context.window)").foregroundStyle(Theme.text3)
                 Text("\(Text(context.used).foregroundStyle(Theme.text2))\(window)").font(Theme.mono(11))
             }
-            if bar.context != nil && !bar.figures.isEmpty {
+            if bar.context != nil && !bar.limits.isEmpty {
                 Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 14)
             }
-            ForEach(bar.figures, id: \.caption) { limit in
+            ForEach(bar.limits, id: \.caption) { limit in
                 HStack(spacing: 5) {
                     UsageRing(percent: limit.usedPercent)
                     Text("\(limit.usedPercent)%").font(Theme.mono(11)).foregroundStyle(Theme.text2)

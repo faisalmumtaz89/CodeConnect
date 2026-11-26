@@ -451,7 +451,7 @@ private struct AccountSettings: View {
 }
 
 /// An agent that keeps one sign-in of its own and no accounts here (Antigravity, minor 51), drawn as an accounts group
-/// with its Default alone: "Signed in · <plan>" (its plan as the agent names it), "Signed in", "Signed out", signing in,
+/// with its Default alone: its plan as the agent names it, "Signed in" when it names none, "Signed out", signing in,
 /// or "As set up on this Mac" before the Mac has said. Its "…" holds Sign In… signed out and Sign Out… signed in; the
 /// sign-out is confirmed. No account is added or chosen here.
 private struct AgentSignInGroup: View {
@@ -634,41 +634,17 @@ private struct AccountRow: View {
     let remove: () -> Void
     /// Sign Out… of an agent's own sign-in: asks first, by its group's card.
     var signOut: () -> Void = {}
-    /// The columns' headings on the group's title line: "<length> used" over each, and over a model group's columns,
-    /// where the agent names groups, the group's name once, above them at the trailing edge of its last.
+    /// The columns' headings on the group's title line: "<length> used" over each.
     static func headings(_ columns: [String]) -> some View {
-        var runs: [[String]] = []
-        for caption in columns {
-            if let last = runs.last?.last, parts(last).group == parts(caption).group {
-                runs[runs.count - 1].append(caption)
-            } else {
-                runs.append([caption])
-            }
-        }
-        return HStack(alignment: .bottom, spacing: 0) {
-            ForEach(runs, id: \.self) { run in
-                VStack(alignment: .trailing, spacing: 1) {
-                    if let group = parts(run[0]).group { Text(group).lineLimit(1).fixedSize() }
-                    HStack(spacing: 0) {
-                        ForEach(run, id: \.self) { caption in
-                            Text("\(parts(caption).length) used").lineLimit(1)
-                                .frame(width: column, alignment: .trailing)
-                        }
-                    }
-                }
+        HStack(spacing: 0) {
+            ForEach(columns, id: \.self) { caption in
+                Text("\(caption) used").lineLimit(1).frame(width: column, alignment: .trailing)
             }
         }
         .font(Theme.ui(10.5)).foregroundStyle(Theme.text3)
     }
 
-    /// A caption's model group, where it names one ("<group> · <length>"), and its length.
-    private static func parts(_ caption: String) -> (group: String?, length: String) {
-        guard let dot = caption.range(of: " · ", options: .backwards) else { return (nil, caption) }
-        return (String(caption[..<dot.lowerBound]), String(caption[dot.upperBound...]))
-    }
-
-    /// The windows `all` name, in the order they name them, by caption (a model group's own, where the agent names
-    /// groups): a group's columns.
+    /// The windows `all` name, in the order they name them, by caption: a group's columns.
     static func columns(_ all: [AccountFacts]) -> [String] {
         var seen: [String] = []
         for limit in all.flatMap({ ReplyBar.limits($0, now: .now) }) where !seen.contains(limit.caption) {

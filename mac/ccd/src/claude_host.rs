@@ -13738,7 +13738,6 @@ mod tests {
             rig.daemon.account_facts.read(
                 &account.id,
                 Some(protocol::ws::AccountFacts {
-                    grouped_windows: Vec::new(),
                     limits_available: None,
                     email: Some(format!("{}@example.test", account.label.to_lowercase())),
                     plan: Some("max".into()),

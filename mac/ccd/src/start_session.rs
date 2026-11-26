@@ -313,7 +313,7 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
                     // FACTS_FRESH, however many apps and turns ask.
                     let mut facts = offer.as_ref().and_then(agy_default_facts);
                     if let (Some(facts), Some(agy)) = (facts.as_mut(), agy) {
-                        facts.grouped_windows = agy_usage(environment, agy).await;
+                        facts.windows = agy_usage(environment, agy).await;
                     }
                     daemon.account_facts.read(key, facts);
                     return;
@@ -2050,7 +2050,6 @@ async fn ask(
 /// exactly as agy gives it (none when agy names none); signed out or not known, nothing.
 pub(crate) fn agy_default_facts(offer: &Offer) -> Option<protocol::ws::AccountFacts> {
     (offer.signed_in == Some(true)).then(|| protocol::ws::AccountFacts {
-        grouped_windows: Vec::new(),
         email: None,
         plan: offer.tier.clone(),
         windows: Vec::new(),
@@ -2085,27 +2084,23 @@ pub(crate) async fn agy_usage(
         .unwrap_or_default()
 }
 
-/// `/usage`'s records, one window a line, tab-separated as agy 1.5.15 prints them: its group, "Five Hour Limit
-/// Remaining" or "Weekly Limit Remaining", the share left ("100%"), the reset (RFC 3339). Any other line, and a window
-/// named in other words, is left out, never guessed. agy names a window not opened yet as resetting at 1970-01-01: 0.
+/// `/usage`'s records, one window a line, tab-separated as agy 1.5.15 prints them: its group of models, its window
+/// ("Five Hour Limit Remaining", "Weekly Limit Remaining"), the share left ("100%"), the reset (RFC 3339). Only the
+/// Gemini models' week is kept, as one plain window (the owner's ruling, 2026-11-26: Antigravity reads as Claude Code
+/// and Codex do, one "Week used"); every other line is left out. agy names a window not opened yet as resetting at
+/// 1970-01-01: 0.
 pub(crate) fn agy_usage_windows(text: &str) -> Vec<protocol::ws::UsageWindow> {
     text.lines()
         .filter_map(|line| {
             let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
-            let [group, window, left, reset] = fields[..] else {
+            let ["Gemini Models", "Weekly Limit Remaining", left, reset] = fields[..] else {
                 return None;
-            };
-            let window_minutes = match window {
-                "Five Hour Limit Remaining" => 300,
-                "Weekly Limit Remaining" => 10_080,
-                _ => return None,
             };
             let left: u32 = left.strip_suffix('%')?.parse().ok()?;
             Some(protocol::ws::UsageWindow {
                 used_percent: 100 - left.min(100),
-                window_minutes,
+                window_minutes: 10_080,
                 resets_at: protocol::time::unix_ms_from_rfc3339(reset)? / 1000,
-                group: Some(group.to_string()),
             })
         })
         .collect()
@@ -3156,42 +3151,24 @@ mod tests {
         Claude and GPT models\tWeekly Limit Remaining\t100%\t1970-01-01T00:00:00Z\n\
         Claude and GPT models\tFive Hour Limit Remaining\t100%\t1970-01-01T00:00:00Z\n";
 
-    /// **agy's `/usage` is read as it prints it**: a window per record, by group, in agy's own words; a window agy has
-    /// not opened (a 1970 reset) resets at 0; a window named in other words, and any other line, is left out.
+    /// **agy's `/usage` is read as one window, the Gemini models' week** (the owner's ruling, 2026-11-26: Antigravity
+    /// reads as Claude Code and Codex do, one "Week used"): of agy's records only Gemini Models' weekly one is kept, a
+    /// plain window, as an app reads Claude Code's; one agy has not opened (a 1970 reset) resets at 0; every other group,
+    /// window and line is left out, so "Claude and GPT models" never reaches an app.
     #[test]
-    fn agys_usage_records_are_its_windows_by_group() {
-        let windows = agy_usage_windows(AGY_USAGE);
-        let read: Vec<_> = windows
-            .iter()
-            .map(|w| {
-                (
-                    w.group.as_deref().unwrap(),
-                    w.window_minutes,
-                    w.used_percent,
-                    w.resets_at,
-                )
-            })
-            .collect();
+    fn agys_usage_is_the_gemini_models_week() {
         assert_eq!(
-            read,
-            [
-                ("Gemini Models", 10_080, 0, 1_796_258_851),
-                ("Gemini Models", 300, 0, 1_795_672_051),
-                ("Claude and GPT models", 10_080, 0, 0),
-                ("Claude and GPT models", 300, 0, 0),
-            ]
+            serde_json::to_value(agy_usage_windows(AGY_USAGE)).unwrap(),
+            serde_json::json!([{"used_percent": 0, "window_minutes": 10_080, "resets_at": 1_796_258_851}])
         );
-        let odd = "Gemini Models\tDaily Limit Remaining\t40%\t2026-11-27T00:00:00Z\n\
+        let odd = "Claude and GPT models\tWeekly Limit Remaining\t70%\t2026-12-03T00:47:31Z\n\
+                   Gemini Models\tFive Hour Limit Remaining\t25%\t2026-11-26T05:47:31Z\n\
                    Model group\tLimit\tRemaining\tReset\n\
-                   Gemini Models\tFive Hour Limit Remaining\t25%\t2026-11-26T05:47:31Z";
-        let read: Vec<_> = agy_usage_windows(odd)
-            .iter()
-            .map(|w| (w.window_minutes, w.used_percent))
-            .collect();
+                   Gemini Models\tWeekly Limit Remaining\t40%\t1970-01-01T00:00:00Z";
         assert_eq!(
-            read,
-            [(300, 75)],
-            "only the window in agy's known words, 75% used of it"
+            serde_json::to_value(agy_usage_windows(odd)).unwrap(),
+            serde_json::json!([{"used_percent": 60, "window_minutes": 10_080, "resets_at": 0}]),
+            "Gemini's week alone, 60% used, not opened yet"
         );
     }
 
@@ -3249,14 +3226,14 @@ mod tests {
             .unwrap()
             .iter()
             .find(|d| d["agent"] == "antigravity")
-            .map(|d| d["facts"]["grouped_windows"].as_array().map(Vec::len));
-        assert_eq!(held, Some(Some(4)), "{told}");
+            .map(|d| d["facts"]["windows"].as_array().map(Vec::len));
+        assert_eq!(held, Some(Some(1)), "{told}");
         let _ = std::fs::remove_dir_all(&rig.root);
     }
 
     /// **Antigravity's plan limits are read at most once a FACTS_FRESH, however many ask**: ten refreshes in a row and
     /// ten more at once (an app's accounts call and an Antigravity turn's end each ask one) run agy's `/usage` once;
-    /// the listing then carries its four windows, by group, on Antigravity's Default (`grouped_windows`, never `windows`).
+    /// the listing then carries its one window, Gemini's week, on Antigravity's Default.
     #[tokio::test]
     async fn antigravity_limits_are_read_once_however_many_ask() {
         let _env = crate::ProcessEnvRead::take();
@@ -3287,10 +3264,10 @@ mod tests {
             .unwrap()
             .iter()
             .find(|d| d["agent"] == "antigravity")
-            .map(|d| d["facts"]["grouped_windows"].clone());
+            .map(|d| d["facts"]["windows"].clone());
         assert_eq!(
             windows.and_then(|w| w.as_array().map(|w| w.len())),
-            Some(4),
+            Some(1),
             "{told}"
         );
         let _ = std::fs::remove_dir_all(&rig.root);

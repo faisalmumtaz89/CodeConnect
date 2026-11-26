@@ -20,10 +20,10 @@ struct UsageFigures: View {
                     let window = Text(verbatim: " / \(context.window)").foregroundStyle(CC.text.tertiary)
                     Text("\(Text(verbatim: context.used).foregroundStyle(CC.text.secondary))\(window)")
                 }
-                if bar.context != nil && !bar.figures.isEmpty {
+                if bar.context != nil && !bar.limits.isEmpty {
                     Rectangle().fill(CC.color.border).frame(width: CC.stroke.hairline, height: 14)
                 }
-                ForEach(bar.figures, id: \.caption) { share($0) }
+                ForEach(bar.limits, id: \.caption) { share($0) }
             }
         }
         .ccType(CC.type.monoSmall)
