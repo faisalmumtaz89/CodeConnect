@@ -8,15 +8,17 @@ import SwiftUI
 /// computer's own words are quoted as they came, the app's account of its link is never passed off as them, and an
 /// empty diff is called clean only when the computer added no note saying why it is empty.
 struct ChangesPanel: View {
+    let row: FleetRow
     let model: AppModel
-    let key: String
+    private var key: String { row.id }
     @State private var hunks: HunkActions
     /// The diff last read, kept on screen while it is read again, so a reread loses no place, fold or comment.
     @State private var shown: (raw: SessionDiff, parsed: UnifiedDiff, fetchedAt: Date)?
 
-    init(model: AppModel, key: String) {
+    init(row: FleetRow, model: AppModel) {
+        self.row = row
         self.model = model
-        self.key = key
+        let key = row.id
         _hunks = State(initialValue: HunkActions(model: model, key: key))
         // A diff already on hand shows at once when the panel opens, while it is read again.
         if case .loaded(let raw, let parsed, let fetchedAt) = model.diffState(for: key) {
@@ -26,20 +28,22 @@ struct ChangesPanel: View {
 
     var body: some View {
         let state = model.diffState(for: key)
-        let git = model.runGit(for: key)?.git
+        let reply = model.runGit(for: key)
+        let git = reply?.git
         VStack(alignment: .leading, spacing: 0) {
             // The branch and the state as the run's repository was read (minor 56); before a read, and from an older
-            // computer, the branch the run's summary names and the diff's own count.
+            // computer, the branch the run's summary names and the diff's own count. A read that found no repository
+            // names no branch.
             if let git {
                 BranchLine(branch: git.branch?.displaySafe, base: git.base?.name.displaySafe)
                 StateLine(text: ChangesWords.state(git), delta: nil, read: ISO8601.parse(git.readAt))
-            } else if let branch = model.shownSummary(for: key)?.gitBranch?.displaySafe {
+            } else if reply == nil, let branch = row.summary.gitBranch?.displaySafe {
                 BranchLine(branch: branch, base: nil)
             }
             // One branch draws a read diff, the one on hand or, while it is read again, the last one, so a reread keeps
             // the same views and their folds, scroll and unsent comment.
             if let diff = onHand(state) ?? (state.isLoading ? shown : nil) {
-                loaded(diff.raw, diff.parsed, diff.fetchedAt, counted: git == nil)
+                loaded(diff.raw, diff.parsed, diff.fetchedAt, counted: reply == nil)
             } else {
                 unread(state)
             }
@@ -48,24 +52,19 @@ struct ChangesPanel: View {
         .background(Theme.window)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("changes.pane")
-        // Read when it opens, and again when the run's computer counts its lines anew (a turn's end), so the panel
-        // follows the run.
+        // Read when it opens, again when a turn ends (an agent's commit or push changes no line count), and when the
+        // run's branch or line count changes, so the panel follows the run.
         .task(id: key) { reread() }
-        .onChange(of: model.shownSummary(for: key)?.diffStat) { _, _ in reread() }
+        .onChange(of: row.status == .running) { _, running in if !running { reread() } }
+        .onChange(of: row.summary.gitBranch) { _, _ in reread() }
+        .onChange(of: row.summary.diffStat) { _, _ in reread() }
         .onChange(of: loadedAt) { _, _ in
             if let diff = onHand(model.diffState(for: key)) { shown = diff }
         }
         // Asked again the moment the link is back, as the iPhone does: only after the app's own link failure, never
         // after a refusal the computer made.
         .onChange(of: model.daemonProfile.isConnected) { _, connected in
-            guard connected else { return }
-            let state = model.diffState(for: key)
-            if case .idle = state {
-                model.loadDiff(key: key)
-            } else if state.failedOnTheLink {
-                model.loadDiff(key: key, force: true)
-            }
-            model.loadRunGit(key: key)
+            if connected { reread() }
         }
     }
 
