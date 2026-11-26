@@ -240,11 +240,13 @@ public enum ChangesWords {
     public static let commitReady = "The run has stopped, so you can commit what it left"
     public static let commitWaitsWorking = "Agent is working · actions wait until it stops"
     public static let commitWaitsCard = "Waiting on you · actions wait until the agent stops"
+    public static let commitWaitsMerge = "A merge has unresolved files · resolve them to commit"
+    public static let commitWaitsBranch = "No branch is checked out · check one out to commit"
     /// Why the computer did not commit, by its code (`git_refusal`), with git's own words after where it gave them.
     public static func commitRefused(code: String, detail: String?) -> String {
         let reason: String
         switch code {
-        case "busy": reason = "The run is working or waiting for you, so nothing was committed."
+        case "busy": reason = "A run in this folder is working or waiting for you, so nothing was committed."
         case "unmerged": reason = "A merge has unresolved files, so nothing was committed."
         case "nothing_to_commit": reason = "Nothing has changed since the last commit."
         case "detached": reason = "No branch is checked out, so nothing was committed."

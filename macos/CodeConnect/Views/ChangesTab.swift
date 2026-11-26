@@ -42,8 +42,8 @@ struct ChangesPanel: View {
                 VStack(alignment: .leading, spacing: 0) {
                     StateLine(
                         text: ChangesWords.state(git), delta: nil, read: ISO8601.parse(git.readAt),
-                        note: committable ? commitWait ?? ChangesWords.commitReady : nil)
-                    if committable { CommitRow(row: row, model: model, ready: commitWait == nil) }
+                        note: committable ? commitWait(git) ?? ChangesWords.commitReady : nil)
+                    if committable { CommitRow(row: row, model: model, ready: commitWait(git) == nil) }
                 }
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             } else if reply == nil, let branch = row.summary.gitBranch?.displaySafe {
@@ -84,13 +84,17 @@ struct ChangesPanel: View {
         }
     }
 
-    /// Why the run's changes cannot be committed yet: its agent works, or a card waits for the person; nil when they can.
-    private var commitWait: String? {
+    /// Why the run's changes cannot be committed yet: its agent works, a card waits for the person, a merge is
+    /// unresolved or no branch is checked out; nil when they can.
+    private func commitWait(_ git: RunGit) -> String? {
         switch row.status {
-        case .running, .stopping: ChangesWords.commitWaitsWorking
-        case .blocked: ChangesWords.commitWaitsCard
-        default: nil
+        case .running, .stopping: return ChangesWords.commitWaitsWorking
+        case .blocked: return ChangesWords.commitWaitsCard
+        default: break
         }
+        if git.unmerged { return ChangesWords.commitWaitsMerge }
+        if git.branch == nil { return ChangesWords.commitWaitsBranch }
+        return nil
     }
 
     /// The diff a read gave, when the state holds one.
