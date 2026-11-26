@@ -667,7 +667,8 @@ gate then refuses.
 `send_text`, `delete_session`, `test_push`, `codex_interrupt`, `claude_interrupt`,
 `codex_compose`, `question_card`, `hook_only_approvals`, `history_pages`, `supported_agents`,
 `can_approve_reliably`, `command_catalog`, `private_transport`, `start_session`,
-`start_worktree`, `browse_folders`, `machine_stats`, `stop_run` and `uploads` so the app disables
+`start_worktree`, `browse_folders`, `machine_stats`, `stop_run`, `uploads` and `run_terminal` (a run's
+shell, to a paired device on a private transport only; see [`SECURITY.md`](../SECURITY.md)) so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a

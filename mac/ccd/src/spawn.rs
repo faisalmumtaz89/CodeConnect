@@ -47,6 +47,30 @@ pub async fn output(command: &mut tokio::process::Command) -> io::Result<Output>
     spawn(command)?.wait_with_output().await
 }
 
+/// [`spawn`] for a program on a terminal: `slave` as its stdin, stdout and stderr, and as the controlling terminal
+/// of a session of its own, which it leads. `command` is dropped once the child is started, and with it every copy of
+/// `slave` this process held, so the terminal hangs up when the child's side of it closes.
+pub fn spawn_in_terminal(
+    mut command: tokio::process::Command,
+    slave: std::os::fd::OwnedFd,
+) -> io::Result<tokio::process::Child> {
+    command
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    // SAFETY: `setsid` and `ioctl` are async-signal-safe, and nothing else runs between fork and exec. By the
+    // time this runs, the child's stdin is the slave.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    spawn(&mut command)
+}
+
 /// [`std::process::Command::spawn`], one start at a time.
 #[allow(clippy::disallowed_methods)]
 pub fn spawn_std(command: &mut std::process::Command) -> io::Result<std::process::Child> {

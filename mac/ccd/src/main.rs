@@ -41,6 +41,7 @@ mod start_session;
 mod state;
 mod store;
 mod switch;
+mod terminal;
 mod tls;
 mod uploads;
 mod ws_server;
@@ -314,6 +315,8 @@ async fn run() -> Result<()> {
         () = shutdown_signal() => Stop::Signal,
     };
 
+    // The runs' shells are hung up and reaped, not left on terminals nobody reads.
+    daemon.terminals.end_all().await;
     // Best-effort: a socket left behind is reclaimed on next start anyway.
     let _ = std::fs::remove_file(&socket_path);
     match stop {

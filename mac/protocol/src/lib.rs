@@ -940,7 +940,17 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     Antigravity's Default carries one window in `windows`, as Claude Code's and Codex's do: the Gemini models'
 ///     weekly one, read from agy's own `/usage`; its other windows, and the other group of models, are not sent.
 ///     `grouped_windows` and `group` are gone: a daemon of 54 sends them, and an app from 55 reads none.
-pub const PROTOCOL_MINOR: u32 = 55;
+///   * `56` — **A run's shell.**
+///
+///     [`ws::ClientMessage::TerminalOpen`] opens, or attaches to, the one shell a run has: its user's login shell
+///     in the run's folder, on the run's own computer, started by the first open and ended with the run (a run an
+///     account switch moved keeps it). Its bytes travel both ways as base64 chunks of at most
+///     [`ws::MAX_TERMINAL_CHUNK_BYTES`] against credit ([`ws::ClientMessage::TerminalCredit`],
+///     [`ws::ServerMessage::TerminalCredit`]); a viewer that folds away and comes back resumes by output offset,
+///     and a new one gets a reset and the last output the daemon holds. One viewer at a time: an open with
+///     `takeover` takes the shell from another. Offered only to a paired device on a private transport
+///     ([`ws::Capabilities::run_terminal`]); a daemon below 56 answers the frames as undecodable.
+pub const PROTOCOL_MINOR: u32 = 56;
 
 #[cfg(test)]
 mod ledger_tests {

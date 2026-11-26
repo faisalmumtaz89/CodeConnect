@@ -1087,6 +1087,10 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// This daemon takes files for a session's agent (`put_file`, and `attachments` on `send_text` and `compose`, minor
     /// 50). An older one answers `put_file` with `bad_request`, so nothing is sent unless this is set.
     public var takesUploads: Bool { advertises(["uploads"]) }
+    /// This daemon serves a run's shell (`terminal_open` and the terminal frames, minor 56), to this connection: a
+    /// paired device on a transport nothing on the path can read. An older one answers `terminal_open` with
+    /// `bad_request`, so nothing is sent unless this is set.
+    public var servesRunTerminal: Bool { advertises(["run_terminal"]) }
     /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
     /// 21): its question cards carry `question_hold` and it takes the
     /// `answers` and `decline` decisions. Absent is false — an older daemon
@@ -2152,6 +2156,19 @@ public enum ClientMessage: Sendable {
     /// `put_file_result`. The first chunk names the file and its size; each next one starts at the bytes the last answer
     /// says were received. `data` is base64 of at most `Attachment.chunkBytes`.
     case putFile(session: String?, uploadID: String, name: String, size: Int, offset: Int, data: String)
+    /// **Open, or attach to, a run's shell** (minor 56, `Capabilities.servesRunTerminal`), answered `terminal_opened` and
+    /// its output, or `terminal_closed`. `resumeAfter` is the output offset this end already shows; `takeover` takes the
+    /// shell from another viewer, as the person's own open or keystroke does and a reconnect's resume does not.
+    case terminalOpen(
+        attachmentID: String, session: String, cols: Int, rows: Int, outputCredit: Int, resumeAfter: UInt64?,
+        takeover: Bool)
+    /// Bytes typed or pasted into an open terminal, base64 of at most the chunk the daemon named, within input credit.
+    case terminalInput(attachmentID: String, data: String)
+    case terminalResize(attachmentID: String, cols: Int, rows: Int)
+    /// `bytes` more of the output were fed, and as many more may come.
+    case terminalCredit(attachmentID: String, bytes: Int)
+    /// The view stopped showing the shell (folded, closed, another run chosen); the shell runs on.
+    case terminalDetach(attachmentID: String)
     /// **Set a hosted Claude run's model and/or effort** (minor 39). `effort` rides this message, so
     /// a change to effort alone sends `model: nil, effort: X`. At least one of the two is present —
     /// the daemon refuses a change naming neither.
@@ -2257,6 +2274,13 @@ extension ClientMessage: Encodable {
         case size
         case offset
         case data
+        case attachmentID = "attachment_id"
+        case cols
+        case rows
+        case outputCredit = "output_credit"
+        case resumeAfter = "resume_after"
+        case takeover
+        case bytes
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -2367,6 +2391,31 @@ extension ClientMessage: Encodable {
             try c.encode(size, forKey: .size)
             try c.encode(offset, forKey: .offset)
             try c.encode(data, forKey: .data)
+        case .terminalOpen(let attachmentID, let session, let cols, let rows, let outputCredit, let resumeAfter, let takeover):
+            try c.encode("terminal_open", forKey: .type)
+            try c.encode(attachmentID, forKey: .attachmentID)
+            try c.encode(session, forKey: .sessionID)
+            try c.encode(cols, forKey: .cols)
+            try c.encode(rows, forKey: .rows)
+            try c.encode(outputCredit, forKey: .outputCredit)
+            try c.encodeIfPresent(resumeAfter, forKey: .resumeAfter)
+            try c.encode(takeover, forKey: .takeover)
+        case .terminalInput(let attachmentID, let data):
+            try c.encode("terminal_input", forKey: .type)
+            try c.encode(attachmentID, forKey: .attachmentID)
+            try c.encode(data, forKey: .data)
+        case .terminalResize(let attachmentID, let cols, let rows):
+            try c.encode("terminal_resize", forKey: .type)
+            try c.encode(attachmentID, forKey: .attachmentID)
+            try c.encode(cols, forKey: .cols)
+            try c.encode(rows, forKey: .rows)
+        case .terminalCredit(let attachmentID, let bytes):
+            try c.encode("terminal_credit", forKey: .type)
+            try c.encode(attachmentID, forKey: .attachmentID)
+            try c.encode(bytes, forKey: .bytes)
+        case .terminalDetach(let attachmentID):
+            try c.encode("terminal_detach", forKey: .type)
+            try c.encode(attachmentID, forKey: .attachmentID)
         case .setModel(let session, let requestID, let model, let effort):
             try c.encode("set_model", forKey: .type)
             try c.encode(session, forKey: .sessionID)
@@ -2710,6 +2759,16 @@ public enum ServerMessage: Sendable {
     case composeResult(sessionID: String, requestID: String, result: ComposeResult)
     /// The answer to one `put_file` chunk, by its upload.
     case putFileResult(uploadID: String, result: PutFileResult)
+    /// A `terminal_open` took the run's shell: `inputCredit` is what may be sent before credit comes back, `folder` the
+    /// shell's folder, `replayEnd` the offset up to which output is replayed (a view sends no answer of its own to it).
+    case terminalOpened(attachmentID: String, inputCredit: Int, maxChunkBytes: Int, folder: String, replayEnd: UInt64)
+    /// The shell's output, decoded; `reset` clears the screen first; `offset` is where this chunk ends.
+    case terminalOutput(attachmentID: String, data: Data, reset: Bool, offset: UInt64)
+    /// `bytes` of this end's input were written to the shell.
+    case terminalCredit(attachmentID: String, bytes: Int)
+    /// The attachment is over: `exited`, `run_ended`, `stopping`, `superseded`, `not_live`, `not_ready`,
+    /// `unavailable`, `slow_consumer`, `not_authorised` or `protocol_error`.
+    case terminalClosed(attachmentID: String, reason: String)
     case settingResult(sessionID: String, requestID: String, result: SettingResult)
     /// The answer to `list_projects`: most recent first, and which agents the
     /// computer has.
@@ -2780,6 +2839,16 @@ extension ServerMessage: Decodable {
         case defaults
         case uploadID = "upload_id"
         case agentSignIns = "agent_sign_ins"
+        case attachmentID = "attachment_id"
+        case inputCredit = "input_credit"
+        case maxChunkBytes = "max_chunk_bytes"
+        case folder
+        case replayEnd = "replay_end"
+        case data
+        case reset
+        case offset
+        case bytes
+        case reason
     }
 
     public init(from decoder: Decoder) throws {
@@ -2842,6 +2911,31 @@ extension ServerMessage: Decodable {
                 sessionID: try c.decode(String.self, forKey: .sessionID),
                 requestID: try c.decode(String.self, forKey: .requestID),
                 result: try c.decode(InterruptResult.self, forKey: .result))
+        case "terminal_opened":
+            self = .terminalOpened(
+                attachmentID: try c.decode(String.self, forKey: .attachmentID),
+                inputCredit: try c.decode(Int.self, forKey: .inputCredit),
+                maxChunkBytes: try c.decode(Int.self, forKey: .maxChunkBytes),
+                folder: try c.decode(String.self, forKey: .folder),
+                replayEnd: try c.decode(UInt64.self, forKey: .replayEnd))
+        case "terminal_output":
+            guard let data = Data(base64Encoded: try c.decode(String.self, forKey: .data)) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .data, in: c, debugDescription: "terminal output is not base64")
+            }
+            self = .terminalOutput(
+                attachmentID: try c.decode(String.self, forKey: .attachmentID),
+                data: data,
+                reset: try c.decodeIfPresent(Bool.self, forKey: .reset) ?? false,
+                offset: try c.decode(UInt64.self, forKey: .offset))
+        case "terminal_credit":
+            self = .terminalCredit(
+                attachmentID: try c.decode(String.self, forKey: .attachmentID),
+                bytes: try c.decode(Int.self, forKey: .bytes))
+        case "terminal_closed":
+            self = .terminalClosed(
+                attachmentID: try c.decode(String.self, forKey: .attachmentID),
+                reason: try c.decode(String.self, forKey: .reason))
         case "put_file_result":
             self = .putFileResult(
                 uploadID: try c.decode(String.self, forKey: .uploadID),

@@ -239,7 +239,8 @@ struct MainWindow: View {
             if let opened, !machines.fleet.contains(where: { $0.id == opened }) { self.opened = nil }
         }
         // Esc closes the open run; a sheet's own Esc is its Cancel, and an ask's its safe answer. Not while the composer
-        // is using it: Esc closes its list, or leaves its field, first.
+        // is using it: Esc closes its list, or leaves its field, first. Nor while the run's shell has the keyboard: there
+        // Esc is the program's (an editor's own), and a window shortcut would take it before the shell saw it.
         .background {
             // Esc in Settings goes back to the agents, unless an ask or a sheet holds it.
             if settings != nil, adding == nil, !asks.isAsking {
@@ -248,7 +249,9 @@ struct MainWindow: View {
                     .accessibilityIdentifier("settings.close")
                     .opacity(0)
                     .allowsHitTesting(false)
-            } else if opened != nil, adding == nil, composerHoldsEscape != true, !asks.isAsking {
+            } else if opened != nil, adding == nil, composerHoldsEscape != true, !Shells.shared.holdsKeys,
+                !asks.isAsking
+            {
                 Button("Close") { opened = nil }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("session.close")

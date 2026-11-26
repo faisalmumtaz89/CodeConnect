@@ -1555,12 +1555,17 @@ pub(crate) async fn end_if_host_gone(daemon: &Arc<Daemon>, uid: &str) {
         ),
     }
     if watch.lifecycle == Lifecycle::Starting {
-        if let Err(err) = daemon
+        match daemon
             .db
             .fail_hosted_start(uid.to_string(), watch.host)
             .await
         {
-            crate::log_error!("{uid}: could not mark the run failed: {err:#}");
+            // A start that failed ends the run; a run a switch moved kept its shell until now.
+            Ok(true) => daemon
+                .terminals
+                .end(uid, protocol::ws::terminal_closed::RUN_ENDED),
+            Ok(false) => {}
+            Err(err) => crate::log_error!("{uid}: could not mark the run failed: {err:#}"),
         }
         return;
     }
