@@ -123,7 +123,7 @@ const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 /// group still holds once that host is gone (a process started outside the agent's own tracking) is stopped as a dead
 /// host's group is ([`crate::claude_host::stop_group`]), once. A process still running past End run's grace is
 /// stopped as End run stops one ([`crate::claude_host::escalate_stop`]): its group, then its end filed; only the
-/// process this wait first found live, never one started since.
+/// process this wait first found live, never one started since. A run with no host recorded has none to wait for.
 pub(crate) async fn ended_for_move(
     daemon: &Arc<Daemon>,
     uid: &str,
@@ -133,7 +133,12 @@ pub(crate) async fn ended_for_move(
     let mut stopping = None;
     let mut laddered = false;
     loop {
-        if let Ok(Some(watch)) = daemon.db.watched_host(uid.to_string()).await {
+        let watched = daemon.db.watched_host(uid.to_string()).await;
+        // No host recorded (a relaunch begun before a restart cleared it): no process of its to wait for.
+        if matches!(watched, Ok(None)) {
+            return true;
+        }
+        if let Ok(Some(watch)) = watched {
             let gone = protocol::proc_identity::liveness(&watch.host)
                 == protocol::proc_identity::Liveness::Gone;
             if watch.lifecycle == protocol::event::Lifecycle::Exited && gone {

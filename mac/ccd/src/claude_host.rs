@@ -2255,6 +2255,14 @@ pub(crate) async fn send_text(
     }
     let deadline = Instant::now() + RELAUNCH_WAIT;
     if lifecycle == Lifecycle::Exited {
+        // Ended by its move, whose wait for its old group to empty a restart may have cut short: that wait first.
+        if matches!(
+            daemon.db.switch_state(uid.to_string()).await,
+            Ok(Some(crate::store::Store::SWITCH_MOVED))
+        ) && !crate::switch::ended_for_move(daemon, uid, deadline).await
+        {
+            return refuse_relaunch(daemon, uid, &request_id, STILL_ENDING).await;
+        }
         return relaunch(daemon, uid, &request_id, &text, deadline).await;
     }
     // A run due to move to another account and certainly quiet: ended by its switch, then relaunched by this message.
@@ -14596,6 +14604,94 @@ mod tests {
         );
         let due = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
         assert_eq!(due["switching"], "waiting", "still due: {due}");
+    }
+
+    /// **A restart after a move's end, before its old group was emptied, loses nothing** (306): a quiet run whose host's
+    /// group also holds a child started outside claude's tracking, its move's end filed, and ccd stopped before the
+    /// message stopped that child. Opened again, the message stops it as the move would have, then relaunches the run
+    /// on B.
+    #[tokio::test]
+    async fn a_restart_after_a_moves_end_with_its_group_not_empty_loses_nothing() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let b = on_a_with_b(&mut rig);
+        let host = stub_host_with_child(&rig);
+        let mut played = live_run_on(&rig, &host).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        turn_ends(&mut played, 4).await;
+        choose(&rig.daemon, Some(&b)).await;
+        let pid = pid_in(&played.dir, "child.pid");
+        let child = ProcessIdentity {
+            pid,
+            birth: read_birth_identity(pid).unwrap(),
+        };
+        // What the moving message had done when ccd stopped: its claim, its switch under way, its old claude ended.
+        let hash = protocol::hash::send_text_hash(&uid, "go on", true);
+        assert_eq!(
+            rig.daemon
+                .store
+                .claim_text_mutation(
+                    &uid,
+                    "r-crash",
+                    &hash,
+                    Some("go on"),
+                    &protocol::time::now_rfc3339()
+                )
+                .unwrap(),
+            TextClaim::Claimed
+        );
+        rig.daemon
+            .store
+            .set_switch_state(&uid, Some(Store::SWITCH_MOVED))
+            .unwrap();
+        assert!(rig.daemon.stop_through_link(&uid).await);
+        let read = next(&mut played.lines).await;
+        assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
+        let old = pid_in(&played.dir, "stub.pid");
+        stop(&played.dir);
+        gone(old).await;
+        let Played {
+            dir, lines, write, ..
+        } = played;
+        drop((lines, write));
+        let claude = rig.root.join("bin").join("claude");
+        let restarted = relauncher(&rig.root, &claude, &rig.root.join("stub-host"));
+        restarted.recover().await;
+        restarted.recover_hosted_runs(&rig.root).await;
+        rig.daemon = restarted;
+        let (sent, relaunched) =
+            tokio::join!(send_as_app(&rig.daemon, &uid, "r-crash", "go on"), async {
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                               "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            });
+        let ended = liveness(&child) == Liveness::Gone;
+        if !ended {
+            // SAFETY: kill(2) of the stand-in's own child, by the pid it recorded, while it is still that child.
+            unsafe { libc::kill(child.pid, libc::SIGKILL) };
+        }
+        stop(&relaunched.dir);
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+        assert!(ended, "the child ended with the move");
     }
 
     /// **A run whose host was running before an upgrade keeps its account until that host ends** (306, G1): ccd

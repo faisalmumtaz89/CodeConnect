@@ -848,7 +848,8 @@ never at ccd's start; its summary says so (`relaunchable`, minor 42). A run End 
 start that failed, and a run claude never named a session for (one started without a first
 message whose claude ended before any, with nothing to resume) stay ended ("This session isn't
 running, so nothing was sent."). Before anything is launched, the run's old host must be gone
-and its process group empty, unless it was recorded before this Mac last started ("This
+and its process group empty (for a run its account switch ended, what is left in that group is
+stopped first, once), unless it was recorded before this Mac last started ("This
 session is still ending; nothing was sent. Try again in a moment."), and a start's own checks
 must pass. The run then reads `starting`, so a second message meanwhile is refused, and a new
 host in the run's folder resumes claude's session in the folder claude ran in, with the
