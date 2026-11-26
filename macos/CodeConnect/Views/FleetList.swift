@@ -293,6 +293,8 @@ struct FleetList: View {
         // The iPhone's rule for its Remove: ended (or adopted), on a computer whose ccd removes runs. Never with End
         // run: a run CodeConnect started is removable only once it has ended.
         let removable = row.summary.isRemovable && model?.daemonProfile.removesSessions == true
+        // Its computer not reached: its mark dims to its stopping form, its section and age as they were.
+        let offline = model?.linkHealth.level == .offline
         let more = hovered == row.id || menu.shown?.owner == "fleet.row.\(row.id).more"
             || HoverButtonStyle.forced("fleet.row.\(row.id)")
         let activate = {
@@ -309,7 +311,7 @@ struct FleetList: View {
         return Button(action: activate) {
             FleetLine(
                 row: row, selected: selected, roomForMore: more && !selecting,
-                elsewhere: elsewhere ? model?.machineOS ?? "" : nil,
+                elsewhere: elsewhere ? model?.machineOS ?? "" : nil, offline: offline,
                 chosen: selecting && choosable ? chosen.contains(row.id) : nil,
                 refusal: batchRefused[row.id])
         }
@@ -725,6 +727,8 @@ private struct FleetLine: View {
     let roomForMore: Bool
     /// The run's computer's system, when the row names its computer.
     var elsewhere: String? = nil
+    /// Its computer is not reached: the mark dims (artboard 15).
+    var offline = false
     /// While choosing runs to remove: whether this one is chosen; its box takes the status mark's place.
     var chosen: Bool? = nil
     /// Why the last batch did not remove it, in place of its age.
@@ -738,7 +742,7 @@ private struct FleetLine: View {
             if let chosen {
                 ChooseBox(on: chosen).accessibilityIdentifier("fleet.row.\(row.id).chosen")
             } else {
-                StateIcon(status: row.status)
+                StateIcon(status: row.status, offline: offline)
                     .accessibilityIdentifier("fleet.row.\(row.id).status")
             }
             Text(row.label.inline)
@@ -870,10 +874,12 @@ private struct ChooseBox: View {
 /// A run's state as the fleet orders it (`FleetStatus`), drawn small: amber when it waits on you.
 struct StateIcon: View {
     let status: FleetStatus
+    /// Its computer is not reached: drawn in its stopping form, dim, as nothing of it can move; read as its status.
+    var offline = false
 
     var body: some View {
         ZStack {
-            switch status {
+            switch offline && status != .ended ? .stopping : status {
             case .blocked:
                 Circle().strokeBorder(Theme.amber, lineWidth: 1.5)
                 Circle().fill(Theme.amber).frame(width: 5, height: 5)
