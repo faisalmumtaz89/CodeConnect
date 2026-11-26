@@ -182,7 +182,7 @@ struct SettingsGroup<Rows: View>: View {
             VStack(spacing: 0) {
                 Group(subviews: rows) { subviews in
                     ForEach(Array(subviews.enumerated()), id: \.offset) { index, subview in
-                        if index > 0 { Rectangle().fill(Theme.hairline).frame(height: 1).padding(.leading, 14) }
+                        if index > 0 { Rectangle().fill(Theme.hairline).frame(height: 1).padding(.horizontal, 14) }
                         subview
                     }
                 }
