@@ -30,15 +30,17 @@ struct SessionPane: View {
             // foot goes: no request is read or answered, and no reply typed, where it can't be seen (the reply's words
             // are the run's, kept).
             VStack(spacing: 0) {
+                // Hidden only while covered, and on the conversation alone: an explicit `accessibilityHidden(false)` on
+                // the stack would stand over the reply box's own hiding while a request has its place.
                 Conversation(model: model, key: row.id)
+                    .opacity(inPlace ? 0 : 1)
+                    .allowsHitTesting(!inPlace)
+                    .disabled(inPlace)
+                    .accessibilityHidden(inPlace)
                 if !inPlace { foot }
             }
             .onPreferenceChange(HoldsReplyBox.self) { boxTaken = $0 }
             .padding(.trailing, changesOpen && !inPlace ? 1 + Self.panelWidth : 0)
-            .opacity(inPlace ? 0 : 1)
-            .allowsHitTesting(!inPlace)
-            .disabled(inPlace)
-            .accessibilityHidden(inPlace)
             .overlay(alignment: .trailing) { if changesOpen { changes } }
         }
         #if DEBUG
