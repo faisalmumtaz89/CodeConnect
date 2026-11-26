@@ -235,7 +235,7 @@ struct HostedSettingsButton: View {
             .menuCard()
             // The card takes every click inside it: one on its checked or disabled rows, a header or a gap does
             // nothing, rather than reaching the reply box or the conversation under it.
-            .contentShape(RoundedRectangle(cornerRadius: 14))
+            .contentShape(RoundedRectangle(cornerRadius: MenuMetrics.cardRadius))
             .onTapGesture {}
     }
 

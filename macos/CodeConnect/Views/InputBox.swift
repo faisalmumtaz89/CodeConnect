@@ -211,7 +211,7 @@ enum Card {
     static let muted = Color(themeHex: 0x8A8A93)
 }
 
-/// The input box's shadows, which every menu card casts too: a deep soft one and a close one. A shadow's spread is the
+/// The input box's shadows, which the usage tip casts too: a deep soft one and a close one. A shadow's spread is the
 /// inset of the shape that casts it.
 struct BoxShadow: View {
     let radius: CGFloat

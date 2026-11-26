@@ -654,6 +654,35 @@ extension ButtonStyle where Self == PanelRowStyle {
     static var panelRow: PanelRowStyle { PanelRowStyle() }
 }
 
+/// A menu row's button in a list whose keys move its choice, not a light (Start's folders, the Folder box): the
+/// pointer lights its `MenuRow` as a panel's light does, and a test launch's `-CC_HOVER id` does too; disabled it dims,
+/// pressed it fades.
+struct MenuRowButtonStyle: ButtonStyle {
+    let id: String
+
+    func makeBody(configuration: Configuration) -> some View { Label(configuration: configuration, id: id) }
+
+    private struct Label: View {
+        let configuration: Configuration
+        let id: String
+        @State private var hovering = false
+        @Environment(\.isEnabled) private var enabled
+
+        var body: some View {
+            configuration.label
+                .environment(\.menuRowLit, (hovering || HoverButtonStyle.forced(id)) && enabled)
+                .opacity(!enabled ? Theme.disabledOpacity : configuration.isPressed ? 0.7 : 1)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+extension ButtonStyle where Self == MenuRowButtonStyle {
+    /// `MenuRowButtonStyle`.
+    static func menuRow(id: String) -> MenuRowButtonStyle { MenuRowButtonStyle(id: id) }
+}
+
 /// A panel's rows that scroll: the row the keys light comes into sight.
 struct PanelScroll<Content: View>: View {
     @ViewBuilder let content: Content
@@ -826,7 +855,6 @@ private struct RowMenuHost: ViewModifier {
                                 }
                             }
                         }
-                        .padding(.vertical, 5)
                         .frame(minWidth: Self.minWidth - 2 * MenuMetrics.inset)
                         .fixedSize()
                         .menuCard()
