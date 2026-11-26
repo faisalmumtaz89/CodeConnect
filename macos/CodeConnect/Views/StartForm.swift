@@ -268,16 +268,18 @@ struct StartForm: View {
     /// its placeholder), and why Start can't be pressed is Start's tooltip.
     private var form: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // The folder question, above the box it asks about (screen 35), 30 pt over its rim: the start's own, whatever
+            // the box shows meanwhile, and the folder its computer asked about (a link's target, as it keeps the answer).
+            if let sentStart, case .trust(let path) = phase {
+                TrustCard(
+                    folder: URL(fileURLWithPath: path).lastPathComponent, computer: sentStart.start.machineName,
+                    keys: !asks.isAsking,
+                    start: { answer(sentStart.start, $0, in: StartContext(model: sentStart.owner)) },
+                    cancel: { backToForm(from: sentStart.start) }
+                )
+                .padding(.bottom, 20)
+            }
             if let context {
-                // The folder question, above the box it asks about (screen 35), 30 pt over its rim.
-                if let sentStart, asksTrust {
-                    TrustCard(
-                        folder: sentStart.start.project.name, computer: sentStart.start.machineName,
-                        start: { answer(sentStart.start, $0, in: StartContext(model: sentStart.owner)) },
-                        cancel: { backToForm(from: sentStart.start) }
-                    )
-                    .padding(.bottom, 20)
-                }
                 AgentNotice(context: context, elsewhere: !isThisMac(context))
                 composer(context)
                     // What the question asks about stays as it was asked while it is open.
@@ -790,6 +792,8 @@ private struct StartProgress: View {
 private struct TrustCard: View {
     let folder: String
     let computer: String
+    /// Return and Esc are the card's; not while another ask is up, whose keys they are.
+    let keys: Bool
     let start: (FolderTrust) -> Void
     let cancel: () -> Void
     @State private var trust = FolderTrust.trusted
@@ -811,9 +815,9 @@ private struct TrustCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 12)
                 ActionButton(title: "Cancel", key: "Esc", prominent: false, id: "start.folder.back", action: cancel)
-                    .keyboardShortcut(.cancelAction)
+                    .keyboardShortcut(keys ? .cancelAction : nil)
                 ActionButton(title: "Start", key: "\u{21A9}", prominent: true, id: "folder.start") { start(trust) }
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(keys ? .defaultAction : nil)
             }
             .padding(.top, 12)
         }

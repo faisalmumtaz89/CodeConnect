@@ -107,7 +107,6 @@ public enum FolderWords {
     public static let distrust = "No, I don’t trust the authors"
     public static let distrustDetail = "Start with nothing from the folder"
     public static let footnote = "Asked once for this folder. You can change it in Settings › Folders."
-    public static func then(_ agent: String, _ folder: String) -> String { "Then \(agent) starts in \(folder)." }
 
     public static let paneTitle = "Folders"
     public static let paneIntro =

@@ -20,6 +20,17 @@ final class StartFolderPathTests: XCTestCase {
         XCTAssertEqual(FolderWords.footnote, "Asked once for this folder. You can change it in Settings › Folders.")
     }
 
+    /// In the browser, "~" is the home the computer itself listed, and only that: another user's home, or a folder
+    /// like /Users/Shared, shows as it is (two folders never read alike).
+    func testUnderTheComputersOwnHomeOnly() {
+        XCTAssertEqual(StartProject.shown("/Users/jordan/models", home: "/Users/jordan"), "~/models")
+        XCTAssertEqual(StartProject.shown("/Users/jordan", home: "/Users/jordan"), "~")
+        XCTAssertEqual(StartProject.shown("/Users/Shared", home: "/Users/jordan"), "/Users/Shared")
+        XCTAssertEqual(StartProject.shown("/Users/jordanx/a", home: "/Users/jordan"), "/Users/jordanx/a")
+        XCTAssertEqual(StartProject.shown("/home/other/x", home: "/home/fm"), "/home/other/x")
+        XCTAssertEqual(StartProject.shown("/srv/x", home: "/"), "/srv/x")
+    }
+
     func testAnyOtherFolderIsAsItIs() {
         XCTAssertEqual(StartProject.shown("/srv/models"), "/srv/models")
         XCTAssertEqual(StartProject.shown("/"), "/")

@@ -44,6 +44,17 @@ struct FolderBrowser: View {
 
     private var request: StartFolderRequest { StartFolderRequest(path: path, showHidden: showsHidden) }
     private var listing: StartFolderListing? { context.listing(request) }
+    /// The folder shown, under the computer's home as "~"; elsewhere whole.
+    private var shownPath: String? {
+        guard let shown = listing?.path ?? path else { return nil }
+        return home.map { StartProject.shown(shown, home: $0) } ?? shown
+    }
+
+    /// The computer's home folder, as it listed it: the folder the browser opens on.
+    private var home: String? {
+        (context.listing(StartFolderRequest(path: nil, showHidden: false))
+            ?? context.listing(StartFolderRequest(path: nil, showHidden: true)))?.path
+    }
 
     /// The rows as shown, by the folder each opens: ".." first, then the folders in name order.
     private func targets(_ listing: StartFolderListing) -> [(name: String, path: String)] {
@@ -55,8 +66,8 @@ struct FolderBrowser: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                // As a shell prints it, "~/models" (screen 33).
-                Text(verbatim: (listing?.path ?? path).map(StartProject.shown) ?? " ")
+                // As a shell prints it, "~/models" (screen 33), under the home the computer listed; else whole.
+                Text(verbatim: shownPath ?? " ")
                     .font(Theme.mono(11))
                     .foregroundStyle(Theme.text2)
                     .lineLimit(1)
