@@ -255,18 +255,19 @@ struct HostedSettingsButton: View {
         Task { await set() }
     }
 
-    /// Choice `index` of its panel. The checked one is the run's fact already: choosing it answers the panel and sends
-    /// nothing. One that asks first (`asksFirst`) is drawn in red, as every act that asks is.
+    /// Choice `index` of its panel. The checked one is the run's fact already: drawn in full with its check, never lit or
+    /// reached by the keys, and a click on it only closes the panel. One that asks first (`asksFirst`) is drawn in red, as
+    /// every act that asks is.
     private func row(
         _ index: Int, _ title: String, detail: String? = nil, marked: Bool, id: String, asksFirst: Bool = false,
         set: @escaping () async -> Void
     ) -> some View {
-        let act = { if marked { choose {} } else { choose(asksFirst: asksFirst, set) } }
+        let act = { if marked { open = nil } else { choose(asksFirst: asksFirst, set) } }
         return Button(action: act) {
             rowLabel(title, detail: detail, marked: marked, red: asksFirst)
         }
         .buttonStyle(.panelRow)
-        .panelRow(index, id: id, choose: act)
+        .panelRow(index, id: id, choosable: !marked, choose: act)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier(id)
         .accessibilityAddTraits(marked ? .isSelected : [])
