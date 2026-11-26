@@ -94,8 +94,7 @@ public enum StartPlace: Hashable, Sendable {
 
     /// A new worktree's name from a run's first message: its words in lower case, accents dropped, joined by "-", as
     /// many whole words as fit in 40 bytes (a first word longer than that cut to it), "run" when the task has no Latin
-    /// letter or digit. A name the repository already has, as the branch the new worktree would get or as a worktree's
-    /// folder, gets "-2", "-3", ….
+    /// letter or digit; one the repository already has gets "-2", "-3", … (`free`).
     public static func named(fromTask task: String, for agent: StartAgent, in git: StartGit) -> String {
         let most = 40
         let words = task.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil).lowercased()
@@ -106,17 +105,26 @@ public enum StartPlace: Hashable, Sendable {
             guard next.utf8.count <= most else { break }
             base = next
         }
-        if base.isEmpty { base = "run" }
+        return free(base.isEmpty ? "run" : base, for: agent, in: git)
+    }
+
+    /// A new worktree's name the repository doesn't have, as the computer makes it: `name`, else "-2", "-3", … while
+    /// the branch the new worktree would get, or its folder (each "/" written "+"), is the repository's. The computer
+    /// sees every branch and has the last word; this is what the form can say from the ones it was listed.
+    public static func free(_ name: String, for agent: StartAgent, in git: StartGit) -> String {
         let branches = Set(git.branches + git.worktrees.compactMap(\.branch))
         let folders = Set(git.worktrees.map { URL(fileURLWithPath: $0.path).lastPathComponent })
-        func taken(_ name: String) -> Bool { branches.contains(newBranch(name, for: agent)) || folders.contains(name) }
-        var name = base
+        func taken(_ name: String) -> Bool {
+            branches.contains(newBranch(name, for: agent))
+                || folders.contains(name.replacingOccurrences(of: "/", with: "+"))
+        }
+        var free = name
         var number = 2
-        while taken(name) {
-            name = "\(base)-\(number)"
+        while taken(free) {
+            free = "\(name)-\(number)"
             number += 1
         }
-        return name
+        return free
     }
 }
 

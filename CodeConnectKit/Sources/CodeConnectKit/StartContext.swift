@@ -347,7 +347,10 @@ public func startPlaceSummary(_ place: StartPlace, agent: StartAgent, project: S
     case .folder: return git?.checkout(at: project?.path ?? "").map(\.title) ?? "This folder"
     case .existing(let checkout): return "\(checkout.title) · worktree"
     case .branch(let branch): return "\(branch) · new worktree"
-    case .new(let name): return "\(StartPlace.newBranch(name, for: agent)) · new worktree"
+    case .new(let name):
+        // As the computer will make it: the next free name where the one asked is the repository's.
+        let made = git.map { StartPlace.free(name, for: agent, in: $0) } ?? name
+        return "\(StartPlace.newBranch(made, for: agent)) · new worktree"
     }
 }
 

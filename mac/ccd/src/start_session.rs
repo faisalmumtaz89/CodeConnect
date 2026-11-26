@@ -803,7 +803,15 @@ async fn codex_start(
     let worktree = worktree.as_ref();
     let cwd = match worktree {
         None => path.to_string(),
-        Some(worktree) => match place(environment, git_bin, path, worktree).await {
+        Some(worktree) => match place(
+            environment,
+            git_bin,
+            path,
+            worktree,
+            trust == Trust::Trusted,
+        )
+        .await
+        {
             Ok(cwd) => cwd,
             Err(why) => return failed(StartFailure::LaunchFailed, why),
         },
@@ -1036,6 +1044,9 @@ async fn hosted_start(
     let (cwd, new_worktree) = match worktree {
         None => (path.to_string(), None),
         // Claude makes its own (`--worktree`); agy has no such flag, so ccd makes one for it as for Codex.
+        // Whether Claude's own checkout runs the repository's hooks for a folder answered not trusted
+        // is not known here (ccd turns them off for the worktrees it makes): a gap, kept until a real
+        // claude in a rig shows it.
         Some(StartWorktree::New { name }) if agent != AgentKind::Antigravity => {
             match check_worktree_name(name) {
                 Ok(()) => (path.to_string(), Some(name.as_str())),
@@ -1047,6 +1058,12 @@ async fn hosted_start(
             daemon.config.git_bin.as_deref(),
             path,
             worktree,
+            // Antigravity asks no folder question: its hooks are off where the folder was answered not
+            // trusted for another agent's start.
+            match agent {
+                AgentKind::Antigravity => !declined(&daemon.db, Path::new(path)).await,
+                _ => trust == Trust::Trusted,
+            },
         )
         .await
         {
@@ -1179,11 +1196,14 @@ pub(crate) fn system_words(err: &std::io::Error) -> String {
 
 /// The folder for a start in `worktree`, making the worktree first when it is
 /// new. Every check reads the repository afresh, and every refusal says why.
+/// `hooks`: git runs the repository's own hooks as it checks the worktree out; off for a
+/// folder answered not trusted, whose code nothing may run (screen 35).
 async fn place(
     environment: &HashMap<OsString, OsString>,
     git_bin: Option<&str>,
     path: &str,
     worktree: &StartWorktree,
+    hooks: bool,
 ) -> Result<String, String> {
     let entries = crate::git::worktrees(path, git_bin, GIT_READ_TIMEOUT)
         .await
@@ -1218,6 +1238,7 @@ async fn place(
             add_worktree(
                 environment,
                 path,
+                hooks,
                 &[OsStr::new("--"), folder.as_os_str(), OsStr::new(branch)],
             )
             .await?;
@@ -1232,6 +1253,7 @@ async fn place(
             add_worktree(
                 environment,
                 path,
+                hooks,
                 &[
                     OsStr::new("-b"),
                     OsStr::new(name),
@@ -1348,15 +1370,19 @@ fn check_worktree_name(name: &str) -> Result<(), String> {
 async fn add_worktree(
     environment: &HashMap<OsString, OsString>,
     path: &str,
+    hooks: bool,
     args: &[&OsStr],
 ) -> Result<(), String> {
-    let mut argv: Vec<&OsStr> = vec![
-        OsStr::new("git"),
+    let mut argv: Vec<&OsStr> = vec![OsStr::new("git")];
+    if !hooks {
+        argv.extend([OsStr::new("-c"), OsStr::new("core.hooksPath=/dev/null")]);
+    }
+    argv.extend([
         OsStr::new("-C"),
         OsStr::new(path),
         OsStr::new("worktree"),
         OsStr::new("add"),
-    ];
+    ]);
     argv.extend_from_slice(args);
     let mut command = login_shell_command(environment, None, &argv);
     command
@@ -4790,6 +4816,64 @@ mod tests {
             git(&folder, &["symbolic-ref", "--short", "HEAD"]),
             "fix/agy"
         );
+    }
+
+    /// The project's post-checkout hook, which leaves `<root>/hook-ran` when git runs it.
+    fn arm_checkout_hook(rig: &Rig) -> PathBuf {
+        let marker = rig.root.join("hook-ran");
+        let hook = rig.project.join(".git/hooks/post-checkout");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        marker
+    }
+
+    /// **A folder answered not trusted runs none of its repository's hooks** when ccd makes a new worktree in it
+    /// (screen 35: "the agent starts with nothing from the folder"); a trusted one runs them, as git-lfs needs.
+    #[tokio::test]
+    async fn a_new_codex_worktree_runs_the_repositorys_hooks_only_when_trusted() {
+        for (trust, runs) in [(Trust::NotTrusted, false), (Trust::Trusted, true)] {
+            let rig = recording(&format!("hooks-codex-{trust:?}"));
+            let marker = arm_checkout_hook(&rig);
+            let result = rig
+                .start_as(
+                    AgentKind::Codex,
+                    &rig.project(),
+                    "fix the tests",
+                    Some(&StartWorktree::New {
+                        name: "fix-the-tests".into(),
+                    }),
+                    Some(trust),
+                )
+                .await;
+            assert!(reached(&result), "{trust:?}: {result:?}");
+            assert_eq!(marker.exists(), runs, "{trust:?}: the hook ran");
+        }
+    }
+
+    /// **Antigravity, which asks no folder question, runs no hooks in a folder answered not trusted** (kept from
+    /// another agent's start); otherwise its repository's hooks run.
+    #[tokio::test]
+    async fn a_new_antigravity_worktree_runs_no_hooks_in_a_folder_answered_not_trusted() {
+        for (kept, runs) in [(Some(Trust::NotTrusted), false), (None, true)] {
+            let rig = recording(&format!("hooks-agy-{kept:?}"));
+            let marker = arm_checkout_hook(&rig);
+            if let Some(kept) = kept {
+                let real = rig.project.canonicalize().unwrap().display().to_string();
+                rig.db.set_folder_trust(real, kept).await.unwrap();
+            }
+            let result = rig
+                .start_in(
+                    &rig.project(),
+                    AgentKind::Antigravity,
+                    StartWorktree::New {
+                        name: "fix-the-tests".into(),
+                    },
+                )
+                .await;
+            assert!(reached(&result), "{kept:?}: {result:?}");
+            assert_eq!(marker.exists(), runs, "{kept:?}: the hook ran");
+        }
     }
 
     /// **A new worktree's name the repository has is not reused**: a branch of that name, however many newer branches

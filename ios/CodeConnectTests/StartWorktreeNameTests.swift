@@ -47,6 +47,21 @@ final class StartWorktreeNameTests: XCTestCase {
         }
     }
 
+    /// A name typed under "New Branch…" that the repository has is shown as the computer will make it: the next free
+    /// one, by the same rule (its folder writes each "/" as "+", as Claude Code's branch does).
+    func testATypedNameThatIsTakenIsTheNextFreeOne() {
+        let git = StartGit(
+            worktrees: [
+                StartWorktree(path: "/w/app", branch: "main", dirty: false, missing: false),
+                StartWorktree(path: "/w/app/.claude/worktrees/fix+ui", branch: "other", dirty: false, missing: false),
+            ],
+            branches: ["worktree-fix+login", "fix/login"], branchesTruncated: false)
+        XCTAssertEqual(StartPlace.free("fix/login", for: .claude, in: git), "fix/login-2")
+        XCTAssertEqual(StartPlace.free("fix/login", for: .codex, in: git), "fix/login-2")
+        XCTAssertEqual(StartPlace.free("fix/ui", for: .codex, in: git), "fix/ui-2")
+        XCTAssertEqual(StartPlace.free("fix/new", for: .claude, in: git), "fix/new")
+    }
+
     /// A name the repository has (a branch the new one would be, or a worktree's folder) gets "-2", then "-3".
     func testATakenNameGetsTheNextNumber() {
         let claude = StartGit(

@@ -162,7 +162,11 @@ struct BranchNaming: View {
                 // Each on a line of its own, as Changes is: the menu is narrower than the box.
                 VStack(alignment: .leading, spacing: 5) {
                     fact(StartWords.branch) {
-                        Text(verbatim: valid ? StartPlace.newBranch(trimmed, for: agent) : StartWords.notNamedYet)
+                        // As the computer will make it: the next free name where the one typed is taken.
+                        Text(
+                            verbatim: valid
+                                ? StartPlace.newBranch(StartPlace.free(trimmed, for: agent, in: git), for: agent)
+                                : StartWords.notNamedYet)
                             .font(valid ? Theme.mono(11) : Theme.ui(11))
                     }
                     fact(StartWords.from) { Text(StartPlace.newWorktreeBase(for: agent, from: here)) }
