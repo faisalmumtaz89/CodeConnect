@@ -339,7 +339,6 @@ private struct Composer: View {
                     confirmMode: { confirmingMode = $0 },
                     box: CGRect(x: InputBoxLayout.barInset - controls.minX, y: 0, width: rowWidth, height: 0))
                 .disabled(runBlocked != nil || busy)
-                .yields(0)
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { controls = $0 }
                 #if DEBUG
                     .task {
@@ -350,6 +349,8 @@ private struct Composer: View {
                         }
                     }
                 #endif
+                // Outermost: a layout value set inside `onGeometryChange` does not reach the bar's layout.
+                .yields(0)
             }
             if isCodex, let counter = ComposeDraft(text: kept.reply).counterText {
                 Text(counter)
