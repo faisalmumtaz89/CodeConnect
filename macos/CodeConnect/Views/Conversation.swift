@@ -49,26 +49,27 @@ struct Conversation: View {
 }
 
 /// The way back to the conversation's end, as the iPhone's: at the column's foot while the reader is away from the
-/// end, "3 new" or "Latest" (Kit's words). Never drawn at the end, so it covers no last line; only its capsule takes a
-/// click. Shown and gone by a cut.
+/// end, "3 new ↓" or "Latest ↓" (Kit's words), raised off the rows by its shadow. Never drawn at the end, so it covers no
+/// last line; only its capsule takes a click. Shown and gone by a cut.
 private struct LatestPill: View {
     let latest: Latest
 
     var body: some View {
         if latest.away {
             Button { latest.jump() } label: {
-                HStack(spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(SessionWords.latest(new: latest.count)).font(Theme.ui(12.5, .medium))
                     Image(systemName: "arrow.down").font(.system(size: 10, weight: .semibold)).accessibilityHidden(true)
-                    Text(SessionWords.latest(new: latest.count)).font(Theme.ui(12))
                 }
                 .foregroundStyle(Theme.text)
                 .padding(.horizontal, 12)
-                .frame(height: 26)
+                .frame(height: 24)
                 .background(Theme.raised, in: Capsule())
                 .overlay(Capsule().strokeBorder(Color.white.opacity(0.09)))
+                .shadow(color: .black.opacity(0.5), radius: 12, y: 8)
                 .contentShape(Capsule())
             }
-            .buttonStyle(.hover(radius: 13, over: true, id: "session.latest"))
+            .buttonStyle(.hover(radius: 12, over: true, id: "session.latest"))
             .padding(.bottom, 12)
             .accessibilityLabel(SessionWords.jumpToLatest)
             .accessibilityValue(SessionWords.latest(new: latest.count))
