@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.27
+
 ## CodeConnect 0.19.26
 
 - On the Mac, Antigravity is an agent you can start beside Claude Code and Codex, on a Mac where Google's Antigravity
