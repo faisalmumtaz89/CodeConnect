@@ -84,7 +84,7 @@ public struct ReplyBar: Equatable, Sendable {
 public struct LimitFoot: Equatable, Sendable {
     /// "5-hour limit reached".
     public let title: String
-    /// "Resets 9:06 PM · in 2h 10m", or "Resets Thu 3 Dec, 9:06 PM · in 5 days" on another day; nil when the limit has
+    /// "Resets 9:06 PM · in 2h 10m" on the same day, or "Resets Thu 3 Dec, 9:06 PM" on another; nil when the limit has
     /// no window of its own, the window is not held, or its reset has passed.
     public let resets: String?
     /// The account's windows, as the reply bar draws them.
@@ -106,8 +106,11 @@ public struct LimitFoot: Equatable, Sendable {
         }
         let window = facts?.windows.first { $0.windowMinutes == limit.which.windowMinutes }
         let resets = window.flatMap { window in
-            AccountSwitchWords.countdown(window, now: now).map {
-                "Resets \(clock(Date(timeIntervalSince1970: TimeInterval(window.resetsAt)), now: now, timeZone)) · \($0)"
+            AccountSwitchWords.countdown(window, now: now).map { countdown in
+                let date = Date(timeIntervalSince1970: TimeInterval(window.resetsAt))
+                return sameDay(date, now, timeZone)
+                    ? "Resets \(clock(date, sameDay: true, timeZone)) · \(countdown)"
+                    : "Resets \(clock(date, sameDay: false, timeZone))"
             }
         }
         let plan = facts?.plan.map { $0.prefix(1).uppercased() + $0.dropFirst() }
@@ -131,14 +134,18 @@ public struct LimitFoot: Equatable, Sendable {
         }
     }
 
-    /// A reset as the band names it: its time on the same day, else its day, date and time.
-    private static func clock(_ date: Date, now: Date, _ timeZone: TimeZone) -> String {
+    private static func sameDay(_ date: Date, _ now: Date, _ timeZone: TimeZone) -> Bool {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
+        return calendar.isDate(date, inSameDayAs: now)
+    }
+
+    /// A reset as the band names it: its time on the same day, else its day, date and time.
+    private static func clock(_ date: Date, sameDay: Bool, _ timeZone: TimeZone) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = timeZone
-        formatter.dateFormat = calendar.isDate(date, inSameDayAs: now) ? "h:mm a" : "EEE d MMM, h:mm a"
+        formatter.dateFormat = sameDay ? "h:mm a" : "EEE d MMM, h:mm a"
         return formatter.string(from: date)
     }
 }
