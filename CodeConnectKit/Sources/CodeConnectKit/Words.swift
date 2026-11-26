@@ -96,6 +96,8 @@ public enum FleetWords {
 /// Settings › Folders, where its answers are kept.
 public enum FolderWords {
     public static let title = "Do you trust the authors of the files in this folder?"
+    /// The Mac's card above the start form, which names the folder (screen 35).
+    public static func question(_ folder: String) -> String { "Do you trust the authors of the files in \(folder)?" }
     public static func body(_ computer: String) -> String {
         "If you do, the agent loads the folder’s own scripts, tools and instructions, and its scripts can run on "
             + "\(computer) without asking you. If you don’t, the agent starts with nothing from the folder."

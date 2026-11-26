@@ -161,9 +161,9 @@ struct StartForm: View {
 
     var body: some View {
         Group {
-            // The draft's page: the form while composing, else the sent start's page in the form's column, as tall as
-            // its content.
-            if let sentStart, phase != .composing {
+            // The draft's page: the form while composing or while its folder question is asked (the card above the
+            // box), else the sent start's page in the form's column, as tall as its content.
+            if let sentStart, phase != .composing, !asksTrust {
                 sent(sentStart.start, on: sentStart.owner)
                     .frame(maxWidth: Self.column)
                     .fixedSize(horizontal: false, vertical: true)
@@ -243,24 +243,24 @@ struct StartForm: View {
         .onChange(of: draft.wantsKeyboard) { takeKeyboard(formShown: true) }
     }
 
-    /// A sent start: the folder question when its computer asked it, else its progress.
-    @ViewBuilder private func sent(_ start: SessionStart, on owner: AppModel) -> some View {
-        if case .needsTrust(let path) = start.outcome {
-            FolderStep(
-                start: start, path: path, computer: start.machineName,
-                answer: { answer(start, $0, in: StartContext(model: owner)) }, back: { backToForm(from: start) })
-        } else {
-            StartProgress(
-                start: start,
-                shown: { owner.shown(for: $0) != nil },
-                again: { backToForm(from: start) },
-                stopRetrying: {
-                    owner.starter.stopRetrying(start.requestID)
-                    draft.withdraw()
-                },
-                close: { backToForm(from: start) },
-                started: { started($0) })
-        }
+    /// The sent start's computer asked the folder question: the card above the box asks it.
+    private var asksTrust: Bool {
+        if case .trust = phase { return true }
+        return false
+    }
+
+    /// A sent start's progress, and Kit's words when it couldn't start.
+    private func sent(_ start: SessionStart, on owner: AppModel) -> some View {
+        StartProgress(
+            start: start,
+            shown: { owner.shown(for: $0) != nil },
+            again: { backToForm(from: start) },
+            stopRetrying: {
+                owner.starter.stopRetrying(start.requestID)
+                draft.withdraw()
+            },
+            close: { backToForm(from: start) },
+            started: { started($0) })
     }
 
     /// The box: the first message, and in its bar the computer, the folder and where in the repository, the model and
@@ -269,8 +269,19 @@ struct StartForm: View {
     private var form: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let context {
+                // The folder question, above the box it asks about (screen 35), 30 pt over its rim.
+                if let sentStart, asksTrust {
+                    TrustCard(
+                        folder: sentStart.start.project.name, computer: sentStart.start.machineName,
+                        start: { answer(sentStart.start, $0, in: StartContext(model: sentStart.owner)) },
+                        cancel: { backToForm(from: sentStart.start) }
+                    )
+                    .padding(.bottom, 20)
+                }
                 AgentNotice(context: context, elsewhere: !isThisMac(context))
                 composer(context)
+                    // What the question asks about stays as it was asked while it is open.
+                    .disabled(asksTrust)
                     // Its menus open over what is above and below it: the last modifier, so they draw over the rest.
                     .zIndex(folderOpen || computerMenuOpen || branchMenuOpen || menuOpen ? 1 : 0)
             } else {
@@ -772,76 +783,78 @@ private struct StartProgress: View {
     }
 }
 
-/// A start the computer answered with the folder question: nothing ran. The question is the form's own page; an
-/// answer sends the start again with it, and Back returns to the form.
-private struct FolderStep: View {
-    let start: SessionStart
-    /// The folder's real path, as the computer gave it.
-    let path: String
+/// The folder question (screen 35), asked once for a folder on a computer, before anything starts there: the card
+/// above the box names the folder, says what each answer means, and offers them as radio rows, the first chosen as
+/// the agents' own folder prompts do. Start (↩) sends the start again with the answer; Cancel (Esc) goes back to the
+/// form with nothing started.
+private struct TrustCard: View {
+    let folder: String
     let computer: String
-    let answer: (FolderTrust) -> Void
-    let back: () -> Void
+    let start: (FolderTrust) -> Void
+    let cancel: () -> Void
+    @State private var trust = FolderTrust.trusted
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(FolderWords.title).font(Theme.ui(17, .semibold)).foregroundStyle(Theme.text)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(path).font(Theme.mono(11.5)).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.head)
-                    .padding(.leading, 10)
-                    .padding(.trailing, CopyButton.slot)
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 6))
-                    .accessibilityIdentifier("folder.path")
-                    .overlay(alignment: .trailing) { CopyButton(text: path, id: "folder.path.copy") }
-                Text(FolderWords.body(computer)).font(Theme.ui(12)).foregroundStyle(Theme.text2)
-                    .fixedSize(horizontal: false, vertical: true)
-                VStack(spacing: 6) {
-                    choice(.trusted)
-                    choice(.notTrusted)
-                }
-                Text(FolderWords.footnote).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
-                    .fixedSize(horizontal: false, vertical: true)
+            Text(FolderWords.question(folder)).font(Theme.ui(14, .semibold)).foregroundStyle(Theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(FolderWords.body(computer)).font(Theme.ui(12.5)).foregroundStyle(Theme.text2).lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 8)
+            VStack(alignment: .leading, spacing: 2) {
+                choice(.trusted)
+                choice(.notTrusted)
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 9)  // as much room above as the bar keeps under its buttons
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("folder.question")
-            Color.clear.frame(height: 18)
-            SheetBar(
-                action: nil, actionID: "", blocked: true, perform: {}, cancel: back, cancelID: "start.folder.back",
-                cancelTitle: "Back"
-            ) {
-                Text(FolderWords.then(start.agent.displayName, start.project.name)).font(Theme.ui(11.5))
-                    .foregroundStyle(Theme.text3)
+            .padding(.top, 10)
+            HStack(spacing: 8) {
+                Text(FolderWords.footnote).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                ActionButton(title: "Cancel", key: "Esc", prominent: false, id: "start.folder.back", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                ActionButton(title: "Start", key: "\u{21A9}", prominent: true, id: "folder.start") { start(trust) }
+                    .keyboardShortcut(.defaultAction)
             }
+            .padding(.top, 12)
         }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.sheet, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.hairline))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("folder.question")
     }
 
-    private func choice(_ trust: FolderTrust) -> some View {
-        let trusts = trust == .trusted
-        let id = "folder.\(trusts ? "trust" : "distrust")"
+    /// An answer as a radio row: its dot, its words and what they mean, on one line.
+    private func choice(_ answer: FolderTrust) -> some View {
+        let trusts = answer == .trusted
+        let chosen = trust == answer
         return Button {
-            answer(trust)
+            trust = answer
         } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(trusts ? FolderWords.trust : FolderWords.distrust).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text)
-                Text(trusts ? FolderWords.trustDetail : FolderWords.distrustDetail).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle().strokeBorder(chosen ? Theme.text : Theme.text3, lineWidth: 1.2)
+                    if chosen { Circle().fill(Theme.text).padding(3.5) }
+                }
+                .frame(width: 13, height: 13)
+                .accessibilityHidden(true)
+                Text(trusts ? FolderWords.trust : FolderWords.distrust).font(Theme.ui(12.5, .medium))
+                    .foregroundStyle(Theme.text)
+                Text(trusts ? FolderWords.trustDetail : FolderWords.distrustDetail).font(Theme.ui(12))
+                    .foregroundStyle(Theme.text3).lineLimit(1)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.code.opacity(0.5), in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 7, id: id))
-        .accessibilityIdentifier(id)
+        .buttonStyle(.hover(radius: 7, id: "folder.\(trusts ? "trust" : "distrust")"))
+        .accessibilityIdentifier("folder.\(trusts ? "trust" : "distrust")")
+        .accessibilityAddTraits(chosen ? .isSelected : [])
     }
 }
 
-/// The one computer a start can go to, by name, green while it answers.
 /// The computer a start goes to: a button and its panel, the model button's kind, so one form has one kind of menu.
 /// The chosen computer carries the check; the lit row, by the pointer or the keys, is filled (`panelRow`).
 private struct ComputerButton: View {

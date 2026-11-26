@@ -11,6 +11,15 @@ final class StartFolderPathTests: XCTestCase {
         XCTAssertEqual(StartProject.shown("/home/fm"), "~")
     }
 
+    /// The Mac's folder question names its folder (screen 35); the rest of its words are the iPhone's.
+    func testTheTrustQuestionNamesItsFolder() {
+        XCTAssertEqual(
+            FolderWords.question("Claude-Code-Setup"), "Do you trust the authors of the files in Claude-Code-Setup?")
+        XCTAssertEqual(FolderWords.trust, "Yes, I trust the authors")
+        XCTAssertEqual(FolderWords.distrust, "No, I don’t trust the authors")
+        XCTAssertEqual(FolderWords.footnote, "Asked once for this folder. You can change it in Settings › Folders.")
+    }
+
     func testAnyOtherFolderIsAsItIs() {
         XCTAssertEqual(StartProject.shown("/srv/models"), "/srv/models")
         XCTAssertEqual(StartProject.shown("/"), "/")
