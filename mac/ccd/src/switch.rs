@@ -122,9 +122,8 @@ const MOVE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// How often [`ended_for_move`] looks again.
 const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Whether the run `uid`, its process stopped by its switch or ended on its own, has ended by `deadline`: its row
-/// `exited` and its recorded host or app-server gone with no member left in its group, as a message's relaunch requires.
-/// What its
+/// Whether the run `uid`, its process stopped by its switch, has ended by `deadline`: its row `exited` and its
+/// recorded host or app-server gone with no member left in its group, as a message's relaunch requires. What its
 /// group still holds once that host is gone (a process started outside the agent's own tracking) is stopped as a dead
 /// host's group is ([`crate::claude_host::stop_group`]), once. A process still running past [`MOVE_GRACE`] is
 /// stopped as End run stops one ([`crate::claude_host::escalate_stop`]): its group, then its end filed; only the

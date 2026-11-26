@@ -2328,14 +2328,15 @@ pub(crate) const STILL_ENDING: &str =
 /// **The person's message `text`, claimed as `request_id`, to the ended hosted Claude run
 /// `uid`, which relaunches it** (decision 210) when its claude ended without ccd stopping it
 /// ([`crate::store::Store::claude_relaunch`]); every other ended run refuses it, as before.
-/// Never at ccd start. Before anything is launched, the warrant: the run's old host is gone
-/// and its group has no member, one it left (a process claude started) stopped by the ladder
-/// within `deadline` ([`crate::switch::ended_for_move`]), unless it was recorded in an earlier
-/// boot, whose numbers mean nothing now; then a start's own checks. The start line resumes
-/// claude's session in the folder claude ran in, with the run's model as its menu marks it chosen
-/// ([`Daemon::selected_model`]), else the start's; the kept folder answer, lowered when the
-/// folder has since been answered not trusted; the mode the run was in when it is one an app
-/// may choose without the person's confirmation ([`relaunch_mode`]), so a run never gains
+/// Never at ccd start. Before anything is launched, the warrant: the run's old host is gone,
+/// and for a run moving to another account its group has no member too (what claude left
+/// running in it, a server or a background job, runs on beside a run that is not moving),
+/// unless it was recorded in an earlier boot, whose numbers mean nothing now; then a start's
+/// own checks. The start line resumes claude's session in the folder claude ran in, with the
+/// run's model as its menu marks it chosen ([`Daemon::selected_model`]), else the start's; the
+/// kept folder answer, lowered when the folder has since been answered not trusted; the mode
+/// the run was in when it is one an app may choose without the person's confirmation
+/// ([`relaunch_mode`]), so a run never gains
 /// permissions by starting again, and none otherwise, so a run in Bypass permissions comes
 /// back in the person's own default (a run moved by a switch of account keeps even that, [`relaunch_mode`]); and the message as its prompt under the send's uuid. One write moves the
 /// run `exited` → `starting`, its host cleared, its cursor zeroed and that start line kept
@@ -2373,6 +2374,8 @@ async fn relaunch(
             return refuse_relaunch(daemon, uid, request_id, not_running).await;
         }
     };
+    // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
+    let switching = crate::switch::switched(daemon, uid).await;
     if let Some(old) = &old {
         let earlier_boot = matches!(
             (old.boot, protocol::proc_identity::boot_identity()),
@@ -2380,8 +2383,7 @@ async fn relaunch(
         );
         if !earlier_boot
             && (liveness(&old.host) != Liveness::Gone
-                || group_has_members(old.host.pid)
-                    && !crate::switch::ended_for_move(daemon, uid, deadline).await)
+                || switching && group_has_members(old.host.pid))
         {
             return refuse_relaunch(daemon, uid, request_id, STILL_ENDING).await;
         }
@@ -2424,8 +2426,6 @@ async fn relaunch(
         let codeconnect = launcher.clone()?;
         Ok::<_, String>((binary, host_bin, codeconnect, kept))
     };
-    // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
-    let switching = crate::switch::switched(daemon, uid).await;
     // A switch's start is ready by its message's deadline, its checks included, or it is refused with nothing sent.
     let checked = if switching {
         tokio::time::timeout_at(deadline, checked)
@@ -16189,10 +16189,10 @@ mod tests {
     }
 
     /// **A run whose claude ended on its own while a process it started lives on is relaunched by the next
-    /// message.** Its host is gone but its group still has that member, which ignores SIGTERM: the message stops it
-    /// by the ladder, then relaunches the run, and is sent.
+    /// message, beside that process.** Its host is gone but its group still has that member: the message is sent,
+    /// the run is `live` on a new host, and the process runs on.
     #[tokio::test]
-    async fn a_message_relaunches_a_run_whose_claude_left_a_process_behind() {
+    async fn a_message_relaunches_a_run_beside_a_process_its_claude_left_running() {
         let _env = crate::ProcessEnvRead::take();
         let rig = relaunch_rig();
         let host = stub_host_with_child(&rig);
@@ -16243,7 +16243,7 @@ mod tests {
                 matched: "go on".into()
             }
         );
-        assert!(!alive, "the process left behind was stopped");
+        assert!(alive, "the process claude left running runs on");
         assert_eq!(kept(&rig, &uid).0, "live");
         stop(&played.dir);
     }
