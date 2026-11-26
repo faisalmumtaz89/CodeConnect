@@ -327,6 +327,7 @@ private struct Composer: View {
             case .hostedReadOnly(let fact):
                 ModelFactLabel(
                     agent: summary?.agent ?? .claude, fact: fact, effort: summary.flatMap(RunSettings.effortName))
+                .yields(0)
             case .hostedLive(let settings):
                 HostedSettingsButton(
                     model: model, key: key, agent: summary?.agent ?? .claude, settings: settings,
@@ -338,6 +339,7 @@ private struct Composer: View {
                     confirmMode: { confirmingMode = $0 },
                     box: CGRect(x: InputBoxLayout.barInset - controls.minX, y: 0, width: rowWidth, height: 0))
                 .disabled(runBlocked != nil || busy)
+                .yields(0)
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { controls = $0 }
                 #if DEBUG
                     .task {

@@ -44,10 +44,10 @@ struct HostedSettingsButton: View {
     private var effort: String? { model.shownSummary(for: key).flatMap(RunSettings.effortName) }
 
     var body: some View {
-        HStack(spacing: 2) {
+        BarLayout(spacing: 2) {
             // Short of room, the model's words cut before the mode's.
-            modelButton
-            if !settings.modes.isEmpty { modeButton.layoutPriority(1) }
+            modelButton.yields(0)
+            if !settings.modes.isEmpty { modeButton.yields(1) }
             if agent == .claude || agent == .antigravity { moreButton }
         }
         .coordinateSpace(.named(Self.space))
@@ -76,7 +76,7 @@ struct HostedSettingsButton: View {
                 // The agent's own report of the model (an id) in code type; a menu row's label in the app's.
                 Text(name).font(settings.modelDisplayReported ? Theme.mono(11.5) : InputBoxChip.font)
                     .foregroundStyle(Theme.text)
-                    .barText(.tail)
+                    .lineLimit(1).truncationMode(.tail)
                 if let effort { Text("· \(effort)").foregroundStyle(Theme.text2).fixedSize() }
                 if settings.inFlight {
                     ProgressView().controlSize(.small).accessibilityHidden(true)
@@ -95,7 +95,7 @@ struct HostedSettingsButton: View {
         ) {
             HStack(spacing: 5) {
                 Text(label).foregroundStyle(settings.selectedMode?.confirm == true ? Theme.red : Theme.text)
-                    .barText(.tail)
+                    .lineLimit(1).truncationMode(.tail)
                 chevron
             }
         }
@@ -301,7 +301,7 @@ struct ModelFactLabel: View {
             // By its menu's name, or as the run reported it in code type; "Model" while it has reported none.
             Text(fact?.text ?? "Model").font(fact?.reported == true ? Theme.mono(11.5) : InputBoxChip.font)
                 .foregroundStyle(Theme.text)
-                .barText(.tail)
+                .lineLimit(1).truncationMode(.tail)
             if let effort { Text("· \(effort)").foregroundStyle(Theme.text2).fixedSize() }
         }
         .font(InputBoxChip.font)

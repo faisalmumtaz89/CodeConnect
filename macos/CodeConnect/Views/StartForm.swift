@@ -354,7 +354,7 @@ struct StartForm: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "folder").font(.system(size: 11)).accessibilityHidden(true)
-                Text(folder?.name ?? "Choose folder").font(InputBoxChip.font).barText(.tail)
+                Text(folder?.name ?? "Choose folder").font(InputBoxChip.font).lineLimit(1).truncationMode(.tail)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             // While none is chosen, the folder is the piece still missing: the bar's one lit, bordered chip.
@@ -586,8 +586,8 @@ struct StartForm: View {
             if context.takesUploads { AttachButton(id: "start.attach", take: draft.attach) }
             // Short of room, the words cut first where they say least for their length: the computer's name, then
             // the branch, then the folder; the model's last.
-            computerChip(context)
-            folderButton(context).layoutPriority(2)
+            computerChip(context).yields(0)
+            folderButton(context).yields(2)
             if let folder, context.branchAhead(folder) {
                 BranchRow(
                     context: context, folder: folder, agent: pick?.agent, place: choice(\.place),
@@ -598,11 +598,11 @@ struct StartForm: View {
                         giveKeyboard($messageFocused, caret: $messageSelection, endOf: draft.message)
                     }
                 }
-                .layoutPriority(1)
+                .yields(1)
             }
         } trailing: {
             ModelButton(context: context, pick: pick, open: $menuOpen) { choice(\.model).wrappedValue = $0 }
-                .layoutPriority(3)
+                .yields(3)
             startButton
         }
         .takesFiles(context.takesUploads, pasting: messageFocused, draft.attach)
@@ -880,7 +880,7 @@ private struct ComputerButton: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "desktopcomputer").font(.system(size: 11)).accessibilityHidden(true)
-                Text(chosen.machineName).font(InputBoxChip.font).barText(.tail)
+                Text(chosen.machineName).font(InputBoxChip.font).lineLimit(1).truncationMode(.tail)
                 Circle().fill(Theme.green).frame(width: 6, height: 6).accessibilityHidden(true)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
