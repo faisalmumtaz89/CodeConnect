@@ -101,7 +101,7 @@ public struct DeviceGroup: Hashable, Sendable, Identifiable {
     /// Under the app's own entry, which has no Block: blocking it would cut the app off from its own computer.
     public static let thisDevice = "This Mac"
     public static let blockAction = "Block"
-    public static let allowAction = "Allow again"
+    public static let allowAction = "Allow Again"
 
     /// Under an allowed device: when it last reached this computer, as of `now`.
     public func seenLine(now: Date = Date()) -> String {

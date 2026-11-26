@@ -244,22 +244,19 @@ private struct Composer: View {
         .confirmation(
             Binding(get: { clearing ? true : nil }, set: { clearing = $0 ?? false }), returnsKeyboard: takeKeyboardBack
         ) { _ in
-            Confirmation(title: ClearConfirmation.title, message: ClearConfirmation.message, answers: [
-                .init(title: ClearConfirmation.keep, kind: .cancel, id: "session.composer.clear.cancel"),
-                .init(title: ClearConfirmation.clear, kind: .destructive, id: "session.composer.clear.confirm") {
-                    performClear()
-                },
-            ])
+            Confirmation(
+                ClearConfirmation.ask, cancelID: "session.composer.clear.cancel",
+                confirmID: "session.composer.clear.confirm", perform: performClear)
         }
         // Kit's words for the run's agent; Keep Asking and Esc send nothing, and the mode stays as it was.
         .confirmation($confirmingMode, returnsKeyboard: takeKeyboardBack) { mode in
-            Confirmation(title: modeWords.title, message: modeWords.message, answers: [
-                .init(title: modeWords.cancel, kind: .cancel, id: "session.composer.mode.cancel"),
-                .init(title: modeWords.confirm, kind: .destructive, id: "session.composer.mode.confirm") {
-                    takeOpener()
-                    Task { _ = await model.setMode(for: key, modeValue: mode.value, confirmed: true) }
-                },
-            ])
+            Confirmation(
+                ModeConfirmation.words(for: summary?.agent ?? .claude), cancelID: "session.composer.mode.cancel",
+                confirmID: "session.composer.mode.confirm"
+            ) {
+                takeOpener()
+                Task { _ = await model.setMode(for: key, modeValue: mode.value, confirmed: true) }
+            }
         }
     }
 
@@ -267,8 +264,6 @@ private struct Composer: View {
     private func takeFile(_ name: String, _ size: Int, _ read: () throws -> Data) {
         model.attach(name: name, size: size, to: key, read: read)
     }
-
-    private var modeWords: ModeConfirmation.Words { ModeConfirmation.words(for: summary?.agent ?? .claude) }
 
     // MARK: The box
 

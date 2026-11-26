@@ -1100,20 +1100,21 @@ struct SessionDetailView: View {
         }
         .ccConfirmation(isPresented: $showClearConfirm) {
             CCConfirmation(
-                title: ClearConfirmation.title, message: ClearConfirmation.message,
+                title: ClearConfirmation.ask.title, message: ClearConfirmation.ask.message,
                 answers: [
-                    .init(title: ClearConfirmation.keep, kind: .cancel, id: "session.clear.cancel"),
-                    .init(title: ClearConfirmation.clear, kind: .destructive, id: "session.clear.confirm") {
+                    .init(title: ClearConfirmation.ask.cancel, kind: .cancel, id: "session.clear.cancel"),
+                    .init(title: ClearConfirmation.ask.confirm, kind: .destructive, id: "session.clear.confirm") {
                         performClear()
                     },
                 ])
         }
         .ccConfirmation(isPresented: $confirmingEndRun) {
-            CCConfirmation(
-                title: FleetWords.endTitle, message: FleetWords.endMessage(summary?.agent.displayName ?? "The agent"),
+            let ask = FleetWords.endAsk(label.project, agent: summary?.agent.displayName ?? "The agent")
+            return CCConfirmation(
+                title: ask.title, message: ask.message,
                 answers: [
-                    .init(title: "Cancel", kind: .cancel, id: "endRun.cancel"),
-                    .init(title: "End run", kind: .destructive, id: "endRun.confirm") { endRun() },
+                    .init(title: ask.cancel, kind: .cancel, id: "endRun.cancel"),
+                    .init(title: ask.confirm, kind: .destructive, id: "endRun.confirm") { endRun() },
                 ])
         }
         .ccConfirmation($endRunNote) { note in

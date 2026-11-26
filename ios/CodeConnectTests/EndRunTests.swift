@@ -11,6 +11,16 @@ import XCTest
 @MainActor
 final class EndRunTests: XCTestCase {
 
+    /// Ending asks in W0-6's words, naming the run: what ending does, a line each, and that its folder stays.
+    func testEndingAsksNamingTheRunAndSaysWhatEndingDoes() {
+        let end = FleetWords.endAsk("query-parser", agent: "Codex")
+        XCTAssertEqual(end.title, "End “query-parser”?")
+        XCTAssertEqual(end.items.map(\.words), ["Codex stops", "The run moves to Ended"])
+        XCTAssertEqual(end.note, "Its folder stays as it is.")
+        XCTAssertEqual([end.cancel, end.confirm], ["Cancel", "End Run"])
+        XCTAssertEqual(end.message, "Codex stops. The run moves to Ended. Its folder stays as it is.")
+    }
+
     /// The notice after an end or a removal that did not happen says why in a whole sentence of its own, one for
     /// each answer ccd can give, and quotes no wire word: an answer this build does not know is "refused", plainly.
     func testAFailedEndOrRemovalSaysWhyInASentenceAndQuotesNoWireWord() {

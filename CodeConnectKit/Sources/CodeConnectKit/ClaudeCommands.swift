@@ -257,7 +257,7 @@ public enum SlashPalette {
         SlashRow(command: "effort", subtitle: "Choose reasoning effort", action: .nativeEffort),
         SlashRow(
             command: "compact", subtitle: CompactPrompt.title, action: .nativeCompact(prefillInstructions: "")),
-        SlashRow(command: "clear", subtitle: ClearConfirmation.clear, action: .nativeClear),
+        SlashRow(command: "clear", subtitle: "Clear context", action: .nativeClear),
         SlashRow(command: "diff", subtitle: "Review working-tree changes", action: .nativeDiff),
     ]
 

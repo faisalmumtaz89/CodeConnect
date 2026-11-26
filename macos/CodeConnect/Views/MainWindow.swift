@@ -352,7 +352,7 @@ struct AddCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Group {
-                Button("New Agent…") { add(.agent) }
+                Button("New Run") { add(.agent) }
                     .keyboardShortcut("n", modifiers: .command)
                 Button("Add Computer…") { add(.computer) }
                     .keyboardShortcut("n", modifiers: [.command, .shift])

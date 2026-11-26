@@ -18,6 +18,30 @@ extension String {
 /// A sentence the Mac and the iPhone both draw lives here, so the two cannot
 /// drift apart; a view keeps only the words its own platform alone shows.
 
+/// An ask before an act that cannot be taken back, in the words both apps show: its title naming what it acts on, one
+/// line for each thing the act does (a mark and plain words, never a path), one line that reassures or says until when,
+/// and its two answers, the safe one first.
+public struct AskWords: Sendable, Hashable {
+    public struct Item: Sendable, Hashable {
+        /// The line's mark, an SF Symbol's name.
+        public let mark: String
+        public let words: String
+    }
+
+    public let title: String
+    public let items: [Item]
+    public let note: String
+    /// The safe answer, which Escape also gives.
+    public let cancel: String
+    /// The answer that acts, drawn as destructive.
+    public let confirm: String
+
+    /// The ask as one paragraph, for a card that draws a sentence (the iPhone's): each line, then the note.
+    public var message: String {
+        (items.map { "\($0.words)." } + [note]).joined(separator: " ")
+    }
+}
+
 /// The fleet list: its title, the way to start a run, the empty states and the
 /// questions asked before a run ends or goes.
 public enum FleetWords {
@@ -32,9 +56,15 @@ public enum FleetWords {
     public static let noEndedRuns = "No ended runs."
     public static let noComputersYet = "No computers yet"
 
-    public static let endTitle = "End this run?"
-    public static func endMessage(_ agent: String) -> String {
-        "\(agent) stops, and the run moves to \(FleetStatus.ended.label)."
+    /// Ending run `name`, whose agent is `agent`: it stops and moves to Ended, and its folder is left as it is.
+    public static func endAsk(_ name: String, agent: String) -> AskWords {
+        AskWords(
+            title: "End “\(name)”?",
+            items: [
+                .init(mark: "stop", words: "\(agent) stops"),
+                .init(mark: "arrow.right", words: "The run moves to \(FleetStatus.ended.label)"),
+            ],
+            note: "Its folder stays as it is.", cancel: "Cancel", confirm: "End Run")
     }
 
     public static func removeTitle(_ project: String) -> String { "Remove \(project)?" }
