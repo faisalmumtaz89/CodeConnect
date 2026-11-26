@@ -253,6 +253,7 @@ public enum ChangesWords {
         let reason: String
         switch (code, step) {
         case ("busy", .pullRequest): reason = "A run in this folder is working or waiting for you, so nothing was pushed."
+        case ("unmerged", .pullRequest): reason = "A merge has unresolved files, so nothing was pushed."
         case ("git_failed", .pullRequest): reason = "Git could not push the branch, so no PR was opened."
         case ("timeout", .pullRequest): reason = "Git took too long; the branch may or may not have been pushed, and no PR was opened."
         default: return actionRefused(code: code, detail: detail)
@@ -314,9 +315,10 @@ public enum ChangesWords {
         } else if !git.changed.complete {
             parts.append("Changes not all counted")
         }
-        if git.pullRequest != nil {
-            // Commits made since the pull request was opened, not yet on its branch.
-            if !git.pushed, git.branch != nil { parts.append("not pushed") }
+        if let pr = git.pullRequest {
+            // Commits made since an open pull request was opened, not yet on its branch (a merged one's branch is
+            // often deleted, which is no unpushed work).
+            if pr.state == .open, !git.pushed, git.branch != nil { parts.append("not pushed") }
             return parts.joined(separator: " · ")
         }
         if let ahead = git.ahead, ahead > 0 {
