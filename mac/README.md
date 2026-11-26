@@ -1340,7 +1340,8 @@ to probe credentials.
   `gh_host`, `gh_read_at` and `pr{number, url, state: open|merged|closed, base,
   head_oid, merged_at?}`: the open pull request from this branch of the push
   remote's repository (its push URL), on the repository of the remote named
-  `upstream` (a fork's parent), else of the base's remote; else the newest
+  `upstream` (a fork's parent), else `origin`'s, else the push remote's (never
+  the branch's own upstream remote, which a push changes); else the newest
   closed one from it whose head is `HEAD`. Only github.com is read; any other host is `no_github_remote`. Read
   through `gh api` alone (no prompt, no pager, 5 seconds a call, at most two),
   outside the folder's git lock, one read at a time and at most once per branch
