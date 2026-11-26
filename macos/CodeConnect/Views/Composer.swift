@@ -322,7 +322,7 @@ private struct Composer: View {
                     .lineSpacing(InputBoxLayout.lineSpacing)
                     .foregroundStyle(Theme.text)
                     .lineLimit(1...5)
-                    .accessibilityLabel(SessionWords.replyPrompt(agent))
+                    .accessibilityLabel(prompt(agent))
                     .accessibilityIdentifier("session.composer.field")
                     // Inside `sendsOnReturn`: over the palette, ↑ ↓ move its light and Return runs the lit row; anything
                     // the palette leaves (⇧/⌥Return, no palette) goes on to the box. ⌘ and ⌃ Return are never the palette's.
