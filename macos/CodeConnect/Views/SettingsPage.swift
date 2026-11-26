@@ -167,16 +167,18 @@ struct SettingsPage: View {
 
 // MARK: - Rows
 
-/// A group of Settings rows: its heading, then a rounded card of rows with hairlines between them.
+/// A group of Settings rows: its heading, if it has one, then a rounded card of rows with hairlines between them.
 struct SettingsGroup<Rows: View>: View {
-    let title: String
+    var title: String? = nil
     @ViewBuilder let rows: Rows
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
-                .padding(.leading, 4)
-                .accessibilityAddTraits(.isHeader)
+            if let title {
+                Text(title).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
+                    .padding(.leading, 4)
+                    .accessibilityAddTraits(.isHeader)
+            }
             VStack(spacing: 0) {
                 Group(subviews: rows) { subviews in
                     ForEach(Array(subviews.enumerated()), id: \.offset) { index, subview in
