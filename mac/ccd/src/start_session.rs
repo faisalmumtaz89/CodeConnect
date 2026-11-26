@@ -2053,7 +2053,8 @@ pub(crate) fn agy_default_facts(offer: &Offer) -> Option<protocol::ws::AccountFa
 const AGY_USAGE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Antigravity's plan limits as agy's own `/usage` prints them (`agy -p "/usage"`, its read-only print mode: no model
-/// turn), run as a start's agy is, on agy's own sign-in; none when it does not answer in time or prints none.
+/// turn), run as a start's agy is, on agy's own sign-in; none when it does not answer in time (its process group then
+/// ended, as any agent's read is) or prints none.
 pub(crate) async fn agy_usage(
     environment: &HashMap<OsString, OsString>,
     agy: &Path,
@@ -2068,10 +2069,10 @@ pub(crate) async fn agy_usage(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    match tokio::time::timeout(AGY_USAGE_WAIT, crate::spawn::output(&mut command)).await {
-        Ok(Ok(out)) => agy_usage_windows(&String::from_utf8_lossy(&out.stdout)),
-        _ => Vec::new(),
-    }
+    agent_output(command, AGY_USAGE_WAIT)
+        .await
+        .map(|out| agy_usage_windows(&String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or_default()
 }
 
 /// `/usage`'s records, one window a line, tab-separated as agy 1.5.15 prints them: its group, "Five Hour Limit
