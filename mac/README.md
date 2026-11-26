@@ -1355,7 +1355,8 @@ to probe credentials.
   `{kind: "commit", message}`: every change in the run's folder, tracked and
   untracked, is committed on its branch (`git add -A`, `git commit -q -m`, run
   through the person's login shell as `git worktree add` is, so a hook finds the
-  tools a terminal does), the repository's hooks and signing running as for the
+  tools a terminal does; the shell's own start-up output, such as bash's "no job
+  control in this shell" with no terminal, never reaches the answer), the repository's hooks and signing running as for the
   person's own commit, and a
   `committed {oid, files, message}` notice (the message as committed, a
   `commit-msg` hook's rewrite included) is filed into the run's conversation with

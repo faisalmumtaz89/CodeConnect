@@ -1305,7 +1305,7 @@ async fn run_write(
     use std::ffi::OsStr;
     let mut argv: Vec<&OsStr> = vec![git.as_os_str(), OsStr::new("-C"), OsStr::new(cwd)];
     argv.extend(args.iter().map(OsStr::new));
-    let command = crate::start_session::login_shell_command(environment, None, &argv);
+    let command = crate::start_session::login_shell_write_command(environment, &argv);
     run_child(command, args, timeout, WRITE_OUTPUT_CAP, true).await
 }
 
@@ -2425,6 +2425,66 @@ mod tests {
         assert!(
             matches!(outcome, CommitOutcome::Committed { .. }),
             "{outcome:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A hook's words are its own under an interactive bash**: with bash as the login shell
+    /// (Linux's usual one) a refusing hook's line is what the commit says, not bash's own
+    /// "no job control" lines from starting interactive with no terminal; and `~/.bashrc` still
+    /// runs past Debian's guard for interactive shells, so the hook finds a tool it puts on `PATH`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hooks_words_are_its_own_under_an_interactive_bash() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = committable("commit-bash");
+        let tools = dir.join(".git/test-tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let tool = tools.join("lint-only-in-bashrc");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh
+echo 'lint: 3 problems' >&2
+exit 1
+",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hook = dir.join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh
+lint-only-in-bashrc
+",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        let mut environment = login_environment(&dir, "/usr/bin:/bin");
+        environment.insert("SHELL".into(), "/bin/bash".into());
+        let home = Path::new(&environment[std::ffi::OsStr::new("HOME")]).to_path_buf();
+        std::fs::write(
+            home.join(".bashrc"),
+            format!(
+                "case $- in *i*) ;; *) return;; esac\nPATH=\"{}:$PATH\"\nexport PATH\n",
+                tools.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(home.join(".bash_profile"), ". ~/.bashrc\n").unwrap();
+        assert_eq!(
+            commit(
+                dir.to_str().unwrap(),
+                None,
+                "m",
+                Duration::from_secs(30),
+                &environment
+            )
+            .await,
+            CommitOutcome::Refused {
+                code: protocol::ws::git_refusal::GIT_FAILED,
+                detail: Some("lint: 3 problems".into())
+            }
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

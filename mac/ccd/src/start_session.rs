@@ -2503,16 +2503,7 @@ pub(crate) fn login_shell_command(
     account: Option<&crate::accounts::AccountEnv>,
     args: &[&OsStr],
 ) -> tokio::process::Command {
-    let shell = environment
-        .get(OsStr::new("SHELL"))
-        .cloned()
-        .unwrap_or_default();
-    let name = Path::new(&shell).file_name().unwrap_or_default();
-    let (program, flags) = if name == "zsh" || name == "bash" {
-        (PathBuf::from(&shell), "-lic")
-    } else {
-        (PathBuf::from("/bin/sh"), "-lc")
-    };
+    let (program, flags) = login_shell(environment);
     if let Some(account) = account {
         account.link_shared(environment);
     }
@@ -2534,6 +2525,53 @@ pub(crate) fn login_shell_command(
         .arg("codeconnect-start")
         // An account's variable, set by `env` at exec, after the shell's files ([`crate::accounts`]).
         .args(account.map(|account| account.argv()).into_iter().flatten())
+        .args(args);
+    command
+}
+
+/// The login shell [`login_shell_command`] runs, and its flags.
+fn login_shell(environment: &HashMap<OsString, OsString>) -> (PathBuf, &'static str) {
+    let shell = environment
+        .get(OsStr::new("SHELL"))
+        .cloned()
+        .unwrap_or_default();
+    let name = Path::new(&shell).file_name().unwrap_or_default();
+    if name == "zsh" || name == "bash" {
+        (PathBuf::from(&shell), "-lic")
+    } else {
+        (PathBuf::from("/bin/sh"), "-lc")
+    }
+}
+
+/// [`login_shell_command`] for a write whose stderr is shown as its own words (a commit's, a
+/// push's: a refusing hook's line): the shell's own start-up writes nothing there. An
+/// interactive shell with no terminal says so first (bash: "cannot set terminal process group",
+/// "no job control in this shell"); `/bin/sh` parks the stderr on fd 0 (the write's stdin is
+/// `/dev/null`, and a login bash closes every inherited descriptor above 2) while the login shell
+/// starts with it on `/dev/null`, and the shell hands it back to `args`, with stdin on
+/// `/dev/null` again. The files a terminal reads still run.
+pub(crate) fn login_shell_write_command(
+    environment: &HashMap<OsString, OsString>,
+    args: &[&OsStr],
+) -> tokio::process::Command {
+    let (program, flags) = login_shell(environment);
+    #[cfg(test)]
+    assert!(
+        environment
+            .get(OsStr::new("HOME"))
+            .is_some_and(|home| under_temporary(Path::new(home))),
+        "a test's login shell would start outside a temporary home: {:?}",
+        environment.get(OsStr::new("HOME"))
+    );
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
+        .env_clear()
+        .envs(environment.iter())
+        .arg("-c")
+        .arg("shell=$1; flags=$2; shift 2; exec 0>&2 2>/dev/null; exec \"$shell\" \"$flags\" 'exec 2>&0 0</dev/null; printf \"\\n\"; exec \"$@\"' codeconnect-start \"$@\"")
+        .arg("codeconnect-write")
+        .arg(program)
+        .arg(flags)
         .args(args);
     command
 }
