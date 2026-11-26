@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.28
+
 ## CodeConnect 0.19.27
 
 - On the Mac, Set Up shows an agent that isn't installed in grey, not amber, while another agent can start: one
