@@ -62,6 +62,21 @@ final class StartWorktreeNameTests: XCTestCase {
         XCTAssertEqual(StartPlace.free("fix/new", for: .claude, in: git), "fix/new")
     }
 
+    /// As the computer counts them: a branch whose path the name's branch would be a folder of (`fix` beside
+    /// `fix/login`), and only the folders new worktrees go in (`.claude/worktrees/` under the main checkout), not the
+    /// main checkout's own or a worktree made elsewhere.
+    func testTheNameIsTakenAsTheComputerCountsIt() {
+        let git = StartGit(
+            worktrees: [
+                StartWorktree(path: "/w/widget", branch: "main", dirty: false, missing: false),
+                StartWorktree(path: "/w/fix", branch: "elsewhere", dirty: false, missing: false),
+            ],
+            branches: ["fix/login"], branchesTruncated: false)
+        XCTAssertEqual(StartPlace.free("fix", for: .codex, in: git), "fix-2")
+        XCTAssertEqual(StartPlace.free("widget", for: .codex, in: git), "widget")
+        XCTAssertEqual(StartPlace.free("fix", for: .claude, in: git), "fix")
+    }
+
     /// A name the repository has (a branch the new one would be, or a worktree's folder) gets "-2", then "-3".
     func testATakenNameGetsTheNextNumber() {
         let claude = StartGit(

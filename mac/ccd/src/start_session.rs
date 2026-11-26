@@ -1374,8 +1374,16 @@ async fn add_worktree(
     args: &[&OsStr],
 ) -> Result<(), String> {
     let mut argv: Vec<&OsStr> = vec![OsStr::new("git")];
+    // Nothing of the repository's own runs for a folder answered not trusted: neither its hooks nor a
+    // `core.fsmonitor` program its config names (as the status read in git.rs does). A filter driver its
+    // config defines for a checked-out file still runs: git has no switch for every filter (an accepted miss).
     if !hooks {
-        argv.extend([OsStr::new("-c"), OsStr::new("core.hooksPath=/dev/null")]);
+        argv.extend([
+            OsStr::new("-c"),
+            OsStr::new("core.hooksPath=/dev/null"),
+            OsStr::new("-c"),
+            OsStr::new("core.fsmonitor=false"),
+        ]);
     }
     argv.extend([
         OsStr::new("-C"),
@@ -4818,13 +4826,22 @@ mod tests {
         );
     }
 
-    /// The project's post-checkout hook, which leaves `<root>/hook-ran` when git runs it.
+    /// The project's post-checkout hook and, set in its own config, a `core.fsmonitor` program:
+    /// each leaves `<root>/hook-ran` when git runs it.
     fn arm_checkout_hook(rig: &Rig) -> PathBuf {
         let marker = rig.root.join("hook-ran");
+        let script = format!("#!/bin/sh\ntouch '{}'\n", marker.display());
         let hook = rig.project.join(".git/hooks/post-checkout");
-        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
-        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        let monitor = rig.root.join("fsmonitor");
+        for program in [&hook, &monitor] {
+            std::fs::write(program, &script).unwrap();
+            std::fs::set_permissions(program, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        }
+        git(
+            &rig.project,
+            &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+        );
         marker
     }
 

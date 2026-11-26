@@ -109,13 +109,20 @@ public enum StartPlace: Hashable, Sendable {
     }
 
     /// A new worktree's name the repository doesn't have, as the computer makes it: `name`, else "-2", "-3", … while
-    /// the branch the new worktree would get, or its folder (each "/" written "+"), is the repository's. The computer
-    /// sees every branch and has the last word; this is what the form can say from the ones it was listed.
+    /// the branch the new worktree would get is a branch or a folder of one's path (`fix` beside `fix/login`), or its
+    /// folder (each "/" written "+") is already among the main checkout's `.claude/worktrees/`. The computer sees
+    /// every branch and has the last word; this is what the form can say from the ones it was listed.
     public static func free(_ name: String, for agent: StartAgent, in git: StartGit) -> String {
         let branches = Set(git.branches + git.worktrees.compactMap(\.branch))
-        let folders = Set(git.worktrees.map { URL(fileURLWithPath: $0.path).lastPathComponent })
+        let made = git.worktrees.first.map { $0.path + "/.claude/worktrees/" }
+        let folders = Set(
+            git.worktrees.compactMap { checkout -> String? in
+                guard let made, checkout.path.hasPrefix(made) else { return nil }
+                return String(checkout.path.dropFirst(made.count))
+            })
         func taken(_ name: String) -> Bool {
-            branches.contains(newBranch(name, for: agent))
+            let branch = newBranch(name, for: agent)
+            return branches.contains(branch) || branches.contains { $0.hasPrefix(branch + "/") }
                 || folders.contains(name.replacingOccurrences(of: "/", with: "+"))
         }
         var free = name
