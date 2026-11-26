@@ -49,8 +49,9 @@ struct ReplyUsage: View {
             }
             ForEach(bar.limits, id: \.caption) { limit in
                 HStack(spacing: 5) {
-                    UsageRing(percent: limit.usedPercent)
-                    Text("\(limit.usedPercent)%").font(Theme.mono(11)).foregroundStyle(Theme.text2)
+                    UsageRing(percent: limit.usedPercent, red: limit.usedPercent >= 100)
+                    Text("\(limit.usedPercent)%").font(Theme.mono(11))
+                        .foregroundStyle(limit.usedPercent >= 100 ? Theme.red : Theme.text2)
                 }
             }
         }
@@ -93,15 +94,16 @@ struct ReplyUsage: View {
     }
 }
 
-/// A usage window's share as a small ring: a dark track, filled clockwise from the top.
-private struct UsageRing: View {
+/// A usage window's share as a small ring: a dark track, filled clockwise from the top; red for a window that is full.
+struct UsageRing: View {
     let percent: Int
+    var red = false
 
     var body: some View {
         ZStack {
             Circle().stroke(Color(themeHex: 0x2C2C33), lineWidth: 2.4)
             Circle().trim(from: 0, to: CGFloat(percent) / 100)
-                .stroke(Color(themeHex: 0xD4D4D8), style: StrokeStyle(lineWidth: 2.4, lineCap: .round))
+                .stroke(red ? Theme.red : Color(themeHex: 0xD4D4D8), style: StrokeStyle(lineWidth: 2.4, lineCap: .round))
                 .rotationEffect(.degrees(-90))
         }
         .frame(width: 16, height: 16)

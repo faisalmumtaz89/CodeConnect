@@ -298,6 +298,11 @@ private struct Composer: View {
 
     // MARK: The box
 
+    /// The reply field's prompt: at a usage limit, when a message goes through again.
+    private func prompt(_ agent: String) -> String {
+        model.limitFoot(for: key, now: .now) == nil ? SessionWords.replyPrompt(agent) : LimitFoot.replyPrompt
+    }
+
     private var box: some View {
         let agent = summary?.agent.displayName ?? "the agent"
         return InputBox(barHeight: 46) {
@@ -310,7 +315,7 @@ private struct Composer: View {
                 }
                 TextField(
                     "", text: $kept.reply, selection: $selection,
-                    prompt: Text(SessionWords.replyPrompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
+                    prompt: Text(prompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
                 )
                     .textFieldStyle(.plain)
                     .font(Theme.ui(15))
