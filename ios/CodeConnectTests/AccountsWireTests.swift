@@ -413,6 +413,19 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertNil(model.accountSwitch(for: .claude), "another agent's sessions aren't counted")
     }
 
+    /// An Antigravity run moving to another account is counted for Antigravity, as Claude Code's and Codex's are (minor
+    /// 55), from the daemon's recorded move, and for no other agent.
+    func testAnAntigravityRunsMoveIsCountedForAntigravity() async throws {
+        let (model, _) = try model()
+        let url = try XCTUnwrap(Bundle(for: type(of: self)).url(forResource: "switch-antigravity-wire", withExtension: "json"))
+        let frames = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url)).arrayValue)
+        model.connection.injectForTesting(
+            try JSONDecoder().decode(ServerMessage.self, from: Data(frames[1].canonicalJSONString.utf8)))
+        await waitUntil({ model.accountSwitch(for: .antigravity) != nil }, "the moving listing to be read")
+        XCTAssertEqual(model.accountSwitch(for: .antigravity)?.moved, 1)
+        XCTAssertNil(model.accountSwitch(for: .codex), "another agent's sessions aren't counted")
+    }
+
     /// A failed move is about the session: its line names the session and points to its conversation, never an account.
     /// The account chosen since (here B, after the daemon's recorded failure) is not the one it failed on.
     func testAFailedMoveNamesNoAccount() async throws {
