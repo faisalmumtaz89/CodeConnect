@@ -252,11 +252,12 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(laterReply.git?.pullRequest?.mergeState, .unknown)
 
         let fields = try encodeClient(
-            .mergePullRequest(requestID: "m-1", sessionUID: "u-1", method: .squash, headOID: "abc"))
+            .mergePullRequest(requestID: "m-1", sessionUID: "u-1", number: 7, method: .squash, headOID: "abc"))
         XCTAssertEqual(fields["type"]?.stringValue, "git_action")
         XCTAssertEqual(fields["action"]?.objectValue?["kind"]?.stringValue, "merge")
         XCTAssertEqual(fields["action"]?.objectValue?["method"]?.stringValue, "squash")
         XCTAssertEqual(fields["action"]?.objectValue?["head_oid"]?.stringValue, "abc")
+        XCTAssertEqual(fields["action"]?.objectValue?["number"]?.intValue, 7)
 
         let newer = try decodeServer(
             """

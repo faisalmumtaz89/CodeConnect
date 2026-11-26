@@ -1410,17 +1410,21 @@ to probe credentials.
   `create_failed{"pushed; " + gh's line}`, or `indeterminate` when gh gave no
   answer or GitHub could not be asked again.
   From `>= 64` `action` may be `{kind: "merge", method: "merge"|"squash"|"rebase",
-  head_oid}`, answered `done{pr}`: the open pull request from the run's branch
+  head_oid, number}`, answered `done{pr}`: the open pull request from the run's branch
   (asked of GitHub now) merged by `gh pr merge <n> --repo <gh_repo> --<method>
   --match-head-commit <head_oid>` (30 s), never with `--delete-branch`, `--auto`
   or `--admin`, and nothing local changes (no checkout, pull or branch deleted).
   GitHub is then asked again: merged is `done`, and so is a pull request a merge
-  queue holds open (the panel reads it open). Refused, with nothing merged, when
-  there is no open pull request (`no_pull_request`), its head is not `head_oid`
-  (`head_moved`, also when GitHub says so as it merges), or the repository does not
+  queue holds open. On a branch whose merge queue is required, gh enqueues it
+  (GitHub's auto-merge), and the queue merges it later by the method the queue is
+  set to, which may not be `method`. `done` carries no state: the panel's next
+  `get_run_git` reads it merged or still open. Refused, with nothing merged, when
+  there is no open pull request (`no_pull_request`), it is not pull request
+  `number` or its head is not `head_oid` (`head_moved`, also when GitHub says so as
+  it merges), or the repository does not
   allow `method` (`method_not_allowed`); GitHub's refusal is `merge_failed{gh's
-  line}`; an answer gh never gave is `indeterminate` unless GitHub then reads it
-  merged. Refused before anything is sent on a detached head, while unmerged, with
+  line}`; an answer gh never gave, or a refusal after which GitHub could not be
+  read, is `indeterminate` unless GitHub then reads it merged. Refused before anything is sent on a detached head, while unmerged, with
   no base known (`base_unknown`: no `refs/remotes/<remote>/HEAD`, as in a
   repository made by `git init` and pushed rather than cloned), on the base branch
   itself (`on_base_branch`), with no commits past the base

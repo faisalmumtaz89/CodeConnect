@@ -1597,6 +1597,8 @@ pub enum GitAction {
     Merge {
         method: MergeMethod,
         head_oid: String,
+        /// The pull request the panel showed: another one from the branch is not merged.
+        number: u64,
     },
 }
 
@@ -1677,7 +1679,8 @@ pub mod git_refusal {
     pub const NO_PULL_REQUEST: &str = "no_pull_request";
     /// The repository does not allow that merge method.
     pub const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
-    /// The pull request's head is not the commit the panel showed: nothing was merged.
+    /// The pull request is not the one the panel showed, or its head is not the commit the panel
+    /// showed: nothing was merged.
     pub const HEAD_MOVED: &str = "head_moved";
     /// GitHub refused the merge; `detail` is gh's line (a rule, a review, a conflict).
     pub const MERGE_FAILED: &str = "merge_failed";
@@ -4877,12 +4880,12 @@ mod tests {
             serde_json::json!({"status": "done", "sha": "abc"})
         );
         let merge: ClientMessage = serde_json::from_str(
-            r#"{"type":"git_action","request_id":"m-1","session_uid":"u","action":{"kind":"merge","method":"squash","head_oid":"abc"}}"#,
+            r#"{"type":"git_action","request_id":"m-1","session_uid":"u","action":{"kind":"merge","method":"squash","head_oid":"abc","number":7}}"#,
         )
         .unwrap();
         assert!(
             matches!(merge, ClientMessage::GitAction { ref action, .. }
-                if *action == GitAction::Merge { method: MergeMethod::Squash, head_oid: "abc".into() }),
+                if *action == GitAction::Merge { method: MergeMethod::Squash, head_oid: "abc".into(), number: 7 }),
             "{merge:?}"
         );
         for done in [opened, committed] {

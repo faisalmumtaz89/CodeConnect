@@ -5300,13 +5300,17 @@ impl Daemon {
                 "create_pr",
                 "codeconnect.git_action.create_pr.v1".to_string(),
             ),
-            GitAction::Merge { method, head_oid } => {
+            GitAction::Merge {
+                method,
+                head_oid,
+                number,
+            } => {
                 if head_oid.is_empty() || !head_oid.chars().all(|c| c.is_ascii_hexdigit()) {
                     return refused(code::BAD_REQUEST, None);
                 }
                 (
                     "merge",
-                    format!("codeconnect.git_action.merge.v1\n{method:?}\n{head_oid}"),
+                    format!("codeconnect.git_action.merge.v1\n{method:?}\n{head_oid}\n{number}"),
                 )
             }
         };
@@ -5383,7 +5387,11 @@ impl Daemon {
                         .await
                 }
                 GitAction::CreatePr => self.create_pr(&row).await,
-                GitAction::Merge { method, head_oid } => self.merge(&row, *method, head_oid).await,
+                GitAction::Merge {
+                    method,
+                    head_oid,
+                    number,
+                } => self.merge(&row, *method, head_oid, *number).await,
             }
         };
         let result = match outcome {
@@ -5543,6 +5551,7 @@ impl Daemon {
         row: &crate::store::SessionRow,
         method: protocol::ws::MergeMethod,
         head_oid: &str,
+        number: u64,
     ) -> ActionOutcome {
         use crate::github::Merged;
         use protocol::ws::{git_refusal as code, PrState};
@@ -5566,7 +5575,9 @@ impl Daemon {
                 Ok(None) => break 'outcome ActionOutcome::Refused(code::NO_PULL_REQUEST, None),
                 Err(unreachable) => break 'outcome unavailable(unreachable),
             };
-            if pr.head_oid != head_oid {
+            // Not the pull request the panel showed (another one opened from the branch since), or
+            // not at the commit it showed.
+            if pr.number != number || pr.head_oid != head_oid {
                 break 'outcome ActionOutcome::Refused(code::HEAD_MOVED, None);
             }
             match crate::github::merge_methods(gh_bin, &target, &pr).await {
@@ -5595,9 +5606,13 @@ impl Daemon {
                 (_, Ok(now)) if now.state == PrState::Merged => done,
                 (Merged::Done, _) => done,
                 (Merged::HeadMoved, _) => ActionOutcome::Refused(code::HEAD_MOVED, None),
-                (Merged::Refused(detail), _) => {
+                (Merged::Refused(detail), Ok(_)) => {
                     ActionOutcome::Refused(code::MERGE_FAILED, Some(detail))
                 }
+                // gh failed and GitHub could not be asked after: it may have merged it.
+                (Merged::Refused(_), Err(_)) => ActionOutcome::Unknown(
+                    "GitHub may have merged it: read the run's repository again".into(),
+                ),
                 (Merged::Unknown, _) => ActionOutcome::Unknown(
                     "GitHub may have merged it: read the run's repository again".into(),
                 ),
@@ -9529,6 +9544,7 @@ mod tests {
         let merge = |method| GitAction::Merge {
             method,
             head_oid: head.into(),
+            number: 15173,
         };
         let merged_pr = GitActionResult::Done {
             sha: None,
@@ -9606,7 +9622,18 @@ mod tests {
         let moved = GitAction::Merge {
             method: MergeMethod::Squash,
             head_oid: "0000000000000000000000000000000000000000".into(),
+            number: 15173,
         };
+        // The panel showed another pull request from this branch (closed since, this one opened).
+        let another = GitAction::Merge {
+            method: MergeMethod::Squash,
+            head_oid: head.into(),
+            number: 41,
+        };
+        assert_eq!(
+            refused(daemon.git_action(uid, "m-8", &another).await).0,
+            code::HEAD_MOVED
+        );
         assert_eq!(
             refused(daemon.git_action(uid, "m-4", &moved).await).0,
             code::HEAD_MOVED
@@ -9656,6 +9683,30 @@ mod tests {
             );
             done(&gh, &dir);
         }
+
+        // gh's answer lost, and GitHub not readable after: not known, never said to have failed.
+        let (gh, daemon, dir) = at("01K1B3XQ8ZC0DE5FGH7JKMNP56", branch);
+        std::fs::write(
+            gh.with_file_name("merge.err"),
+            "error connecting to api.github.com\n",
+        )
+        .unwrap();
+        std::fs::write(gh.with_file_name("merge.exit"), "1").unwrap();
+        std::fs::write(gh.with_file_name("pull.after"), "not a pull request").unwrap();
+        assert_eq!(
+            refused(
+                daemon
+                    .git_action(
+                        "01K1B3XQ8ZC0DE5FGH7JKMNP56",
+                        "m-9",
+                        &merge(MergeMethod::Squash)
+                    )
+                    .await
+            )
+            .0,
+            code::INDETERMINATE
+        );
+        done(&gh, &dir);
 
         // gh's answer lost, but GitHub merged it: done, from the read after.
         let (gh, daemon, dir) = at("01K1B3XQ8ZC0DE5FGH7JKMNP55", branch);

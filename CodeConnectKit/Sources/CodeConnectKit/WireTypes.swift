@@ -1599,6 +1599,19 @@ public enum PutFileResult: Decodable, Sendable, Hashable {
     }
 }
 
+/// The `merge` action as the wire carries it.
+private struct MergeAction: Encodable {
+    let kind = "merge"
+    let method: MergeMethod
+    let headOID: String
+    let number: UInt64
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, method, number
+        case headOID = "head_oid"
+    }
+}
+
 /// A way to merge a pull request (minor 64).
 public enum MergeMethod: String, Codable, Sendable, Hashable, CaseIterable {
     case merge, squash, rebase
@@ -2395,8 +2408,9 @@ public enum ClientMessage: Sendable {
     case commit(requestID: String, sessionUID: String, message: String)
     /// A pull request from the run's branch (`create_pr`, minor 61).
     case createPullRequest(requestID: String, sessionUID: String)
-    /// The run's open pull request merged by `method`, only while its head is `headOID` (`merge`, minor 64).
-    case mergePullRequest(requestID: String, sessionUID: String, method: MergeMethod, headOID: String)
+    /// The run's open pull request `number` merged by `method`, only while its head is `headOID`: the pull request and
+    /// commit the panel showed (`merge`, minor 64).
+    case mergePullRequest(requestID: String, sessionUID: String, number: UInt64, method: MergeMethod, headOID: String)
     /// **Say something to a Codex session.** Minor 18, and the one message an
     /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
     case compose(
@@ -2639,11 +2653,11 @@ extension ClientMessage: Encodable {
             try c.encode(requestID, forKey: .requestID)
             try c.encode(sessionUID, forKey: .sessionUID)
             try c.encode(["kind": "create_pr"], forKey: .action)
-        case .mergePullRequest(let requestID, let sessionUID, let method, let headOID):
+        case .mergePullRequest(let requestID, let sessionUID, let number, let method, let headOID):
             try c.encode("git_action", forKey: .type)
             try c.encode(requestID, forKey: .requestID)
             try c.encode(sessionUID, forKey: .sessionUID)
-            try c.encode(["kind": "merge", "method": method.rawValue, "head_oid": headOID], forKey: .action)
+            try c.encode(MergeAction(method: method, headOID: headOID, number: number), forKey: .action)
         case .compose(let session, let requestID, let text, let payloadHash, let attachments):
             try c.encode("compose", forKey: .type)
             try c.encode(session, forKey: .sessionID)

@@ -1234,10 +1234,11 @@ public final class DaemonConnection {
             timeout: Self.commitTimeout)
     }
 
-    /// Merge the run `sessionUID`'s open pull request by `method`, only while its head is `headOID`, the commit the panel
-    /// showed. `requestID` is its identity: a retry reuses it and the computer replays its answer, never merging twice.
+    /// Merge the run `sessionUID`'s open pull request `number` by `method`, only while its head is `headOID`: the pull
+    /// request and commit the panel showed. `requestID` is its identity: a retry reuses it and the computer replays its
+    /// answer, never merging twice.
     public func mergePullRequest(
-        sessionUID: String, method: MergeMethod, headOID: String, requestID: String
+        sessionUID: String, number: UInt64, method: MergeMethod, headOID: String, requestID: String
     ) async throws -> GitActionResult {
         guard capabilities?.mergesPullRequests == true else {
             throw ConnectionError.incompatible(
@@ -1247,7 +1248,8 @@ public final class DaemonConnection {
         return try await request(
             key: requestID,
             store: \.gitActionWaiters,
-            send: .mergePullRequest(requestID: requestID, sessionUID: sessionUID, method: method, headOID: headOID),
+            send: .mergePullRequest(
+                requestID: requestID, sessionUID: sessionUID, number: number, method: method, headOID: headOID),
             timeout: Self.commitTimeout)
     }
 
