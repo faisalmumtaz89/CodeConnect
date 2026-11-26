@@ -648,7 +648,7 @@ private struct AccountRow: View {
         return HStack(alignment: .bottom, spacing: 0) {
             ForEach(runs, id: \.self) { run in
                 VStack(alignment: .trailing, spacing: 1) {
-                    if let group = parts(run[0]).group { Text(group).lineLimit(1) }
+                    if let group = parts(run[0]).group { Text(group).lineLimit(1).fixedSize() }
                     HStack(spacing: 0) {
                         ForEach(run, id: \.self) { caption in
                             Text("\(parts(caption).length) used").lineLimit(1)
