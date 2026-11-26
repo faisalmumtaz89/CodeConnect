@@ -175,7 +175,8 @@ struct StartForm: View {
             }
         }
         .task(id: contexts.map(\.id)) { contexts.forEach { $0.load() } }
-        .onChange(of: context?.takesUploads, initial: true) { takesFiles = $1 ?? false }
+        // Only while composing: a sent start takes no more files.
+        .onChange(of: context?.takesUploads == true && phase == .composing, initial: true) { takesFiles = $1 }
         // Another folder, or the same path on another computer, has its repository read, as the iPhone's folder step
         // does. Where in it the start goes is the draft's: only the person's own pick of a folder resets it.
         .task(id: [context?.id ?? "", folderPath ?? ""]) {
