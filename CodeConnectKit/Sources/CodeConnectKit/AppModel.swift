@@ -1301,6 +1301,16 @@ public final class AppModel {
         return await activateAccount(agent: agent, accountID: account.id)
     }
 
+    /// A click on `agent`'s Default row: chosen, unless its own sign-in (Antigravity's) reads signed out, when it is
+    /// signed in instead, as an added account's row is ([`choose`]); while that sign-in is going on, nothing.
+    @discardableResult
+    public func chooseDefault(_ agent: StartAgent) async -> Bool {
+        if let signIn = accountBook?.agentSignIn(for: agent), !signIn.choosable {
+            return signIn.signedOut ? await signInAgent(agent) : false
+        }
+        return await activateAccount(agent: agent, accountID: nil)
+    }
+
     /// The switch `agent`'s sessions on this computer are in (their summaries' `switching`), toward the account its
     /// new starts now use; nil while none is moving.
     public func accountSwitch(for agent: StartAgent) -> AccountSwitch? {

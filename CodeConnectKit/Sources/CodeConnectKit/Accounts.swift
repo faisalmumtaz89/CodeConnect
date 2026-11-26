@@ -130,6 +130,10 @@ public struct AgentSignIn: Decodable, Hashable, Sendable {
         return plan ?? "Signed in"
     }
 
+    /// Whether its Default can be chosen: not while the agent says it is signed out, a sign-in going on or not, so no
+    /// session moves onto a Default that can't start ([`AppModel.chooseDefault`]).
+    public var choosable: Bool { signedIn != false }
+
     /// Signed out, as its row says it: the agent says so and no sign-in is going on.
     public var signedOut: Bool { signedIn == false && !signingIn }
 

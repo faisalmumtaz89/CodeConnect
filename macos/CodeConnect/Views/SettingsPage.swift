@@ -548,7 +548,7 @@ private struct AgentAccounts: View {
                         model: model, agent: agent, id: nil, facts: book.defaultFacts(for: agent), label: "Default",
                         signedOut: signIn?.signedOut ?? false, signingIn: signIn?.signingIn ?? false,
                         note: signIn?.line(plan: book.defaultFacts(for: agent)?.plan), columns: columns,
-                        inUse: active == nil, choose: { await model.activateAccount(agent: agent, accountID: nil) },
+                        inUse: active == nil, choose: { await model.chooseDefault(agent) },
                         acts: model.signsAgentsIn ? signIn?.acts ?? [] : [], remove: {},
                         signOut: { signingOut = true })
                     ForEach(book.accounts(for: agent)) { account in
