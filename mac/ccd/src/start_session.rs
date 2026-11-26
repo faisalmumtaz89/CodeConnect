@@ -2076,7 +2076,7 @@ pub(crate) async fn agy_usage(
 
 /// `/usage`'s records, one window a line, tab-separated as agy 1.5.15 prints them: its group, "Five Hour Limit
 /// Remaining" or "Weekly Limit Remaining", the share left ("100%"), the reset (RFC 3339). Any other line, and a window
-/// named in other words, is left out, never guessed. A reset in 1970 is agy's word for a window not opened yet: 0.
+/// named in other words, is left out, never guessed. agy names a window not opened yet as resetting at 1970-01-01: 0.
 pub(crate) fn agy_usage_windows(text: &str) -> Vec<protocol::ws::UsageWindow> {
     text.lines()
         .filter_map(|line| {
@@ -2090,15 +2090,10 @@ pub(crate) fn agy_usage_windows(text: &str) -> Vec<protocol::ws::UsageWindow> {
                 _ => return None,
             };
             let left: u32 = left.strip_suffix('%')?.parse().ok()?;
-            let resets_at = protocol::time::unix_ms_from_rfc3339(reset)? / 1000;
             Some(protocol::ws::UsageWindow {
                 used_percent: 100 - left.min(100),
                 window_minutes,
-                resets_at: if resets_at < 365 * 86_400 {
-                    0
-                } else {
-                    resets_at
-                },
+                resets_at: protocol::time::unix_ms_from_rfc3339(reset)? / 1000,
                 group: Some(group.to_string()),
             })
         })
