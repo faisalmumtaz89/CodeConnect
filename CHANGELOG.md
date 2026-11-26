@@ -5,6 +5,15 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.29
 
+- On the Mac, the reply and Start bars stay on one row: when space runs short their words are cut with "…", the
+  computer's name first and the model's last, instead of wrapping onto a second line.
+- The Start pane stands on a slowly drifting field of figures, which lights up around the pointer and ripples where you
+  click.
+- A session whose Claude ended while a command it started was still running takes your next message again, instead of
+  saying it is still ending; that command keeps running.
+- A session's count of changed lines includes the files it added that git doesn't track yet.
+- Settings › Accounts and the reply bar show Antigravity's plan limits, by model group.
+
 ## CodeConnect 0.19.28
 
 - On the Mac, choosing another account in Settings › Accounts stops nothing: new sessions use it at once, and an open
