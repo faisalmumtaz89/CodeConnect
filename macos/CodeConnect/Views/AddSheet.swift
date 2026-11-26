@@ -365,6 +365,10 @@ private struct IPhoneSide: View {
                     code = .unreachable
                     return
                 }
+                if let shown = RenderWindow.pairCode {
+                    code = .shown(PairingQRPayload(host: "100.64.0.1", port: 8787, code: shown))
+                    return
+                }
             #endif
             let root = setup.installer?.root
             while !Task.isCancelled {
