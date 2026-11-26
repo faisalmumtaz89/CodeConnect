@@ -47,4 +47,19 @@ final class ChangesStateWordsTests: XCTestCase {
         let git = try JSONDecoder().decode(RunGit.self, from: Data(unborn.utf8))
         XCTAssertEqual(ChangesWords.state(git), "1 file changed · nothing committed")
     }
+
+    /// Why the computer did not commit, by its code: in the app's words, git's own words after where it gave them, and
+    /// an outcome not known (or a code this build does not know) never claimed either way.
+    func testACommitsRefusalIsWordedByItsCode() {
+        XCTAssertEqual(
+            ChangesWords.commitRefused(code: "nothing_to_commit", detail: nil), "Nothing has changed since the last commit.")
+        XCTAssertEqual(
+            ChangesWords.commitRefused(code: "git_failed", detail: "pre-commit hook: fmtcheck failed"),
+            "Git did not commit. pre-commit hook: fmtcheck failed", "git's words, as it gave them")
+        XCTAssertEqual(
+            ChangesWords.commitRefused(code: "busy", detail: nil),
+            "The run is working or waiting for you, so nothing was committed.")
+        XCTAssertEqual(ChangesWords.commitRefused(code: "indeterminate", detail: nil), ChangesWords.commitUnknown)
+        XCTAssertEqual(ChangesWords.commitRefused(code: "a_newer_code", detail: "x"), ChangesWords.commitUnknown)
+    }
 }

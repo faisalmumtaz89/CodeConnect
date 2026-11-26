@@ -236,6 +236,30 @@ public enum ChangesWords {
     public static func committed(files count: Int, sha: String) -> String {
         "You committed \(files(count)) · \(sha.prefix(7))"
     }
+    /// The Changes panel's line under its state while it can commit, or why it cannot yet.
+    public static let commitReady = "The run has stopped, so you can commit what it left"
+    public static let commitWaitsWorking = "Agent is working · actions wait until it stops"
+    public static let commitWaitsCard = "Waiting on you · actions wait until the agent stops"
+    /// Why the computer did not commit, by its code (`git_refusal`), with git's own words after where it gave them.
+    public static func commitRefused(code: String, detail: String?) -> String {
+        let reason: String
+        switch code {
+        case "busy": reason = "The run is working or waiting for you, so nothing was committed."
+        case "unmerged": reason = "A merge has unresolved files, so nothing was committed."
+        case "nothing_to_commit": reason = "Nothing has changed since the last commit."
+        case "detached": reason = "No branch is checked out, so nothing was committed."
+        case "not_a_repository": reason = "This run’s folder is not in a git repository."
+        case "unknown_session": reason = "This run is no longer on its computer."
+        case "bad_request": reason = "The computer could not take this message, so nothing was committed."
+        case "git_failed": reason = "Git did not commit."
+        case "timeout": reason = "Git took too long, so nothing was committed."
+        default: return commitUnknown
+        }
+        guard let detail, !detail.isEmpty else { return reason }
+        return "\(reason) \(detail)"
+    }
+    /// A commit whose outcome is not known: the panel's repository, read again, shows what git has.
+    public static let commitUnknown = "It is not known whether the commit was made; the changes below are what git has now."
     /// A Changes panel's state line from its run's repository: an unresolved merge, the files changed (at least so
     /// many when the computer could not count them all), and the commits not on the base, pushed or not, or nothing
     /// committed yet. Only what the computer read; nothing from an agent's words.
