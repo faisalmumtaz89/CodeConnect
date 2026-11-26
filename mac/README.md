@@ -1380,10 +1380,11 @@ to probe credentials.
   From `>= 61` `action` may be `{kind: "create_pr"}`, answered `done{pr: {number,
   url}}` (no `sha`): the open pull request from the run's branch into `gh_repo`
   (looked up as `get_run_git` looks, but asked of GitHub now) is the answer, and
-  nothing is pushed; else the branch is pushed to its push remote when that lacks
-  it at `HEAD` (`git push --no-follow-tags -u -- <remote>
+  nothing is pushed; else the branch is pushed to its push remote (`git push
+  --no-follow-tags -u -- <remote>
   refs/heads/<b>:refs/heads/<b>`, no force, through the login shell with the
-  repository's `pre-push` hook, 120 s) and opened with `gh pr create --repo
+  repository's `pre-push` hook, 120 s; nothing when the remote has `HEAD`, refused
+  when the branch there moved on) and opened, in the run's folder, with `gh pr create --repo
   <gh_repo> --head <[owner:]b> --fill [--base <base>]` (title and body from the
   commits, 30 s). If gh refuses or gives no answer, GitHub is asked once more, and
   a pull request found there is the answer, so one is never opened twice; else
