@@ -9121,6 +9121,45 @@ mod tests {
         );
     }
 
+    /// **A retry of a failed Codex move has the move's deadline** (306): the run's move failed and it ended; the person's
+    /// message tries again while the new account's app-server never comes up: it is refused, nothing sent, within the
+    /// move's 15 s from its arrival.
+    #[tokio::test]
+    async fn a_retry_of_a_failed_codex_move_is_refused_within_the_moves_deadline() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        rig.daemon = relauncher(&rig);
+        let (uid, mut ws) = engine_run(&rig, "req-retry", "thr-retry", "turn-1").await;
+        turn_over(&rig.daemon, &uid, &mut ws, "thr-retry", "turn-1", &[]).await;
+        let b = rig.daemon.store.add_account("codex", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("codex", Some(&b.id))
+            .unwrap());
+        rig.daemon
+            .store
+            .set_switch_state(&uid, Some(Store::SWITCH_FAILED))
+            .unwrap();
+        app_server_ended(&rig, &uid, ws).await;
+        let asked_at = Instant::now();
+        let said = saying(&rig.daemon, &uid, "say-retry", "on B?")
+            .await
+            .unwrap();
+        let waited = asked_at.elapsed();
+        if let Some(watch) = rig.daemon.db.watched_host(uid.clone()).await.unwrap() {
+            crate::claude_host::stop_group(watch.host, watch.boot.unwrap()).await;
+        }
+        assert!(
+            matches!(said, protocol::ws::ComposeResult::Rejected { .. }),
+            "{said:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(16),
+            "answered after {waited:?}"
+        );
+    }
+
     /// **A moved run that has had a message is never silently given a new thread, and the thread asked for is on the
     /// model it would run** (306; terminal's rehearsal; gate 9): the person's message moves a run to B whose resume
     /// finds no rollout of its thread: Codex is asked for a thread on its kept model when B's plan offers it, and on

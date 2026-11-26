@@ -2604,6 +2604,7 @@ impl Daemon {
         use protocol::ws::ComposeResult;
 
         let refuse = |reason: String| ComposeResult::Rejected { reason };
+        let arrived = tokio::time::Instant::now();
 
         // 1. **The run, and the agent that is running in it — before any lock or durable
         //    claim.** An unreadable row is a refusal too: unreadable is not evidence of
@@ -2703,8 +2704,9 @@ impl Daemon {
         // first and relaunched by the message the same way ([`crate::switch::moves`]), all under
         // the run's move gate.
         let moving = self.move_guard(&session.uid).await;
-        // One deadline for a message's relaunch, a move's end of the old app-server included: a move's within the
-        // apps' wait for an answer, so one that cannot start is refused, nothing sent, before they stop waiting.
+        // One deadline for a message's relaunch, a move's end of the old app-server included: a move's runs from the
+        // message's arrival, within the apps' wait for an answer, so one that cannot start is refused, nothing sent,
+        // before they stop waiting.
         let mut deadline = tokio::time::Instant::now() + crate::start_session::START_TIMEOUT;
         let mut engine = match self.inner.lock().await.host_links.get(&session.uid) {
             Some(HostLink::Codex(_, commands)) => Some(commands.clone()),
@@ -2720,7 +2722,7 @@ impl Daemon {
                 // A message the ledger holds is answered from it, and moves nothing.
                 if !recorded && crate::switch::moves(self, &session.uid, request_id, running).await
                 {
-                    deadline = tokio::time::Instant::now() + crate::claude_host::RELAUNCH_WAIT;
+                    deadline = arrived + crate::claude_host::RELAUNCH_WAIT;
                     if !crate::switch::ended_for_move(self, &session.uid, deadline).await {
                         return refuse(crate::claude_host::STILL_ENDING.into());
                     }
@@ -2763,6 +2765,10 @@ impl Daemon {
             claimed_hash,
             reply,
         };
+        // A run its switch ended, moved or failed: its relaunch has the move's deadline, from the message's arrival.
+        if crate::switch::switched(self, &session.uid).await {
+            deadline = arrived + crate::claude_host::RELAUNCH_WAIT;
+        }
         if crate::codex_host::relaunch(self, &session.uid, ask, deadline).await {
             return Daemon::compose_result(
                 self.engine_report(&session.uid, request_id, told).await,
@@ -3301,6 +3307,7 @@ impl Daemon {
         connection: u64,
         attachments: &[String],
     ) -> SendTextResult {
+        let arrived = tokio::time::Instant::now();
         if text.len() > protocol::ws::MAX_SEND_TEXT_BYTES {
             return SendTextResult::Refused {
                 reason: format!(
@@ -3389,6 +3396,7 @@ impl Daemon {
                         text,
                         identity,
                         submit,
+                        arrived,
                     },
                 )
                 .await

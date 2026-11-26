@@ -2172,6 +2172,8 @@ pub(crate) struct Message {
     /// The app's request id with the hash it was checked against, when it gave them.
     pub identity: Option<(String, String)>,
     pub submit: bool,
+    /// When the request reached ccd, from which a relaunch's deadline runs.
+    pub arrived: Instant,
 }
 
 /// `send_text` to the hosted Claude run `uid`, whose lifecycle was last read as
@@ -2196,6 +2198,7 @@ pub(crate) async fn send_text(
         text,
         identity,
         submit,
+        arrived,
     } = message;
     if let Some(reason) = refused_screen(&text) {
         return refuse(reason);
@@ -2253,7 +2256,7 @@ pub(crate) async fn send_text(
             return refuse("could not record that this message is being sent; nothing was sent");
         }
     }
-    let deadline = Instant::now() + RELAUNCH_WAIT;
+    let deadline = arrived + RELAUNCH_WAIT;
     if lifecycle == Lifecycle::Exited {
         // Ended by its move, whose wait for its old group to empty a restart may have cut short: that wait first.
         if matches!(
@@ -2420,7 +2423,15 @@ async fn relaunch(
     };
     // A run moved by a switch of account keeps its mode, and a start that cannot go through says so (306 S9).
     let switching = crate::switch::switched(daemon, uid).await;
-    let (claude, host_bin, codeconnect, kept) = match checked.await {
+    // A switch's start is ready by its message's deadline, its checks included, or it is refused with nothing sent.
+    let checked = if switching {
+        tokio::time::timeout_at(deadline, checked)
+            .await
+            .unwrap_or_else(|_| Err("it was not ready in time".to_string()))
+    } else {
+        checked.await
+    };
+    let (claude, host_bin, codeconnect, kept) = match checked {
         Ok(checked) => checked,
         Err(why) => {
             if switching {
@@ -14724,6 +14735,62 @@ mod tests {
         stop(&relaunched.dir);
         assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
         assert_eq!(rig.daemon.store.run_account(&uid).unwrap(), Some(b));
+    }
+
+    /// **A move whose checks take its time is refused within its deadline** (306): the person's message moves a quiet
+    /// run, and Claude Code's version and sign-in checks on B each answer, but only after 9 s: the message is refused,
+    /// nothing launched, within the move's 15 s from its arrival.
+    #[tokio::test]
+    async fn a_move_whose_checks_take_its_time_is_refused_within_its_deadline() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = relaunch_rig();
+        let (played, b) = quiet_on_a(&mut rig).await;
+        let uid = played.uid.clone();
+        choose(&rig.daemon, Some(&b)).await;
+        // Claude Code on B answers its version and its sign-in, each 9 s on.
+        let claude = rig.root.join("bin").join("claude");
+        let real = rig.root.join("bin").join("claude-real");
+        std::fs::rename(&claude, &real).unwrap();
+        std::fs::write(
+            &claude,
+            format!("#!/bin/sh\nsleep 9\nexec '{}' \"$@\"\n", real.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let asked_at = Instant::now();
+        let (sent, old) = tokio::join!(send_as_app(&rig.daemon, &uid, "r-1", "go on"), async {
+            let Played {
+                dir,
+                mut lines,
+                mut write,
+                ..
+            } = played;
+            let read = next(&mut lines).await;
+            assert!(matches!(read, Some(ToHost::Stop { .. })), "{read:?}");
+            say(
+                &mut write,
+                serde_json::json!({"type": "exited", "seq": 5, "code": 0}),
+            )
+            .await;
+            assert_eq!(next(&mut lines).await, Some(ToHost::Ack { seq: 5 }));
+            let old = pid_in(&dir, "stub.pid");
+            stop(&dir);
+            gone(old).await;
+            drop((lines, write));
+            (dir, old)
+        });
+        let waited = asked_at.elapsed();
+        let (dir, old) = old;
+        assert!(matches!(&sent, SendTextResult::Refused { .. }), "{sent:?}");
+        assert!(
+            waited < Duration::from_secs(16),
+            "answered after {waited:?}"
+        );
+        assert_eq!(
+            read_host_file(&dir.join("host.json")).map(|record| record.host_pid),
+            Some(old),
+            "nothing launched"
+        );
     }
 
     /// **A move's message after a reboot does not wait on the old group's number** (306): the run's move ended it, and
