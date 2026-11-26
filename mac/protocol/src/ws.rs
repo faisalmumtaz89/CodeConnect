@@ -3505,6 +3505,7 @@ mod tests {
                 used_percent: 42,
                 window_minutes: 300,
                 resets_at: 1_800_000_000,
+                group: None,
             }],
             read_at: "2026-11-22T21:00:00.000Z".into(),
         };
