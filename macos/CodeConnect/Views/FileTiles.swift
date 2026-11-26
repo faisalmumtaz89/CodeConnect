@@ -1,7 +1,6 @@
 import AppKit
 import CodeConnectKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// The box's paperclip, first in its bar, where the computer takes files: it opens the Mac's file panel, and each file
 /// chosen goes to `take`.
@@ -155,7 +154,10 @@ private struct PastesFiles: ViewModifier {
 }
 
 /// Files over the view, read from the drag's own pasteboard as they enter, so the plate can name and count them
-/// before they land; a drag that carries no file (words, a link) is not this view's, and shows nothing.
+/// before they land; a drag that carries no file or picture (words, a link) is not this view's, shows nothing, and
+/// goes on to whatever under it takes it (a field types the words in). One AppKit view over the whole of it takes the
+/// drag: AppKit finds a drag's destination by the types each view takes, front to back, so it stands in front of a
+/// focused field's editor for files while letting clicks, the cursor and words through (`hitTest` is nil).
 private struct DroppedFiles: ViewModifier {
     let on: Bool
     let held: Int
@@ -167,6 +169,11 @@ private struct DroppedFiles: ViewModifier {
         content
             .environment(\.filesDragged, over != nil)
             .overlay {
+                Receiver(on: on, over: $over, take: take)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            .overlay {
                 if let over {
                     DropPlate(names: over, held: held)
                         .padding(12)
@@ -174,34 +181,65 @@ private struct DroppedFiles: ViewModifier {
                         .allowsHitTesting(false)
                 }
             }
-            .onDrop(of: [.fileURL, .png, .tiff], delegate: Receiver(on: on, over: $over, take: take))
             #if DEBUG
                 .task(id: on) { if on, !RenderWindow.droppedNames.isEmpty { over = RenderWindow.droppedNames } }
             #endif
     }
 
-    private struct Receiver: DropDelegate {
+    private struct Receiver: NSViewRepresentable {
         let on: Bool
         @Binding var over: [String]?
         let take: FileIntake.Take
 
-        private var board: NSPasteboard { NSPasteboard(name: .drag) }
+        func makeNSView(context: Context) -> Target { Target() }
 
-        func validateDrop(info: DropInfo) -> Bool { on && !FileIntake.names(on: board).isEmpty }
-
-        func dropEntered(info: DropInfo) {
-            guard on else { return }
-            let names = FileIntake.names(on: board)
-            over = names.isEmpty ? nil : names
+        func updateNSView(_ view: Target, context: Context) {
+            view.take = take
+            view.show = { over = $0 }
+            view.taking(on)
         }
 
-        func dropUpdated(info: DropInfo) -> DropProposal? { over == nil ? nil : DropProposal(operation: .copy) }
+        static func dismantleNSView(_ view: Target, coordinator: ()) { view.taking(false) }
+    }
 
-        func dropExited(info: DropInfo) { over = nil }
+    private final class Target: NSView {
+        var take: FileIntake.Take = { _, _, _ in }
+        var show: ([String]?) -> Void = { _ in }
+        private var on = false
+        private var holding = false
 
-        func performDrop(info: DropInfo) -> Bool {
-            over = nil
-            return on && FileIntake.take(from: board, take)
+        /// Registered for files only while the view takes them.
+        func taking(_ next: Bool) {
+            guard next != on else { return }
+            on = next
+            if on { registerForDraggedTypes([.fileURL, .png, .tiff]) } else { unregisterDraggedTypes(); clear() }
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+            let names = on ? FileIntake.names(on: sender.draggingPasteboard) : []
+            holding = !names.isEmpty
+            show(holding ? names : nil)
+            return holding ? .copy : []
+        }
+
+        override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation { holding ? .copy : [] }
+
+        override func draggingExited(_ sender: (any NSDraggingInfo)?) { clear() }
+
+        override func draggingEnded(_ sender: any NSDraggingInfo) { clear() }
+
+        override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+            let taken = on && holding
+            clear()
+            return taken && FileIntake.take(from: sender.draggingPasteboard, take)
+        }
+
+        private func clear() {
+            guard holding else { return }
+            holding = false
+            show(nil)
         }
     }
 }
