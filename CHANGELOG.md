@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.29
+
 ## CodeConnect 0.19.28
 
 - On the Mac, choosing another account in Settings › Accounts stops nothing: new sessions use it at once, and an open
