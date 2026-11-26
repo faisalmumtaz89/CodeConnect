@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.30
+
 ## CodeConnect 0.19.29
 
 - On the Mac, the reply and Start bars stay on one row: when space runs short their words are cut with "…", the
