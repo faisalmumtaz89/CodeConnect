@@ -678,12 +678,13 @@ where
                 // A run's shell: a paired device, and only over a transport nothing on the path can read, since what
                 // it carries is a shell's keystrokes and output.
                 if let Some(attachment_id) = terminal_frame(&parsed) {
-                    if device_id.is_none() || !private_transport {
+                    let Some(device) = device_id.as_deref().filter(|_| private_transport) else {
                         send(&mut sink, &terminal_closed(attachment_id, protocol::ws::terminal_closed::NOT_AUTHORISED)).await?;
                         continue;
-                    }
+                    };
                     if let Some(reason) = handle_terminal(
                         &daemon,
+                        device,
                         parsed,
                         &mut terminal,
                         &mut terminal_opening,
@@ -2399,6 +2400,7 @@ fn terminal_closed(attachment_id: &str, reason: &str) -> ServerMessage {
 /// terminal arms. A frame for an attachment already gone is dropped: the client sent it before it learnt.
 fn handle_terminal(
     daemon: &Arc<Daemon>,
+    device_id: &str,
     message: ClientMessage,
     terminal: &mut Option<crate::terminal::Attachment>,
     opening: &mut Option<String>,
@@ -2443,6 +2445,7 @@ fn handle_terminal(
             *opening = Some(attachment_id.clone());
             let daemon = Arc::clone(daemon);
             let opened = opened.clone();
+            let device_id = device_id.to_string();
             tokio::spawn(async move {
                 let request = crate::terminal::OpenRequest {
                     attachment_id: attachment_id.clone(),
@@ -2452,6 +2455,7 @@ fn handle_terminal(
                     output_credit,
                     resume_after,
                     takeover,
+                    device_id,
                 };
                 let result = crate::terminal::open(&daemon, request).await;
                 let _ = opened.send((attachment_id, result));

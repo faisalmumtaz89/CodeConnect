@@ -175,6 +175,8 @@ pub(crate) struct OpenRequest {
     pub(crate) output_credit: u32,
     pub(crate) resume_after: Option<u64>,
     pub(crate) takeover: bool,
+    /// The paired device asking, for the log.
+    pub(crate) device_id: String,
 }
 
 /// An open that took the run's shell.
@@ -293,27 +295,26 @@ impl Attachment {
         let Some(holder) = state.holds(self.generation) else {
             return true;
         };
-        state.closed.is_some()
-            || holder.written > 0
+        let pending = state.end_offset() > holder.sent;
+        holder.written > 0
             || holder.reset
-            || (holder.credit > 0 && state.end_offset() > holder.sent)
+            || (holder.credit > 0 && pending)
+            || (state.closed.is_some() && !pending)
             || holder
                 .stalled
                 .is_some_and(|since| since + STALL_DEADLINE <= Instant::now())
     }
 
-    /// The next thing to send this viewer, one bounded chunk at a time; `None` when there is nothing yet. After a
-    /// [`Step::Closed`] there is never anything more.
+    /// The next thing to send this viewer, one bounded chunk at a time; `None` when there is nothing yet. A shell
+    /// that is gone still sends what it printed last, as credit allows, before its [`Step::Closed`]; after that there
+    /// is never anything more.
     pub(crate) fn next(&mut self) -> Option<Step> {
         if self.done {
             return None;
         }
         let now = Instant::now();
         let mut state = self.shell.lock();
-        if let Some(reason) = state.closed {
-            self.done = true;
-            return Some(Step::Closed(reason));
-        }
+        let closed = state.closed;
         let (start, end) = (state.start, state.end_offset());
         let Some(holder) = state
             .holder
@@ -321,11 +322,12 @@ impl Attachment {
             .filter(|holder| holder.generation == self.generation)
         else {
             self.done = true;
-            return Some(Step::Closed(terminal_closed::SUPERSEDED));
+            return Some(Step::Closed(closed.unwrap_or(terminal_closed::SUPERSEDED)));
         };
         if holder.written > 0 {
             let bytes = holder.written.min(u64::from(u32::MAX)) as u32;
             holder.written -= u64::from(bytes);
+            holder.input_left += u64::from(bytes);
             return Some(Step::InputCredit(bytes));
         }
         if holder.reset || (holder.credit > 0 && end > holder.sent) {
@@ -352,10 +354,17 @@ impl Attachment {
                 offset,
             });
         }
-        if holder
+        let stalled_out = holder
             .stalled
-            .is_some_and(|since| since + STALL_DEADLINE <= now)
-        {
+            .is_some_and(|since| since + STALL_DEADLINE <= now);
+        if let Some(reason) = closed {
+            if end > holder.sent && !stalled_out {
+                return None;
+            }
+            self.done = true;
+            return Some(Step::Closed(reason));
+        }
+        if stalled_out {
             state.holder = None;
             drop(state);
             self.shell.wake.notify_one();
@@ -439,9 +448,12 @@ pub(crate) async fn open(
     if row.lifecycle != Lifecycle::Live && !moved {
         return Err(terminal_closed::NOT_LIVE);
     }
-    // A Claude run's folder is the one its first report names (a new worktree's is made by claude itself); until
-    // then the row holds the folder it was started from.
-    if row.agent == AgentKind::Claude && row.claude_session_id.is_none() {
+    // A Claude run started in a new worktree is in the folder its first report names, which claude makes itself;
+    // until then the row holds the folder it was started from.
+    if row.agent == AgentKind::Claude
+        && row.claude_session_id.is_none()
+        && starts_in_a_new_worktree(daemon, &uid).await
+    {
         return Err(terminal_closed::NOT_READY);
     }
     let existing = terminals.lock().get(&uid).cloned().filter(|shell| {
@@ -492,7 +504,7 @@ pub(crate) async fn open(
     // A viewer this open took the shell from learns it at its next step.
     shell.changed();
     shell.wake.notify_one();
-    crate::log_info!("{uid}: a viewer took its shell");
+    crate::log_info!("{uid}: device {} took its shell", request.device_id);
     Ok(Opened {
         attachment: Attachment {
             id: request.attachment_id,
@@ -504,6 +516,21 @@ pub(crate) async fn open(
         folder: shell.folder.clone(),
         replay_end,
     })
+}
+
+/// Whether the hosted run `uid` was started in a worktree claude makes, as its kept start line says.
+async fn starts_in_a_new_worktree(daemon: &Daemon, uid: &str) -> bool {
+    let start = daemon
+        .db
+        .hosted_link(uid.to_string())
+        .await
+        .ok()
+        .flatten()
+        .and_then(|link| link.start);
+    matches!(
+        start.and_then(|line| serde_json::from_str(&line).ok()),
+        Some(protocol::host::ToHost::Start { options, .. }) if options.worktree.is_some()
+    )
 }
 
 /// Start the run's shell in `folder`, and its task.
@@ -527,9 +554,15 @@ fn start(
         .env("COLORTERM", "truecolor");
     let child = crate::spawn::spawn_in_terminal(command, slave)?;
     let master = AsyncFd::new(master)?;
+    // Each shell counts its output from a base of its own, so an offset a viewer kept from an earlier shell never
+    // names a place in this one.
+    let base = daemon.terminals.generation.fetch_add(1, Ordering::Relaxed) << 40;
     let shell = Arc::new(Shell {
         folder: folder.to_string(),
-        state: Mutex::new(State::default()),
+        state: Mutex::new(State {
+            start: base,
+            ..State::default()
+        }),
         version: watch::channel(0).0,
         wake: Notify::new(),
     });
@@ -739,8 +772,7 @@ async fn run(
             () = shell.wake.notified() => {}
         }
     };
-    shell.lock().closed = Some(reason);
-    shell.changed();
+    // Out of the registry before its viewers hear it is gone, so whatever they do next finds it gone.
     let mut shells = daemon.terminals.lock();
     if shells
         .get(&uid)
@@ -749,6 +781,8 @@ async fn run(
         shells.remove(&uid);
     }
     drop(shells);
+    shell.lock().closed = Some(reason);
+    shell.changed();
     crate::log_info!("{uid}: its shell is gone ({reason})");
 }
 
@@ -896,6 +930,18 @@ mod tests {
             lifecycle: Lifecycle,
             claude_session_id: Option<&str>,
         ) {
+            self.begin_started(uid, agent, lifecycle, claude_session_id, None);
+        }
+
+        /// A run begun with `worktree` as its kept start line's new worktree, when it is a Claude start.
+        fn begin_started(
+            &self,
+            uid: &str,
+            agent: AgentKind,
+            lifecycle: Lifecycle,
+            claude_session_id: Option<&str>,
+            worktree: Option<&str>,
+        ) {
             let now = protocol::time::now_rfc3339();
             let row = SessionRow {
                 session_uid: uid.into(),
@@ -909,7 +955,33 @@ mod tests {
                 agent,
                 codex_thread_id: None,
             };
-            self.daemon.store.begin_run(&row, uid, None, None).unwrap();
+            let start = (row.agent == AgentKind::Claude).then(|| {
+                serde_json::to_string(&protocol::host::ToHost::Start {
+                    uuid: "u".into(),
+                    options: protocol::host::StartOptions {
+                        agent: AgentKind::Claude,
+                        cwd: row.cwd.clone(),
+                        claude_path: "/nonexistent/claude".into(),
+                        permission_mode: None,
+                        trust: protocol::host::Trust::Trusted,
+                        resume: None,
+                        model: None,
+                        effort: None,
+                        worktree: worktree.map(str::to_string),
+                        additional_directories: Vec::new(),
+                        mail: protocol::host::McpCommand {
+                            command: "/nonexistent/mail".into(),
+                            args: Vec::new(),
+                        },
+                    },
+                    prompt: String::new(),
+                })
+                .unwrap()
+            });
+            self.daemon
+                .store
+                .begin_run(&row, uid, start.as_deref(), None)
+                .unwrap();
         }
 
         fn request(&self, attachment_id: &str) -> OpenRequest {
@@ -921,6 +993,7 @@ mod tests {
                 output_credit: TERMINAL_MAX_OUTSTANDING_CREDIT,
                 resume_after: None,
                 takeover: true,
+                device_id: "test-device".into(),
             }
         }
 
@@ -1007,10 +1080,14 @@ mod tests {
     /// The number printed after `name=` in `output`.
     fn printed(output: &str, name: &str) -> i32 {
         let prefix = format!("{name}=");
+        // Anywhere in a line: a shell may write its own escape codes and a carriage return before a command's output.
         output
             .lines()
-            .filter_map(|line| line.trim().strip_prefix(&prefix))
-            .find_map(|rest| rest.trim().parse().ok())
+            .filter_map(|line| line.split(prefix.as_str()).nth(1))
+            .find_map(|rest| {
+                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse().ok()
+            })
             .unwrap_or_else(|| panic!("no {prefix} in: {output}"))
     }
 
@@ -1144,6 +1221,153 @@ mod tests {
         );
     }
 
+    /// **A switch whose relaunch fails ends the run, and its shell with it.**
+    #[tokio::test]
+    async fn a_failed_switch_ends_the_shell() {
+        const HOST: protocol::proc_identity::ProcessIdentity =
+            protocol::proc_identity::ProcessIdentity {
+                pid: 4242,
+                birth: protocol::proc_identity::BirthIdentity {
+                    start_sec: 1,
+                    start_usec: 2,
+                },
+            };
+        let rig = Rig::new("switchfail");
+        rig.daemon.store.record_host(&rig.uid, &HOST, None).unwrap();
+        rig.daemon
+            .store
+            .set_switch_state(&rig.uid, Some(Store::SWITCH_MOVED))
+            .unwrap();
+        assert!(rig
+            .daemon
+            .end_hosted_run(
+                &rig.uid,
+                HOST,
+                None,
+                Lifecycle::Live,
+                Lifecycle::Exited,
+                serde_json::json!({"exit_code": 0})
+            )
+            .await
+            .unwrap());
+        let mut failed = rig.open(rig.request("t1")).await;
+        crate::switch::relaunch_failed(&rig.daemon, &rig.uid, "signed out".into()).await;
+        assert_eq!(closed(&mut failed).await, terminal_closed::RUN_ENDED);
+    }
+
+    /// **Typing never runs out**: input credit comes back as the shell takes it, so a viewer types far past the
+    /// credit it was first given.
+    #[tokio::test]
+    async fn a_viewer_types_past_its_first_credit() {
+        let rig = Rig::new("typing");
+        let mut viewer = rig.open(rig.request("t1")).await;
+        // Into a program that takes it all without echoing it, so the test is about credit, not about a shell's editor.
+        type_line(
+            &viewer,
+            "stty -echo; cat > /dev/null; stty echo; echo typed-$((1+1))",
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let line = format!("{}\n", "a".repeat(127));
+        // Sends `bytes`, waiting for input credit to come back whenever it has run out.
+        async fn send(viewer: &mut Attachment, bytes: &[u8]) {
+            while viewer.input(bytes.to_vec()).is_err() {
+                loop {
+                    viewer.ready().await;
+                    match viewer.next() {
+                        Some(Step::InputCredit(_)) => break,
+                        Some(Step::Output { data, .. }) => {
+                            viewer.credit(data.len() as u32).unwrap()
+                        }
+                        Some(Step::Closed(reason)) => panic!("closed {reason} while typing"),
+                        None => {}
+                    }
+                }
+            }
+        }
+        let mut typed = 0;
+        let typing = tokio::time::timeout(Duration::from_secs(20), async {
+            while typed < 3 * TERMINAL_INPUT_CREDIT as usize {
+                send(&mut viewer, line.as_bytes()).await;
+                typed += line.len();
+            }
+            // End of input for `cat`: the shell goes on to the marker.
+            send(&mut viewer, &[4]).await;
+        })
+        .await;
+        assert!(typing.is_ok(), "typing stopped after {typed} bytes");
+        read_until(&mut viewer, "typed-2").await;
+    }
+
+    /// **A shell that exits leaves its last output readable**: what it printed last still reaches a viewer that had
+    /// no credit for it when it exited, before the viewer is closed `exited`.
+    #[tokio::test]
+    async fn a_shell_that_exits_still_sends_what_it_printed_last() {
+        let rig = Rig::new("lastwords");
+        let mut viewer = rig
+            .open(OpenRequest {
+                output_credit: 0,
+                ..rig.request("t1")
+            })
+            .await;
+        viewer.ready().await;
+        assert!(matches!(
+            viewer.next(),
+            Some(Step::Output { reset: true, .. })
+        ));
+        type_line(&viewer, "printf 'last-%s\\n' $((1+1)); exit");
+        let shell = rig.daemon.terminals.lock().get(&rig.uid).cloned().unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while shell.lock().closed.is_none() {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the shell exits");
+        while let Some(step) = viewer.next() {
+            assert!(
+                matches!(step, Step::InputCredit(_)),
+                "nothing but credit before the output is read: {step:?}"
+            );
+        }
+        viewer.credit(TERMINAL_MAX_OUTSTANDING_CREDIT).unwrap();
+        read_until(&mut viewer, "last-2").await;
+        assert_eq!(closed(&mut viewer).await, terminal_closed::EXITED);
+    }
+
+    /// **An offset kept from a shell that exited names nothing in the next one**, so the viewer is reset, not
+    /// resumed mid-stream.
+    #[tokio::test]
+    async fn an_offset_from_an_earlier_shell_resets_the_viewer() {
+        let rig = Rig::new("oldoffset");
+        let mut first = rig.open(rig.request("t1")).await;
+        type_line(&first, "echo first-$((1+1))");
+        let (_, offset, _) = read_until(&mut first, "first-2").await;
+        type_line(&first, "exit");
+        assert_eq!(closed(&mut first).await, terminal_closed::EXITED);
+        // The fresh shell prints more than the first did, so the old offset would land inside its output.
+        let mut fresh = rig.open(rig.request("t2")).await;
+        type_line(
+            &fresh,
+            "printf 'x%.0s' $(seq 1 4000); echo; echo second-$((1+1))",
+        );
+        let (_, reached, _) = read_until(&mut fresh, "second-2").await;
+        drop(fresh);
+        let shell = rig.daemon.terminals.lock().get(&rig.uid).cloned().unwrap();
+        assert!(
+            reached - shell.lock().start > offset,
+            "the fresh shell printed past the old offset"
+        );
+        let mut stale = rig
+            .open(OpenRequest {
+                resume_after: Some(offset),
+                ..rig.request("t3")
+            })
+            .await;
+        type_line(&stale, "echo third-$((1+1))");
+        let (_, _, reset) = read_until(&mut stale, "third-2").await;
+        assert!(reset, "an offset from the earlier shell resets the viewer");
+    }
+
     /// **A viewer that folds away resumes where it left off; a fresh one gets a reset and what the shell kept.**
     /// The same shell all along.
     #[tokio::test]
@@ -1202,7 +1426,14 @@ mod tests {
     async fn an_ended_or_unready_run_is_refused() {
         let rig = Rig::new("refused");
         rig.begin("01ENDED", AgentKind::Codex, Lifecycle::Exited, None);
-        rig.begin("01CLAUDENEW", AgentKind::Claude, Lifecycle::Live, None);
+        rig.begin_started(
+            "01CLAUDENEW",
+            AgentKind::Claude,
+            Lifecycle::Live,
+            None,
+            Some("feature-x"),
+        );
+        rig.begin("01CLAUDEHERE", AgentKind::Claude, Lifecycle::Live, None);
         for (uid, reason) in [
             ("01ENDED", terminal_closed::NOT_LIVE),
             ("01NOSUCHRUN", terminal_closed::NOT_LIVE),
@@ -1218,6 +1449,17 @@ mod tests {
             .await;
             assert_eq!(refused.err(), Some(reason), "{uid}");
         }
+        // A Claude run started in its own folder with no first message has no report yet, and its folder is known.
+        let mut here = rig
+            .open(OpenRequest {
+                session_uid: "01CLAUDEHERE".into(),
+                ..rig.request("t2")
+            })
+            .await;
+        rig.daemon
+            .terminals
+            .end("01CLAUDEHERE", terminal_closed::RUN_ENDED);
+        assert_eq!(closed(&mut here).await, terminal_closed::RUN_ENDED);
         let bad_size = open(
             &rig.daemon,
             OpenRequest {

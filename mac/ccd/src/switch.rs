@@ -221,6 +221,10 @@ pub(crate) async fn ended(daemon: &Arc<Daemon>, uid: &str) {
 pub(crate) async fn relaunch_failed(daemon: &Arc<Daemon>, uid: &str, why: String) {
     set(daemon, uid, Some(Store::SWITCH_FAILED)).await;
     crate::log_warn!("{uid}: its switch's start failed: {why}");
+    // The run is ended now, not moved: its shell goes with it.
+    daemon
+        .terminals
+        .end(uid, protocol::ws::terminal_closed::RUN_ENDED);
     let agent = match daemon.db.get_session(uid.to_string()).await {
         Ok(Some(row)) => row.agent,
         _ => return,
