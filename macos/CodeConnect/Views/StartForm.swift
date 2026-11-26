@@ -908,7 +908,7 @@ private struct ComputerButton: View {
                 MenuRow {
                     Image(systemName: "plus").font(.system(size: 9.5, weight: .bold)).frame(width: 12)
                         .accessibilityHidden(true)
-                    Text("Add a computer\u{2026}").font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
+                    Text(AddKind.computer.title).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
                 }
             }
             .buttonStyle(.panelRow)
