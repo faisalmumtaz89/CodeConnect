@@ -17,13 +17,6 @@ public struct FleetGroup: Sendable, Hashable, Identifiable {
     public let name: String
     public let rows: [FleetRow]
 
-    /// The decisions this group's runs are waiting on a person for, counted as `FleetCount` counts
-    /// the whole fleet's.
-    public var waiting: Int { FleetCount.decisions(in: rows) }
-
-    /// A project's folder, as a shell prints it (`shellPath`).
-    public var folder: String { Self.shellPath(rows[0].summary.shownCwd) }
-
     /// The computer a project is on: with its folder, what tells two projects named alike apart.
     public var computer: String { rows[0].machineName ?? "Unknown computer" }
 

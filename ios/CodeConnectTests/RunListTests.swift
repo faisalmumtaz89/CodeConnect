@@ -77,12 +77,13 @@ final class RunListTests: XCTestCase {
         calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
         calendar.locale = Locale(identifier: "en_US")
         let now = Date(timeIntervalSince1970: 1_795_660_000)  // Thu 26 Nov 2026, 02:26 UTC
-        XCTAssertEqual(Format.clock(now.addingTimeInterval(16 * 3600), now: now, calendar: calendar), "6:26 PM")
+        // Foundation sets a time's AM/PM apart with a narrow no-break space (U+202F).
+        XCTAssertEqual(Format.clock(now.addingTimeInterval(16 * 3600), now: now, calendar: calendar), "6:26\u{202F}PM")
         XCTAssertEqual(Format.clock(now.addingTimeInterval(4 * 86400), now: now, calendar: calendar), "Mon")
         XCTAssertEqual(Format.clock(now.addingTimeInterval(-3 * 86400), now: now, calendar: calendar), "Mon")
         XCTAssertEqual(
             RunListWords.offlineLine(lastSeen: now.addingTimeInterval(-60), waiting: 3, now: now, calendar: calendar),
-            "Last seen 2:25 AM")
+            "Last seen 2:25\u{202F}AM")
         XCTAssertEqual(RunListWords.offlineLine(lastSeen: nil, waiting: 2, now: now, calendar: calendar), "2 runs")
         XCTAssertNil(RunListWords.offlineLine(lastSeen: nil, waiting: 0, now: now, calendar: calendar))
     }

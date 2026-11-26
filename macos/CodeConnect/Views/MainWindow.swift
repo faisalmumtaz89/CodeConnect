@@ -72,12 +72,13 @@ struct MainWindow: View {
                 let showsStart = open == nil
                 if showsList {
                     FleetList(
-                        scope: $scope, filter: $filter, opened: $opened, pairAgain: pairAgain,
-                        newRun: { adding = .agent }, addComputer: { adding = .computer },
-                        openSettings: { settings = .general })
+                        scope: $scope, filter: $filter, opened: $opened, newRun: { adding = .agent },
+                        addComputer: { adding = .computer }, openSettings: { settings = .general })
                         // Beside an open run, or the start form, the list is the grid's 256; alone, it fills the window.
                         .frame(width: showsRun || showsStart ? 256 : nil)
                         .environment(\.headerClearance, clearance(first: true, last: !showsRun && !showsStart))
+                        // Its computer menu opens over the pane beside it.
+                        .zIndex(1)
                         // The arrows open a run; Return then puts the cursor in its reply box.
                         .onKeyPress(.return) {
                             guard opened != nil else { return .ignored }
@@ -342,8 +343,6 @@ struct AddCommands: Commands {
     }
 }
 
-// MARK: - Sidebar
-
 /// What the list shows before there is anything in it: what CodeConnect needs, and the way to
 /// give it.
 private struct EmptyFleet: View {
@@ -351,13 +350,8 @@ private struct EmptyFleet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Text("Active").font(Theme.ui(13, .semibold)).foregroundStyle(Theme.text)
-                Text("0").font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .frame(height: 52)
+            // The header band, empty: the window's buttons and the list's toggle stand in it.
+            Color.clear.frame(height: 52)
             Rectangle().fill(Theme.hairline).frame(height: 1)
 
             VStack(spacing: 12) {

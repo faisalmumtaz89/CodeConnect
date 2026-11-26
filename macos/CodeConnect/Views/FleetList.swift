@@ -24,8 +24,6 @@ struct FleetList: View {
     @Binding var filter: FleetFilter?
     /// The run open beside the list, if any.
     @Binding var opened: String?
-    /// A computer whose pairing has to change: Add Computer, its address already in the code form.
-    let pairAgain: (String) -> Void
     let newRun: () -> Void
     let addComputer: () -> Void
     let openSettings: () -> Void
@@ -62,12 +60,15 @@ struct FleetList: View {
         let selectable = scope == .finished ? list.ended.filter(removable).map(\.id) : []
         let picked = selectable.filter(chosen.contains)
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
+            // The head's controls stand at the end of the list's 256 pt, whatever the list's width, so the computer menu
+            // opens over the list and never past the window; the ended runs are every computer's, so no computer is
+            // offered over them.
+            HStack(spacing: 4) {
                 Spacer(minLength: 0)
-                ComputerFilter(filter: $filter, addComputer: addComputer)
+                if scope == .active { ComputerFilter(filter: $filter, addComputer: addComputer) }
                 Button(action: newRun) {
                     Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.text2)
-                        .frame(width: 24, height: 24)
+                        .frame(width: 20, height: 24)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.hover(radius: 6, id: "fleet.newRun"))
@@ -76,9 +77,11 @@ struct FleetList: View {
                 .accessibilityLabel("New Run")
                 .accessibilityIdentifier("fleet.newRun")
             }
-            .padding(.leading, max(16, headerClearance.leading))
-            .padding(.trailing, max(12, headerClearance.trailing))
-            .frame(height: 52)
+            // Clear of the list's toggle beside the window's buttons when the list comes first.
+            .padding(.leading, max(16, headerClearance.leading - 16))
+            .padding(.trailing, 12)
+            .frame(width: 256, height: 52)
+            .frame(maxWidth: .infinity, alignment: .leading)
             // Its dropdown opens over the rows below it.
             .zIndex(1)
             // What the last batch did not remove, and why, under the head.
@@ -94,13 +97,7 @@ struct FleetList: View {
                 .accessibilityIdentifier("fleet.batchNote")
             }
 
-            // A computer whose link is not working shows why in place of its runs, and the one thing to do: rows it
-            // listed before are the last it said, and none can be acted on until it is reached again.
-            if let (computer, notice) = shownComputerNotice, scope == .active {
-                ComputerNotice(notice: notice, act: noticeAction(computer, notice))
-                    .padding(.horizontal, 18)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if scope == .active, machines.fleet.isEmpty {
+            if scope == .active, machines.fleet.isEmpty {
                 NoAgentsYet(newAgent: newRun)
                     .padding(.horizontal, 18)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -296,7 +293,7 @@ struct FleetList: View {
         let removable = row.summary.isRemovable && model?.daemonProfile.removesSessions == true
         let more = hovered == row.id || menu.shown?.owner == "fleet.row.\(row.id).more"
             || HoverButtonStyle.forced("fleet.row.\(row.id)")
-        return Button {
+        let activate = {
             if selecting || (choosable && NSEvent.modifierFlags.contains(.command)) {
                 // Choosing: a click chooses or lets go; ⌘-click starts choosing with it.
                 guard choosable, !batchRunning else { return }
@@ -306,7 +303,8 @@ struct FleetList: View {
             }
             opened = selected ? nil : row.id
             keepListFocus()
-        } label: {
+        }
+        return Button(action: activate) {
             FleetLine(
                 row: row, selected: selected, roomForMore: more && !selecting,
                 elsewhere: elsewhere ? model?.machineOS ?? "" : nil,
@@ -318,7 +316,7 @@ struct FleetList: View {
         .padding(.horizontal, 8)
         .padding(.bottom, 2)
         .accessibilityElement(children: .contain)
-        .accessibilityAction { opened = selected ? nil : row.id }
+        .accessibilityAction { activate() }
         .accessibilityIdentifier("fleet.row.\(row.id)")
         .accessibilityAddTraits(selected ? .isSelected : [])
         // The run's "…" (decisions 185 and 217): on hover, its panel holding Copy Working Directory, then End Run…
@@ -413,30 +411,6 @@ struct FleetList: View {
         let kept = rows.compactMap { batchRefused[$0.id] }
         guard !kept.isEmpty else { return nil }
         return ("\(kept.count) not removed", Set(kept).sorted().joined(separator: " · "))
-    }
-
-    /// The computer the list is narrowed to, when its link is not working, and what it says.
-    private var shownComputerNotice: (AppModel, LinkNotice)? {
-        guard let computer, let model = machines.models.first(where: { ($0.machineID ?? "") == computer }),
-            let notice = model.linkHealth.notice
-        else { return nil }
-        return (model, notice)
-    }
-
-    /// The notice's one action on the Mac (`LinkNotice.macAction`): Try Again where the link can be asked again, Open
-    /// Tailscale where Tailscale is off and its app is here, Pair Again where the pairing or its address has to change.
-    private func noticeAction(_ computer: AppModel, _ notice: LinkNotice) -> (title: String, run: () -> Void)? {
-        let app = TailscaleApp.url
-        switch LinkNotice.macAction(notice.action, tailscaleFound: app != nil) {
-        case .tryAgain: return (PeerWords.tryAgain, { computer.connection.retryNow() })
-        case .openTailscale:
-            guard let app else { return nil }
-            return (LinkNotice.openTailscale, { NSWorkspace.shared.open(app) })
-        case .pairAgain:
-            guard let address = computer.endpoint?.typedAddress else { return nil }
-            return (LinkHealth.pairAgain, { pairAgain(address) })
-        case nil: return nil
-        }
     }
 }
 
@@ -573,8 +547,8 @@ private struct ComputerChoice: View {
     let chosen: Bool
     let count: Int
 
-    /// Reached: its link has no word of its own to say (live, or only slow), as the iPhone's computer rows read it.
-    private var live: Bool { computer.linkHealth.machineWord == nil }
+    /// Not offline: a link connecting, quiet or refused is still this computer's, and says so in Settings.
+    private var live: Bool { computer.linkHealth.level != .offline }
 
     /// What the row shows of the computer's latest sample: only while its link is live, so no figure outlasts the
     /// link that brought it.
