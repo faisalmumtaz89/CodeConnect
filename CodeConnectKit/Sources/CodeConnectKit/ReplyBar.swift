@@ -81,12 +81,20 @@ public struct ReplyBar: Equatable, Sendable {
 /// when it resets (read from the run's account's window of that length, which the app holds: the agent's own reset has
 /// no declared unit), the account's windows with the full one marked, and the account with its plan. The reply box stays
 /// live under it. Nil for a run at no limit, and for one that takes no reply.
+extension SessionSummary {
+    /// **The run is at a usage limit**: its last turn stopped at one (`limit`), and it still takes a reply, which goes
+    /// through once the limit resets. The band over its box shows, and the run list has it in Needs you.
+    public var atLimit: Bool { limit != nil && !takesNoReply }
+}
+
 public struct LimitFoot: Equatable, Sendable {
     /// "5-hour limit reached".
     public let title: String
     /// "Resets 9:06 PM · in 2h 10m" on the same day, or "Resets Thu 3 Dec, 9:06 PM" on another; nil when the limit has
     /// no window of its own, the window is not held, or its reset has passed.
     public let resets: String?
+    /// When that is, for a list's time slot; nil when `resets` is.
+    public let resetsAt: Date?
     /// The account's windows, as the reply bar draws them.
     public let limits: [ReplyBar.Limit]
     /// The caption of the window this limit is, drawn red; nil when it is none of them.
@@ -100,23 +108,26 @@ public struct LimitFoot: Equatable, Sendable {
     public static func of(summary: SessionSummary, book: AccountBook?, now: Date, timeZone: TimeZone = .current)
         -> LimitFoot?
     {
-        guard let limit = summary.limit, !summary.takesNoReply else { return nil }
+        guard summary.atLimit, let limit = summary.limit else { return nil }
         let facts = summary.account.flatMap { account in
             StartAgent(rawValue: summary.agent.rawValue).flatMap { book?.facts(for: $0, accountID: account.id) }
         }
         let window = facts?.windows.first { $0.windowMinutes == limit.which.windowMinutes }
-        let resets = window.flatMap { window in
-            AccountSwitchWords.countdown(window, now: now).map { countdown in
-                let date = Date(timeIntervalSince1970: TimeInterval(window.resetsAt))
-                return sameDay(date, now, timeZone)
-                    ? "Resets \(clock(date, sameDay: true, timeZone)) · \(countdown)"
-                    : "Resets \(clock(date, sameDay: false, timeZone))"
+        let reset = window.flatMap { window in
+            AccountSwitchWords.countdown(window, now: now).map {
+                (date: Date(timeIntervalSince1970: TimeInterval(window.resetsAt)), countdown: $0)
             }
+        }
+        let resets = reset.map { reset in
+            sameDay(reset.date, now, timeZone)
+                ? "Resets \(clock(reset.date, sameDay: true, timeZone)) · \(reset.countdown)"
+                : "Resets \(clock(reset.date, sameDay: false, timeZone))"
         }
         let plan = facts?.plan.map { $0.prefix(1).uppercased() + $0.dropFirst() }
         let name = facts?.email ?? summary.account?.label
         return LimitFoot(
-            title: "\(words(limit.which)) limit reached", resets: resets, limits: ReplyBar.limits(facts, now: now),
+            title: "\(words(limit.which)) limit reached", resets: resets, resetsAt: reset?.date,
+            limits: ReplyBar.limits(facts, now: now),
             full: window.map { AccountSwitchWords.caption(minutes: $0.windowMinutes) },
             account: name.map { name in plan.map { "\(name) · \($0)" } ?? name })
     }
