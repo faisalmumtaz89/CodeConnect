@@ -11,31 +11,11 @@ public struct FleetGroup: Sendable, Hashable, Identifiable {
     public enum Kind: Sendable, Hashable, CaseIterable {
         case computer
         case project
-
-        /// Where the Mac keeps the list's grouping between launches: "computer" or "project".
-        static let keptKey = "codeconnect.fleet.grouping"
-
-        /// The grouping kept in `defaults`, or by computer when none is.
-        public static func kept(in defaults: UserDefaults) -> Kind {
-            defaults.string(forKey: keptKey) == "project" ? .project : .computer
-        }
-
-        /// Keeps this grouping in `defaults`, for the next launch.
-        public func keep(in defaults: UserDefaults) {
-            defaults.set(self == .project ? "project" : "computer", forKey: Self.keptKey)
-        }
     }
 
     public let id: String
     public let name: String
     public let rows: [FleetRow]
-
-    /// The decisions this group's runs are waiting on a person for, counted as `FleetCount` counts
-    /// the whole fleet's.
-    public var waiting: Int { FleetCount.decisions(in: rows) }
-
-    /// A project's folder, as a shell prints it (`shellPath`).
-    public var folder: String { Self.shellPath(rows[0].summary.shownCwd) }
 
     /// The computer a project is on: with its folder, what tells two projects named alike apart.
     public var computer: String { rows[0].machineName ?? "Unknown computer" }
@@ -72,24 +52,5 @@ public struct FleetGroup: Sendable, Hashable, Identifiable {
         return keys.compactMap { key in
             grouped[key].map { FleetGroup(id: key, name: $0.name, rows: $0.rows) }
         }
-    }
-}
-
-extension FleetGroup {
-    /// The runs a choice of runs to remove can hold, in the list's order: those the list shows, grouped by `kind` less
-    /// the groups `folded` names, that `removable` allows. A run a filter left out of `rows`, or a folded group hides,
-    /// is not among them.
-    public static func choosable(
-        _ rows: [FleetRow], by kind: Kind, folded: Set<String>, removable: (FleetRow) -> Bool
-    ) -> [String] {
-        groups(rows, by: kind).filter { !folded.contains($0.id) }.flatMap(\.rows).filter(removable).map(\.id)
-    }
-
-    /// The chosen runs a removal takes, and the number it says: the choosable ones among `chosen`, so what is counted
-    /// and removed is what the list shows as chosen. A hidden run stays chosen, and is picked again once shown.
-    public static func picked(
-        _ rows: [FleetRow], by kind: Kind, folded: Set<String>, chosen: Set<String>, removable: (FleetRow) -> Bool
-    ) -> [String] {
-        choosable(rows, by: kind, folded: folded, removable: removable).filter(chosen.contains)
     }
 }

@@ -754,28 +754,15 @@ final class FleetCountTests: XCTestCase {
         XCTAssertEqual(projects.map(\.name), ["web", "web", "web"])
     }
 
-    /// A project's folder is printed as a shell prints it, and its computer is its own: the two that
-    /// tell same-named projects apart.
-    func testAProjectSaysItsFolderAndItsComputer() {
+    /// A project's computer is its own: what tells same-named projects apart.
+    func testAProjectSaysItsComputer() {
         let rows = [
             row("a", .running, blockedCount: 0, machine: "m1", project: "web", folder: "/Users/dev/code/web"),
             row("b", .running, blockedCount: 0, machine: "m2", project: "web", folder: "/home/dev/code/web"),
             row("c", .running, blockedCount: 0, machine: "m1", project: "web", folder: "/srv/web"),
         ]
         let projects = FleetGroup.groups(rows, by: .project)
-        XCTAssertEqual(projects.map(\.folder), ["~/code/web", "~/code/web", "/srv/web"])
         XCTAssertEqual(projects.map(\.computer), ["m1 name", "m2 name", "m1 name"])
-    }
-
-    /// A group's waiting count is its decisions, not its runs or its blocked runs: one run holding
-    /// three and one holding one is four, in a group of three runs, two of them blocked.
-    func testAGroupCountsDecisionsNotRows() {
-        let rows = [
-            row("a", .blocked, blockedCount: 3, machine: "m1"),
-            row("b", .blocked, blockedCount: 1, machine: "m1"),
-            row("c", .running, blockedCount: 0, machine: "m1"),
-        ]
-        XCTAssertEqual(FleetGroup.groups(rows, by: .computer).map(\.waiting), [4])
     }
 }
 

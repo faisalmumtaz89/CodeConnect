@@ -38,12 +38,6 @@ struct AgeText: View {
     }
 }
 
-extension FleetGroup {
-    /// The group in an accessibility identifier: a project's id holds a line break between its computer and its folder,
-    /// which reads as `computer:folder` here.
-    var axID: String { id.replacingOccurrences(of: "\n", with: ":") }
-}
-
 /// Every button that draws its own look: its label as given, with a faint fill while the pointer is on it, so anything
 /// clickable reads as clickable before it is clicked. The rule: a label with padding of its own is its fill's shape; a
 /// bare label standing alone (a link, a disclosure, a tool's row: `bare`) has its fill stand `bareBleed` off it, 8 pt
@@ -290,7 +284,7 @@ final class PanelFrames {
 
 extension EnvironmentValues {
     @Entry var panelFrames: PanelFrames?
-    /// The agents (the sidebar, the list, a run) are on screen: false while Settings covers them, kept as they were.
+    /// The agents (the run list, a run) are on screen: false while Settings covers them, kept as they were.
     @Entry var agentsShown = true
 }
 
@@ -596,24 +590,30 @@ extension View {
 
 /// The one menu's row: what it says on one line, and under it, where the row has one, a second line in 11.5 pt, muted;
 /// 28 pt tall, 40 with the second line, 10 pt in at its sides, 2 pt below the row above. In a menu that chooses
-/// (`chosen` given) a check slot leads every row, checked on the chosen one; what is chosen is never filled. The row the
-/// pointer or keys light (`panelRow`) is filled, at corners of 5.
-struct MenuRow<Content: View, Second: View>: View {
+/// (`chosen` given) a check slot leads every row, checked on the chosen one; what is chosen is never filled. Where the
+/// row has one, a trailing view stands at its trailing edge, centred on its lines. The row the pointer or keys light
+/// (`panelRow`) is filled, at corners of 5.
+struct MenuRow<Content: View, Second: View, Trailing: View>: View {
     var chosen: Bool?
     let content: Content
     let second: Second
+    let trailing: Trailing
     private let twoLines: Bool
     @Environment(\.menuRowLit) private var lit
 
-    init(chosen: Bool? = nil, @ViewBuilder content: () -> Content, @ViewBuilder second: () -> Second) {
-        self.init(chosen: chosen, twoLines: true, content: content(), second: second())
+    init(
+        chosen: Bool? = nil, @ViewBuilder content: () -> Content, @ViewBuilder second: () -> Second,
+        @ViewBuilder trailing: () -> Trailing
+    ) {
+        self.init(chosen: chosen, twoLines: true, content: content(), second: second(), trailing: trailing())
     }
 
-    private init(chosen: Bool?, twoLines: Bool, content: Content, second: Second) {
+    private init(chosen: Bool?, twoLines: Bool, content: Content, second: Second, trailing: Trailing) {
         self.chosen = chosen
         self.twoLines = twoLines
         self.content = content
         self.second = second
+        self.trailing = trailing
     }
 
     var body: some View {
@@ -629,6 +629,7 @@ struct MenuRow<Content: View, Second: View>: View {
                 if twoLines { second.font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1) }
             }
             Spacer(minLength: 0)
+            trailing
         }
         .padding(.horizontal, 10)
         .frame(minHeight: twoLines ? MenuMetrics.twoLineHeight : MenuMetrics.rowHeight)
@@ -638,9 +639,21 @@ struct MenuRow<Content: View, Second: View>: View {
     }
 }
 
+extension MenuRow where Trailing == EmptyView {
+    init(chosen: Bool? = nil, @ViewBuilder content: () -> Content, @ViewBuilder second: () -> Second) {
+        self.init(chosen: chosen, twoLines: true, content: content(), second: second(), trailing: EmptyView())
+    }
+}
+
 extension MenuRow where Second == EmptyView {
+    init(chosen: Bool? = nil, @ViewBuilder content: () -> Content, @ViewBuilder trailing: () -> Trailing) {
+        self.init(chosen: chosen, twoLines: false, content: content(), second: EmptyView(), trailing: trailing())
+    }
+}
+
+extension MenuRow where Second == EmptyView, Trailing == EmptyView {
     init(chosen: Bool? = nil, @ViewBuilder content: () -> Content) {
-        self.init(chosen: chosen, twoLines: false, content: content(), second: EmptyView())
+        self.init(chosen: chosen, twoLines: false, content: content(), second: EmptyView(), trailing: EmptyView())
     }
 }
 
@@ -889,7 +902,7 @@ private struct RowMenuHost: ViewModifier {
     /// the window's bottom, inside the window's sides. A right-click's point: its top leading corner there.
     private func place(_ rect: CGRect, in bounds: CGRect) -> CGPoint {
         let point = rect.size == .zero
-        let gap = point ? 0 : Theme.rowMenuGap
+        let gap = point ? 0 : Theme.panelGap
         let below = rect.maxY + gap
         let above = rect.minY - gap - size.height
         let y = below + size.height <= bounds.maxY || above < bounds.minY ? below : above

@@ -35,9 +35,6 @@ enum Theme {
     static let segmentLift = 0.15
     /// How far a panel opened by a button stands off it, above or below: a clear gap, never touching.
     static let panelGap: CGFloat = 6
-    /// How far a menu opened by a list row's "…" stands off it: close enough that it covers the row's second line whole
-    /// rather than cutting through its text.
-    static let rowMenuGap: CGFloat = 1
     /// The conversation's column: its rows, the request at its foot and the reply box, 640 pt with their 28 pt sides.
     static let conversationColumn: CGFloat = 640 + 2 * 28
 

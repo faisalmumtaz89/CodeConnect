@@ -566,7 +566,7 @@ public struct LinkHealth: Sendable, Equatable {
     }
 
     /// What a screen says about a link that is not working, or nil when it is: a short title, the whole sentence,
-    /// and the one thing to do. The iPhone's banner, and the Mac's computer row and list, say it in these words.
+    /// and the one thing to do. The iPhone's banner and the Mac's Settings › Computers say it in these words.
     public var notice: LinkNotice? {
         let device = HostDevice.current.name
         switch level {
@@ -781,6 +781,16 @@ public enum Format {
         if seconds < 3600 { return "\(Int(seconds / 60))m" }
         if seconds < 86400 { return "\(Int(seconds / 3600))h" }
         return "\(Int(seconds / 86400))d"
+    }
+
+    /// A time as a list gives it: its clock time on `now`'s day ("9:40 PM"), else its weekday ("Mon").
+    public static func clock(_ date: Date, now: Date, calendar: Calendar = .current) -> String {
+        let format = DateFormatter()
+        format.calendar = calendar
+        format.timeZone = calendar.timeZone
+        format.locale = calendar.locale ?? Locale(identifier: "en_US")
+        format.setLocalizedDateFormatFromTemplate(calendar.isDate(date, inSameDayAs: now) ? "h:mm a" : "EEE")
+        return format.string(from: date)
     }
 
     public static func age(since date: Date?, now: Date = Date()) -> String {
