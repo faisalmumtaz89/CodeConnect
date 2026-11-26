@@ -92,7 +92,7 @@
         static var newFolderName: String? { UserDefaults.standard.string(forKey: "CC_NEW_FOLDER") }
         /// `-CC_BRANCH_PLACE <branch>`: the start form's place, the repository's worktree on that branch.
         /// `-CC_BRANCH_NAME <name>`: a new worktree being named, as typed.
-        static func branch(in git: StartGit?, place: inout StartPlace, newName: inout String?) {
+        static func branch(in git: StartGit?, place: inout StartPlace?, newName: inout String?) {
             let defaults = UserDefaults.standard
             if let branch = defaults.string(forKey: "CC_BRANCH_PLACE"),
                 let checkout = git?.others(than: "").first(where: { $0.branch == branch })

@@ -66,8 +66,8 @@ struct StartForm: View {
     private var choices: StartDraft.Choices { context.map { draft.choices(on: $0.id) } ?? StartDraft.Choices() }
     private var query: String { choices.query }
     private var folderPath: String? { choices.folderPath }
-    /// The place chosen, else the folder as it is.
-    private var place: StartPlace { choices.place ?? .folder }
+    /// The place chosen; nil is the default (`startPlace`).
+    private var place: StartPlace? { choices.place }
     private var newName: String? { choices.newName }
 
     /// One of the chosen computer's choices, as a binding the form's controls write to the draft through.
@@ -147,9 +147,14 @@ struct StartForm: View {
     /// the first message starts at one line and the rows stand closer.
     private var short: Bool { room < 600 }
 
-    /// The place Start sends: a new worktree by the name typed, else the one chosen.
+    /// The place Start sends: a new worktree by the name typed, else the one chosen, else in a repository a new
+    /// worktree named from the first message (screen 34's default), and the folder as it is outside one or while its
+    /// repository is still being read.
     private var startPlace: StartPlace {
-        newName.map { .new($0.trimmingCharacters(in: .whitespaces)) } ?? place
+        if let newName { return .new(newName.trimmingCharacters(in: .whitespaces)) }
+        if let place { return place }
+        guard let context, let folder, let pick, let git = context.git(folder.path) ?? nil else { return .folder }
+        return .new(StartPlace.named(fromTask: draft.message, for: pick.agent, in: git))
     }
 
     var body: some View {
@@ -591,8 +596,7 @@ struct StartForm: View {
             folderButton(context).yields(2)
             if let folder, context.branchAhead(folder) {
                 BranchRow(
-                    context: context, folder: folder, agent: pick?.agent,
-                    place: Binding(get: { place }, set: { choice(\.place).wrappedValue = $0 }),
+                    context: context, folder: folder, agent: pick?.agent, place: choice(\.place),
                     newName: choice(\.newName), open: $branchMenuOpen, top: 0
                 ) {
                     // A turn after the menu closes, as `takeKeyboard`'s, so AppKit's settling doesn't take it back.

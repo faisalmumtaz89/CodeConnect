@@ -284,6 +284,16 @@ public enum StartWords {
     public static let olderBranches = "Older branches aren’t listed."
     public static let newBranch = "New branch…"
     public static let newBranchDetail = "A worktree of its own, by name"
+    /// The Mac's branch menu (screen 34): the folder's checkout, the default new worktree, and the branches to start one
+    /// from, named by the first two and how many more.
+    public static let ownCheckout = "The folder’s own checkout"
+    public static let namedFromTask = "Branch named from the task"
+    public static let fromABranch = "From a branch…"
+    public static func branchList(_ branches: [String]) -> String {
+        branches.count <= 2
+            ? branches.joined(separator: ", ")
+            : branches.prefix(2).joined(separator: ", ") + ", \(branches.count - 2) more"
+    }
     public static let worktreeName = "Name"
     public static let worktreeNameExample = "fix-login"
     public static let worktreeNameRule = "Letters, digits, . _ and -, with / between parts. Up to 64."
