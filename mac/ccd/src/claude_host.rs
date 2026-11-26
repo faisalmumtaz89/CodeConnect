@@ -649,10 +649,16 @@ fn next_mark(last: i64, now: i64) -> i64 {
 }
 
 /// The usage limit Claude Code's `rate_limit_info` says a request was refused at, if it says one was: its
-/// `errorCode`, else its `rateLimitType`.
+/// `errorCode`, else its `rateLimitType`. A window refused while extra usage is allowed refused nothing: the request
+/// goes on extra usage.
 fn claude_limit(info: &serde_json::Value) -> Option<protocol::event::LimitKind> {
     use protocol::event::LimitKind;
-    if info["status"] != "rejected" {
+    if info["status"] != "rejected"
+        || matches!(
+            info["overageStatus"].as_str(),
+            Some("allowed" | "allowed_warning")
+        )
+    {
         return None;
     }
     if info["errorCode"] == "credits_required" {
@@ -8176,7 +8182,8 @@ mod tests {
 
     /// **A run claude says a request of was refused at a usage limit says which (minor 54), until its next turn**: a
     /// `rate_limit_event` `rejected` names it by its `rateLimitType` (`seven_day_opus`: the weekly Opus), or credits by
-    /// its `errorCode`; an `allowed` one names none; the next turn's init clears it.
+    /// its `errorCode`; an `allowed` one names none, nor a `rejected` one whose extra usage is allowed; the next turn's
+    /// init clears it.
     #[tokio::test]
     async fn a_refused_rate_limit_event_marks_the_run_at_its_limit_until_its_next_turn() {
         use protocol::event::LimitKind;
@@ -8233,6 +8240,22 @@ mod tests {
         )
         .await;
         limit_is(&rig.daemon, &uid, None, "an allowed request names no limit").await;
+        say_sdk(
+            &mut played,
+            &mut seq,
+            event(
+                serde_json::json!({"status": "rejected", "rateLimitType": "five_hour",
+                "overageStatus": "allowed", "isUsingOverage": true}),
+            ),
+        )
+        .await;
+        limit_is(
+            &rig.daemon,
+            &uid,
+            None,
+            "a window refused but extra usage allowed: the run goes on",
+        )
+        .await;
         say_sdk(
             &mut played,
             &mut seq,
