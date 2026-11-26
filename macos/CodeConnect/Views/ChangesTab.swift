@@ -47,6 +47,8 @@ struct ChangesPanel: View {
             } else {
                 unread(state)
             }
+            // The run's shell, under both tabs, at the panel's foot; it sets its own height.
+            TerminalFoot(row: row, model: model)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.window)
