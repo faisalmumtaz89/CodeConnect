@@ -808,13 +808,23 @@ async fn read_last_output(shell: &Shell, master: &AsyncFd<OwnedFd>, buffer: &mut
     .await;
 }
 
-/// End the shell: hang up its foreground job and itself, close the terminal, and kill whichever of the two groups
-/// is left after [`HANGUP_GRACE`]. The shell is reaped before this returns.
+/// End the shell: hang up itself, its jobs and the terminal's foreground job, close the terminal, and kill whichever
+/// of those groups is left after [`HANGUP_GRACE`]. The shell is reaped before this returns.
+///
+/// A shell with job control runs each job in a group of its own, which only the shell itself would pass the hang-up
+/// on to, and a shell waiting on a foreground job that ignores it may be killed before it does. So the jobs' groups
+/// are read while the shell is alive (the groups its own children lead) and signalled with it.
 async fn hang_up(child: &mut tokio::process::Child, master: AsyncFd<OwnedFd>) {
     // While unreaped, the shell's pid, which `setsid` made its session's and its group's id, cannot be reused.
     let shell_group = child.id().map(|pid| pid as i32);
+    let jobs = shell_group
+        .map(protocol::proc_identity::tool_groups)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|leader| Some(leader.pid));
     let groups: Vec<i32> = [shell_group, foreground(master.as_raw_fd())]
         .into_iter()
+        .chain(jobs)
         .flatten()
         .fold(Vec::new(), |mut groups, group| {
             if !groups.contains(&group) {
@@ -823,7 +833,7 @@ async fn hang_up(child: &mut tokio::process::Child, master: AsyncFd<OwnedFd>) {
             groups
         });
     for group in &groups {
-        // SAFETY: the shell's own group, and the foreground group of the terminal it leads.
+        // SAFETY: the shell's own group, its jobs' groups, and the foreground group of the terminal it leads.
         unsafe { libc::kill(-group, libc::SIGHUP) };
     }
     drop(master);
@@ -1585,16 +1595,18 @@ mod tests {
     /// last output included), so the viewer is closed in time rather than waiting forever.
     #[test]
     fn output_for_a_viewer_with_no_credit_starts_its_stall_clock() {
-        let mut state = State::default();
-        state.holder = Some(Holder {
-            generation: 1,
-            sent: 0,
-            credit: 0,
-            reset: false,
-            written: 0,
-            input_left: 0,
-            stalled: None,
-        });
+        let mut state = State {
+            holder: Some(Holder {
+                generation: 1,
+                sent: 0,
+                credit: 0,
+                reset: false,
+                written: 0,
+                input_left: 0,
+                stalled: None,
+            }),
+            ..State::default()
+        };
         state.push(b"last words");
         assert!(state.holder.as_ref().unwrap().stalled.is_some());
     }
