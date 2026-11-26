@@ -2635,7 +2635,8 @@ async fn relaunch(
 }
 
 /// agy's home on the account the Antigravity run `uid` records and its home on `account`, the one it goes on now, when
-/// the two differ: where its session's files are copied from and to ([`crate::accounts::carry_agy_session`]).
+/// the two differ: where its session's files are copied from and to ([`crate::accounts::carry_agy_session`]). The
+/// account it records may have been removed since: its folder, kept for the run, is still its home.
 fn agy_homes(
     daemon: &Daemon,
     uid: &str,
@@ -2643,9 +2644,16 @@ fn agy_homes(
     environment: &HashMap<OsString, OsString>,
     account: Option<&crate::accounts::AccountEnv>,
 ) -> Result<Option<(PathBuf, PathBuf)>, String> {
-    let was = match daemon.store.run_account(uid) {
-        Ok(Some(was)) => crate::accounts::AccountEnv::for_account(root, &was)
-            .map_err(|err| format!("its account's folder could not be made: {err}"))?,
+    let was = match daemon.store.run_account_id(uid) {
+        Ok(Some(id)) => {
+            let was = crate::store::Account {
+                id,
+                agent: AgentKind::Antigravity.as_str().into(),
+                label: String::new(),
+            };
+            crate::accounts::AccountEnv::for_account(root, &was)
+                .map_err(|err| format!("its account's folder could not be made: {err}"))?
+        }
         Ok(None) => None,
         Err(err) => return Err(format!("its account could not be read: {err:#}")),
     };
@@ -13427,10 +13435,10 @@ mod tests {
     }
 
     /// **A message moves an Antigravity run onto the active account with its session's own files** (306 #3): a run on
-    /// account A whose agy ended, B made active, and the person's next message: the session's files (named by its id
-    /// in agy's conversations, brain and annotations) are copied from A's folder into B's, any of them B had cleared
-    /// first, nothing else in either folder touched and A keeping its copy; the host is launched with B's folder,
-    /// resumes the session, and the run records B.
+    /// account A whose agy ended, B made active and A then removed (its folder kept, as a run records it), and the
+    /// person's next message: the session's files (named by its id in agy's conversations, brain and annotations) are
+    /// copied from A's folder into B's, any of them B had cleared first, nothing else in either folder touched and A
+    /// keeping its copy; the host is launched with B's folder, resumes the session, and the run records B.
     #[tokio::test]
     async fn a_message_moves_an_antigravity_run_with_its_sessions_files() {
         let _env = crate::ProcessEnvRead::take();
@@ -13551,6 +13559,8 @@ mod tests {
             .store
             .activate_account("antigravity", Some(&b.id))
             .unwrap());
+        // A removed as Remove… removes it: its row gone, its folder kept for the run that records it.
+        rig.daemon.store.remove_account(&a.id).unwrap();
 
         let (sent, relaunched) = tokio::join!(
             send_as_app(&rig.daemon, &uid, "r-on-b", "carry on"),

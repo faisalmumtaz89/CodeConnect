@@ -3338,6 +3338,20 @@ impl Store {
         Ok(())
     }
 
+    /// The id of the account the run `session_uid` records, whether that account is still here or removed since; `None`
+    /// for its agent's Default.
+    pub fn run_account_id(&self, session_uid: &str) -> Result<Option<String>> {
+        Ok(self
+            .read()
+            .query_row(
+                "SELECT account_id FROM run_hosts WHERE session_uid = ?1",
+                params![session_uid],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     pub fn run_account(&self, session_uid: &str) -> Result<Option<Account>> {
         Ok(self
             .read()
