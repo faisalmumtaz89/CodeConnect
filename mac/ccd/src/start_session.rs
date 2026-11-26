@@ -1270,7 +1270,8 @@ async fn free_new_worktree(
 }
 
 /// A new worktree's name nothing in the repository has: `name`, else `name-2`, `name-3`, …. Taken: the branch the
-/// agent would make (Claude Code's `worktree-<name>`, the name itself for the others) is a branch or clashes with
+/// agent would make (Claude Code's `worktree-<name>` with each `/` as `+`, the name itself for the others) is a
+/// branch or clashes with
 /// one's path (`fix` beside `fix/x`), or the worktree's folder is already there, which Claude Code would reopen. The
 /// app avoids the names it was listed; only this computer sees every branch. A name under an existing branch
 /// (`fix/x` under `fix`) no number frees: refused in git's words.
@@ -1280,8 +1281,9 @@ fn free_worktree_name(
     branches: &[String],
     main: &str,
 ) -> Result<String, String> {
+    // Claude Code writes each `/` of the name as `+`, in its branch as in its folder.
     let branch = |name: &str| match agent {
-        AgentKind::Claude => format!("worktree-{name}"),
+        AgentKind::Claude => format!("worktree-{}", name.replace('/', "+")),
         _ => name.to_string(),
     };
     if let Some(parent) = branches
@@ -3623,12 +3625,10 @@ mod tests {
 
     /// **B10 G3's start**: a real, signed-in claude on the real agent host, started as the
     /// app starts one, through the folder question: in `g3_project` under
-    /// `CODECONNECT_TEST_RIG_DIR/<name>`, its answer `trust` given with the start; with
-    /// `worktree`, in a new worktree of that name whose folder is already there (checked out
-    /// from the project, so its project is there too) and answered not trusted in its own
-    /// right. The host and claude get this test's `HOME`, `USER`, `LOGNAME`, `PATH` and
+    /// `CODECONNECT_TEST_RIG_DIR/<name>`, its answer `trust` given with the start. The host
+    /// and claude get this test's `HOME`, `USER`, `LOGNAME`, `PATH` and
     /// `CLAUDE_CONFIG_DIR`, as B7's G2 gives them.
-    async fn g3_start(name: &str, trust: Trust, worktree: Option<&str>) -> G3 {
+    async fn g3_start(name: &str, trust: Trust) -> G3 {
         let var =
             |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set"));
         let host = PathBuf::from(var("CODECONNECT_TEST_AGENT_HOST"));
@@ -3650,34 +3650,6 @@ mod tests {
         .map(|name| (OsString::from(name), var(name)))
         .collect();
         environment.insert(OsString::from("SHELL"), OsString::from("/bin/zsh"));
-        let place = match worktree {
-            Some(name) => {
-                let folder = worktree_folder(project.to_str().unwrap(), name);
-                let branch = format!("worktree-{name}");
-                git(
-                    &project,
-                    &[
-                        "worktree",
-                        "add",
-                        "-q",
-                        "-b",
-                        &branch,
-                        folder.to_str().unwrap(),
-                    ],
-                );
-                let folder = std::fs::canonicalize(folder).unwrap();
-                let folder = folder.to_str().unwrap().to_string();
-                daemon
-                    .db
-                    .set_folder_trust(folder, Trust::NotTrusted)
-                    .await
-                    .unwrap();
-                Some(StartWorktree::New {
-                    name: name.to_string(),
-                })
-            }
-            None => None,
-        };
         let started = hosted_start(
             AgentKind::Claude,
             &daemon,
@@ -3686,7 +3658,7 @@ mod tests {
             name,
             project.to_str().unwrap(),
             "Say hello in one short sentence.",
-            place.as_ref(),
+            None,
             None,
             &environment,
             None,
@@ -3808,7 +3780,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
     async fn a_folder_answered_trusted_loads_its_project_into_a_real_claude() {
-        let g3 = g3_start("g3t", Trust::Trusted, None).await;
+        let g3 = g3_start("g3t", Trust::Trusted).await;
         let hook = g3.root.join("hook-canary").exists();
         let mcp = g3.root.join("mcp-canary").exists();
         println!(
@@ -3853,7 +3825,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
     async fn a_folder_answered_not_trusted_loads_nothing_of_its_project_into_a_real_claude() {
-        let g3 = g3_start("g3u", Trust::NotTrusted, None).await;
+        let g3 = g3_start("g3u", Trust::NotTrusted).await;
         let hook = g3.root.join("hook-canary").exists();
         let mcp = g3.root.join("mcp-canary").exists();
         println!(
@@ -3869,42 +3841,6 @@ mod tests {
             (hook, g3.listed, g3.reply.contains("ZEBRA-G10"), mcp),
             (false, false, false, false),
             "hook canary, g10canary listed, ZEBRA-G10 in the reply, mcp canary"
-        );
-    }
-
-    /// **B10 G3, a new worktree's folder reopened**: from a folder answered trusted, a new
-    /// worktree whose folder, `.claude/worktrees/<name>` in Claude's layout, is already there
-    /// and answered not trusted in its own right. A real claude reopens that folder (its
-    /// transcript's `cwd`) and loads nothing of the project checked out there. Ignored and
-    /// gated as B7's G2 is.
-    #[tokio::test]
-    #[ignore = "needs the built agent host and a signed-in claude: CODECONNECT_TEST_AGENT_HOST, CODECONNECT_TEST_REAL_CLAUDE, CODECONNECT_TEST_RIG_DIR"]
-    async fn a_new_worktree_reopens_its_declined_folder_and_loads_nothing_into_a_real_claude() {
-        let g3 = g3_start("g3w", Trust::Trusted, Some("g3")).await;
-        let reopened = std::fs::canonicalize(g3.root.join("project/.claude/worktrees/g3"))
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        let hook = g3.root.join("hook-canary").exists();
-        println!(
-            "G3 new worktree: ran in {:?}, the folder {reopened:?}; hook canary {hook}; g10canary listed {}; reply {:?}",
-            g3.ran_in, g3.listed, g3.reply
-        );
-        g3_end(&g3).await;
-        assert!(
-            !g3.reply.is_empty(),
-            "the run never replied, so the reply's canary proves nothing"
-        );
-        assert_eq!(
-            g3.ran_in.as_deref(),
-            Some(reopened.as_str()),
-            "claude reopened the folder that was there"
-        );
-        assert_eq!(
-            (hook, g3.listed, g3.reply.contains("ZEBRA-G10")),
-            (false, false, false),
-            "hook canary, g10canary listed, ZEBRA-G10 in the reply"
         );
     }
 
@@ -4509,8 +4445,8 @@ mod tests {
 
     /// **A new Codex worktree is made where Claude Code makes one, on a branch named
     /// as typed**, from the commit of the folder it was asked in: here a linked
-    /// worktree one commit ahead of main. A second one by the same name is git's to
-    /// refuse.
+    /// worktree one commit ahead of main. A second one by the same name goes to the next
+    /// name, its branch being there by then.
     #[tokio::test]
     async fn a_new_codex_worktree_starts_from_the_folder_it_is_asked_in() {
         let rig = recording("new-codex");
@@ -4905,7 +4841,8 @@ mod tests {
         assert_eq!(rig.host_cwd(), folder.canonicalize().unwrap());
     }
 
-    /// **The next free name, by each agent's branch**: Claude Code's `worktree-<name>`, the others' `<name>`; a branch
+    /// **The next free name, by each agent's branch**: Claude Code's `worktree-<name>` (each `/` written `+`), the
+    /// others' `<name>`; a branch
     /// path clashing either way (`fix` beside `fix/x`); a name under a branch no number frees (`fix/x` under `fix`) is
     /// refused in git's words.
     #[test]
@@ -4946,6 +4883,15 @@ mod tests {
         assert_eq!(
             free("fix/x", AgentKind::Codex, &["fix"]),
             Err("a branch named fix already exists, so fix/x can't be made".into())
+        );
+        // Claude Code writes each "/" of the name as "+" in its branch, as in its folder.
+        assert_eq!(
+            free("fix/login", AgentKind::Claude, &["worktree-fix+login"]),
+            Ok("fix/login-2".into())
+        );
+        assert_eq!(
+            free("fix/login", AgentKind::Claude, &["worktree-fix"]),
+            Ok("fix/login".into())
         );
     }
 

@@ -75,9 +75,10 @@ public enum StartPlace: Hashable, Sendable {
     case new(String)
 
     /// The branch a new worktree of this name gets: Claude Code's own
-    /// `worktree-<name>`, Codex's the name as typed.
+    /// `worktree-<name>`, each `/` written `+` as in its folder; Codex's and
+    /// Antigravity's the name as typed.
     public static func newBranch(_ name: String, for agent: StartAgent) -> String {
-        agent == .claude ? "worktree-\(name)" : name
+        agent == .claude ? "worktree-" + name.replacingOccurrences(of: "/", with: "+") : name
     }
 
     /// Claude Code's rule for a worktree's name, which both agents' follow:
