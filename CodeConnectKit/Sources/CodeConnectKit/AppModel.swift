@@ -262,6 +262,9 @@ public final class AppModel {
     public private(set) var now = Date()
     /// One diff per session, keyed like `states`, fetched only when asked for.
     private(set) var diffs: [String: DiffState] = [:]
+    /// Each run's repository as its computer last read it (`runGit(for:)`), and the runs a read is on its way for.
+    private(set) var runGits: [String: RunGitReply] = [:]
+    private var runGitsReading: Set<String> = []
 
     /// How far back to backfill a session we have never cached. The daemon pages
     /// at 500; this keeps a cold open bounded without hiding recent work.
@@ -1871,6 +1874,7 @@ public final class AppModel {
         answerAttempts = [:]
         answersInFlight = []
         diffs = [:]
+        runGits = [:]
         // **The mutation controllers go with the fleet.** They were left
         // behind, so a reconnect that re-created a session under the same key
         // inherited the previous fleet's in-flight ids and settled banners —
@@ -3080,6 +3084,7 @@ public final class AppModel {
         shownSessions[key] = nil
         if departedMarks.remove(key) != nil { ReviewMarks.forget(sessionKey: key) }
         diffs[key] = nil
+        runGits[key] = nil
         catchUp?.list?.removeAll { $0.sessionKey == key }
         catchUp?.progressed = true
         #if DEBUG
@@ -4257,6 +4262,24 @@ public final class AppModel {
     // MARK: - Diff
 
     public func diffState(for key: String) -> DiffState { diffs[key] ?? .idle }
+
+    /// The run's repository as its computer last read it for its Changes panel (minor 56): nil before a read, from a
+    /// computer that does not read repositories, and in the sample fleet and fixtures, which have none.
+    public func runGit(for key: String) -> RunGitReply? { runGits[key] }
+
+    /// Reads the run's repository again, unless a read is on its way. A failed read keeps the last one: the panel's
+    /// diff says what became of the link, in its own words, so this read adds no second account of it.
+    public func loadRunGit(key: String) {
+        guard !sampleFleetActive, !fixturesActive, connection.capabilities?.readsRunGit == true,
+            connection.phase.isConnected, !runGitsReading.contains(key)
+        else { return }
+        runGitsReading.insert(key)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.runGitsReading.remove(key) }
+            if let reply = try? await self.connection.runGit(session: key) { self.runGits[key] = reply }
+        }
+    }
 
     /// Ask the daemon for this run's working-tree diff.
     ///
