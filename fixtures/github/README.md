@@ -9,3 +9,6 @@
   daemon reads (number, state, html_url, merged_at, base.ref, head.ref, head.sha, head.repo.full_name).
 - `api-token-refused.*`: **written from gh's source, not captured**: GitHub refusing a token (HTTP 401), with gh's hint to sign in.
 - Not here, because no credential is used to capture: an authenticated `gh api` (exit 0; its body is the pulls JSON above).
+- `checks-graphql.json`: **written from GitHub's GraphQL schema, not captured** (GraphQL takes no anonymous request): the answer to
+  ccd's `gh api graphql` checks query (`statusCheckRollup` of an open PR's last commit) with each case the daemon reads. The owner's
+  real-GitHub end-to-end captures a real one; it replaces this file as is (same query, same shape).

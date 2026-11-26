@@ -212,6 +212,28 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(pr.state, .merged)
         XCTAssertEqual(pr.headOID, "abc")
         XCTAssertEqual(pr.mergedAt, "m")
+        XCTAssertNil(pr.checks, "a closed or merged one carries none")
+
+        let checked = try decodeServer(
+            """
+            {"type":"run_git","session_id":"cc-1",
+             "git":{"branch":"feat/x","changed":{"files":0,"added":0,"removed":0,"complete":true},
+                    "pushed":true,"unmerged":false,"read_at":"t","gh":"signed_in",
+                    "pr":{"number":3,"url":"u","state":"open","base":"main","head_oid":"abc","checks_complete":false,
+                          "checks":[{"name":"test","state":"fail","started_at":"s","completed_at":"c","url":"l",
+                                     "failure_line":"expected 2, got 3"},
+                                    {"name":"ci/x","state":"a_later_state"}]}}}
+            """)
+        guard case .runGit(let withChecks) = checked, let checks = withChecks.git?.pullRequest?.checks else {
+            return XCTFail("no checks")
+        }
+        XCTAssertEqual(withChecks.git?.pullRequest?.checksComplete, false)
+        XCTAssertEqual(checks.map(\.state), [.fail, .unknown])
+        XCTAssertEqual(checks[0].failureLine, "expected 2, got 3")
+        XCTAssertEqual(checks[0].startedAt, "s")
+        XCTAssertEqual(checks[0].completedAt, "c")
+        XCTAssertEqual(checks[0].url, "l")
+        XCTAssertNil(checks[1].startedAt)
 
         let newer = try decodeServer(
             """

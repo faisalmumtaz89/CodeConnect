@@ -8599,6 +8599,7 @@ mod tests {
         std::fs::write(
             &gh,
             "#!/bin/sh\nd=$(dirname \"$0\")\necho \"prompt=${GH_PROMPT_DISABLED:-on} $*\" >> \"$d/calls\"\ncase \"$*\" in\n\
+             \"api graphql\"*) cat \"$d/api.err\" >&2; cat \"$d/checks.json\"; exit $(cat \"$d/api.exit\");;\n\
              \"pr create\"*) touch \"$d/created\"; pwd -P > \"$d/create.cwd\"; cat \"$d/create.err\" >&2; cat \"$d/create.out\"; exit $(cat \"$d/create.exit\");;\n\
              *state=open*) cat \"$d/api.err\" >&2; if [ -f \"$d/created\" ] && [ -f \"$d/open.after\" ]; then cat \"$d/open.after\"; else cat \"$d/open.json\"; fi; exit $(cat \"$d/api.exit\");;\n\
              *state=closed*) cat \"$d/api.err\" >&2; cat \"$d/closed.json\"; exit $(cat \"$d/api.exit\");;\n\
@@ -8609,6 +8610,11 @@ mod tests {
         let fixtures = github_fixtures();
         std::fs::copy(fixtures.join("pulls-open.json"), dir.join("open.json")).unwrap();
         std::fs::copy(fixtures.join("pulls-closed.json"), dir.join("closed.json")).unwrap();
+        std::fs::copy(
+            fixtures.join("checks-graphql.json"),
+            dir.join("checks.json"),
+        )
+        .unwrap();
         std::fs::write(dir.join("api.err"), "").unwrap();
         std::fs::write(dir.join("api.exit"), "0").unwrap();
         for (name, text) in [("create.out", ""), ("create.err", ""), ("create.exit", "0")] {
@@ -8718,11 +8724,21 @@ mod tests {
         assert_eq!(read.gh, Some(GhState::SignedIn));
         assert_eq!(read.pr.as_ref().map(|pr| pr.number), Some(15173));
         assert_eq!(two.unwrap().unwrap().pr, read.pr);
+        let pr = read.pr.as_ref().unwrap();
+        assert_eq!(
+            (pr.checks.as_ref().map(Vec::len), pr.checks_complete),
+            (Some(9), Some(true)),
+            "an open pull request's checks, from the checks query"
+        );
         let calls = gh_calls(&gh);
         assert_eq!(
             calls.len(),
-            1,
-            "two reads at once, one open pulls call: {calls:?}"
+            2,
+            "two reads at once: one open pulls call, one checks query: {calls:?}"
+        );
+        assert!(
+            calls[1].contains("api graphql") && calls[1].contains("number=15173"),
+            "{calls:?}"
         );
         assert!(
             calls[0].starts_with("prompt=1 "),
@@ -8738,7 +8754,7 @@ mod tests {
             (again.pr, again.gh_read_at),
             (read.pr.clone(), read.gh_read_at.clone())
         );
-        assert_eq!(gh_calls(&gh).len(), 1, "inside the window gh is not asked");
+        assert_eq!(gh_calls(&gh).len(), 2, "inside the window gh is not asked");
         git_in(
             &dir,
             &[
@@ -8754,7 +8770,7 @@ mod tests {
             ],
         );
         daemon.run_git(uid).await.unwrap().unwrap();
-        assert_eq!(gh_calls(&gh).len(), 2, "a new commit is read again");
+        assert_eq!(gh_calls(&gh).len(), 4, "a new commit is read again");
         done(&gh, &dir);
 
         let gh = stand_in_gh();
@@ -9332,6 +9348,58 @@ mod tests {
         );
         assert!(gh_calls(&gh).is_empty(), "{:?}", gh_calls(&gh));
         done(&gh, &dir, &bare);
+    }
+
+    /// **A merged pull request carries no checks, and they are not asked for**: only an open
+    /// one's are read.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_merged_pull_request_is_read_without_its_checks() {
+        use protocol::agent::AgentKind;
+        use protocol::ws::PrState;
+        let _env = crate::ProcessEnvRead::take();
+        let gh = stand_in_gh();
+        let daemon = daemon_on(
+            shared_store(),
+            Config {
+                gh_bin: Some(gh.to_str().unwrap().into()),
+                ..Config::default()
+            },
+        );
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP41";
+        let dir = run_in_a_repository_as(&daemon, uid, AgentKind::Claude, Lifecycle::Exited);
+        git_in(
+            &dir,
+            &["remote", "add", "origin", "https://github.com/cli/cli.git"],
+        );
+        git_in(&dir, &["switch", "-q", "-c", "w2-done"]);
+        let head = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(gh.with_file_name("open.json"), "[]").unwrap();
+        std::fs::write(
+            gh.with_file_name("closed.json"),
+            format!(
+                r#"[{{"number": 15500, "state": "closed", "html_url": "https://github.com/cli/cli/pull/15500",
+                    "merged_at": "2026-11-26T10:00:00Z", "base": {{"ref": "trunk"}},
+                    "head": {{"ref": "w2-done", "sha": "{head}", "repo": {{"full_name": "cli/cli"}}}}}}]"#
+            ),
+        )
+        .unwrap();
+        let read = daemon.run_git(uid).await.unwrap().unwrap();
+        let pr = read.pr.unwrap();
+        assert_eq!((pr.number, pr.state), (15500, PrState::Merged));
+        assert_eq!((pr.checks, pr.checks_complete), (None, None));
+        let calls = gh_calls(&gh);
+        assert_eq!(
+            calls.len(),
+            2,
+            "open, then closed; no checks query: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.contains("graphql")),
+            "{calls:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(gh.parent().unwrap());
     }
 
     /// **A read of a run's repository and a commit in it never run git at once**: started

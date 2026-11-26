@@ -2095,6 +2095,42 @@ public struct RunGit: Decodable, Sendable, Hashable {
         public let base: String
         public let headOID: String
         public let mergedAt: String?
+        /// An open one's checks at its head (minor 62), failed first; nil when not read (closed or merged, an older
+        /// daemon, GitHub not answering).
+        public let checks: [Check]?
+        /// False when there were more than 100, or the head moved while they were read.
+        public let checksComplete: Bool?
+
+        public struct Check: Decodable, Sendable, Hashable {
+            /// A check run's name, or a status's context.
+            public let name: String
+            public let state: State
+            /// A check run's start; a status has none. Its duration runs to `completedAt`, or to now while it runs.
+            public let startedAt: String?
+            public let completedAt: String?
+            /// Its log.
+            public let url: String?
+            /// A failed check run's first failure line, when it says more than the runner's exit code.
+            public let failureLine: String?
+
+            public enum State: String, Decodable, Sendable, Hashable {
+                case fail, pending, cancelled, pass, skipped
+                /// A state this build, or the computer, does not name.
+                case unknown
+
+                public init(from decoder: Decoder) throws {
+                    let raw = try decoder.singleValueContainer().decode(String.self)
+                    self = State(rawValue: raw) ?? .unknown
+                }
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case name, state, url
+                case startedAt = "started_at"
+                case completedAt = "completed_at"
+                case failureLine = "failure_line"
+            }
+        }
 
         public enum State: String, Decodable, Sendable, Hashable {
             case open, merged, closed
@@ -2111,6 +2147,8 @@ public struct RunGit: Decodable, Sendable, Hashable {
             case number, url, state, base
             case headOID = "head_oid"
             case mergedAt = "merged_at"
+            case checks
+            case checksComplete = "checks_complete"
         }
     }
 
