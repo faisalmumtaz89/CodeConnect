@@ -1632,7 +1632,7 @@ async fn compose(
     } else {
         crate::store::COMPOSE_ROUTE_START
     };
-    daemon.commits_told(uid, told).await;
+    daemon.commits_told(uid, &ask.request_id, told).await;
     let words = crate::claude_host::person_row(uid, &uuid, &ask.text, Some(&ask.request_id), None)
         .with_turn_id(Some(turn.to_string()));
     file(daemon, uid, vec![words]).await;
@@ -6970,6 +6970,52 @@ mod tests {
             "the message that joined the turn: {:?}",
             named(Arc::clone(&rig.daemon), uid.clone()).await
         );
+        drop(ws);
+        end_run(&rig, &uid).await;
+    }
+
+    /// **A steer a Stop cuts off told the agent nothing**: it carried the commit's line, Codex
+    /// never read it, and the message sent after carries the line again.
+    #[tokio::test]
+    async fn a_steer_a_stop_cuts_off_leaves_its_commit_lines_for_the_next() {
+        let rig = rig();
+        let frames = frames_of(LIVE_FRAMES);
+        let thread = frames[2]["params"]["threadId"].as_str().unwrap();
+        let turn = frames[29]["params"]["turn"]["id"].as_str().unwrap();
+        let (uid, mut ws) = engine_run(&rig, "req-cut-note", thread, turn).await;
+        turn_begun(&rig.daemon, &uid, &mut ws, thread, turn).await;
+        rig.daemon
+            .ingest(PendingEvent::new(
+                &SessionKey::new(&uid, &uid),
+                EventKind::Notification,
+                json!({"notification_type": "committed", "oid": "eeeeeee111",
+                       "files": 1, "message": "m"}),
+                Source::Daemon,
+            ))
+            .await
+            .unwrap();
+        let sent = saying(&rig.daemon, &uid, "say-a", "steered");
+        let start = asked(&mut ws, "turn/start").await;
+        assert_eq!(
+            start["params"]["input"][0]["text"],
+            "You committed 1 file · eeeeeee\n\nsteered"
+        );
+        answer(&mut ws, &start, json!({"turn": {"id": turn}})).await;
+        let _ = sent.await;
+        let stop = stopping(&rig.daemon, &uid, "stop-note", turn);
+        let interrupt = asked(&mut ws, "turn/interrupt").await;
+        answer(&mut ws, &interrupt, json!({})).await;
+        tell(&mut ws, &its_turn_ended("interrupted")).await;
+        assert!(stop.await.is_ok());
+        settled_as(&rig.daemon, &uid, "say-a", crate::store::COMPOSE_STOPPED).await;
+        let again = saying(&rig.daemon, &uid, "say-b", "after the stop");
+        let start = asked(&mut ws, "turn/start").await;
+        assert_eq!(
+            start["params"]["input"][0]["text"],
+            "You committed 1 file · eeeeeee\n\nafter the stop"
+        );
+        answer(&mut ws, &start, json!({"turn": {"id": "turn-after"}})).await;
+        let _ = again.await;
         drop(ws);
         end_run(&rig, &uid).await;
     }

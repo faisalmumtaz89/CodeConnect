@@ -962,10 +962,20 @@ impl Daemon {
         (format!("{}\n\n{text}", lines.join("\n")), Some(through))
     }
 
-    /// The run's agent was sent the commits through `through` ([`Daemon::with_commit_note`]).
-    pub(crate) async fn commits_told(&self, session_uid: &str, through: Option<u64>) {
+    /// The message `request_id` told the run's agent of the commits through `through`
+    /// ([`Daemon::with_commit_note`]); a Stop that drops it later takes that back.
+    pub(crate) async fn commits_told(
+        &self,
+        session_uid: &str,
+        request_id: &str,
+        through: Option<u64>,
+    ) {
         let Some(through) = through else { return };
-        if let Err(err) = self.db.commits_told(session_uid.to_string(), through).await {
+        if let Err(err) = self
+            .db
+            .commits_told(session_uid.to_string(), request_id.to_string(), through)
+            .await
+        {
             crate::log_error!(
                 "{session_uid}: could not record the commits its agent was told: {err:#}"
             );

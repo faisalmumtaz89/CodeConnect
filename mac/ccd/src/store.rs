@@ -1627,8 +1627,9 @@ impl Store {
             .expect("test fixture");
     }
 
-    /// The run's `committed` notices its agent has not been told of, the newest [`MAX_COMMIT_LINES`]
-    /// oldest first: each one's seq, commit and file count.
+    /// The run's `committed` notices its agent has not been told of (past the newest one a message
+    /// carried that no Stop dropped), the newest [`MAX_COMMIT_LINES`] oldest first: each one's seq,
+    /// commit and file count.
     pub fn untold_commits(&self, session_uid: &str) -> Result<Vec<(u64, String, u64)>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
@@ -1636,7 +1637,15 @@ impl Store {
                FROM events
               WHERE session_uid = ?1 AND kind = ?2
                 AND json_extract(payload, '$.notification_type') = ?3
-                AND seq > COALESCE((SELECT told_through FROM commit_notes WHERE session_uid = ?1), 0)
+                AND seq > COALESCE((
+                    SELECT MAX(told_through) FROM commit_notes AS note
+                     WHERE note.session_uid = ?1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM events AS dropped
+                            WHERE dropped.session_uid = ?1 AND dropped.kind = ?2
+                              AND json_extract(dropped.payload, '$.notification_type') = ?5
+                              AND json_extract(dropped.payload, '$.request_id') = note.request_id)
+                ), 0)
               ORDER BY seq DESC LIMIT ?4",
         )?;
         let mut commits = stmt
@@ -1645,7 +1654,8 @@ impl Store {
                     session_uid,
                     EventKind::Notification.as_str(),
                     protocol::event::notice::COMMITTED,
-                    MAX_COMMIT_LINES as i64
+                    MAX_COMMIT_LINES as i64,
+                    protocol::event::notice::SEND_NOT_SENT
                 ],
                 |row| {
                     Ok((
@@ -1660,12 +1670,12 @@ impl Store {
         Ok(commits)
     }
 
-    /// The run's agent has been told of its commits through `through` (never backwards).
-    pub fn commits_told(&self, session_uid: &str, through: &u64) -> Result<()> {
+    /// The message `request_id` told the run's agent of its commits through `through`.
+    pub fn commits_told(&self, session_uid: &str, request_id: &str, through: &u64) -> Result<()> {
         self.write().execute(
-            "INSERT INTO commit_notes(session_uid, told_through) VALUES (?1, ?2)
-             ON CONFLICT(session_uid) DO UPDATE SET told_through = MAX(told_through, excluded.told_through)",
-            params![session_uid, *through as i64],
+            "INSERT OR REPLACE INTO commit_notes(session_uid, request_id, told_through)
+             VALUES (?1, ?2, ?3)",
+            params![session_uid, request_id, *through as i64],
         )?;
         Ok(())
     }
@@ -6165,11 +6175,14 @@ fn answer_claim_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerClaim> {
 fn create_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
-        -- How far a run's agent has been told of the commits made from its Changes panel: the
-        -- seq of the newest `committed` notice a message it was sent carried.
+        -- The messages that told a run's agent of commits made from its Changes panel: each
+        -- one's request and the seq of the newest `committed` notice it carried. One a Stop
+        -- dropped (its `send_not_sent` notice filed) told nothing.
         CREATE TABLE IF NOT EXISTS commit_notes(
-            session_uid  TEXT PRIMARY KEY,
-            told_through INTEGER NOT NULL
+            session_uid  TEXT NOT NULL,
+            request_id   TEXT NOT NULL,
+            told_through INTEGER NOT NULL,
+            PRIMARY KEY(session_uid, request_id)
         );
 
         CREATE TABLE IF NOT EXISTS sessions(

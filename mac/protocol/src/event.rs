@@ -127,8 +127,8 @@ pub mod notice {
     pub const MODEL_UNAVAILABLE: &str = "model_unavailable";
     /// The person committed the run's changes from its Changes panel
     /// (`{oid, files, message}`: the commit, how many files it changed, its message; minor
-    /// 59, [`crate::ws::GitAction::Commit`]). The run's agent is told at the next message it is
-    /// sent: ccd puts one line per commit since it was last told ("You committed 2 files ·
+    /// 59, [`crate::ws::GitAction::Commit`]). The run's agent is told at the person's next
+    /// message: ccd puts one line per commit since it was last told ("You committed 2 files ·
     /// <sha7>", the newest five) above that message's words; the person's row keeps their words.
     pub const COMMITTED: &str = "committed";
 }

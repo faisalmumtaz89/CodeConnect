@@ -2331,7 +2331,7 @@ pub(crate) async fn send_text(
     }
     match tokio::time::timeout(SEND_WAIT, taken).await {
         Ok(Ok(true)) => {
-            daemon.commits_told(uid, told).await;
+            daemon.commits_told(uid, &request_id, told).await;
             SendTextResult::Sent { matched: text }
         }
         Ok(Ok(false)) => refuse("This session stopped taking messages; nothing was sent."),
@@ -6259,6 +6259,48 @@ mod tests {
             host_takes(&mut played, 6, "done")
         );
         assert_eq!(text, "You committed 1 file · 8888888\n\ngo on");
+        stop(&played.dir);
+    }
+
+    /// **A message a Stop drops told the agent nothing**: queued behind a running turn, it
+    /// carried the commit's line, the Stop cancelled it, and the message sent after carries
+    /// the line again.
+    #[tokio::test]
+    async fn a_dropped_message_leaves_its_commit_lines_for_the_next() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        turn_begins(&mut played, 3, "turn-1").await;
+        rig.daemon
+            .ingest(PendingEvent::new(
+                &SessionKey::new(&uid, &uid),
+                EventKind::Notification,
+                serde_json::json!({"notification_type": "committed", "oid": "ccccccc111",
+                                   "files": 2, "message": "m"}),
+                Source::Daemon,
+            ))
+            .await
+            .unwrap();
+        let (_, (_, text)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-1", "queued"),
+            host_takes(&mut played, 4, "done")
+        );
+        assert_eq!(text, "You committed 2 files · ccccccc\n\nqueued");
+        let cancelled = [send_uuid(&uid, "r-1")];
+        let (stopped, _) =
+            tokio::join!(stop_as_app(&rig.daemon, &uid, "stop-1", "turn-1"), async {
+                let (uuid, _) = host_reads_stop(&mut played).await;
+                host_ends_turn(&mut played, 5, &uuid, "aborted_tools", &cancelled).await;
+            });
+        assert!(
+            matches!(stopped, protocol::ws::InterruptResult::Aborted { .. }),
+            "{stopped:?}"
+        );
+        let (_, (_, text)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-2", "after the stop"),
+            host_takes(&mut played, 7, "done")
+        );
+        assert_eq!(text, "You committed 2 files · ccccccc\n\nafter the stop");
         stop(&played.dir);
     }
 
@@ -13279,6 +13321,53 @@ mod tests {
             2,
             "the relaunched run's end is filed beside the first"
         );
+        stop(&played.dir);
+    }
+
+    /// **A relaunching message leaves the commit's lines for the next**: its prompt is the
+    /// person's words alone, as its row is, and the message after it, to the live run, carries
+    /// the line.
+    #[tokio::test]
+    async fn a_relaunch_leaves_its_commit_lines_for_the_next_message() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = relaunch_rig();
+        let ended = ended_on_its_own(&rig).await;
+        let uid = ended.uid.clone();
+        rig.daemon
+            .ingest(PendingEvent::new(
+                &SessionKey::new(&uid, &uid),
+                EventKind::Notification,
+                serde_json::json!({"notification_type": "committed", "oid": "fffffff111",
+                                   "files": 3, "message": "m"}),
+                Source::Daemon,
+            ))
+            .await
+            .unwrap();
+        let old = pid_in(&ended.dir, "stub.pid");
+        let (sent, mut played) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-again", "carry on"),
+            async {
+                let mut played = play_relaunched(&ended.dir, old).await;
+                let ToHost::Start { uuid, prompt, .. } = played.start.clone() else {
+                    panic!("not a start: {:?}", played.start);
+                };
+                assert_eq!(prompt, "carry on", "a relaunch's prompt is the words alone");
+                say(
+                    &mut played.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid,
+                                       "status": "done", "initialize": initialize_answer()}),
+                )
+                .await;
+                assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 2 }));
+                played
+            }
+        );
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        let (_, (_, text)) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-next", "and then"),
+            host_takes(&mut played, 3, "done")
+        );
+        assert_eq!(text, "You committed 3 files · fffffff\n\nand then");
         stop(&played.dir);
     }
 

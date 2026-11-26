@@ -109,7 +109,7 @@ db_ops! {
     fn append_event(pending: PendingEvent) -> Option<Event>;
     fn max_seq(session_uid: String) -> u64;
     fn untold_commits(session_uid: String) -> Vec<(u64, String, u64)>;
-    fn commits_told(session_uid: String, through: u64) -> ();
+    fn commits_told(session_uid: String, request_id: String, through: u64) -> ();
     fn filed_event(session_uid: String, source: Source, source_event_id: String) -> Option<(u64, Option<String>)>;
     fn session_facts(session_uid: String) -> protocol::facts::SessionFacts;
     /// The settings Codex last named for a Codex run's thread, as filed.
