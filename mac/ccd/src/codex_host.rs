@@ -11056,6 +11056,7 @@ mod tests {
         rig.daemon.account_facts.read(
             &key,
             Some(protocol::ws::AccountFacts {
+                grouped_windows: Vec::new(),
                 limits_available: None,
                 email: Some("default@example.test".into()),
                 plan: Some("plus".into()),
@@ -11065,11 +11066,13 @@ mod tests {
                         used_percent: 10,
                         window_minutes: 300,
                         resets_at: 1_795_920_000,
+                        group: None,
                     },
                     protocol::ws::UsageWindow {
                         used_percent: 7,
                         window_minutes: 10080,
                         resets_at: 1_796_428_800,
+                        group: None,
                     },
                 ],
                 read_at: "2026-11-23T10:00:00.000Z".into(),

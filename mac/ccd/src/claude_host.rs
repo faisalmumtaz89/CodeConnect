@@ -1241,6 +1241,11 @@ async fn link(
                         );
                         events.insert(end, usage);
                     }
+                    // A turn spends from the plan's limits, as claude's rate_limit_event says of Claude's: the
+                    // accounts are refreshed, so Antigravity's are read again once what is held is old (at most once a
+                    // FACTS_FRESH, however many runs and turns), and pushed.
+                    let daemon = Arc::clone(&daemon);
+                    tokio::spawn(async move { crate::start_session::refresh_facts(&daemon).await });
                 }
                 let session = acp_session(&message);
                 if let Err(why) = apply_acp(
@@ -13733,6 +13738,7 @@ mod tests {
             rig.daemon.account_facts.read(
                 &account.id,
                 Some(protocol::ws::AccountFacts {
+                    grouped_windows: Vec::new(),
                     limits_available: None,
                     email: Some(format!("{}@example.test", account.label.to_lowercase())),
                     plan: Some("max".into()),

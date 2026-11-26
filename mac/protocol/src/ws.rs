@@ -1057,6 +1057,10 @@ pub struct AccountFacts {
     /// figure from its own `window_minutes`, never from a guess.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<UsageWindow>,
+    /// Its windows by model group (minor 54: Antigravity's), each naming its group: in a field of their own, so an app
+    /// below 54, which tells windows apart by their length, never meets two of one length.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grouped_windows: Vec<UsageWindow>,
     /// Whether plan limits apply to this sign-in, where the agent says (Claude Code's `rate_limits_available`): false
     /// for a sign-in with none (an API key's), so an app says "no plan limits"; absent while not reported yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1072,8 +1076,12 @@ pub struct UsageWindow {
     pub used_percent: u32,
     /// The window's length, in minutes.
     pub window_minutes: u64,
-    /// When the window resets (Unix seconds).
+    /// When the window resets (Unix seconds); 0 for a window the agent has not opened yet (Antigravity's, unused).
     pub resets_at: i64,
+    /// The models the window counts, in the agent's own words (minor 54: Antigravity's "Gemini Models", "Claude and
+    /// GPT models"); absent where one window counts all the agent's models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// An agent's Default account (the agent as it is on the computer), with what it says of it.
@@ -2415,9 +2423,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 53,
             "a diff listing its files (`files`, `files_truncated`) is minor 53"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 54,
+            "a usage window's model group (`group`) is minor 54"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 53);
+        assert_eq!(crate::PROTOCOL_MINOR, 54);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3490,6 +3502,7 @@ mod tests {
         // What the agent says of an account, and of its Default, made-up values in the agent's shapes: each window
         // the agent names, an unnamed one absent.
         let facts = AccountFacts {
+            grouped_windows: Vec::new(),
             limits_available: None,
             email: Some("work@example.test".into()),
             plan: Some("plus".into()),
@@ -3497,6 +3510,7 @@ mod tests {
                 used_percent: 42,
                 window_minutes: 300,
                 resets_at: 1_800_000_000,
+                group: None,
             }],
             read_at: "2026-11-22T21:00:00.000Z".into(),
         };
@@ -3516,6 +3530,7 @@ mod tests {
             defaults: vec![DefaultAccount {
                 agent: crate::agent::AgentKind::Codex,
                 facts: AccountFacts {
+                    grouped_windows: Vec::new(),
                     windows: Vec::new(),
                     ..facts
                 },

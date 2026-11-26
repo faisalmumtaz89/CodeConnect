@@ -443,7 +443,6 @@ impl Facts {
     }
 
     /// What is held for `key` is as old as [`FACTS_FRESH`], so the next refresh reads it again.
-    #[cfg(test)]
     pub(crate) fn age(&self, key: &str) {
         if let Some((_, at)) = self.known.lock().unwrap().get_mut(key) {
             *at = at.checked_sub(FACTS_FRESH).unwrap();
@@ -579,6 +578,7 @@ pub(crate) fn keep_antigravity(facts: &Facts, said: Option<(bool, Option<String>
     facts.read(
         &key,
         signed_in.then(|| protocol::ws::AccountFacts {
+            grouped_windows: Vec::new(),
             email: None,
             plan,
             windows: Vec::new(),
@@ -637,6 +637,7 @@ pub(crate) async fn read_claude_facts(
         return None;
     }
     Some(protocol::ws::AccountFacts {
+        grouped_windows: Vec::new(),
         limits_available: None,
         email: status["email"].as_str().map(str::to_string),
         plan: status["subscriptionType"].as_str().map(str::to_string),
@@ -687,6 +688,7 @@ pub(crate) async fn read_claude_usage(
                 used_percent: window["utilization"].as_f64()?.round().clamp(0.0, 100.0) as u32,
                 window_minutes: minutes,
                 resets_at: window["resets_at"].as_i64()?,
+                group: None,
             })
         })
         .collect();
@@ -754,6 +756,7 @@ pub(crate) async fn read_facts(
         drop(stdin);
         let (account, limits) = (said_account?, said_limits?);
         Some(protocol::ws::AccountFacts {
+            grouped_windows: Vec::new(),
             limits_available: None,
             email: account["account"]["email"].as_str().map(str::to_string),
             plan: account["account"]["planType"].as_str().map(str::to_string),
@@ -775,6 +778,7 @@ pub(crate) fn codex_windows(limits: &serde_json::Value) -> Vec<protocol::ws::Usa
             used_percent: u32::try_from(window["usedPercent"].as_u64()?).ok()?,
             window_minutes: window["windowDurationMins"].as_u64()?,
             resets_at: window["resetsAt"].as_i64()?,
+            group: None,
         })
     };
     ["primary", "secondary"]
@@ -1875,7 +1879,8 @@ pub(crate) mod tests {
                 vec![protocol::ws::UsageWindow {
                     used_percent: 42,
                     window_minutes: 7 * 24 * 60,
-                    resets_at: 1_795_928_400
+                    resets_at: 1_795_928_400,
+                    group: None,
                 }]
             ))
         );
@@ -2257,11 +2262,18 @@ done
 
     /// Antigravity's sign-in as each listing carries it (S2), built as ccd builds one (its sign-in slot's mark, then
     /// what is held): signed in with agy's tier "Google AI Pro", signed in with no tier named, signed out, and signing
-    /// in. Its read time is fixed, so the frames are the same at every build.
+    /// in; and signed in with its plan's limits, read by agy's own /usage as ccd reads them (records shaped as agy 1.5.15
+    /// prints them, some of each Gemini window used). Its read time is fixed, so the frames are the same at every build.
     fn antigravity_sign_in_frames() -> serde_json::Value {
         let store = crate::store::Store::open_temp("ccd-agy-frames");
         let _db = store.temp_db();
         let key = super::default_key(&protocol::agent::AgentKind::Antigravity);
+        let usage = crate::start_session::agy_usage_windows(
+            "Gemini Models\tWeekly Limit Remaining\t80%\t2026-12-03T00:47:31Z\n\
+             Gemini Models\tFive Hour Limit Remaining\t45%\t2026-11-26T05:47:31Z\n\
+             Claude and GPT models\tWeekly Limit Remaining\t100%\t1970-01-01T00:00:00Z\n\
+             Claude and GPT models\tFive Hour Limit Remaining\t100%\t1970-01-01T00:00:00Z\n",
+        );
         let frame = |signed_in: Option<bool>, plan: Option<&str>, going: bool| {
             let facts = super::Facts::default();
             facts.keep_agent_signed(&key, signed_in);
@@ -2271,6 +2283,11 @@ done
                     email: None,
                     plan: plan.map(str::to_string),
                     windows: Vec::new(),
+                    grouped_windows: if plan == Some("Google AI Ultra") {
+                        usage.clone()
+                    } else {
+                        Vec::new()
+                    },
                     limits_available: None,
                     read_at: "2026-11-25T12:00:00.000Z".into(),
                 }),
@@ -2287,6 +2304,7 @@ done
             "signed_in_no_tier": frame(Some(true), None, false),
             "signed_out": frame(Some(false), None, false),
             "signing_in": frame(Some(false), None, true),
+            "signed_in_usage": frame(Some(true), Some("Google AI Ultra"), false),
         })
     }
 

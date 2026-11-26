@@ -24,6 +24,9 @@ public struct ReplyBar: Equatable, Sendable {
     /// The account's windows, shortest first; empty when the account or its facts are not known, when its agent names
     /// none, or when no plan limits apply.
     public let limits: [Limit]
+    /// The windows drawn beside the box (its card holds all of `limits`): all of them; by model group (Antigravity's),
+    /// the one nearest its limit, standing for them all, as the bar has room for few.
+    public let figures: [Limit]
     /// In the limits' place, the Accounts page's words when the account's agent says no plan limits apply.
     public let limitsNote: String?
     /// The account by the Kit's name rule: its email as the account book knows it, else its label; nil when the run
@@ -47,21 +50,31 @@ public struct ReplyBar: Equatable, Sendable {
             return Context(used: tokens(used), window: tokens(window))
         }.first
         guard let account = summary.account, let agent = StartAgent(rawValue: summary.agent.rawValue) else {
-            return ReplyBar(context: context, limits: [], limitsNote: nil, account: nil)
+            return ReplyBar(context: context, limits: [], figures: [], limitsNote: nil, account: nil)
         }
         let facts = book?.facts(for: agent, accountID: account.id)
         return ReplyBar(
-            context: context, limits: limits(facts, now: now),
+            context: context, limits: limits(facts, now: now), figures: figures(facts, now: now),
             limitsNote: facts?.limitsAvailable == false ? AccountSwitchWords.noPlanLimits : nil,
             account: facts?.email ?? account.label)
     }
 
-    /// An account's windows as drawn, shortest first, wherever its usage is shown (this bar, the Accounts page).
+    /// The bar's `figures` of `facts`.
+    public static func figures(_ facts: AccountFacts?, now: Date) -> [Limit] {
+        let all = limits(facts, now: now)
+        guard facts?.windows.contains(where: { $0.group != nil }) == true else { return all }
+        return all.max { $0.usedPercent < $1.usedPercent }.map { [$0] } ?? []
+    }
+
+    /// An account's windows as drawn, shortest first (by model group, in the agent's order, where it names groups),
+    /// wherever its usage is shown (this bar, the Accounts page).
     public static func limits(_ facts: AccountFacts?, now: Date) -> [Limit] {
         guard let facts, facts.limitsAvailable != false else { return [] }
-        return facts.windows.sorted { $0.windowMinutes < $1.windowMinutes }.map {
+        let groups = facts.windows.compactMap(\.group).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        let rank = { (window: UsageWindow) in groups.firstIndex(of: window.group ?? "") ?? 0 }
+        return facts.windows.sorted { (rank($0), $0.windowMinutes) < (rank($1), $1.windowMinutes) }.map {
             Limit(
-                usedPercent: $0.usedPercent, caption: AccountSwitchWords.caption(minutes: $0.windowMinutes),
+                usedPercent: $0.usedPercent, caption: AccountSwitchWords.caption($0),
                 resets: AccountSwitchWords.resets($0, now: now))
         }
     }

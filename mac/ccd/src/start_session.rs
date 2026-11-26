@@ -108,14 +108,23 @@ async fn accounts_answer(daemon: &Arc<Daemon>, message: ClientMessage) -> Server
                 &daemon.store,
                 &daemon.sign_ins,
                 // What agy said is the sign-in the list carries at once; with no answer of agy's, it is read again.
+                // Signed in, its plan goes out at once and its limits follow: what is held is aged, so the refresh reads
+                // agy's /usage now rather than a FACTS_FRESH later.
                 move |said| {
                     ended.agents.forget(&AgentKind::Antigravity);
                     let known = said.is_some();
+                    let signed_in = matches!(said, Some((true, _)));
                     crate::accounts::keep_antigravity(&ended.account_facts, said);
                     tokio::spawn(async move {
                         if known {
-                            push_accounts(&ended).await
-                        } else {
+                            push_accounts(&ended).await;
+                        }
+                        if signed_in {
+                            ended
+                                .account_facts
+                                .age(&crate::accounts::default_key(&AgentKind::Antigravity));
+                        }
+                        if !known || signed_in {
                             refresh_facts(&ended).await
                         }
                     });
@@ -300,9 +309,13 @@ async fn refresh_once(daemon: &Arc<Daemon>) {
                     if let Some(offer) = &offer {
                         daemon.account_facts.keep_agent_signed(key, offer.signed_in);
                     }
-                    daemon
-                        .account_facts
-                        .read(key, offer.as_ref().and_then(agy_default_facts));
+                    // Signed in, its plan's limits too, from agy's own /usage: one run of agy a read, so at most one a
+                    // FACTS_FRESH, however many apps and turns ask.
+                    let mut facts = offer.as_ref().and_then(agy_default_facts);
+                    if let (Some(facts), Some(agy)) = (facts.as_mut(), agy) {
+                        facts.grouped_windows = agy_usage(environment, agy).await;
+                    }
+                    daemon.account_facts.read(key, facts);
                     return;
                 }
                 let home = match account {
@@ -2037,12 +2050,65 @@ async fn ask(
 /// exactly as agy gives it (none when agy names none); signed out or not known, nothing.
 pub(crate) fn agy_default_facts(offer: &Offer) -> Option<protocol::ws::AccountFacts> {
     (offer.signed_in == Some(true)).then(|| protocol::ws::AccountFacts {
+        grouped_windows: Vec::new(),
         email: None,
         plan: offer.tier.clone(),
         windows: Vec::new(),
         limits_available: None,
         read_at: protocol::time::now_rfc3339(),
     })
+}
+
+/// How long agy's `/usage` may take to answer.
+const AGY_USAGE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Antigravity's plan limits as agy's own `/usage` prints them (`agy -p "/usage"`, its read-only print mode: no model
+/// turn), run as a start's agy is, on agy's own sign-in; none when it does not answer in time (its process group then
+/// ended, as any agent's read is) or prints none.
+pub(crate) async fn agy_usage(
+    environment: &HashMap<OsString, OsString>,
+    agy: &Path,
+) -> Vec<protocol::ws::UsageWindow> {
+    let mut command = agent_command(
+        environment,
+        None,
+        &[agy.as_os_str(), OsStr::new("-p"), OsStr::new("/usage")],
+    );
+    command
+        .current_dir(home_in(environment))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    agent_output(command, AGY_USAGE_WAIT)
+        .await
+        .map(|out| agy_usage_windows(&String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or_default()
+}
+
+/// `/usage`'s records, one window a line, tab-separated as agy 1.5.15 prints them: its group, "Five Hour Limit
+/// Remaining" or "Weekly Limit Remaining", the share left ("100%"), the reset (RFC 3339). Any other line, and a window
+/// named in other words, is left out, never guessed. agy names a window not opened yet as resetting at 1970-01-01: 0.
+pub(crate) fn agy_usage_windows(text: &str) -> Vec<protocol::ws::UsageWindow> {
+    text.lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
+            let [group, window, left, reset] = fields[..] else {
+                return None;
+            };
+            let window_minutes = match window {
+                "Five Hour Limit Remaining" => 300,
+                "Weekly Limit Remaining" => 10_080,
+                _ => return None,
+            };
+            let left: u32 = left.strip_suffix('%')?.parse().ok()?;
+            Some(protocol::ws::UsageWindow {
+                used_percent: 100 - left.min(100),
+                window_minutes,
+                resets_at: protocol::time::unix_ms_from_rfc3339(reset)? / 1000,
+                group: Some(group.to_string()),
+            })
+        })
+        .collect()
 }
 
 /// One `agy acp` ccd talks to itself (the start box's ask, a sign-in, a sign-out), started as an agent is
@@ -3082,6 +3148,152 @@ mod tests {
         let root = PathBuf::from(format!("/tmp/cca{tag}.{}", &uid[16..]));
         std::fs::create_dir_all(root.join("project")).unwrap();
         root
+    }
+
+    /// agy 1.5.15's `/usage`, as it printed it for a signed-in Google AI Ultra account (2026-11-26).
+    const AGY_USAGE: &str = "Gemini Models\tWeekly Limit Remaining\t100%\t2026-12-03T00:47:31Z\n\
+        Gemini Models\tFive Hour Limit Remaining\t100%\t2026-11-26T05:47:31Z\n\
+        Claude and GPT models\tWeekly Limit Remaining\t100%\t1970-01-01T00:00:00Z\n\
+        Claude and GPT models\tFive Hour Limit Remaining\t100%\t1970-01-01T00:00:00Z\n";
+
+    /// **agy's `/usage` is read as it prints it**: a window per record, by group, in agy's own words; a window agy has
+    /// not opened (a 1970 reset) resets at 0; a window named in other words, and any other line, is left out.
+    #[test]
+    fn agys_usage_records_are_its_windows_by_group() {
+        let windows = agy_usage_windows(AGY_USAGE);
+        let read: Vec<_> = windows
+            .iter()
+            .map(|w| {
+                (
+                    w.group.as_deref().unwrap(),
+                    w.window_minutes,
+                    w.used_percent,
+                    w.resets_at,
+                )
+            })
+            .collect();
+        assert_eq!(
+            read,
+            [
+                ("Gemini Models", 10_080, 0, 1_796_258_851),
+                ("Gemini Models", 300, 0, 1_795_672_051),
+                ("Claude and GPT models", 10_080, 0, 0),
+                ("Claude and GPT models", 300, 0, 0),
+            ]
+        );
+        let odd = "Gemini Models\tDaily Limit Remaining\t40%\t2026-11-27T00:00:00Z\n\
+                   Model group\tLimit\tRemaining\tReset\n\
+                   Gemini Models\tFive Hour Limit Remaining\t25%\t2026-11-26T05:47:31Z";
+        let read: Vec<_> = agy_usage_windows(odd)
+            .iter()
+            .map(|w| (w.window_minutes, w.used_percent))
+            .collect();
+        assert_eq!(
+            read,
+            [(300, 75)],
+            "only the window in agy's known words, 75% used of it"
+        );
+    }
+
+    /// The rig's agy as a stand-in signed in: it answers an offer (`initialize`, `session/new`, `session/close`) and
+    /// prints [`AGY_USAGE`] for `agy -p "/usage"`, noting each such run in `<agy>.p`.
+    fn usage_agy(rig: &Rig) -> PathBuf {
+        let agy = rig.root.join("stand-in-agy");
+        let reply = |body: &str| format!(r#"printf '{{"jsonrpc":"2.0","id":%s,{body}}}\n' "$id""#);
+        let records = AGY_USAGE
+            .replace('%', "%%")
+            .replace('\t', "\\t")
+            .replace('\n', "\\n");
+        std::fs::write(
+            &agy,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = -p ]; then echo \"$2\" >> \"$0.p\"; printf '{records}'; exit 0; fi\n\
+                 while read -r line; do\n  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n  \
+                 case \"$line\" in\n    *'\"initialize\"'*) {init} ;;\n    *'\"session/new\"'*) {opened} ;;\n    \
+                 *'\"session/close\"'*) {empty} ;;\n  esac\ndone\n",
+                init = reply(r#""result":{"protocolVersion":1}"#),
+                opened = reply(r#""result":{"sessionId":"s","configOptions":[{"category":"model","options":[]}]}"#),
+                empty = reply(r#""result":{}"#),
+            ),
+        )
+        .unwrap();
+        agy
+    }
+
+    /// **A sign-in's limits are read at once** (as the sign-in does: agy's answer kept, then aged): the refresh after
+    /// it runs agy's `/usage` once and holds its windows; held as fresh instead (the must-fail), it runs none.
+    #[tokio::test]
+    async fn a_sign_ins_limits_are_read_at_once() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = Rig::new("agysig", "exit 1");
+        let agy = usage_agy(&rig);
+        let key = crate::accounts::default_key(&AgentKind::Antigravity);
+        let runs = || std::fs::read_to_string(format!("{}.p", agy.display())).unwrap_or_default();
+        crate::accounts::keep_antigravity(
+            &rig.daemon.account_facts,
+            Some((true, Some("Google AI Ultra".into()))),
+        );
+        refresh_facts(&rig.daemon).await;
+        assert_eq!(runs(), "", "held as fresh, nothing is read");
+        rig.daemon.account_facts.age(&key);
+        refresh_facts(&rig.daemon).await;
+        assert_eq!(runs(), "/usage\n", "aged, /usage is read at once");
+        let told = serde_json::to_value(
+            rig.daemon
+                .account_facts
+                .told(crate::accounts::listing(&rig.daemon.store, None)),
+        )
+        .unwrap();
+        let held = told["defaults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["agent"] == "antigravity")
+            .map(|d| d["facts"]["grouped_windows"].as_array().map(Vec::len));
+        assert_eq!(held, Some(Some(4)), "{told}");
+        let _ = std::fs::remove_dir_all(&rig.root);
+    }
+
+    /// **Antigravity's plan limits are read at most once a FACTS_FRESH, however many ask**: ten refreshes in a row and
+    /// ten more at once (an app's accounts call and an Antigravity turn's end each ask one) run agy's `/usage` once;
+    /// the listing then carries its four windows, by group, on Antigravity's Default (`grouped_windows`, never `windows`).
+    #[tokio::test]
+    async fn antigravity_limits_are_read_once_however_many_ask() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = Rig::new("agyuse", "exit 1");
+        let agy = usage_agy(&rig);
+        for _ in 0..10 {
+            refresh_facts(&rig.daemon).await;
+        }
+        let at_once: Vec<_> = (0..10)
+            .map(|_| {
+                let daemon = Arc::clone(&rig.daemon);
+                tokio::spawn(async move { refresh_facts(&daemon).await })
+            })
+            .collect();
+        for asked in at_once {
+            asked.await.unwrap();
+        }
+        let runs = std::fs::read_to_string(format!("{}.p", agy.display())).unwrap_or_default();
+        assert_eq!(runs, "/usage\n", "agy's /usage run once for twenty asks");
+        let told = serde_json::to_value(
+            rig.daemon
+                .account_facts
+                .told(crate::accounts::listing(&rig.daemon.store, None)),
+        )
+        .unwrap();
+        let windows = told["defaults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["agent"] == "antigravity")
+            .map(|d| d["facts"]["grouped_windows"].clone());
+        assert_eq!(
+            windows.and_then(|w| w.as_array().map(|w| w.len())),
+            Some(4),
+            "{told}"
+        );
+        let _ = std::fs::remove_dir_all(&rig.root);
     }
 
     /// The arm's way to the run: a Claude start whose claude is ready gets its row,
