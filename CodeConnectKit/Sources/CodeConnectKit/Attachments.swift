@@ -62,6 +62,42 @@ public struct Attachment: Identifiable, Hashable, Sendable {
 
     static func isImage(_ data: Data) -> Bool { imageExtension(data) != nil }
 
+    /// What a `read` throws for a folder: it is refused in its own words before anything is read.
+    public struct Folder: Error {
+        public init() {}
+    }
+
+    /// The extensions a type mark names on its plate. Any other file, and one with no extension, has the plain page.
+    static let knownTypes: Set<String> = [
+        "swift", "rs", "py", "js", "ts", "tsx", "go", "c", "h", "cpp", "java", "kt", "rb", "sh", "html", "css", "diff",
+        "patch", "txt", "md", "rtf", "pdf", "doc", "docx", "xls", "xlsx", "log", "json", "jsonl", "yaml", "yml", "toml",
+        "xml", "csv", "tsv", "sql", "plist", "png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "zip", "tar", "gz",
+        "mp3", "wav", "m4a", "mov", "mp4",
+    ]
+
+    /// The type a file's mark names on its plate ("LOG", "CSV"), or nil for the plain page.
+    public static func typeLabel(_ name: String) -> String? {
+        let ext = (name as NSString).pathExtension.lowercased()
+        return knownTypes.contains(ext) ? ext.uppercased() : nil
+    }
+
+    /// The drop plate's limits, as one line.
+    public static let dropLimits = "Up to \(maxCount) files, \(sizeText(maxBytes)) each"
+
+    /// The drop plate's count, from the files dragged against the `held` already going with the message: how many go
+    /// and how many more fit, or, when they don't all fit, how many won't be sent.
+    public static func dropLine(dragged: Int, held: Int) -> String {
+        let room = max(0, maxCount - held)
+        func files(_ n: Int) -> String { n == 1 ? "1 file" : "\(n) files" }
+        if dragged > room {
+            let fit = room == 0 ? "none fit" : room == 1 ? "1 fits" : "\(room) fit"
+            return "\(files(dragged)) · \(fit); \(dragged - room) won’t be sent"
+        }
+        let goes = "\(files(dragged)) \(dragged == 1 ? "goes" : "go") with your next message"
+        let left = room - dragged
+        return left == 0 ? goes : "\(goes) · \(left) more \(left == 1 ? "fits" : "fit")"
+    }
+
     /// A file added to a tray that holds `count` already: refused on its name and size alone when over a limit (`read` is
     /// then never called), or when it cannot be read; else ready to go, under a new id.
     static func taking(name raw: String, size: Int, count: Int, read: () throws -> Data) -> Attachment {
@@ -70,9 +106,12 @@ public struct Attachment: Identifiable, Hashable, Sendable {
             Attachment(id: newID(), name: name, size: size, isImage: false, data: nil, state: .refused(reason))
         }
         if count >= maxCount { return refused("\(name) can’t be sent: a message carries up to \(maxCount) files.") }
-        if let reason = sizeRefusal(name, size) { return refused(reason) }
+        // Over the size limit on its size alone; an empty file or a folder is known once read, which costs nothing.
+        if size > maxBytes, let reason = sizeRefusal(name, size) { return refused(reason) }
         let data: Data
-        do { data = try read() } catch { return refused("\(name) can’t be read: \(error.localizedDescription)") }
+        do { data = try read() } catch is Folder {
+            return refused("\(name) is a folder; only files can be sent.")
+        } catch { return refused("\(name) can’t be read: \(error.localizedDescription)") }
         if let reason = sizeRefusal(name, data.count) { return refused(reason) }
         return Attachment(
             id: newID(), name: name, size: data.count, isImage: isImage(data), data: data, state: .uploading(sent: 0))
@@ -148,10 +187,11 @@ extension AppModel {
         let travelling = files.filter { if case .uploading = $0.state { true } else { false } }.count
         let failed = files.filter { if case .failed = $0.state { true } else { false } }.count
         if failed > 0 {
-            return failed == 1 ? "Retry or remove the file that didn’t arrive." : "Retry or remove the files that didn’t arrive."
+            return failed == 1
+                ? "Retry or remove the file that didn’t arrive." : "Retry or remove the \(failed) files that didn’t arrive."
         }
         if travelling > 0 {
-            return travelling == 1 ? "Waiting for the file to arrive." : "Waiting for \(travelling) files to arrive."
+            return travelling == 1 ? "Waiting for 1 file to arrive." : "Waiting for \(travelling) files to arrive."
         }
         return nil
     }

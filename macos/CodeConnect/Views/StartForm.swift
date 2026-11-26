@@ -23,6 +23,9 @@ struct StartForm: View {
     /// The window's start: what is chosen on each computer, the first message, and the start sent. The form keeps
     /// none of it, so it is the same start whenever and however the form is drawn again.
     @Bindable var draft: StartDraft
+    /// The chosen computer takes files: the panel takes drops for the box while it does.
+    @Binding var takesFiles: Bool
+    @Environment(\.filesDragged) private var filesDragged
     /// The computer button's panel is open.
     @State private var computerMenuOpen = false
     @State private var menuOpen = false
@@ -172,6 +175,7 @@ struct StartForm: View {
             }
         }
         .task(id: contexts.map(\.id)) { contexts.forEach { $0.load() } }
+        .onChange(of: context?.takesUploads, initial: true) { takesFiles = $1 ?? false }
         // Another folder, or the same path on another computer, has its repository read, as the iPhone's folder step
         // does. Where in it the start goes is the draft's: only the person's own pick of a folder resets it.
         .task(id: [context?.id ?? "", folderPath ?? ""]) {
@@ -601,7 +605,8 @@ struct StartForm: View {
                 .yields(3)
             startButton
         }
-        .takesFiles(context.takesUploads, pasting: messageFocused, draft.attach)
+        .pastesFiles(context.takesUploads && messageFocused, draft.attach)
+        .environment(\.filesOver, filesDragged && context.takesUploads)
         #if DEBUG
             .task { AppModel.seedFixtureFiles(draft) }
         #endif

@@ -17,6 +17,8 @@ struct StartPane: View {
     @State private var height: CGFloat = 0
     /// Where the form, or the page standing in its place, is in the panel: the ground stays calm around it.
     @State private var standing: CGRect = .zero
+    /// The form's chosen computer takes files.
+    @State private var takesFiles = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,7 +26,7 @@ struct StartPane: View {
             Spacer(minLength: 16)
             Group {
                 if formShown || !machines.startContexts.isEmpty || machines.outstandingStart != nil {
-                    StartForm(started: started, addComputer: addComputer, whyNone: why, draft: draft)
+                    StartForm(started: started, addComputer: addComputer, whyNone: why, draft: draft, takesFiles: $takesFiles)
                         .onAppear { formShown = true }
                 } else {
                     noComputer
@@ -39,6 +41,8 @@ struct StartPane: View {
         .background(NumericGround(clear: standing).clipShape(RoundedRectangle(cornerRadius: 12)))
         .background(Theme.window, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.hairline))
+        // Files dropped anywhere on the panel go with the first message, staged until Start sends them.
+        .takesDroppedFiles(takesFiles, held: draft.files.count, plateBottom: 0, draft.attach)
         .coordinateSpace(.named(StartForm.space))
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .padding(.horizontal, 10)

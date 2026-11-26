@@ -159,6 +159,60 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(wire.chunks.count, Attachment.maxCount - 1, "only the files inside the limits leave")
     }
 
+    /// What holds the message back is counted in words, never "file(s)": one file or the 2 files that didn't arrive,
+    /// 1 file or 2 files on their way.
+    func testTheHeldBackLineCountsTheFiles() async throws {
+        let (model, wire) = try await model()
+        wire.refuse = "no room"
+        model.attach(data: Data([1]), name: "a.txt", to: "u-1")
+        await settled(model)
+        XCTAssertEqual(model.filesBlockedReason(for: "u-1"), "Retry or remove the file that didn’t arrive.")
+        model.attach(data: Data([2]), name: "b.txt", to: "u-1")
+        await settled(model)
+        XCTAssertEqual(model.filesBlockedReason(for: "u-1"), "Retry or remove the 2 files that didn’t arrive.")
+        model.files(for: "u-1").forEach { model.removeFile($0.id, from: "u-1") }
+        wire.refuse = nil
+        model.connection.sendStub = { _ in }
+        model.attach(data: Data([3]), name: "c.txt", to: "u-1")
+        XCTAssertEqual(model.filesBlockedReason(for: "u-1"), "Waiting for 1 file to arrive.")
+        model.attach(data: Data([4]), name: "d.txt", to: "u-1")
+        XCTAssertEqual(model.filesBlockedReason(for: "u-1"), "Waiting for 2 files to arrive.")
+    }
+
+    /// A folder is refused on its own words before anything is read, and nothing of it leaves.
+    func testAFolderIsRefusedBeforeItIsRead() async throws {
+        let (model, wire) = try await model()
+        model.attach(name: "src", size: 0, to: "u-1") { throw Attachment.Folder() }
+        XCTAssertEqual(model.files(for: "u-1").first?.state, .refused("src is a folder; only files can be sent."))
+        XCTAssertTrue(wire.chunks.isEmpty)
+    }
+
+    /// A file's type as its mark's plate writes it: a known extension in capitals, whatever its case; none for a name
+    /// with no extension or one the set does not know.
+    func testATypeMarkNamesOnlyKnownTypes() {
+        XCTAssertEqual(Attachment.typeLabel("install.log"), "LOG")
+        XCTAssertEqual(Attachment.typeLabel("TRACE.LOG"), "LOG")
+        XCTAssertEqual(Attachment.typeLabel("audit.csv"), "CSV")
+        XCTAssertEqual(Attachment.typeLabel("notes.md"), "MD")
+        XCTAssertEqual(Attachment.typeLabel("clip.mov"), "MOV")
+        XCTAssertEqual(Attachment.typeLabel("archive.tar.gz"), "GZ")
+        XCTAssertNil(Attachment.typeLabel("Brewfile"))
+        XCTAssertNil(Attachment.typeLabel("dump.xyz"))
+        XCTAssertNil(Attachment.typeLabel("trailing."))
+    }
+
+    /// The drop plate's line, counted from the drag against what the tray already holds.
+    func testTheDropLineCountsWhatFits() {
+        XCTAssertEqual(Attachment.dropLine(dragged: 3, held: 0), "3 files go with your next message · 7 more fit")
+        XCTAssertEqual(Attachment.dropLine(dragged: 1, held: 0), "1 file goes with your next message · 9 more fit")
+        XCTAssertEqual(Attachment.dropLine(dragged: 1, held: 8), "1 file goes with your next message · 1 more fits")
+        XCTAssertEqual(Attachment.dropLine(dragged: 2, held: 8), "2 files go with your next message")
+        XCTAssertEqual(Attachment.dropLine(dragged: 12, held: 0), "12 files · 10 fit; 2 won’t be sent")
+        XCTAssertEqual(Attachment.dropLine(dragged: 3, held: 9), "3 files · 1 fits; 2 won’t be sent")
+        XCTAssertEqual(Attachment.dropLine(dragged: 2, held: 10), "2 files · none fit; 2 won’t be sent")
+        XCTAssertEqual(Attachment.dropLimits, "Up to 10 files, 10 MB each")
+    }
+
     /// A name becomes one path component, as the daemon takes it.
     func testAFileNameIsOnePathComponent() {
         XCTAssertEqual(Attachment.fileName("../etc/passwd"), "_etc_passwd")
@@ -175,7 +229,7 @@ final class AttachmentTests: XCTestCase {
     func testTheSendWaitsForEveryFileThenCarriesTheirIDs() async throws {
         let (model, wire) = try await model()
         model.attach(data: Data(repeating: 2, count: 3), name: "a.png", to: "u-1")
-        XCTAssertEqual(model.sendBlockedReason(for: "u-1", draft: "look"), "Waiting for the file to arrive.")
+        XCTAssertEqual(model.sendBlockedReason(for: "u-1", draft: "look"), "Waiting for 1 file to arrive.")
         model.attach(data: Data(repeating: 3, count: 4), name: "b.txt", to: "u-1")
         await settled(model)
         XCTAssertNil(model.sendBlockedReason(for: "u-1", draft: "look"))

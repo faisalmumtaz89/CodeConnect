@@ -40,6 +40,12 @@ struct SessionPane: View {
                 if !inPlace { foot }
             }
             .onPreferenceChange(HoldsReplyBox.self) { boxTaken = $0 }
+            // Files dropped anywhere on the conversation go with the next message, so a drop can't miss; the plate
+            // stands above the box they land in. Not while the changes stand in its place.
+            .takesDroppedFiles(
+                model.canUpload(row.id) && !boxTaken && !inPlace, held: model.files(for: row.id).count,
+                plateBottom: replyHeight
+            ) { name, size, read in model.attach(name: name, size: size, to: row.id, read: read) }
             .padding(.trailing, changesOpen && !inPlace ? 1 + Self.panelWidth : 0)
             .overlay(alignment: .trailing) { if changesOpen { changes } }
         }
