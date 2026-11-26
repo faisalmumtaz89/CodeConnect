@@ -26,14 +26,20 @@ struct ChangesPanel: View {
 
     var body: some View {
         let state = model.diffState(for: key)
+        let git = model.runGit(for: key)?.git
         VStack(alignment: .leading, spacing: 0) {
-            if let branch = model.shownSummary(for: key)?.gitBranch?.displaySafe {
-                BranchLine(branch: branch)
+            // The branch and the state as the run's repository was read (minor 56); before a read, and from an older
+            // computer, the branch the run's summary names and the diff's own count.
+            if let git {
+                BranchLine(branch: git.branch?.displaySafe, base: git.base?.name.displaySafe)
+                StateLine(text: ChangesWords.state(git), delta: nil, read: ISO8601.parse(git.readAt))
+            } else if let branch = model.shownSummary(for: key)?.gitBranch?.displaySafe {
+                BranchLine(branch: branch, base: nil)
             }
             // One branch draws a read diff, the one on hand or, while it is read again, the last one, so a reread keeps
             // the same views and their folds, scroll and unsent comment.
             if let diff = onHand(state) ?? (state.isLoading ? shown : nil) {
-                loaded(diff.raw, diff.parsed, diff.fetchedAt)
+                loaded(diff.raw, diff.parsed, diff.fetchedAt, counted: git == nil)
             } else {
                 unread(state)
             }
@@ -59,6 +65,7 @@ struct ChangesPanel: View {
             } else if state.failedOnTheLink {
                 model.loadDiff(key: key, force: true)
             }
+            model.loadRunGit(key: key)
         }
     }
 
@@ -94,12 +101,13 @@ struct ChangesPanel: View {
     /// Asks for the diff again, unless a read is already on its way (the computer takes one at a time).
     private func reread() {
         if !model.diffState(for: key).isLoading { model.loadDiff(key: key, force: true) }
+        model.loadRunGit(key: key)
     }
 
     /// A diff the computer read: clean when it changed nothing and said nothing, its note when it said why it is
-    /// empty, else the state line, the band and the document.
+    /// empty, else the band and the document, under the diff's own count where the repository gave none (`counted`).
     @ViewBuilder
-    private func loaded(_ raw: SessionDiff, _ parsed: UnifiedDiff, _ fetchedAt: Date) -> some View {
+    private func loaded(_ raw: SessionDiff, _ parsed: UnifiedDiff, _ fetchedAt: Date, counted: Bool) -> some View {
         if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil {
             Message(id: "changes.clean", title: ChangesWords.noUncommitted, sentence: ChangesWords.clean)
         } else if parsed.isEmpty && raw.files?.isEmpty != false {
@@ -108,8 +116,13 @@ struct ChangesPanel: View {
                 sentence: ChangesWords.computersReason, quote: (raw.note ?? "", "changes.note"))
         } else {
             let files = ChangedFile.rows(raw, parsed)
-            StateLine(files: files, cut: raw.truncated || raw.filesTruncated, read: raw.capturedDate ?? fetchedAt)
-            Band(count: files.count)
+            if counted {
+                StateLine(
+                    text: "\(ChangesWords.files(files.count)) changed",
+                    delta: (files.reduce(0) { $0 + ($1.added ?? 0) }, files.reduce(0) { $0 + ($1.removed ?? 0) }),
+                    read: raw.capturedDate ?? fetchedAt)
+            }
+            Band(count: files.count, cut: raw.truncated || raw.filesTruncated)
             Document(raw: raw, diff: parsed, files: files).environment(hunks)
         }
     }
@@ -123,15 +136,23 @@ struct ChangesPanel: View {
     }
 }
 
-/// The branch the run's folder has checked out, as git names it.
+/// The branch the run's folder has checked out, and the branch it is measured against when the computer knows one.
 private struct BranchLine: View {
-    let branch: String
+    /// Nil on a detached head.
+    let branch: String?
+    let base: String?
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.triangle.branch").font(.system(size: 11)).foregroundStyle(Theme.text3)
                 .accessibilityHidden(true)
-            Text(verbatim: branch).font(Theme.mono(12)).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
+            Text(verbatim: branch ?? "Detached HEAD").font(Theme.mono(12)).foregroundStyle(Theme.text)
+                .lineLimit(1).truncationMode(.middle)
+            if let base, base != branch {
+                Image(systemName: "arrow.right").font(.system(size: 9)).foregroundStyle(Theme.text3)
+                    .accessibilityLabel("onto")
+                Text(verbatim: base).font(Theme.mono(12)).foregroundStyle(Theme.text3).lineLimit(1)
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 20)
@@ -141,34 +162,26 @@ private struct BranchLine: View {
     }
 }
 
-/// How the run's changes stand: the files and lines it changed, then when they were read, and that the computer cut
-/// them short when it did.
+/// How the run's changes stand, then when that was read.
 private struct StateLine: View {
-    let files: [ChangedFile]
-    let cut: Bool
+    let text: String
+    /// Lines added and removed, where the line counts them itself.
+    let delta: (added: UInt64, removed: UInt64)?
     let read: Date?
 
     var body: some View {
-        let added = files.reduce(0) { $0 + ($1.added ?? 0) }
-        let removed = files.reduce(0) { $0 + ($1.removed ?? 0) }
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Text("\(ChangesWords.files(files.count)) changed ·").font(Theme.ui(13, .medium)).foregroundStyle(Theme.text)
-                LineDelta(added: added, removed: removed)
+                Text(verbatim: text).font(Theme.ui(13, .medium)).foregroundStyle(Theme.text)
+                if let delta { LineDelta(added: delta.added, removed: delta.removed) }
             }
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("changes.summary")
-            HStack(spacing: 0) {
-                AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
-                    .foregroundStyle(Theme.text3)
-                    .monospacedDigit()
-                    .accessibilityIdentifier("changes.age")
-                if cut {
-                    Text(" · Cut short by your computer").foregroundStyle(Theme.amber)
-                        .accessibilityIdentifier("changes.truncated")
-                }
-            }
-            .font(Theme.ui(12))
+            AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
+                .font(Theme.ui(12))
+                .foregroundStyle(Theme.text3)
+                .monospacedDigit()
+                .accessibilityIdentifier("changes.age")
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -180,11 +193,17 @@ private struct StateLine: View {
 /// The panel's one tab before the run has a pull request: its changes, and how many files.
 private struct Band: View {
     let count: Int
+    /// The computer cut the diff short.
+    let cut: Bool
 
     var body: some View {
         HStack(spacing: 8) {
             Text("Changes").font(Theme.ui(13, .medium)).foregroundStyle(Theme.text)
             Text(ChangesWords.files(count)).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+            if cut {
+                Text("Cut short by your computer").font(Theme.ui(12)).foregroundStyle(Theme.amber)
+                    .accessibilityIdentifier("changes.truncated")
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 20)

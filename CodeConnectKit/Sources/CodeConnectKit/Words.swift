@@ -236,6 +236,26 @@ public enum ChangesWords {
     public static func committed(files count: Int, sha: String) -> String {
         "You committed \(files(count)) · \(sha.prefix(7))"
     }
+    /// A Changes panel's state line from its run's repository: an unresolved merge, the files changed (at least so
+    /// many when the computer could not count them all), and the commits not on the base, pushed or not, or nothing
+    /// committed yet. Only what the computer read; nothing from an agent's words.
+    public static func state(_ git: RunGit) -> String {
+        var parts: [String] = []
+        if git.unmerged { parts.append("Merge conflicts") }
+        let changed = Int(git.changed.files)
+        if changed > 0 {
+            parts.append(git.changed.complete ? "\(files(changed)) changed" : "At least \(files(changed)) changed")
+        } else if !git.changed.complete {
+            parts.append("Changes not all counted")
+        }
+        if let ahead = git.ahead, ahead > 0 {
+            parts.append(ahead == 1 ? "1 commit" : "\(ahead) commits")
+            if git.branch != nil { parts.append(git.pushed ? "pushed" : "not pushed") }
+        } else if git.ahead == 0, changed > 0 {
+            parts.append("nothing committed")
+        }
+        return parts.isEmpty ? "No changes" : parts.joined(separator: " · ")
+    }
     public static func showMoreLines(_ count: Int) -> String { "Show \(count) more line\(count == 1 ? "" : "s")" }
     public static func unchangedLines(_ count: Int) -> String {
         count == 1 ? "1 unchanged line" : "\(count) unchanged lines"
