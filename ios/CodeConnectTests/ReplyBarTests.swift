@@ -244,15 +244,14 @@ final class ReplyBarTests: XCTestCase {
         XCTAssertEqual(foot.account, "\(try XCTUnwrap(d.facts?.email)) · Max")
     }
 
-    /// A reset on another day names the day and the date before the time.
+    /// A reset on another day names the day and the date before the time, and no countdown.
     func testAWeeklyLimitOnAnotherDayNamesTheDay() throws {
         let book = try book()
         let (d, _) = try on("D", in: book)
         let run = try summary(.claude, account: .object(["id": .string(d.id), "label": .string("D")]), limit: "weekly")
         let foot = try XCTUnwrap(LimitFoot.of(summary: run, book: book, now: now, timeZone: .gmt))
         XCTAssertEqual(foot.title, "Weekly limit reached")
-        let resets = try XCTUnwrap(foot.resets)
-        XCTAssertTrue(resets.hasPrefix("Resets ") && resets.contains(", ") && resets.hasSuffix(" · in 5 days"), resets)
+        XCTAssertEqual(foot.resets, "Resets Fri 4 Dec, 4:00 PM")
         XCTAssertEqual(foot.full, "Week")
     }
 
