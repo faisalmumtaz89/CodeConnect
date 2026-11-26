@@ -1959,6 +1959,12 @@ public final class AppModel {
         requestSessions()
     }
 
+    /// A message the daemon took for a run that was moving to another account is the move's last step: the list is
+    /// asked for again at once, so the run shows its new account and no move without waiting for the next refresh.
+    private func listAgainAfterAMove(_ moving: Bool) {
+        if moving { requestSessions() }
+    }
+
     /// The one way a `sessions` request leaves, so each is counted in the order
     /// it was written: the Mac answers them in that order, and a reply is
     /// matched to its request by that count. The first written on a catch-up's
@@ -3616,12 +3622,15 @@ public final class AppModel {
 
         retireSettingNoticeForSend(key)
         controls.beginCompose()
+        let moving = summary.switching != nil
         do {
             let result = try await connection.compose(
                 session: reference, requestID: requestID, text: text, payloadHash: hash, attachments: files)
             controls.settleCompose(result, material: hash)
             switch result {
-            case .started, .steered, .duplicate: filesSent(files, from: key)
+            case .started, .steered, .duplicate:
+                filesSent(files, from: key)
+                listAgainAfterAMove(moving)
             default: break
             }
             states[key]?.codexTurnsChanged()
@@ -4095,6 +4104,7 @@ public final class AppModel {
         let requestID = pendingSendIdentities[mutation] ?? UUID().uuidString.lowercased()
         let payloadHash = SendTextIdentity.payloadHash(
             session: key, text: trimmed, submit: submit, attachments: files)
+        let moving = summary(for: key)?.switching != nil
         do {
             let result = try await connection.sendText(
                 session: key, text: trimmed, submit: submit,
@@ -4103,6 +4113,7 @@ public final class AppModel {
             case .sent(let matched):
                 pendingSendIdentities[mutation] = nil
                 filesSent(files, from: key)
+                listAgainAfterAMove(moving)
                 return .sent(matched: matched)
             case .refused(let reason):
                 // A refusal promises nothing was typed, so the next attempt
@@ -4112,6 +4123,7 @@ public final class AppModel {
             case .duplicate(_, let appliedAt):
                 pendingSendIdentities[mutation] = nil
                 filesSent(files, from: key)
+                listAgainAfterAMove(moving)
                 return .alreadyApplied(appliedAt: appliedAt)
             case .indeterminate(let reason):
                 retainIdentityIfListed(mutation, requestID)

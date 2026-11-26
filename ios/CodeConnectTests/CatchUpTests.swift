@@ -83,6 +83,7 @@ final class CatchUpTests: XCTestCase {
         var pending: [(id: String, seq: Int)] = []
         var codexLink = "none"
         var created = "2026-10-16T10:00:00Z"
+        var switching: String?
     }
 
     private func list(_ rows: [Row]) -> ServerMessage {
@@ -93,7 +94,8 @@ final class CatchUpTests: XCTestCase {
                 "cwd":"/tmp/\(row.uid.suffix(2))","lifecycle":"\(row.lifecycle)","link":"attached",\
                 "last_seq":\(row.lastSeq),"created_at":"\(row.created)",\
                 "updated_at":"2026-10-16T10:00:00Z","blocked_on":[\(row.pending.map { "\"\($0.id)\"" }.joined(separator: ","))],\
-                "agent":"\(row.agent)","codex_link":"\(row.codexLink)","pending":[\(pending.joined(separator: ","))]}
+                "agent":"\(row.agent)","codex_link":"\(row.codexLink)","pending":[\(pending.joined(separator: ","))]\
+                \(row.switching.map { #","switching":"\#($0)""# } ?? "")}
                 """
         }
         return frame(#"{"type":"sessions","sessions":["# + body.joined(separator: ",") + "]}")
@@ -710,6 +712,18 @@ final class CatchUpTests: XCTestCase {
     /// `.sent` FIRST — which clears the send's identity — then the person's row, then, after the Stop,
     /// the notice. So the hand-back rides on live arrival, not on a held identity. Driving the real
     /// `.sent` answer is the point: an identity-gated hand-back would never fire here (must-fail).
+    /// **A message the daemon takes for a run that is moving to another account asks for the list again, once**, so
+    /// the run shows its new account without waiting for the next refresh; a message to any other run asks nothing.
+    func testAMessageToAMovingRunAsksForTheListOnce() async throws {
+        let (model, wire) = await caughtUp([Row(uid: a, lastSeq: 2, switching: "waiting"), Row(uid: b, lastSeq: 2)])
+        model.connection.sendTextStub = { _, _ in .sent(matched: "cc-1") }
+        let before = wire.sessionsAsked
+        _ = await model.send(text: "carry on", to: b)
+        XCTAssertEqual(wire.sessionsAsked, before, "a run that is not moving asks for nothing")
+        _ = await model.send(text: "carry on", to: a)
+        XCTAssertEqual(wire.sessionsAsked, before + 1, "the moving run's message asks for the list once")
+    }
+
     func testALiveStoppedSendOffersItsTextToTheComposer() async throws {
         let (model, _) = await caughtUp([Row(uid: a, lastSeq: 2)])
         // The send answers `.sent`, exactly as the daemon's canonical stop sequence does, so its
