@@ -62,7 +62,7 @@ struct FileDiffView: View {
                     heading(mark: expanded.wrappedValue ? "chevron.down" : "chevron.right")
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.hover(id: "changes.file.\(file.id).toggle"))
                 .accessibilityIdentifier("changes.file.\(file.id).toggle")
             } else {
                 heading(mark: "doc.text")
