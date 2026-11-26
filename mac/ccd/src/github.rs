@@ -592,6 +592,10 @@ fn checks_from(
             })
         })
         .collect();
+    // A check run again on the same commit (a re-run, a label) is listed once per run: the one
+    // started last stands, as gh's own `pr checks` shows it.
+    checks.sort_by(|a, b| (&a.name, &b.started_at).cmp(&(&b.name, &a.started_at)));
+    checks.dedup_by(|later, kept| later.name == kept.name);
     checks.sort_by(|a, b| (a.state, &a.name).cmp(&(b.state, &b.name)));
     Some((checks, complete))
 }
@@ -776,7 +780,8 @@ mod tests {
     /// **An open pull request's checks, as the panel shows them**, from the checks query's
     /// answer (written from GitHub's schema): each state named, sorted failed first, a
     /// check run's times and log, a status's log alone, and a failure's line when it says
-    /// more than the runner's exit code.
+    /// more than the runner's exit code; a check run again on the commit shown once, as its
+    /// latest run.
     #[test]
     fn a_pull_requests_checks_are_read_and_sorted() {
         use protocol::ws::{Check, CheckState::*};
@@ -832,6 +837,11 @@ mod tests {
             (None, Some("https://circleci.com/gh/cli/cli/1"))
         );
         assert_eq!(by("a new kind").url, None);
+        assert_eq!(
+            by("build (ubuntu)").url.as_deref(),
+            Some("https://github.com/cli/cli/actions/runs/1/job/11"),
+            "the run started last, not the earlier failed one"
+        );
     }
 
     /// **Checks of another commit are not shown, and a list past 100 says so**: the head moved
