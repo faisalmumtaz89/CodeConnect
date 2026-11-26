@@ -2407,20 +2407,7 @@ async fn relaunch(
         let reason = format!("This session could not start again ({why}); nothing was sent.");
         return refuse_relaunch(daemon, uid, request_id, &reason).await;
     };
-    // An Antigravity run's session files are copied below, so nothing its old agy started may still be writing them.
     let antigravity = kept.agent == AgentKind::Antigravity;
-    if let Some(old) = &old {
-        let earlier_boot = matches!(
-            (old.boot, protocol::proc_identity::boot_identity()),
-            (Some(then), Some(now)) if then != now
-        );
-        if !earlier_boot
-            && (liveness(&old.host) != Liveness::Gone
-                || (switching || antigravity) && group_has_members(old.host.pid))
-        {
-            return refuse_relaunch(daemon, uid, request_id, STILL_ENDING).await;
-        }
-    }
     let environment = crate::start_session::phone_environment();
     // The account its agent's starts use now (306 Slice E): a run relaunched, by a message or by a switch, goes on the
     // active one, and records it.
@@ -2431,6 +2418,36 @@ async fn relaunch(
             return refuse_relaunch(daemon, uid, request_id, not_running).await;
         }
     };
+    // An Antigravity run going on in another home of agy's than its last: its session's files are copied there below.
+    let moving = if antigravity {
+        match agy_homes(daemon, uid, root, &environment, account.as_ref()) {
+            Ok(moving) => moving,
+            Err(why) => {
+                if switching {
+                    crate::switch::relaunch_failed(daemon, uid, why.clone()).await;
+                }
+                let reason =
+                    format!("This session could not start again ({why}); nothing was sent.");
+                return refuse_relaunch(daemon, uid, request_id, &reason).await;
+            }
+        }
+    } else {
+        None
+    };
+    // A move waits for what the old process left in its group, which may still write what the move carries; a run going
+    // on where it was starts beside it.
+    if let Some(old) = &old {
+        let earlier_boot = matches!(
+            (old.boot, protocol::proc_identity::boot_identity()),
+            (Some(then), Some(now)) if then != now
+        );
+        if !earlier_boot
+            && (liveness(&old.host) != Liveness::Gone
+                || (switching || moving.is_some()) && group_has_members(old.host.pid))
+        {
+            return refuse_relaunch(daemon, uid, request_id, STILL_ENDING).await;
+        }
+    }
     let checked = async {
         // An Antigravity run goes on with the agy a start would find now.
         let binary = if antigravity {
@@ -2558,10 +2575,11 @@ async fn relaunch(
             return refuse_relaunch(daemon, uid, request_id, not_running).await;
         }
     }
-    // An Antigravity run going on in another home than its last takes its session there (306): its claim keeps any
-    // other message from starting it meanwhile, and a copy that fails puts it back as it was, nothing launched.
-    if antigravity {
-        if let Err(why) = carry_session(daemon, uid, root, &environment, account.as_ref(), &ended) {
+    // A moving Antigravity run takes its session to its new home (306): its claim keeps any other message from starting
+    // it meanwhile, and a copy that fails puts it back as it was, nothing launched.
+    if let Some((from, to)) = &moving {
+        if let Err(err) = crate::accounts::carry_agy_session(from, to, &ended.claude_session_id) {
+            let why = format!("its conversation could not be moved: {err}");
             if let Err(err) = daemon.db.undo_relaunch(uid.to_string(), old, None).await {
                 crate::log_error!("{uid}: could not put the run back to exited: {err:#}");
             }
@@ -2616,16 +2634,15 @@ async fn relaunch(
     }
 }
 
-/// The Antigravity run `uid`'s session, copied from agy's home on the account the run records into its home on
-/// `account`, the one it goes on now ([`crate::accounts::carry_agy_session`]); nothing when the two are one.
-fn carry_session(
+/// agy's home on the account the Antigravity run `uid` records and its home on `account`, the one it goes on now, when
+/// the two differ: where its session's files are copied from and to ([`crate::accounts::carry_agy_session`]).
+fn agy_homes(
     daemon: &Daemon,
     uid: &str,
     root: &Path,
     environment: &HashMap<OsString, OsString>,
     account: Option<&crate::accounts::AccountEnv>,
-    ended: &crate::store::ClaudeRelaunch,
-) -> Result<(), String> {
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
     let was = match daemon.store.run_account(uid) {
         Ok(Some(was)) => crate::accounts::AccountEnv::for_account(root, &was)
             .map_err(|err| format!("its account's folder could not be made: {err}"))?,
@@ -2634,13 +2651,10 @@ fn carry_session(
     };
     let from = crate::accounts::agy_home(was.as_ref(), environment);
     let to = crate::accounts::agy_home(account, environment);
-    match (from, to) {
-        (Some(from), Some(to)) if from != to => {
-            crate::accounts::carry_agy_session(&from, &to, &ended.claude_session_id)
-                .map_err(|err| format!("its conversation could not be moved: {err}"))
-        }
-        _ => Ok(()),
-    }
+    Ok(match (from, to) {
+        (Some(from), Some(to)) if from != to => Some((from, to)),
+        _ => None,
+    })
 }
 
 /// A relaunch refused before anything was sent: its claim dropped, so a retry is a fresh
@@ -13393,18 +13407,28 @@ mod tests {
         stop(&relaunched.dir);
     }
 
-    /// **An Antigravity run is not relaunched while its old host's group still holds a process** (306 #3): its session's
-    /// files are copied at a relaunch, so a message to a run whose agy ended on its own, the host gone but a child it
-    /// started still in its group, is refused as still ending, nothing started.
-    #[tokio::test]
-    async fn an_antigravity_run_is_not_relaunched_while_its_old_group_holds_a_process() {
-        let _env = crate::ProcessEnvRead::take();
-        let mut rig = rig();
+    /// An Antigravity run on `on` (its Default when `None`) whose agy ended on its own, its host gone but a child the
+    /// host started still in its group (ignoring TERM): the run's uid, its folder and that child's pid. Each host the
+    /// test's ccd launches records its pid in the folder's `hosts`, for [`end_hosts`].
+    async fn antigravity_ended_beside_a_child(
+        rig: &mut Rig,
+        on: Option<&crate::store::Account>,
+    ) -> (String, PathBuf, i32) {
         let (claude, _) = crate::start_session::test_claude(&rig.root);
         let agy = rig.root.join("bin/agy");
         std::fs::write(&agy, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let host = stub_host_with_child(&rig);
+        let host = rig.root.join("stub-host-recorded");
+        std::fs::write(
+            &host,
+            format!(
+                "#!/bin/sh\necho $$ > \"$1/stub.pid\"\necho $$ >> \"$1/hosts\"\n(trap '' TERM; exec sleep 60) &\n\
+                 echo $! > \"$1/child.pid\"\nprintf '{{\"protocol_version\":{HOST_PROTOCOL_VERSION},\"host_pid\":%s}}' \
+                 \"$$\" > \"$1/host.json\"\nexec sleep 20\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755)).unwrap();
         rig.daemon = daemon_with(
             &rig.root,
             Config {
@@ -13418,6 +13442,9 @@ mod tests {
             .relaunch_from
             .set((rig.root.clone(), Ok(rig.root.join("codeconnect"))))
             .unwrap();
+        if let Some(on) = on {
+            rig.account = crate::accounts::AccountEnv::for_account(&rig.root, on).unwrap();
+        }
         let cwd = rig.root.to_str().unwrap().to_string();
         let daemon = Arc::clone(&rig.daemon);
         let (result, mut played) = tokio::join!(
@@ -13426,11 +13453,11 @@ mod tests {
                 Run {
                     agent: AgentKind::Antigravity,
                     claude_path: "/nonexistent/agy",
-                    ..run(&rig, "req-agy", &cwd, &host)
+                    ..run(rig, "req-agy", &cwd, &host)
                 }
             ),
             async {
-                let mut played = play_to_start(&rig).await;
+                let mut played = play_to_start(rig).await;
                 let uuid = played.start_uuid();
                 say(
                     &mut played.write,
@@ -13467,13 +13494,76 @@ mod tests {
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 5 }));
         let child = pid_in(&played.dir, "child.pid");
         let old = pid_in(&played.dir, "stub.pid");
-        stop(&played.dir);
+        let dir = played.dir.clone();
+        stop(&dir);
         gone(old).await;
         drop(played);
         until_detached(&rig.daemon, &uid).await;
-        let sent = send_as_app(&rig.daemon, &uid, "r-early", "carry on").await;
-        // SAFETY: kill(2) of the stand-in's own child, by the pid it recorded.
-        unsafe { libc::kill(child, libc::SIGKILL) };
+        (uid, dir, child)
+    }
+
+    /// Ends everything in the process group of each host [`antigravity_ended_beside_a_child`]'s ccd launched in `dir`,
+    /// whose children ignore TERM.
+    async fn end_hosts(dir: &Path) {
+        let hosts = std::fs::read_to_string(dir.join("hosts")).unwrap();
+        for host in hosts.lines().map(|pid| pid.parse::<i32>().unwrap()) {
+            // SAFETY: killpg(2) of the group a stand-in host leads, by the pid it recorded.
+            unsafe { libc::killpg(host, libc::SIGKILL) };
+        }
+    }
+
+    /// **A message relaunches an Antigravity run beside what its agy left running** (306 #3, as 80334c93 for Claude):
+    /// its agy ended on its own, a child of its host still in the old group, and the run going on in the same home;
+    /// the message relaunches it, and the child keeps running.
+    #[tokio::test]
+    async fn a_message_relaunches_an_antigravity_run_beside_what_it_left_running() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        let (uid, dir, child) = antigravity_ended_beside_a_child(&mut rig, None).await;
+        let old = pid_in(&dir, "stub.pid");
+        let (sent, relaunched) = tokio::join!(
+            send_as_app(&rig.daemon, &uid, "r-on", "carry on"),
+            async {
+                let mut relaunched = play_relaunched(&dir, old).await;
+                let uuid = relaunched.start_uuid();
+                say(
+                    &mut relaunched.write,
+                    serde_json::json!({"type": "outcome", "seq": 2, "uuid": uuid, "status": "done"}),
+                )
+                .await;
+                assert_eq!(
+                    next(&mut relaunched.lines).await,
+                    Some(ToHost::Ack { seq: 2 })
+                );
+                relaunched
+            }
+        );
+        let running = unsafe { libc::kill(child, 0) } == 0;
+        let second = pid_in(&relaunched.dir, "child.pid");
+        end_hosts(&dir).await;
+        gone(child).await;
+        gone(second).await;
+        assert!(matches!(sent, SendTextResult::Sent { .. }), "{sent:?}");
+        assert!(running, "what the old agy left keeps running");
+    }
+
+    /// **A move is refused while what its agy left still runs** (306 #3): the run is on A and B is active, so its
+    /// session's files are copied to B's home; with a child of its old host still in the group, which may still write
+    /// them, the message is refused as still ending and the run stays ended, nothing started.
+    #[tokio::test]
+    async fn a_move_of_an_antigravity_run_waits_for_what_it_left_running() {
+        let _env = crate::ProcessEnvRead::take();
+        let mut rig = rig();
+        let a = rig.daemon.store.add_account("antigravity", "A").unwrap();
+        let (uid, dir, child) = antigravity_ended_beside_a_child(&mut rig, Some(&a)).await;
+        let b = rig.daemon.store.add_account("antigravity", "B").unwrap();
+        assert!(rig
+            .daemon
+            .store
+            .activate_account("antigravity", Some(&b.id))
+            .unwrap());
+        let sent = send_as_app(&rig.daemon, &uid, "r-move", "carry on").await;
+        end_hosts(&dir).await;
         gone(child).await;
         assert_eq!(
             sent,
