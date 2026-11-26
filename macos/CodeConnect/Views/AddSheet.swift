@@ -325,7 +325,7 @@ private struct IPhoneSide: View {
                     .resizable()
                     .accessibilityLabel("Pairing QR code")
                     .accessibilityIdentifier("iphone.qr")
-                    .frame(width: 196, height: 196)
+                    .frame(width: 138, height: 138)
                     .padding(12)
                     .background(.white, in: RoundedRectangle(cornerRadius: 10))
                     .frame(maxWidth: .infinity)
@@ -337,17 +337,20 @@ private struct IPhoneSide: View {
                         Text("\(payload.endpoint.typedAddress) · \(pairingCode)").font(Theme.mono(11.5)).foregroundStyle(Theme.text2)
                             .textSelection(.enabled)
                     }
+                    .multilineTextAlignment(.center)
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("iphone.code")
                     .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 18)
                     .padding(.top, 14)
                 }
             }
             Spacer(minLength: 18)
-            // Beside the computer's bar, whose Cancel and Esc close the sheet: Done alone, lit once an iPhone has paired.
+            // Beside the computer's bar, whose Cancel and Esc close the sheet and whose Connect answers ⌘↩: Done alone,
+            // lit once an iPhone has paired, answering a click.
             SheetBar(
                 action: "Done", actionID: "iphone.done", blocked: !added, perform: { dismiss() },
-                cancel: nil, cancelID: "iphone.cancel", keyed: added
+                cancel: nil, cancelID: "iphone.cancel", keyed: false
             ) {
                 if !added {
                     Text("Done lights once the iPhone has paired.")
