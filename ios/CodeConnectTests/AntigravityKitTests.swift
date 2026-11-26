@@ -163,15 +163,15 @@ final class AntigravityKitTests: XCTestCase {
         return book
     }
 
-    /// Antigravity's one row says its plan exactly as agy names it ("Google AI Pro" here), "Signed in" when agy names
-    /// none, and nothing of its own while it is signed out or signing in (the row says those); its "…" offers Sign Out…
+    /// Antigravity's one row says its plan alone, exactly as agy names it ("Google AI Pro" here), as Claude Code's says
+    /// "Max"; "Signed in" when agy names none, and nothing of its own while it is signed out or signing in (the row says those); its "…" offers Sign Out…
     /// signed in, Sign In… signed out, and nothing while a sign-in is going.
     func testAntigravitysRowSaysItsSignInAndItsPlanAsAgyNamesIt() throws {
         let line: (AccountBook) -> String? = { book in
             book.agentSignIn(for: .antigravity)?.line(plan: book.defaultFacts(for: .antigravity)?.plan)
         }
         let pro = try signInBook("signed_in_pro")
-        XCTAssertEqual(line(pro), "Signed in · Google AI Pro")
+        XCTAssertEqual(line(pro), "Google AI Pro")
         XCTAssertEqual(pro.agentSignIn(for: .antigravity)?.acts, [.signOut])
         XCTAssertEqual(line(try signInBook("signed_in_no_tier")), "Signed in")
         let out = try signInBook("signed_out")
@@ -225,36 +225,25 @@ final class AntigravityKitTests: XCTestCase {
         XCTAssertFalse(lacking(false, [false, true, true]), "a ready agent is never lacking")
     }
 
-    /// **Antigravity's plan limits, by model group, as agy names them** (minor 54): each window carries its group; the
-    /// Accounts page captions each by its group and length, in agy's order; a window agy has not opened reads "not
-    /// started"; the reply bar shows the one nearest its limit. A window with no group is captioned by its length alone.
-    func testAntigravitysWindowsAreCaptionedByTheirGroupAndTheBarShowsTheFullest() throws {
-        func facts(_ windows: String) throws -> AccountFacts {
-            try JSONDecoder().decode(
-                AccountFacts.self, from: Data(#"{"read_at": "2026-11-26T04:10:00.000Z", \#(windows)}"#.utf8))
-        }
-        let agy = try facts(
-            """
-            "grouped_windows": [{"used_percent": 30, "window_minutes": 10080, "resets_at": 1796258851, "group": "Gemini Models"},
-            {"used_percent": 55, "window_minutes": 300, "resets_at": 1795672051, "group": "Gemini Models"},
-            {"used_percent": 0, "window_minutes": 10080, "resets_at": 0, "group": "Claude and GPT models"},
-            {"used_percent": 0, "window_minutes": 300, "resets_at": 0, "group": "Claude and GPT models"}]
-            """)
-        XCTAssertEqual(agy.windows.first?.group, "Gemini Models")
+    /// **Antigravity's plan limits are one window, Gemini's week, read as Claude Code's are** (minor 55; the owner's
+    /// ruling, 2026-11-26): ccd's own frame gives Antigravity's Default one window, captioned "Week" with its reset, and
+    /// the bar's figures are that window alone; none of the "Claude and GPT models" windows reaches the app. A daemon of
+    /// 54 sends its windows by group in `grouped_windows`, which this app reads as none.
+    func testAntigravitysLimitsAreGeminisWeekAlone() throws {
         let now = Date(timeIntervalSince1970: 1_795_660_000)
-        let limits = ReplyBar.limits(agy, now: now)
-        XCTAssertEqual(
-            limits.map(\.caption),
-            [
-                "Gemini Models · 5-hour", "Gemini Models · Week", "Claude and GPT models · 5-hour",
-                "Claude and GPT models · Week",
-            ])
-        XCTAssertEqual(limits.first?.resets, "resets in 3h 20m")
-        XCTAssertEqual(limits.last?.resets, "not started")
-        XCTAssertEqual(ReplyBar.figures(agy, now: now).map(\.caption), ["Gemini Models · 5-hour"], "the fullest")
-        let claude = try facts(#""windows": [{"used_percent": 10, "window_minutes": 300, "resets_at": 1795670000}]"#)
-        XCTAssertEqual(ReplyBar.limits(claude, now: now).map(\.caption), ["5-hour"], "no group: its length alone")
-        XCTAssertEqual(ReplyBar.figures(claude, now: now).count, 1, "no group: the bar shows every window")
+        let facts = try XCTUnwrap(try signInBook("signed_in_usage").defaultFacts(for: .antigravity))
+        let limits = ReplyBar.limits(facts, now: now)
+        XCTAssertEqual(limits.map(\.caption), ["Week"])
+        XCTAssertEqual(limits.map(\.usedPercent), [20])
+        XCTAssertEqual(limits.first?.resets, "resets in 6 days")
+        let older = try JSONDecoder().decode(
+            AccountFacts.self,
+            from: Data(
+                #"{"read_at": "2026-11-26T04:10:00.000Z", "grouped_windows": [{"used_percent": 0, "window_minutes": 10080, "resets_at": 0, "group": "Claude and GPT models"}]}"#
+                    .utf8))
+        XCTAssertEqual(ReplyBar.limits(older, now: now), [], "a 54 daemon's grouped windows are read as none")
+        let unopened = UsageWindow(usedPercent: 0, windowMinutes: 10080, resetsAt: 0)
+        XCTAssertEqual(AccountSwitchWords.resets(unopened, now: now), "not started")
     }
 
     /// An Antigravity run's "/" offers model, effort, compact and diff: agy has no `/clear`. Compact's words name

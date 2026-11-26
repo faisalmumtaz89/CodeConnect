@@ -51,34 +51,15 @@
       {
         "agent": "antigravity",
         "facts": {
-          "grouped_windows": [
+          "plan": "Google AI Ultra",
+          "read_at": "2026-11-25T12:00:00.000Z",
+          "windows": [
             {
-              "group": "Gemini Models",
               "resets_at": 1796258851,
               "used_percent": 20,
               "window_minutes": 10080
-            },
-            {
-              "group": "Gemini Models",
-              "resets_at": 1795672051,
-              "used_percent": 55,
-              "window_minutes": 300
-            },
-            {
-              "group": "Claude and GPT models",
-              "resets_at": 0,
-              "used_percent": 0,
-              "window_minutes": 10080
-            },
-            {
-              "group": "Claude and GPT models",
-              "resets_at": 0,
-              "used_percent": 0,
-              "window_minutes": 300
             }
-          ],
-          "plan": "Google AI Ultra",
-          "read_at": "2026-11-25T12:00:00.000Z"
+          ]
         }
       }
     ],
