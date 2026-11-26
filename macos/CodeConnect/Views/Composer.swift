@@ -77,15 +77,22 @@ private struct ResumeCommand: View {
 private struct Composer: View {
     let model: AppModel
     let key: String
-    /// The run's words and the send whose answer never came, kept by the run (`RunDrafts`): they outlive this box.
-    /// The rest of the box (the last outcome, a command's watch) starts again.
+    /// The run's words, the send whose answer never came, a send on its way, the last outcome and a command's watch,
+    /// kept by the run (`RunDrafts`): they outlive this box. The rest of the box (its panels, its palette) starts again.
     @Bindable var kept: RunDrafts
     let showsChanges: () -> Void
 
-    /// What became of the last Claude send or refused command; Kit words it.
-    @State private var result: ComposeAttempt?
+    /// What became of the last Claude send or refused command; Kit words it. The run's (`RunDrafts.lastSend`).
+    private var result: ComposeAttempt? {
+        get { kept.lastSend }
+        nonmutating set { kept.lastSend = newValue }
+    }
     @State private var retire: Task<Void, Never>?
-    @State private var sending = false
+    /// A send or command is on its way. The run's (`RunDrafts.sending`).
+    private var sending: Bool {
+        get { kept.sending }
+        nonmutating set { kept.sending = newValue }
+    }
     @State private var askingAgain = false
     /// The field has the keyboard: Esc leaves it before it closes the run.
     @FocusState private var fieldFocused: Bool
@@ -93,8 +100,11 @@ private struct Composer: View {
     @State private var selection: TextSelection?
     @Environment(\.replyFocusRequest) private var replyFocusRequest
     @Environment(\.agentsShown) private var agentsShown
-    /// The Compact command typed last, and where it stands.
-    @State private var running: Running?
+    /// The Compact command typed last, and where it stands. The run's (`RunDrafts.command`).
+    private var running: Running? {
+        get { kept.command }
+        nonmutating set { kept.command = newValue }
+    }
     @State private var quiet: Task<Void, Never>?
     /// The settings panel open above the box's bar, if any.
     @State private var panel: SettingsPanel?
@@ -119,12 +129,7 @@ private struct Composer: View {
     /// The pointer is on the usage figures, and their card shows over the bar.
     @State private var usageHovered = false
 
-    private struct Running: Equatable {
-        let command: NativeCommand
-        var phase: CommandPhase
-        /// How far the run's events had got when it was sent: only a receipt above this answers it.
-        let baseline: UInt64
-    }
+    private typealias Running = CommandWatch
 
     private var summary: SessionSummary? { model.shownSummary(for: key) }
     private var isCodex: Bool { summary?.isCodex == true }
@@ -185,7 +190,12 @@ private struct Composer: View {
         // A new handshake is the link back, and so is the box coming back, from another tab or another run: the
         // unanswered send is asked again, if Kit's rule still allows it.
         .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
-        .onAppear { askUnansweredAgain() }
+        .onAppear {
+            askUnansweredAgain()
+            // A command still watched takes a receipt that came while no box showed the run. Its caption's timers, and
+            // a landed note's, run on in the box that started them, each acting only on its own value.
+            settle()
+        }
         // A run nothing has been said to yet, as one started with no first message, has the cursor in its box once its
         // conversation is in. Not "an empty conversation": a Codex run files its session start before any message.
         .task(id: awaitsFirstMessage) {
@@ -230,10 +240,6 @@ private struct Composer: View {
                 }
             }
         #endif
-        .onDisappear {
-            retire?.cancel()
-            quiet?.cancel()
-        }
         .sheet(isPresented: $compacting) {
             CompactDialog(instructions: $instructions, agent: summary?.agent ?? .claude) {
                 compacting = false
@@ -511,7 +517,8 @@ private struct Composer: View {
         guard attempt.landed else { return }
         retire = Task {
             try? await Task.sleep(for: .seconds(4))
-            guard !Task.isCancelled else { return }
+            // Only its own: a box no longer shown still runs this, and a later outcome is another box's to retire.
+            guard !Task.isCancelled, result == attempt else { return }
             result = nil
         }
     }
