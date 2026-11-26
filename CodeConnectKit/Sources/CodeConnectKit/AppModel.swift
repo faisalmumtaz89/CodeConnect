@@ -160,6 +160,8 @@ public final class AppModel {
     public let machineID: String?
     public let pairing: PairingStore
     public let connection: DaemonConnection
+    /// A run's shell on this computer, as this link shows it (`RunTerminal`).
+    public let terminal: RunTerminal
     public let settings: AppSettings
     /// This machine's folder of the event cache.
     private let cache: EventCache
@@ -358,6 +360,7 @@ public final class AppModel {
         self.machineID = machineID
         self.pairing = pairing
         self.connection = DaemonConnection()
+        self.terminal = RunTerminal(connection: connection)
         self.settings = settings
         self.cache = machineID.map { cache.machine($0) } ?? cache
         self.relayEnrollment = relayEnrollment
@@ -367,6 +370,7 @@ public final class AppModel {
         connection.onDisconnected = { [weak self] in
             self?.machineStats = nil
             self?.filesLostWithLink()
+            self?.terminal.linkDown()
         }
 
         connection.onMessage = { [weak self] message in self?.handle(message) }
@@ -380,6 +384,7 @@ public final class AppModel {
             // it will never answer — waits for the release with the rest.
             self.openCatchUp(onNewLink: true)
             self.resubscribeAll()
+            self.terminal.linkUp()
             // After every handshake, not only after a pairing: a phone that
             // paired before push existed must start registering the first
             // time an upgraded daemon advertises it — and the capability is
@@ -2439,6 +2444,8 @@ public final class AppModel {
 
     private func handle(_ message: ServerMessage) {
         switch message {
+        case .terminalOpened, .terminalOutput, .terminalCredit, .terminalClosed:
+            terminal.receive(message)
         case .deleteSessionResult, .putFileResult:
             // Nothing to do here. `removeSession` awaits the reply itself and does
             // the local clean-up, because only it knows which row asked.

@@ -52,7 +52,13 @@ struct SessionPane: View {
                     }
                     .onPreferenceChange(HoldsReplyBox.self) { boxTaken = $0 }
                 }
-                if tab == .changes { ChangesTab(model: model, key: row.id) }
+                if tab == .changes {
+                    // The run's shell at the panel's foot, until the Changes panel gives it its own place there.
+                    VStack(spacing: 0) {
+                        ChangesTab(model: model, key: row.id)
+                        TerminalFoot(row: row, model: model)
+                    }
+                }
             }
         }
         #if DEBUG

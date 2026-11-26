@@ -260,6 +260,12 @@
         static var sessionTab: SessionTab? {
             UserDefaults.standard.string(forKey: "CC_SESSION_TAB") == "changes" ? .changes : nil
         }
+        /// `-CC_TERMINAL YES`: the opened run's shell is open at the panel's foot. `-CC_TERMINAL_TYPE <text>`: once it is
+        /// open, these words are typed into it, then Return (`\n` for more lines).
+        static var terminalOpen: Bool { UserDefaults.standard.bool(forKey: "CC_TERMINAL") }
+        static var terminalTyped: String? {
+            UserDefaults.standard.string(forKey: "CC_TERMINAL_TYPE")?.replacingOccurrences(of: "\\n", with: "\n")
+        }
         /// `-CC_SLASH_LIT <row>`: with a `/` reply, the slash palette lights this row, as ↓ would.
         static var slashLit: Int { UserDefaults.standard.integer(forKey: "CC_SLASH_LIT") }
         /// `-CC_REPLY <text>`: the opened run's reply box holds these words, as typed (`\n` for a new line).
