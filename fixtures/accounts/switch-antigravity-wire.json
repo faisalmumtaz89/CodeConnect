@@ -6,16 +6,16 @@
         "exit_code": null,
         "reason": "Switched to B",
         "switched_to": {
-          "account_id": "01M8BJ6PS5R79YYN3BSG40679P",
+          "account_id": "01M8BRNC61ZASQCA3BP5VE90F7",
           "label": "B"
         }
       },
       "seq": 5,
-      "session_id": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
-      "session_uid": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
+      "session_id": "01M8BRNC624SYNSVRCVTR1P6K1",
+      "session_uid": "01M8BRNC624SYNSVRCVTR1P6K1",
       "source": "daemon",
-      "source_event_id": "exit:01M8BJ6PS6PHYVT8Y4TPJ7B8W4:8944",
-      "ts": "2026-11-26T09:15:22.962Z"
+      "source_event_id": "exit:01M8BRNC624SYNSVRCVTR1P6K1:89710",
+      "ts": "2026-11-26T11:08:15.352Z"
     },
     "type": "event"
   },
@@ -23,14 +23,14 @@
     "sessions": [
       {
         "account": {
-          "id": "01M8BJ6PS5R79YYN3BSG40679N",
+          "id": "01M8BRNC61ZASQCA3BP5VE90F6",
           "label": "A"
         },
         "agent": "antigravity",
         "blocked_on": [],
         "codex_link": "none",
-        "created_at": "2026-11-26T09:15:22.790Z",
-        "cwd": "/tmp/cch2.2GM3NS8264",
+        "created_at": "2026-11-26T11:08:14.915Z",
+        "cwd": "/tmp/cch2.W6MMJZ9P95",
         "last_seq": 5,
         "lifecycle": "live",
         "link": "attached",
@@ -75,11 +75,11 @@
             }
           ]
         },
-        "project_label": "cch2.2GM3NS8264",
-        "session_id": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
-        "session_uid": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
+        "project_label": "cch2.W6MMJZ9P95",
+        "session_id": "01M8BRNC624SYNSVRCVTR1P6K1",
+        "session_uid": "01M8BRNC624SYNSVRCVTR1P6K1",
         "switching": "moved",
-        "updated_at": "2026-11-26T09:15:22.962Z"
+        "updated_at": "2026-11-26T11:08:15.352Z"
       }
     ],
     "type": "sessions"
@@ -92,10 +92,10 @@
         "reason": "agent host linked"
       },
       "seq": 6,
-      "session_id": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
-      "session_uid": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
+      "session_id": "01M8BRNC624SYNSVRCVTR1P6K1",
+      "session_uid": "01M8BRNC624SYNSVRCVTR1P6K1",
       "source": "daemon",
-      "ts": "2026-11-26T09:15:23.090Z"
+      "ts": "2026-11-26T11:08:15.544Z"
     },
     "type": "event"
   },
@@ -103,14 +103,14 @@
     "sessions": [
       {
         "account": {
-          "id": "01M8BJ6PS5R79YYN3BSG40679N",
+          "id": "01M8BRNC61ZASQCA3BP5VE90F6",
           "label": "A"
         },
         "agent": "antigravity",
         "blocked_on": [],
         "codex_link": "none",
-        "created_at": "2026-11-26T09:15:22.790Z",
-        "cwd": "/tmp/cch2.2GM3NS8264",
+        "created_at": "2026-11-26T11:08:14.915Z",
+        "cwd": "/tmp/cch2.W6MMJZ9P95",
         "last_seq": 6,
         "lifecycle": "live",
         "link": "attached",
@@ -155,11 +155,11 @@
             }
           ]
         },
-        "project_label": "cch2.2GM3NS8264",
-        "session_id": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
-        "session_uid": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
+        "project_label": "cch2.W6MMJZ9P95",
+        "session_id": "01M8BRNC624SYNSVRCVTR1P6K1",
+        "session_uid": "01M8BRNC624SYNSVRCVTR1P6K1",
         "switching": "moved",
-        "updated_at": "2026-11-26T09:15:23.035Z"
+        "updated_at": "2026-11-26T11:08:15.436Z"
       }
     ],
     "type": "sessions"
@@ -172,11 +172,11 @@
         "text": "on B now?"
       },
       "seq": 7,
-      "session_id": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
-      "session_uid": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
+      "session_id": "01M8BRNC624SYNSVRCVTR1P6K1",
+      "session_uid": "01M8BRNC624SYNSVRCVTR1P6K1",
       "source": "daemon",
-      "source_event_id": "say:e4afed42-9cfa-8d2b-83b6-05e370f321e2",
-      "ts": "2026-11-26T09:15:23.090Z"
+      "source_event_id": "say:29752718-335a-8e59-89df-55d0f6067ae8",
+      "ts": "2026-11-26T11:08:15.544Z"
     },
     "type": "event"
   },
@@ -184,14 +184,14 @@
     "sessions": [
       {
         "account": {
-          "id": "01M8BJ6PS5R79YYN3BSG40679P",
+          "id": "01M8BRNC61ZASQCA3BP5VE90F7",
           "label": "B"
         },
         "agent": "antigravity",
         "blocked_on": [],
         "codex_link": "none",
-        "created_at": "2026-11-26T09:15:22.790Z",
-        "cwd": "/tmp/cch2.2GM3NS8264",
+        "created_at": "2026-11-26T11:08:14.915Z",
+        "cwd": "/tmp/cch2.W6MMJZ9P95",
         "last_seq": 7,
         "lifecycle": "live",
         "link": "attached",
@@ -236,11 +236,11 @@
             }
           ]
         },
-        "project_label": "cch2.2GM3NS8264",
-        "session_id": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
-        "session_uid": "01M8BJ6PS6PHYVT8Y4TPJ7B8W4",
+        "project_label": "cch2.W6MMJZ9P95",
+        "session_id": "01M8BRNC624SYNSVRCVTR1P6K1",
+        "session_uid": "01M8BRNC624SYNSVRCVTR1P6K1",
         "switching": "moved",
-        "updated_at": "2026-11-26T09:15:23.090Z"
+        "updated_at": "2026-11-26T11:08:15.545Z"
       }
     ],
     "type": "sessions"

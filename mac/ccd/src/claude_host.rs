@@ -4393,7 +4393,6 @@ mod tests {
                 email: None,
                 plan: Some("Google AI Pro".into()),
                 windows: Vec::new(),
-                grouped_windows: Vec::new(),
                 limits_available: None,
                 read_at: "2026-11-26T12:00:00.000Z".into(),
             }),

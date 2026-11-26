@@ -1371,13 +1371,13 @@ public final class AppModel {
         return keepsAccounts && connection.profile.protocolMinor >= 51
     }
 
-    /// This computer keeps accounts for Antigravity as it does for Claude Code and Codex (minor 55), each its own home of
+    /// This computer keeps accounts for Antigravity as it does for Claude Code and Codex (minor 56), each its own home of
     /// agy's; one before it refuses them, and offers Antigravity's one sign-in alone ([`signsAgentsIn`]).
     public var keepsAntigravityAccounts: Bool {
         #if DEBUG
             if fixtureAccountBook != nil { return true }
         #endif
-        return keepsAccounts && connection.profile.protocolMinor >= 55
+        return keepsAccounts && connection.profile.protocolMinor >= 56
     }
 
     /// Starts `agent`'s own sign-in in a browser on the computer; true once the computer has it going.

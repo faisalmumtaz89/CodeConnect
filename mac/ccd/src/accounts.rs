@@ -2744,11 +2744,10 @@ done
                 .activate_account("antigravity", Some(&added.id))
                 .unwrap());
             let facts = super::Facts::default();
-            let read = |plan: &str, grouped_windows| protocol::ws::AccountFacts {
+            let read = |plan: &str, windows| protocol::ws::AccountFacts {
                 email: None,
                 plan: Some(plan.into()),
-                windows: Vec::new(),
-                grouped_windows,
+                windows,
                 limits_available: None,
                 read_at: "2026-11-25T12:00:00.000Z".into(),
             };

@@ -3306,7 +3306,7 @@ mod tests {
             .cloned()
             .unwrap();
         assert_eq!(account["facts"]["plan"], "Google AI Ultra", "{told}");
-        assert_eq!(account["facts"].get("grouped_windows"), None, "{told}");
+        assert_eq!(account["facts"].get("windows"), None, "{told}");
         let runs = std::fs::read_to_string(format!("{}.p", agy.display())).unwrap_or_default();
         assert_eq!(runs, "/usage\n", "agy's /usage run once, for the Default");
         let _ = std::fs::remove_dir_all(&rig.root);
