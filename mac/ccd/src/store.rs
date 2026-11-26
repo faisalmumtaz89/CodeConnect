@@ -3359,6 +3359,48 @@ impl Store {
         Ok(runs)
     }
 
+    /// The run `session_uid` stopped at `limit`, or (`None`) is at none.
+    pub fn set_run_limit(
+        &self,
+        session_uid: &str,
+        limit: Option<&protocol::event::RunLimit>,
+    ) -> Result<()> {
+        let which = limit
+            .map(|limit| serde_json::to_value(limit.which))
+            .transpose()?
+            .and_then(|which| which.as_str().map(str::to_string));
+        self.write().execute(
+            "UPDATE run_hosts SET limit_which = ?2, limit_at = ?3 WHERE session_uid = ?1",
+            params![session_uid, which, limit.map(|limit| &limit.at)],
+        )?;
+        Ok(())
+    }
+
+    /// Every run at a usage limit, and which.
+    pub fn run_limits(&self) -> Result<Vec<(String, protocol::event::RunLimit)>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT session_uid, limit_which, limit_at FROM run_hosts WHERE limit_which IS NOT NULL",
+        )?;
+        let runs = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(runs
+            .into_iter()
+            .map(|(uid, which, at)| {
+                let which = serde_json::from_value(serde_json::Value::String(which))
+                    .unwrap_or(protocol::event::LimitKind::Unknown);
+                (uid, protocol::event::RunLimit { which, at })
+            })
+            .collect())
+    }
+
     /// Whether a run still going (starting, live or stopping) records the account `id`.
     pub fn account_in_use(&self, id: &str) -> Result<bool> {
         Ok(self
@@ -6644,7 +6686,9 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             screen_only     TEXT,
             account_id      TEXT,
             switching       INTEGER,
-            launch_account  TEXT
+            launch_account  TEXT,
+            limit_which     TEXT,
+            limit_at        TEXT
         );
 
         -- An agent's accounts on this computer: each a folder of ccd's own,
@@ -6868,6 +6912,9 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     ("run_hosts", "account_id", "TEXT"),
     ("run_hosts", "switching", "INTEGER"),
     ("run_hosts", "launch_account", "TEXT"),
+    // The usage limit a run stopped at (minor 54): its wire word, and when.
+    ("run_hosts", "limit_which", "TEXT"),
+    ("run_hosts", "limit_at", "TEXT"),
 ];
 
 /// Repair push tuples a rollback or a pre-tuple build could have left incoherent.
