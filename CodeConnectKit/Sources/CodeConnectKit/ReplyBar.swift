@@ -76,3 +76,70 @@ public struct ReplyBar: Equatable, Sendable {
         return tenths % 10 == 0 ? "\(tenths / 10)M" : "\(tenths / 10).\(tenths % 10)M"
     }
 }
+
+/// A run stopped at a usage limit (`SessionSummary.limit`), as the band at its conversation's foot says it: which limit,
+/// when it resets (read from the run's account's window of that length, which the app holds: the agent's own reset has
+/// no declared unit), the account's windows with the full one marked, and the account with its plan. The reply box stays
+/// live under it. Nil for a run at no limit, and for one that takes no reply.
+public struct LimitFoot: Equatable, Sendable {
+    /// "5-hour limit reached".
+    public let title: String
+    /// "Resets 9:06 PM · in 2h 10m", or "Resets Thu 3 Dec, 9:06 PM · in 5 days" on another day; nil when the limit has
+    /// no window of its own, the window is not held, or its reset has passed.
+    public let resets: String?
+    /// The account's windows, as the reply bar draws them.
+    public let limits: [ReplyBar.Limit]
+    /// The caption of the window this limit is, drawn red; nil when it is none of them.
+    public let full: String?
+    /// "<email> · <Plan>", or the account's name alone; nil when the run names no account.
+    public let account: String?
+
+    /// The reply box's prompt while the run is at its limit.
+    public static let replyPrompt = "Send after the reset to carry on"
+
+    public static func of(summary: SessionSummary, book: AccountBook?, now: Date, timeZone: TimeZone = .current)
+        -> LimitFoot?
+    {
+        guard let limit = summary.limit, !summary.takesNoReply else { return nil }
+        let facts = summary.account.flatMap { account in
+            StartAgent(rawValue: summary.agent.rawValue).flatMap { book?.facts(for: $0, accountID: account.id) }
+        }
+        let window = facts?.windows.first { $0.windowMinutes == limit.which.windowMinutes }
+        let resets = window.flatMap { window in
+            AccountSwitchWords.countdown(window, now: now).map {
+                "Resets \(clock(Date(timeIntervalSince1970: TimeInterval(window.resetsAt)), now: now, timeZone)) · \($0)"
+            }
+        }
+        let plan = facts?.plan.map { $0.prefix(1).uppercased() + $0.dropFirst() }
+        let name = facts?.email ?? summary.account?.label
+        return LimitFoot(
+            title: "\(words(limit.which)) limit reached", resets: resets, limits: ReplyBar.limits(facts, now: now),
+            full: window.map { AccountSwitchWords.caption(minutes: $0.windowMinutes) },
+            account: name.map { name in plan.map { "\(name) · \($0)" } ?? name })
+    }
+
+    private static func words(_ which: LimitKind) -> String {
+        switch which {
+        case .fiveHour: "5-hour"
+        case .weekly: "Weekly"
+        case .weeklyOpus: "Weekly Opus"
+        case .weeklySonnet: "Weekly Sonnet"
+        case .extraUsage: "Extra usage"
+        case .credits: "Credit"
+        case .workspace: "Workspace"
+        case .unknown: "Usage"
+        }
+    }
+
+    /// A reset as the band names it: its time on the same day, else its day, date and time.
+    private static func clock(_ date: Date, now: Date, _ timeZone: TimeZone) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = calendar.isDate(date, inSameDayAs: now) ? "h:mm a" : "EEE d MMM, h:mm a"
+        return formatter.string(from: date)
+    }
+}
+

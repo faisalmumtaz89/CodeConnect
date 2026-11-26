@@ -55,11 +55,15 @@ final class ReplyBarTests: XCTestCase {
     }
 
     /// A recorded live summary of `agent`, on the account `account` names (`nil`: none named).
-    private func summary(_ agent: StartAgent, account: JSONValue?) throws -> SessionSummary {
+    private func summary(
+        _ agent: StartAgent, account: JSONValue?, limit: String? = nil, lifecycle: String? = nil
+    ) throws -> SessionSummary {
         let (name, key) =
             agent == .claude ? ("minor-46-wire", "session_hosted_live") : ("codex-settings-wire", "session_codex_live")
         var run = try XCTUnwrap(try bundled(name)[key]?.objectValue)
         run["account"] = account
+        if let limit { run["limit"] = .object(["which": .string(limit), "at": .string("2026-11-28T18:56:40Z")]) }
+        if let lifecycle { run["lifecycle"] = .string(lifecycle) }
         return try decode(SessionSummary.self, .object(run))
     }
 
@@ -220,5 +224,62 @@ final class ReplyBarTests: XCTestCase {
             (1_050_000, "1.1M"), (1_250_000, "1.3M"), (2_000_000, "2M"),
         ]
         for (count, words) in cases { XCTAssertEqual(ReplyBar.tokens(count), words, "\(count)") }
+    }
+
+    // MARK: The limit at the conversation's foot
+
+    /// A run at its 5-hour limit: the window named, its reset read from the account's own 5-hour window (on its clock
+    /// and as a countdown), the account's windows with the full one marked, and the account with its plan.
+    func testAFiveHourLimitReadsItsResetFromTheAccountsWindow() throws {
+        let book = try book()
+        let (d, live) = try on("D", in: book)
+        let run = try summary(
+            .claude, account: .object(["id": .string(d.id), "label": .string("D")]), limit: "five_hour")
+        XCTAssertNil(LimitFoot.of(summary: live, book: book, now: now), "no limit, no foot")
+        let foot = try XCTUnwrap(LimitFoot.of(summary: run, book: book, now: now, timeZone: .gmt))
+        XCTAssertEqual(foot.title, "5-hour limit reached")
+        XCTAssertEqual(foot.resets, "Resets 9:06 PM · in 2h 10m")
+        XCTAssertEqual(foot.limits, ReplyBar.limits(d.facts, now: now), "the bar's windows")
+        XCTAssertEqual(foot.full, "5-hour")
+        XCTAssertEqual(foot.account, "\(try XCTUnwrap(d.facts?.email)) · Max")
+    }
+
+    /// A reset on another day names the day and the date before the time.
+    func testAWeeklyLimitOnAnotherDayNamesTheDay() throws {
+        let book = try book()
+        let (d, _) = try on("D", in: book)
+        let run = try summary(.claude, account: .object(["id": .string(d.id), "label": .string("D")]), limit: "weekly")
+        let foot = try XCTUnwrap(LimitFoot.of(summary: run, book: book, now: now, timeZone: .gmt))
+        XCTAssertEqual(foot.title, "Weekly limit reached")
+        let resets = try XCTUnwrap(foot.resets)
+        XCTAssertTrue(resets.hasPrefix("Resets ") && resets.contains(", ") && resets.hasSuffix(" · in 5 days"), resets)
+        XCTAssertEqual(foot.full, "Week")
+    }
+
+    /// A limit with no window of its own says which it is, with no reset and no window marked.
+    func testALimitWithNoWindowOfItsOwnHasNoReset() throws {
+        let book = try book()
+        let (d, _) = try on("D", in: book)
+        let run = try summary(
+            .claude, account: .object(["id": .string(d.id), "label": .string("D")]), limit: "extra_usage")
+        let foot = try XCTUnwrap(LimitFoot.of(summary: run, book: book, now: now, timeZone: .gmt))
+        XCTAssertEqual(foot.title, "Extra usage limit reached")
+        XCTAssertNil(foot.resets)
+        XCTAssertNil(foot.full)
+        let words = [("weekly_opus", "Weekly Opus"), ("weekly_sonnet", "Weekly Sonnet"), ("credits", "Credit"),
+            ("workspace", "Workspace"), ("something_new", "Usage")]
+        for (which, name) in words {
+            let other = try summary(.claude, account: nil, limit: which)
+            XCTAssertEqual(LimitFoot.of(summary: other, book: book, now: now)?.title, "\(name) limit reached", which)
+        }
+    }
+
+    /// A run that has ended takes no reply, so its foot shows no limit band.
+    func testAnEndedRunShowsNoLimitBand() throws {
+        let book = try book()
+        let run = try summary(.claude, account: nil, limit: "five_hour", lifecycle: "exited")
+        XCTAssertTrue(run.takesNoReply)
+        XCTAssertNil(LimitFoot.of(summary: run, book: book, now: now))
+        XCTAssertEqual(LimitFoot.replyPrompt, "Send after the reset to carry on")
     }
 }
