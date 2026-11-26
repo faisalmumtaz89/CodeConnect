@@ -2251,6 +2251,9 @@ public final class AppModel {
         if diffs.contains(where: { states[$0.key] == nil }) {
             diffs = diffs.filter { states[$0.key] != nil }
         }
+        if runGits.contains(where: { states[$0.key] == nil }) {
+            runGits = runGits.filter { states[$0.key] != nil }
+        }
         // Each assigned only when it differs: `@Observable` fires on the
         // assignment, and an equal list redraws every row for nothing.
         if shownSummaries != summaries { shownSummaries = summaries }

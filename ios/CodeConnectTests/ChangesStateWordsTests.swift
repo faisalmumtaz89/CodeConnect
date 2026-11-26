@@ -35,5 +35,16 @@ final class ChangesStateWordsTests: XCTestCase {
             ChangesWords.state(try git(files: 1, ahead: 0, unmerged: true)), "Merge conflicts · 1 file changed · nothing committed")
         XCTAssertEqual(ChangesWords.state(try git(branch: nil, files: 0, ahead: 2)), "2 commits", "a detached head pushes nothing")
         XCTAssertEqual(ChangesWords.state(try git(files: 0, ahead: 0)), "No changes")
+        XCTAssertEqual(
+            ChangesWords.state(try git(files: 0, ahead: nil)), "No uncommitted changes", "no base: no claim about commits")
+    }
+
+    func testAFolderWithNoCommitYetHasNothingCommitted() throws {
+        let unborn = #"""
+            {"branch":"main","changed":{"files":1,"added":2,"removed":0,"complete":true},
+             "pushed":false,"unmerged":false,"read_at":"2026-11-26T12:00:00Z"}
+            """#
+        let git = try JSONDecoder().decode(RunGit.self, from: Data(unborn.utf8))
+        XCTAssertEqual(ChangesWords.state(git), "1 file changed · nothing committed")
     }
 }
