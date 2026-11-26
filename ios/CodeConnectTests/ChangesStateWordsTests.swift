@@ -58,7 +58,7 @@ final class ChangesStateWordsTests: XCTestCase {
             "Git did not commit. pre-commit hook: fmtcheck failed", "git's words, as it gave them")
         XCTAssertEqual(
             ChangesWords.commitRefused(code: "busy", detail: nil),
-            "The run is working or waiting for you, so nothing was committed.")
+            "A run in this folder is working or waiting for you, so nothing was committed.", "any run in the folder")
         XCTAssertEqual(ChangesWords.commitRefused(code: "indeterminate", detail: nil), ChangesWords.commitUnknown)
         XCTAssertEqual(ChangesWords.commitRefused(code: "a_newer_code", detail: "x"), ChangesWords.commitUnknown)
     }
