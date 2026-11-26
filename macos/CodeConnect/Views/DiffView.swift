@@ -15,6 +15,9 @@ struct FileDiffView: View {
     /// The most diff lines to draw, counted as Kit's card budget counts them (every line of every hunk, folded or
     /// not, and never a hunk's header); the card counts the rest.
     var lineLimit: Int?
+    /// Whether its lines show, where the list it stands in can fold it to its header (a run's Changes panel); with
+    /// none, they always show (an approval card's diff).
+    var expanded: Binding<Bool>?
     /// The folded stretches opened here, by hunk and segment.
     @State private var opened: Set<String> = []
     /// What the hunks can do here: a run's Changes tab gives them; an approval card's diff has none.
@@ -54,29 +57,20 @@ struct FileDiffView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "doc.text").font(.system(size: 10)).accessibilityHidden(true)
-                Text((path ?? file.displayPath).displaySafe).font(Theme.mono(11.5)).lineLimit(1).truncationMode(.head)
-                Text((status ?? file.status).label).font(Theme.ui(11)).foregroundStyle(Theme.text3)
-                Spacer(minLength: 8)
-                LineDelta(added: UInt64(file.additions), removed: UInt64(file.deletions))
-            }
-            .foregroundStyle(Theme.text2)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
-            Rectangle().fill(Theme.hairline).frame(height: 1)
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(rows) { row in
-                    switch row {
-                    case .header(let hunk, _): header(hunk)
-                    case .line(let line, _): DiffLine(line: line)
-                    case .folded(let count, let fold, _): foldedRow(count: count, fold: fold)
-                    case .note(let text, _): quiet(text, mono: false)
-                    }
+            if let expanded {
+                Button { expanded.wrappedValue.toggle() } label: {
+                    heading(mark: expanded.wrappedValue ? "chevron.down" : "chevron.right")
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("changes.file.\(file.id).toggle")
+            } else {
+                heading(mark: "doc.text")
             }
-            .padding(.vertical, 6)
-            .textSelection(.enabled)
+            if expanded?.wrappedValue != false {
+                Rectangle().fill(Theme.hairline).frame(height: 1)
+                lines
+            }
         }
         .background(Theme.code, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.hairline))
@@ -88,6 +82,35 @@ struct FileDiffView: View {
                 }
             }
         #endif
+    }
+
+    /// The file's path, what became of it and its lines, behind `mark`.
+    private func heading(mark: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: mark).font(.system(size: 10)).accessibilityHidden(true)
+            Text((path ?? file.displayPath).displaySafe).font(Theme.mono(11.5)).lineLimit(1).truncationMode(.head)
+            Text((status ?? file.status).label).font(Theme.ui(11)).foregroundStyle(Theme.text3)
+            Spacer(minLength: 8)
+            LineDelta(added: UInt64(file.additions), removed: UInt64(file.deletions))
+        }
+        .foregroundStyle(Theme.text2)
+        .padding(.horizontal, 12)
+        .frame(height: 30)
+    }
+
+    private var lines: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(rows) { row in
+                switch row {
+                case .header(let hunk, _): header(hunk)
+                case .line(let line, _): DiffLine(line: line)
+                case .folded(let count, let fold, _): foldedRow(count: count, fold: fold)
+                case .note(let text, _): quiet(text, mono: false)
+                }
+            }
+        }
+        .padding(.vertical, 6)
+        .textSelection(.enabled)
     }
 
     @ViewBuilder
