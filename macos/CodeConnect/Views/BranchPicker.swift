@@ -50,7 +50,12 @@ struct BranchRow: View {
         // Around the menu as well as the button: the menu says where it is through what this sets, so a click on one
         // of its rows is a click inside, not one that closes it before the row is chosen.
         .closesPanel($open)
-        .onChange(of: open) { listing = false }
+        .onChange(of: open) {
+            listing = false
+            #if DEBUG
+                if open && RenderWindow.opensBranchList { listing = true }
+            #endif
+        }
     }
 
     /// The least a menu keeps from the form's edges.
