@@ -142,6 +142,7 @@ impl State {
             holder.sent = self.start;
             holder.reset = true;
         }
+        self.note_stall(Instant::now());
     }
 
     fn note_stall(&mut self, now: Instant) {
@@ -443,8 +444,10 @@ pub(crate) async fn open(
         .ok()
         .flatten()
         .ok_or(terminal_closed::NOT_LIVE)?;
-    let moved = daemon.db.switch_state(uid.clone()).await.ok().flatten()
-        == Some(crate::store::Store::SWITCH_MOVED);
+    // A run an account switch moved reads `exited` until its next message relaunches it, and is not ended.
+    let moved = row.lifecycle == Lifecycle::Exited
+        && daemon.db.switch_state(uid.clone()).await.ok().flatten()
+            == Some(crate::store::Store::SWITCH_MOVED);
     if row.lifecycle != Lifecycle::Live && !moved {
         return Err(terminal_closed::NOT_LIVE);
     }
@@ -728,7 +731,6 @@ async fn run(
                     Ok(Ok(len)) => {
                         let mut state = shell.lock();
                         state.push(&buffer[..len]);
-                        state.note_stall(Instant::now());
                         drop(state);
                         shell.changed();
                     }
@@ -1434,9 +1436,16 @@ mod tests {
             Some("feature-x"),
         );
         rig.begin("01CLAUDEHERE", AgentKind::Claude, Lifecycle::Live, None);
+        // Moved by a switch whose relaunch then failed: ended, whatever the switch's mark says.
+        rig.begin("01MOVEDFAILED", AgentKind::Codex, Lifecycle::Failed, None);
+        rig.daemon
+            .store
+            .set_switch_state("01MOVEDFAILED", Some(Store::SWITCH_MOVED))
+            .unwrap();
         for (uid, reason) in [
             ("01ENDED", terminal_closed::NOT_LIVE),
             ("01NOSUCHRUN", terminal_closed::NOT_LIVE),
+            ("01MOVEDFAILED", terminal_closed::NOT_LIVE),
             ("01CLAUDENEW", terminal_closed::NOT_READY),
         ] {
             let refused = open(
@@ -1570,6 +1579,24 @@ mod tests {
             .terminals
             .end(&rig.uid, terminal_closed::RUN_ENDED);
         closed(&mut again).await;
+    }
+
+    /// **Output that arrives for a viewer with no credit starts its stall clock**, wherever it is read from (a shell's
+    /// last output included), so the viewer is closed in time rather than waiting forever.
+    #[test]
+    fn output_for_a_viewer_with_no_credit_starts_its_stall_clock() {
+        let mut state = State::default();
+        state.holder = Some(Holder {
+            generation: 1,
+            sent: 0,
+            credit: 0,
+            reset: false,
+            written: 0,
+            input_left: 0,
+            stalled: None,
+        });
+        state.push(b"last words");
+        assert!(state.holder.as_ref().unwrap().stalled.is_some());
     }
 
     /// **A viewer whose output waits on spent credit past [`STALL_DEADLINE`] is closed `slow_consumer`**, and the
