@@ -1045,6 +1045,9 @@ public final class AppModel {
             if let usage = UserDefaults.standard.string(forKey: "CC_FIXTURE_USAGE") {
                 frames = Fixtures.withUsage(frames, context: usage != "limits")
             }
+            if let failed = UserDefaults.standard.string(forKey: "CC_FIXTURE_FAILED") {
+                frames = Fixtures.withFailedTurn(frames, failed: failed)
+            }
             if fixtureAccountBook != nil { Task { await loadAccounts() } }
             // **`-CC_FIXTURE_LATE_EVENTS <n>` is events arriving while the
             // reader is on screen.** The stream's last `n` frames are held back

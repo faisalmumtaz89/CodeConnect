@@ -1129,6 +1129,41 @@ enum Fixtures {
         /// account, so the limits `-CC_ACCOUNTS_WIRE`'s `defaults` give that agent are its; with `YES` each run also
         /// reports its context once, after its last event ("390k / 1M"), its listing's `last_seq` raised to match.
         /// `-CC_FIXTURE_LIMIT <which>` (a `LimitKind`'s wire name): the run `-CC_OPEN` names stopped at that limit.
+        /// `-CC_FIXTURE_FAILED <failed>`: the run `-CC_OPEN` names ends a last turn that failed (run state 04): after
+        /// its events, a `turn_complete` carrying `<failed>` as ccd files it (`{"status":529,"message":"…"}`), its
+        /// listing's `last_seq` raised to match.
+        static func withFailedTurn(_ frames: [ServerMessage], failed: String, now: Date = Fixtures.now) -> [ServerMessage] {
+            guard let open = UserDefaults.standard.string(forKey: "CC_OPEN") else { return frames }
+            var seq: UInt64 = 0
+            for frame in frames {
+                switch frame {
+                case .event(let event) where event.sessionKey == open: seq = max(seq, event.seq + 1)
+                case .sessions(let runs):
+                    for run in runs where run.sessionKey == open { seq = max(seq, run.lastSeq + 1) }
+                default: break
+                }
+            }
+            var end: ServerMessage?
+            let raised = frames.map { frame -> ServerMessage in
+                guard case .sessions(let runs) = frame else { return frame }
+                return .sessions(runs.map { run in
+                    guard run.sessionKey == open,
+                        var object = (try? JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(run)))?
+                            .objectValue
+                    else { return run }
+                    object["last_seq"] = .int(Int64(seq))
+                    end = decode(
+                        "{\"type\":\"event\",\"event\":{\"seq\":\(seq),\"session_uid\":\(quoted(run.sessionUID)),"
+                            + "\"session_id\":\(quoted(run.sessionID)),\"ts\":\"\(rfc3339(now))\",\"kind\":\"turn_complete\","
+                            + "\"source\":\"sdk\",\"turn_id\":\"fx-failed\",\"payload\":{\"subtype\":\"success\","
+                            + "\"is_error\":true,\"num_turns\":1,\"failed\":\(failed)}}}")
+                    return (try? JSONDecoder().decode(
+                        SessionSummary.self, from: Data(JSONValue.object(object).canonicalJSONString.utf8))) ?? run
+                })
+            }
+            return end.map { raised + [$0] } ?? frames
+        }
+
         static func withUsage(_ frames: [ServerMessage], context: Bool, now: Date = Fixtures.now) -> [ServerMessage] {
             var next: [String: UInt64] = [:]
             for frame in frames {
