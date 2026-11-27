@@ -401,7 +401,7 @@ private struct ComputerSettings: View {
         }
         .removesComputer($removing)
         #if DEBUG
-            .task { if RenderWindow.confirm == "computer" { removing = computers.last } }
+            .task(id: computers.count) { if RenderWindow.confirm == "computer" { removing = computers.last } }
         #endif
         .task(id: computers.map(\.machineID)) {
             guard let root = setup.installer?.root else { return }
