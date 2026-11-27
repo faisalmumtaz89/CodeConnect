@@ -1039,9 +1039,11 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
                 // One row holds the name and, under it, the description as the agent sends it, price included.
-                try driver.requireExists(
+                // At AX5 the Model section is below the fold, and a lazy list draws no row until it is scrolled to.
+                try driver.require(
                     driver.element(containing: "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok", in: app),
-                    "the Sonnet row with its description")
+                    "the Sonnet row with its description",
+                    scrollingWithin: driver.list(holding: "Permission", in: app))
             }),
         RenderScenario(
             name: "session-hosted-settings-modes",

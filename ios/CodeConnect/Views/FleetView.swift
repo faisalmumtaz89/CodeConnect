@@ -1034,9 +1034,10 @@ struct FleetView: View {
     /// Ask every computer for its projects. The computer is chosen in the
     /// flow, by a tap, and held there.
     /// A session's settings choosing another agent's model: the Start sheet, seeded with this computer, its folder,
-    /// that agent and model, over the session, once the settings sheet has gone.
+    /// that agent and model, opened from the fleet once the settings sheet has gone, as the folder question reopens it.
     private func startNew(_ seed: StartSeed) {
         startSeed = seed
+        path = []
         Task {
             try? await Task.sleep(for: .milliseconds(450))
             startOpen = true
