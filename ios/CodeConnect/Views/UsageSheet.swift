@@ -11,6 +11,7 @@ struct UsageSheet: View {
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         CCSheetChrome("Usage", onClose: { dismiss() }) {
@@ -41,13 +42,17 @@ struct UsageSheet: View {
                 CCSectionHeader("Limits")
                 card {
                     ForEach(Array(bar.limits.enumerated()), id: \.offset) { index, limit in
-                        // The share in mono, when it resets in prose (the board's P7).
+                        // The share in mono, when it resets in prose (the board's P7); at accessibility sizes one
+                        // under the other, so neither squeezes the other into two lines.
                         CCFactRow(
                             limit.caption, separator: index < bar.limits.count - 1 || bar.limitsNote != nil,
                             accessibilityValueText: ["\(limit.usedPercent)%", limit.resets].compactMap { $0 }
                                 .joined(separator: ", "),
                             value: {
-                                HStack(spacing: CC.space.sm) {
+                                let layout = typeSize.isAccessibilitySize
+                                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: CC.space.xxs))
+                                    : AnyLayout(HStackLayout(spacing: CC.space.sm))
+                                layout {
                                     CCFactValue(text: "\(limit.usedPercent)%")
                                     if let resets = limit.resets {
                                         Text(resets).ccType(CC.type.footnote).foregroundStyle(CC.text.tertiary)
