@@ -7006,7 +7006,7 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     ("run_hosts", "account_id", "TEXT"),
     ("run_hosts", "switching", "INTEGER"),
     ("run_hosts", "launch_account", "TEXT"),
-    // The usage limit a run stopped at (minor 54): its wire word, and when.
+    // The usage limit a run stopped at (minor 65): its wire word, and when.
     ("run_hosts", "limit_which", "TEXT"),
     ("run_hosts", "limit_at", "TEXT"),
 ];

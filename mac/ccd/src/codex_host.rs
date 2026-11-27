@@ -11142,7 +11142,7 @@ mod tests {
         }
     }
 
-    /// **A Codex turn that fails at a usage limit marks the run at it (minor 54), until its next turn**: `turn/completed`
+    /// **A Codex turn that fails at a usage limit marks the run at it (minor 65), until its next turn**: `turn/completed`
     /// failed with `codexErrorInfo` `usageLimitExceeded` names the window the connection's last
     /// `account/rateLimits/updated` said full (300 minutes: the 5-hour), or a workspace's when its
     /// `rateLimitReachedType` is one; the next `turn/started` clears it, and a turn failing otherwise names none.
