@@ -166,7 +166,6 @@ struct HostedSettingsButton: View {
     /// The models, one line each, then the selected model's efforts.
     private var modelPanel: some View {
         card(.model) {
-            header("Model")
             ForEach(Array(settings.models.enumerated()), id: \.element.value) { index, entry in
                 let marked = entry == settings.selectedModel
                 let id = "session.composer.model.\(entry.value)"
@@ -219,7 +218,7 @@ struct HostedSettingsButton: View {
     private func placed(_ which: SettingsPanel) -> (x: CGFloat, width: CGFloat) {
         let widest: CGFloat =
             switch which {
-            case .model: 420
+            case .model: 330
             case .mode: 240
             case .more: 180
             }
