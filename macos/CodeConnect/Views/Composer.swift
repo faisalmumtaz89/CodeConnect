@@ -15,8 +15,11 @@ struct ComposerBar: View {
     var body: some View {
         if let model = machines.model(forSession: key) {
             if let summary = model.shownSummary(for: key), summary.takesNoReply {
-                if let command = summary.resumeCommand { ResumeCommand(command: command).onConversationColumn() }
-                EndedLine()
+                // One stack, so nothing but the command's own 12 pt stands between it and the foot's hairline.
+                VStack(spacing: 0) {
+                    if let command = summary.resumeCommand { ResumeCommand(command: command).onConversationColumn() }
+                    EndedLine()
+                }
             } else if let kept = model.drafts(for: key) {
                 Composer(model: model, key: key, kept: kept, showsChanges: showsChanges).onConversationColumn()
             }
