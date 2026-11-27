@@ -336,9 +336,11 @@ async fn run_git_inner(
                 Some(merge_base) => {
                     files(&git, cwd, Some(&merge_base), timeout)
                         .await
-                        .map(|listed| protocol::ws::FromBase {
-                            merge_base,
-                            changed: changed_files(&listed),
+                        .map(|listed| {
+                            Box::new(protocol::ws::FromBase {
+                                merge_base,
+                                changed: changed_files(&listed),
+                            })
                         })
                 }
                 None => None,

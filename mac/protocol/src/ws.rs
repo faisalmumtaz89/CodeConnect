@@ -1518,7 +1518,7 @@ pub struct RunGit {
     /// `HEAD` and [`RunGitBase::reference`], committed and uncommitted, untracked ones
     /// included, counted as `changed` is. Absent without a head, a base, or a merge-base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from_base: Option<FromBase>,
+    pub from_base: Option<Box<FromBase>>,
 }
 
 /// A [`RunGit`]'s files against its base ([`RunGit::from_base`]).
