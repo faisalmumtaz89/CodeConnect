@@ -717,44 +717,44 @@ enum RenderCatalog {
                     driver.text(containing: "Not sent: stopped", in: app),
                     "the cancelled send's marker on the person's own row")
             }),
-        // **The run's branch and its +N −M**, under the bar, in ccd's `git_branch`
-        // and `diff_stat`: a long branch, a short one, a Codex run, and none.
+        // **The session's branch in its title, and its +N −M at the bar's end**, in ccd's `git_branch` and `diff_stat`:
+        // a long branch, a short one, a Codex session, and none.
         RenderScenario(
             name: "session-facts-long",
-            purpose: "a branch longer than the line gives way in its middle; +N −M keeps its edge",
+            purpose: "a branch longer than the title's line gives way in its middle; Changes keeps its +N −M",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
             reach: { app, driver in
-                let facts = app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch
-                try driver.requireExists(facts, "the run's branch line")
-                guard facts.label.contains("feature/") else { throw RenderFailure.unreachable("feature/ on the run's branch line") }
+                let title = app.descendants(matching: .any).matching(identifier: "session-title").firstMatch
+                try driver.requireExists(title, "the bar's title")
+                guard title.label.contains("branch feature/") else { throw RenderFailure.unreachable("feature/ in the title") }
+                try driver.requireExists(app.buttons["session-changes"], "the changes at the bar's end")
             }),
         RenderScenario(
             name: "session-facts-short",
-            purpose: "a short branch and its +N −M",
+            purpose: "a short branch in the title, and its +N −M",
             arguments: ["-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
             reach: { app, driver in
-                let facts = app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch
-                try driver.requireExists(facts, "the run's branch line")
-                guard facts.label.contains("main") else { throw RenderFailure.unreachable("main on the run's branch line") }
+                let title = app.descendants(matching: .any).matching(identifier: "session-title").firstMatch
+                try driver.requireExists(title, "the bar's title")
+                guard title.label.contains("branch main") else { throw RenderFailure.unreachable("main in the title") }
             }),
         RenderScenario(
             name: "session-facts-codex",
-            purpose: "a Codex run's branch and +N −M",
+            purpose: "a Codex session's branch in the title, and its +N −M",
             arguments: ["-CC_FIXTURE", "stacked", "-CC_DEEPLINK", "codeconnect://session/fx-4"],
             reach: { app, driver in
-                let facts = app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch
-                try driver.requireExists(facts, "the run's branch line")
-                guard facts.label.contains("main") else { throw RenderFailure.unreachable("main on the run's branch line") }
+                let title = app.descendants(matching: .any).matching(identifier: "session-title").firstMatch
+                try driver.requireExists(title, "the bar's title")
+                guard title.label.contains("branch main") else { throw RenderFailure.unreachable("main in the title") }
             }),
         RenderScenario(
             name: "session-facts-none",
-            purpose: "a folder ccd reports no branch for: no line under the bar",
+            purpose: "a folder ccd reports no branch for: the title names the folder and the computer alone",
             arguments: ["-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-3"],
             reach: { app, driver in
-                try driver.require(app.buttons["session-more"], "the session detail")
-                if app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch.exists {
-                    throw RenderFailure.unreachable("no branch line for a run without one")
-                }
+                let title = app.descendants(matching: .any).matching(identifier: "session-title").firstMatch
+                try driver.requireExists(title, "the bar's title")
+                if title.label.contains("branch ") { throw RenderFailure.unreachable("no branch for a session without one") }
             }),
         // **The run's ⋯ on a Claude run started from the app**: Changes, then
         // Claude Code's Compact and Clear, as the Mac's reply box offers them.
@@ -930,15 +930,16 @@ enum RenderCatalog {
         // The header's one line, when the computer's name is longer than it.
         RenderScenario(
             name: "session-header-long-name",
-            purpose: "a computer name longer than its line in the session bar's menu",
+            purpose: "a computer name longer than the title's line: the branch and the folder give way before it",
             arguments: [
                 "-CC_FIXTURE", "timelineLongName", "-CC_DEEPLINK", "codeconnect://session/fx-6",
             ],
             reach: { app, driver in
-                try driver.openSessionMenu(app)
-                try driver.requireExists(
-                    app.staticTexts["On Jordan’s MacBook Pro (16-inch, Nov 2024)"].firstMatch,
-                    "the computer's name, heading the menu's link item")
+                let title = app.descendants(matching: .any).matching(identifier: "session-title").firstMatch
+                try driver.requireExists(title, "the bar's title")
+                guard title.label.hasSuffix("on Jordan’s MacBook Pro (16-inch, Nov 2024)") else {
+                    throw RenderFailure.unreachable("the computer's whole name in the title")
+                }
             }),
 
         // **The decision, as a sheet.** The Deck renders this card full

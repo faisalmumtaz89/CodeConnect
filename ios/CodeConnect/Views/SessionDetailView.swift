@@ -985,7 +985,6 @@ struct SessionDetailView: View {
     /// timeline gives the keyboard back on a tap of its own.
     @FocusState private var composerFocused: Bool
     /// Landscape: the bar's title is one line, the path beside the project.
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     /// The run this screen is about. Everything on it — the timeline, the
     /// compose bar, the diff — is scoped to this one key, so a
@@ -1000,12 +999,10 @@ struct SessionDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // **The header is the bar.** The project and its path are the bar's
-            // title, and the rest is one tap away at its end, so
-            // the conversation starts where the bar stops. What the header carried
-            // only sometimes — a Codex turn's Stop, the permission note, an ended
-            // run's resume command — still shows, under the bar, while it applies.
-            RunFacts(summary: summary)
+            // **The header is the bar.** The session's title and where it runs are the bar's title, its changes and
+            // the rest one tap away at its end, so the conversation starts where the bar stops. What the header
+            // carried only sometimes — a Codex turn's Stop, the permission note, an ended run's resume command —
+            // still shows, under the bar, while it applies.
             sessionNotices
 
             if shown != nil {
@@ -1030,6 +1027,8 @@ struct SessionDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) { barTitle }
+            ToolbarItem(placement: .topBarTrailing) { changesButton }
+                .ccPlainToolbarItem()
             ToolbarItem(placement: .topBarTrailing) { moreMenu }
                 .ccPlainToolbarItem()
         }
@@ -1173,37 +1172,36 @@ struct SessionDetailView: View {
 
     // MARK: Bar
 
-    /// **Who this is, as the bar's title**: the status dot, the project, and the
-    /// path under it (beside it in landscape). It stops growing where iOS's own
-    /// bar titles do, since a bar has one height. A long press copies the whole
-    /// path, as it did on the header's path line.
+    /// **Who this is, as the bar's title**: the session's title (its first message, else its folder), and under it,
+    /// on one line, where it runs: the folder › the branch · the computer, by the Mac's or Linux's mark. Each part stays
+    /// on one line; short of room the branch gives way first, in its middle, then the folder at its end, the computer
+    /// last. It stops growing where iOS's own bar titles do, since a bar has one height. A long press copies the whole
+    /// path.
     private var barTitle: some View {
-        // A long name gives way in its middle and keeps its end, as on the Mac.
-        let name = Text(verbatim: label.project)
-            .ccType(CC.type.headline)
-            .foregroundStyle(CC.text.primary)
-            .lineLimit(1)
-            .truncationMode(.middle)
-        // The path is the Mac's, as it is: the phone does not know whose home
-        // folder it is under, so it does not shorten one. Head truncation keeps
-        // the tail, the part that identifies the run.
-        let path = Text(verbatim: summary?.shownCwd ?? "")
-            .ccType(CC.type.monoSmall)
-            .foregroundStyle(CC.text.tertiary)
-            .lineLimit(1)
-            .truncationMode(.head)
-        return HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
-            CCStatusDot(
-                color: dotColour,
-                size: CCStatusDot.Size.row.rawValue,
-                isHollow: shown?.loadedFromCacheAt != nil && shown?.hasLiveData != true,
-                pulses: (shown?.pendingApprovals.isEmpty == false))
-            .ccMark(beside: CC.type.headline)
-            if verticalSizeClass == .compact {
-                HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) { name; path }
-            } else {
-                VStack(alignment: .leading, spacing: 0) { name; path }
+        let branch = summary?.gitBranch?.displaySafe
+        let computer = model.machineName
+        return VStack(alignment: .leading, spacing: 1) {
+            Text(verbatim: summary?.title ?? label.project)
+                .ccType(CC.type.rowTitle)
+                .foregroundStyle(CC.text.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            HStack(spacing: 4) {
+                Text(verbatim: label.project).lineLimit(1).truncationMode(.tail).layoutPriority(1)
+                if let branch {
+                    Text(verbatim: "›").foregroundStyle(CC.text.tertiary)
+                    Text(verbatim: branch).font(.system(size: 11.5, design: .monospaced))
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                if let computer {
+                    Text(verbatim: "·").foregroundStyle(CC.text.tertiary)
+                    Image(systemName: model.machineOS == "linux" ? "server.rack" : "desktopcomputer")
+                        .font(.system(size: 10)).accessibilityHidden(true)
+                    Text(verbatim: computer).lineLimit(1).truncationMode(.tail).layoutPriority(2)
+                }
             }
+            .ccType(CC.type.footnote)
+            .foregroundStyle(CC.text.secondary)
         }
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .contentShape(Rectangle())
@@ -1212,9 +1210,34 @@ struct SessionDetailView: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            [label.project, summary.map { "Working directory, \($0.shownCwd)" }]
-                .compactMap { $0 }.joined(separator: ". "))
+            [summary?.title ?? label.project, label.project, branch.map { "branch \($0)" }, computer.map { "on \($0)" }]
+                .compactMap { $0 }.joined(separator: ", "))
         .accessibilityIdentifier("session-title")
+    }
+
+    /// **The session's changes, at the bar's end**: +N −M uncommitted, and its sheet a tap away. Never cut, on every
+    /// session; with no count read yet, the mark alone.
+    private var changesButton: some View {
+        Button {
+            showDiff = true
+        } label: {
+            HStack(spacing: 4) {
+                CCIcon("plus-minus", size: 14, weight: .regular)
+                if let diff = summary?.diffStat {
+                    Text(verbatim: "+\(diff.added)").foregroundStyle(CC.color.success)
+                    Text(verbatim: "−\(diff.removed)").foregroundStyle(CC.color.danger)
+                }
+            }
+            .ccType(CC.type.monoSmall)
+            .foregroundStyle(CC.text.secondary)
+            .fixedSize()
+            .ccHitTarget()
+        }
+        .buttonStyle(.plain)
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .accessibilityLabel("Changes")
+        .accessibilityValue(summary?.diffStat.map { "\($0.added) lines added, \($0.removed) removed" } ?? "")
+        .accessibilityIdentifier("session-changes")
     }
 
     /// The run as it was when End run was confirmed; the row reads Stopping once ccd takes it.
@@ -1223,17 +1246,10 @@ struct SessionDetailView: View {
         Task { endRunNote = await model.endRun(summary) }
     }
 
-    /// **Everything the bar does not show, one tap away.** First the session's
-    /// changes, whose sheet counts them, and the link's health under the name
-    /// of the computer the session is on, which is a heading, not an action.
-    /// Last, on a live run CodeConnect started, End run.
+    /// **Everything the bar does not show, one tap away**: Compact and Clear where the agent has them, the link's
+    /// health (the computer is named in the title), and last, on a live run CodeConnect started, End run.
     private var moreMenu: some View {
         return Menu {
-            Button {
-                showDiff = true
-            } label: {
-                Label("Changes", image: "plus-minus")
-            }
             // A Claude or Antigravity run started from the app takes its agent's
             // own Compact, and Claude's its Clear, as the Mac's reply box offers
             // them: agy has no clear.
@@ -1255,12 +1271,10 @@ struct SessionDetailView: View {
                 }
             }
             if !model.sampleFleetActive {
-                Section(model.machineName.map { "On \($0)" } ?? "") {
-                    Button {
-                        showLinkDetail = true
-                    } label: {
-                        Label("Link health", image: "desktop")
-                    }
+                Button {
+                    showLinkDetail = true
+                } label: {
+                    Label("Link health", image: "desktop")
                 }
             }
             // Ending a run cannot be undone, so it is last, and asks first.
@@ -1339,13 +1353,6 @@ struct SessionDetailView: View {
             .background(CC.color.surface)
             .overlay(alignment: .bottom) { CCHairline() }
         }
-    }
-
-    private var dotColour: Color {
-        guard let summary else { return CC.text.tertiary }
-        let status = FleetStatusRule.status(
-            summary: summary, shown: shown, reviewedSeq: shown?.reviewedSeq ?? 0)
-        return status.ccDotColor
     }
 
     /// A deep link aimed at *this* session opens what it asked for.
@@ -2398,47 +2405,8 @@ extension ComposeProse.Tone {
     }
 }
 
-/// **What the screen does not already say about the run**, one line under the
-/// bar: the folder's branch in code type, and its uncommitted +N −M at the
-/// right edge. The agent is in the reply box's placeholder and the model
-/// above it, so neither repeats here. Short of room the branch gives way in
-/// its middle; with neither fact known the line is absent.
-private struct RunFacts: View {
-    let summary: SessionSummary?
-
-    @Environment(\.dynamicTypeSize) private var typeSize
-
-    var body: some View {
-        let branch = summary?.gitBranch?.displaySafe
-        let diff = summary?.diffStat
-        if branch != nil || diff != nil {
-            HStack(spacing: CC.space.sm) {
-                if let branch {
-                    Text(verbatim: branch)
-                        .foregroundStyle(CC.text.secondary)
-                        .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
-                        .truncationMode(.middle)
-                }
-                Spacer(minLength: 0)
-                if let diff {
-                    (Text(verbatim: "+\(diff.added)").foregroundStyle(CC.color.success)
-                        + Text(verbatim: " −\(diff.removed)").foregroundStyle(CC.color.danger))
-                        .fixedSize()
-                }
-            }
-            .ccType(CC.type.monoSmall)
-            .padding(.horizontal, CC.space.md)
-            .padding(.vertical, CC.space.xs)
-            .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("session-facts")
-        }
-    }
-}
-
-/// In an ended run's reply box's place: a hairline, then the run's end said
-/// quietly, a check mark on the text's first line (`SessionWords.runEnded`).
-/// It keeps the room the box keeps above itself (`SessionComposeBar`), so the
-/// settings line over it stands as clear of it as of the box.
+/// In an ended session's reply box's place: a hairline, then one line: the agent's mark, the session's end said
+/// quietly (`SessionWords.runEnded`), and the model it ran on with its effort.
 private struct EndedLine: View {
     let model: AppModel
     let key: String
