@@ -298,9 +298,11 @@ private struct Composer: View {
 
     // MARK: The box
 
-    /// The reply field's prompt: at a usage limit, when a message goes through again.
+    /// The reply field's prompt: at a usage limit, when a message goes through again; while the run's computer is
+    /// offline, that it is and when a reply can go.
     private func prompt(_ agent: String) -> String {
-        model.limitFoot(for: key, now: .now)?.prompt ?? SessionWords.replyPrompt(agent)
+        model.limitFoot(for: key, now: .now)?.prompt ?? model.offlineReply(for: key, draft: kept.reply)
+            ?? SessionWords.replyPrompt(agent)
     }
 
     private var box: some View {
@@ -457,8 +459,11 @@ private struct Composer: View {
         if case .hostedLive(let settings) = model.runSettings(for: key), let outcome = settings.lastOutcome {
             return Line(text: outcome.text, tone: outcome.tone.composeTone)
         }
-        // Why the files hold the message back stands under them, not here as well.
-        let standing = blocked != nil && runBlocked == nil ? nil : model.standingNote(for: key, draft: kept.reply)
+        // Why the files hold the message back stands under them, not here as well; an offline computer is said in the
+        // field's prompt.
+        let standing =
+            blocked != nil && runBlocked == nil || model.offlineReply(for: key, draft: kept.reply) != nil
+            ? nil : model.standingNote(for: key, draft: kept.reply)
         if let kit = model.outcomeNote(for: key, lastSend: result) ?? standing {
             return Line(text: kit.text, tone: kit.tone)
         }

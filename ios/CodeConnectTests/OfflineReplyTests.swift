@@ -30,6 +30,7 @@ final class OfflineReplyTests: XCTestCase {
         XCTAssertEqual(
             model.standingNote(for: key, draft: "hello")?.text, "lumen5090 is offline. You can reply once it’s back.")
         XCTAssertEqual(model.sendBlockedReason(for: key, draft: "hello"), model.linkHealth.disabledReason)
+        XCTAssertEqual(model.offlineReply(for: key, draft: "hello"), "lumen5090 is offline. You can reply once it’s back.")
     }
 
     /// The changes panel, while the computer is offline: whom it can't reach, and how old what it shows is.
@@ -45,5 +46,6 @@ final class OfflineReplyTests: XCTestCase {
         let model = model(linkState: "tailnet")
         XCTAssertEqual(model.linkHealth.level, .offline)
         XCTAssertEqual(model.standingNote(for: key, draft: "hello")?.text, model.linkHealth.disabledReason)
+        XCTAssertNil(model.offlineReply(for: key, draft: "hello"))
     }
 }

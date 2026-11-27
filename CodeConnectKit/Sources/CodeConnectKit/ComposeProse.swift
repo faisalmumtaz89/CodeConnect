@@ -223,9 +223,7 @@ extension AppModel {
     /// run's own reason it cannot be answered from here (offering "Why?"), else nil.
     public func standingNote(for key: String, draft: String) -> ComposeProse.Note? {
         if let reason = sendBlockedReason(for: key, draft: draft) {
-            // An offline computer by name, and when a reply can go; an offline link with a cause of its own keeps it.
-            let offline = reason == linkHealth.disabledReason && linkHealth.level == .offline && linkHealth.cause == nil
-            let text = offline ? machineName.map(SessionWords.computerOffline) ?? reason : reason
+            let text = offlineReply(for: key, draft: draft) ?? reason
             return ComposeProse.Note(text: text, tone: .warning, icon: "warning-circle-fill")
         }
         if let summary = shownSummary(for: key),
@@ -234,6 +232,15 @@ extension AppModel {
             return ComposeProse.Note(text: "Observe only. \(reason)", tone: .neutral, icon: nil, offersWhy: true)
         }
         return nil
+    }
+
+    /// Why a reply to `key` cannot go while its computer is offline, by the computer's name, and when it can; nil when
+    /// the computer is not offline, or its offline link has a cause of its own (which says more), or has no name.
+    public func offlineReply(for key: String, draft: String) -> String? {
+        guard let reason = sendBlockedReason(for: key, draft: draft), reason == linkHealth.disabledReason,
+            linkHealth.level == .offline, linkHealth.cause == nil
+        else { return nil }
+        return machineName.map(SessionWords.computerOffline)
     }
 
     /// Whether to ask an unanswered send once more, now that the link is back: connected, not already sending, the
