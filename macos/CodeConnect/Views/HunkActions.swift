@@ -23,12 +23,15 @@ import SwiftUI
     /// A run that takes no reply can't be commented to; its hunks can still be copied.
     var comments: Bool { model.shownSummary(for: key)?.takesNoReply != true }
 
+    /// The run's agent by name, as its reply box names it.
+    var agent: String { model.shownSummary(for: key)?.agent.displayName ?? "the agent" }
+
     func items(file: UnifiedDiff.FileDiff, hunk: UnifiedDiff.Hunk, id: String) -> [RowMenu.Item] {
         let hunkID = Self.id(file: file, hunk: hunk)
         var items: [RowMenu.Item] = []
         if comments {
             items.append(RowMenu.Item(
-                id: "\(id).comment", title: "Comment to Agent…", symbol: PanelSymbol.comment, destructive: false
+                id: "\(id).comment", title: "Comment to \(agent)…", symbol: PanelSymbol.comment, destructive: false
             ) { [self] in
                 sent = nil
                 commenting = hunkID
@@ -155,7 +158,7 @@ struct HunkCommentField: View {
                 .foregroundStyle(Theme.text)
                 .lineLimit(1...5)
                 .sendsOnReturn(send)
-                // It appears because Comment to Agent… was just chosen: what is typed next is the comment.
+                // It appears because Comment to <agent>… was just chosen: what is typed next is the comment.
                 .takesKeyboardWhenShown($focused)
                 .onExitCommand { actions.commenting = nil }
                 .accessibilityLabel(ChangesWords.commentPrompt)
