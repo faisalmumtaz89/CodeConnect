@@ -177,7 +177,7 @@ struct FleetList: View {
         // Ending a run cannot be undone: it asks once (the approved words), then says only what went wrong.
         .confirmation($ending) { row in
             Confirmation(
-                FleetWords.endAsk(row.label.inline, agent: row.summary.agent.displayName), cancelID: "endRun.cancel",
+                FleetWords.endAsk(row.title, agent: row.summary.agent.displayName), cancelID: "endRun.cancel",
                 confirmID: "endRun.confirm"
             ) { endRun(row) }
         }
@@ -747,12 +747,13 @@ private struct FleetLine: View {
                 StateIcon(status: row.status, offline: offline, limited: row.summary.atLimit)
                     .accessibilityIdentifier("fleet.row.\(row.id).status")
             }
-            Text(row.label.inline)
+            // The name fills the row up to its time: no spacer of its own, which would cost the row's gap twice.
+            Text(row.title)
                 .font(Theme.ui(13, row.status == .blocked ? .medium : .regular))
                 .foregroundStyle(row.status == .ended ? Theme.text2 : Theme.text)
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Spacer(minLength: 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
             if let refusal {
                 Text(refusal).font(Theme.ui(11.5)).foregroundStyle(Theme.amber).lineLimit(1)
             }

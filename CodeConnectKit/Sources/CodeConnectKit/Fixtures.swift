@@ -701,10 +701,20 @@ enum Fixtures {
             let agent = codex ? "\"agent\":\"codex\"," : ""
             var hosted = ""
             #if DEBUG
+                // `-CC_FIXTURE_TITLES YES`: each run carries a title (minor 63), the first line of its first message,
+                // as ccd sends one, so the list and the run's header draw it.
+                if UserDefaults.standard.bool(forKey: "CC_FIXTURE_TITLES") {
+                    let titles = [
+                        "Retry the router on 5xx", "Batch remove ended runs", "Default checkpoint for the importer",
+                        "Support page for 0.19.23", "Usage reset countdown", "Audit setup against installed",
+                        "Fix the flaky parser test", "Release notes for 0.19.30",
+                    ]
+                    hosted += "\"title\":\"\(titles[(index - 1) % titles.count])\","
+                }
                 // `-CC_FIXTURE_PLAIN_CONVERSATION YES`: `fx-7`, the website's conversation, is a hosted Claude run on
                 // Sonnet 5.5 at High in the asking mode, `fx-1`'s menus under `hostedSettings`, so its settings line draws.
                 if index == 7, UserDefaults.standard.bool(forKey: "CC_FIXTURE_PLAIN_CONVERSATION") {
-                    hosted = showcaseSettingsJSON
+                    hosted += showcaseSettingsJSON
                 }
             #endif
             return """
