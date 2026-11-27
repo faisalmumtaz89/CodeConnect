@@ -185,11 +185,6 @@ public enum TimelineBuilder {
     /// drawn or not, or 0 when there is none. A prompt Claude Code annulled is
     /// none: resuming a session whose last prompt went unanswered, it writes
     /// its placeholder reply, and that prompt will never be answered.
-    /// Whether the run's latest end is one the person asked for (End Run), as the daemon marks it.
-    static func endedByPerson(_ events: [Event]) -> Bool {
-        events.last { $0.kind == .sessionEnd }?.endedByPerson == true
-    }
-
     static func lastPromptSeq(_ events: [Event]) -> UInt64 {
         for event in events.reversed() {
             if event.isClaudePlaceholderReply { return 0 }
@@ -227,7 +222,9 @@ public enum TimelineBuilder {
     }
 
     /// `accountName` names an account by its id (nil: the agent's Default) as this app's account book knows it, or nil
-    /// when it does not; a failed switch's row reads it, else the label its event carries.
+    /// when it does not; a failed switch's row reads it, else the label its event carries. `keepsWorktree`: the run
+    /// works in a worktree of its own that stays (`SessionSummary.inWorktree`), which the end the person asked for
+    /// says.
     static func build(
         _ events: [Event], accountName: (String?) -> String? = { _ in nil }, keepsWorktree: Bool = false
     ) -> [TimelineItem] {
@@ -582,7 +579,7 @@ public enum TimelineBuilder {
                 }
                 switched = false
                 runEnded = true
-                items.append(event.item(.notice(endNotice(for: event))))
+                items.append(event.item(.notice(endNotice(for: event, keepsWorktree: keepsWorktree))))
 
             case .turnComplete:
                 var end = endNotice(for: event)
@@ -825,7 +822,12 @@ public enum TimelineBuilder {
         }
     }
 
-    private static func endNotice(for event: Event) -> NoticeItem {
+    private static func endNotice(for event: Event, keepsWorktree: Bool = false) -> NoticeItem {
+        if event.endedByPerson {
+            return NoticeItem(
+                kind: .sessionEnded, symbol: "power",
+                title: SessionWords.ended(byPerson: true, inWorktree: keepsWorktree), detail: nil, severity: .info)
+        }
         if let failure = event.turnFailure {
             // As artboard 04 says it: what stopped the run, then when, and that a message carries on.
             let at = Format.clock(event.date, now: event.date)

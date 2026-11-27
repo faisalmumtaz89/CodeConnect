@@ -16,7 +16,7 @@ struct ComposerBar: View {
         if let model = machines.model(forSession: key) {
             if let summary = model.shownSummary(for: key), summary.takesNoReply {
                 if let command = summary.resumeCommand { ResumeCommand(command: command).onConversationColumn() }
-                EndedLine(model: model, key: key, summary: summary)
+                EndedLine()
             } else if let kept = model.drafts(for: key) {
                 Composer(model: model, key: key, kept: kept, showsChanges: showsChanges).onConversationColumn()
             }
@@ -24,14 +24,9 @@ struct ComposerBar: View {
     }
 }
 
-/// In an ended run's reply box's place: the pane's foot band, under its hairline; the mark and words on the
-/// conversation's notice columns, and under its words the agent the run was, with its model and the effort it ended
-/// with, as far as the run said them.
+/// In an ended run's reply box's place: the pane's foot band, under its hairline, the one 34 pt line that says the run
+/// has ended (artboard 13); the mark and words on the conversation's notice columns.
 private struct EndedLine: View {
-    let model: AppModel
-    let key: String
-    let summary: SessionSummary
-
     var body: some View {
         VStack(spacing: 0) {
             Rectangle().fill(Theme.hairline).frame(height: 1)
@@ -39,15 +34,8 @@ private struct EndedLine: View {
                 Image(systemName: "checkmark.circle").font(.system(size: 11)).foregroundStyle(Theme.text3)
                     .frame(width: 14)
                     .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(
-                        SessionWords.ended(
-                            byPerson: model.shown(for: key)?.endedByPerson == true, inWorktree: summary.inWorktree))
-                    agentLine
-                }
-                .font(Theme.ui(12))
-                .foregroundStyle(Theme.text3)
-                .padding(.vertical, 8)
+                Text(SessionWords.runEnded).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                    .padding(.vertical, 8)
             }
             .padding(.horizontal, 28)
             .frame(minHeight: 34)
@@ -55,19 +43,6 @@ private struct EndedLine: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("session.endedLine")
-    }
-
-    /// The agent, and the model it said it ran when it said: by the label of the run's menu entry for that model when
-    /// there is one, so the line and the settings list spell it alike, else as the agent reported it, in code type
-    /// (Kit's `modelName`); then the effort it ended with (Kit's `headerEffort`), with or without a model said.
-    private var agentLine: Text {
-        var line = Text(summary.agent.productName)
-        if let confirmed = model.confirmedModel(for: key) {
-            let name = RunSettings.modelName(confirmed: confirmed.name, menus: summary.menus, label: summary.modelLabel)
-            line = Text("\(line) · \(name.reported ? Text(name.text).font(Theme.mono(11.5)) : Text(name.text))")
-        }
-        if let effort = RunSettings.headerEffort(summary: summary) { line = Text("\(line) · \(effort)") }
-        return line
     }
 }
 

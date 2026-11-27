@@ -85,8 +85,6 @@ public final class SessionState {
     /// The newest prompt handed to the agent, built with `timeline`
     /// (`TimelineBuilder.lastPromptSeq`).
     private(set) var lastPromptSeq: UInt64 = 0 { didSet { unpublished = true } }
-    /// The run's latest end is one the person asked for (`TimelineBuilder.endedByPerson`).
-    private(set) var endedByPerson = false { didSet { unpublished = true } }
     /// When the on-disk copy was written. Non-nil only until live data arrives,
     /// so the UI can say "as of 6 minutes ago" and mean it.
     private(set) var loadedFromCacheAt: Date? { didSet { unpublished = true } }
@@ -409,8 +407,6 @@ public final class SessionState {
         // first difference, and the timeline is the costly one.
         public var drawnThrough: UInt64 = 0
         var lastPromptSeq: UInt64 = 0
-        /// The run's latest end is one the person asked for (End Run).
-        public var endedByPerson = false
         /// When the run last did something: its newest event that is not a fact the daemon keeps about it. A daemon
         /// restart files a `link_state` for every run it finds still running, and a Codex run's reattach files its
         /// settings (`codex_settings`) again; neither is the run doing anything.
@@ -462,12 +458,14 @@ public final class SessionState {
     @ObservationIgnored var codexTurns: () -> (observed: [String], retired: Set<String>) = { ([], []) }
     /// An account's name as this app's account book knows it, by its id (nil: the Default), for a switch's rows.
     @ObservationIgnored var accountName: (String?) -> String? = { _ in nil }
+    /// The run works in a worktree of its own that stays (`SessionSummary.inWorktree`), for its end's notice.
+    @ObservationIgnored var keepsWorktree: () -> Bool = { false }
 
     /// What a publication now would put on screen.
     var current: Shown {
         let turns = codexTurns()
         return Shown(
-            drawnThrough: drawnThrough, lastPromptSeq: lastPromptSeq, endedByPerson: endedByPerson,
+            drawnThrough: drawnThrough, lastPromptSeq: lastPromptSeq,
             // A switch of account's end and the daemon's start of the run on the new account are no activity: the
             // person's message that moved it is. Nor is a background task's start or end, a quiet fact.
             lastActivityAt: events.last(where: { event in
@@ -889,7 +887,6 @@ public final class SessionState {
         timeline.removeAll()
         drawnThrough = 0
         lastPromptSeq = 0
-        endedByPerson = false
         // Cleared with the timeline it is a projection of. Left behind, a
         // rewound/reset log would keep feeding stale cards to the Deck
         // (`AppModel.deck` flat-maps this) and to any open sheet's live lookup —
@@ -1141,7 +1138,7 @@ public final class SessionState {
         let built = TimelineBuilder.build(
             pins.values.flatMap { [$0.event] + ($0.resolution.map { [$0] } ?? []) }
                 .sorted { $0.seq < $1.seq } + events,
-            accountName: accountName)
+            accountName: accountName, keepsWorktree: keepsWorktree())
         let start = windowStart ?? 0
         let next = pins.isEmpty ? built : built.filter { $0.seq >= start }
         pinnedItems = pins.isEmpty ? [] : built.filter { $0.seq < start }.map(withPinnedHold)
@@ -1149,7 +1146,6 @@ public final class SessionState {
         timeline = next
         drawnThrough = lastSeq
         lastPromptSeq = TimelineBuilder.lastPromptSeq(events)
-        endedByPerson = TimelineBuilder.endedByPerson(events)
         // Derived here, in the one place the timeline can change, so the cached
         // copy cannot go stale — a Deck holding a card the log has resolved
         // would invite a second answer to a decision already made.
