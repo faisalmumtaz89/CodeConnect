@@ -3071,9 +3071,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 70,
             "a failed turn's end (`failed` on `turn_complete`) is minor 70"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 71,
+            "the repository a run works in (`repo` on a session) is minor 71"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 70);
+        assert_eq!(crate::PROTOCOL_MINOR, 71);
     }
 
     /// **The tags, pinned on this side too.**

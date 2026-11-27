@@ -1138,6 +1138,7 @@ impl Daemon {
         for pending in &mut pendings {
             self.truncate_payload(pending);
         }
+        let moved = notes.cwd.is_some();
         let gate = self.publish_gate(session_uid).await;
         let events = {
             // Held across the commit and the broadcast, as in `ingest`.
@@ -1155,6 +1156,9 @@ impl Daemon {
             events
         };
         self.published(session_uid, &events).await;
+        if moved {
+            self.refresh_tree(session_uid);
+        }
         Ok(Some(events))
     }
 
@@ -3734,6 +3738,7 @@ impl Daemon {
         // Every run's title, as kept.
         let titles = self.db.run_titles().await?;
         let archived = self.db.archived_runs().await?;
+        let repos = self.db.run_repos().await?;
         // And the request event of every open card, one query per card on the
         // dedup index: the seq its pending ref names, and a Codex card's turn. The
         // cards are snapshotted first, so one raised after the snapshot is listed in
@@ -3877,6 +3882,7 @@ impl Daemon {
             &relaunchable,
             &titles,
             &archived,
+            &repos,
         );
         for session in &mut sessions {
             if let (Some(fact), Some(id)) =
@@ -4980,6 +4986,7 @@ impl Daemon {
         relaunchable: &HashSet<String>,
         titles: &HashMap<String, String>,
         archived: &HashSet<String>,
+        repos: &HashMap<String, (String, protocol::event::RepoFact)>,
     ) -> Vec<SessionSummary> {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -5025,6 +5032,11 @@ impl Daemon {
                 Some(HostLink::Codex(..))
             ) && row.lifecycle == Lifecycle::Live;
             let codex = row.agent == protocol::agent::AgentKind::Codex;
+            // Kept from the last read in the run's folder; one read in a folder it has left is not its.
+            let repo = repos
+                .get(&row.session_uid)
+                .filter(|(cwd, _)| *cwd == row.cwd)
+                .map(|(_, repo)| repo.clone());
             out.push(SessionSummary {
                 session_uid: row.session_uid.clone(),
                 session_id: row.session_id.clone(),
@@ -5093,6 +5105,7 @@ impl Daemon {
                 title: titles.get(&row.session_uid).cloned(),
                 limit: None,
                 archived: archived.contains(&row.session_uid),
+                repo,
             });
         }
         out
@@ -6177,9 +6190,9 @@ impl Daemon {
         outcome
     }
 
-    /// Read a run's branch and line counts from git into the session list, on a
-    /// task of its own so no caller waits on git. A run whose row is gone is
-    /// left alone.
+    /// Read a run's branch, line counts and repository from git into the session list, on a
+    /// task of its own so no caller waits on git; the repository is kept in the store. A run
+    /// whose row is gone is left alone.
     fn refresh_tree(&self, session_uid: &str) {
         let db = self.db.clone();
         let inner = Arc::clone(&self.inner);
@@ -6194,6 +6207,11 @@ impl Daemon {
             let gate = git_gate_in(&gates, &row.cwd).await;
             let _one_at_a_time = gate.lock().await;
             let tree = crate::git::tree_facts(&row.cwd, git_bin.as_deref(), timeout).await;
+            if let Some(repo) = tree.repo.clone() {
+                if let Err(err) = db.keep_run_repo(session_uid.clone(), row.cwd, repo).await {
+                    crate::log_error!("{session_uid}: could not keep its repository: {err:#}");
+                }
+            }
             inner.lock().await.tree_facts.insert(session_uid, tree);
         });
     }
@@ -8580,6 +8598,123 @@ mod tests {
         let summary = read_after(2).await;
         assert_eq!(summary.git_branch.as_deref(), Some("next"));
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// **A run's repository is read with its tree and kept**: listed once a turn ends, not read
+    /// again by a listing, still there after a restart when its folder is gone, and read again
+    /// when its folder changes, a fact kept for another folder never listed for the new one.
+    #[tokio::test]
+    async fn a_runs_repository_is_kept_and_follows_its_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "ccd-repo-fact-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            std::fs::create_dir_all(dir).unwrap();
+            let status = std::process::Command::new(crate::git::git_bin(None).unwrap())
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        let (app, next, plain) = (root.join("app"), root.join("next"), root.join("plain"));
+        git(&app, &["init", "-q", "-b", "main"]);
+        git(&app, &["remote", "add", "origin", "git@github.com:Faisal/App.git"]);
+        git(&next, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(&plain).unwrap();
+        let real = |dir: &std::path::Path| dir.canonicalize().unwrap().to_str().unwrap().to_string();
+        let app_repo = protocol::event::RepoFact {
+            name: "app".into(),
+            remote: Some("github.com/faisal/app".into()),
+            main_path: real(&app),
+        };
+
+        let store = shared_store();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        hosted_run(&daemon, TEST_UID, app.to_str().unwrap());
+        let repo_becomes = |daemon: &Arc<Daemon>, want: Option<protocol::event::RepoFact>| {
+            let daemon = Arc::clone(daemon);
+            async move {
+                for _ in 0..200 {
+                    if summary_of(&daemon, TEST_UID).await.repo == want {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                panic!("the repository was not read as {want:?} within 10 s");
+            }
+        };
+        assert_eq!(summary_of(&daemon, TEST_UID).await.repo, None, "before any read");
+        daemon
+            .ingest(
+                PendingEvent::new(
+                    &SessionKey::new(TEST_UID, TEST_UID),
+                    EventKind::TurnComplete,
+                    json!({}),
+                    Source::Daemon,
+                )
+                .with_source_event_id("turn-1".to_string()),
+            )
+            .await
+            .unwrap()
+            .expect("a new turn end");
+        repo_becomes(&daemon, Some(app_repo.clone())).await;
+
+        git(&app, &["remote", "set-url", "origin", "https://github.com/other/app"]);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            summary_of(&daemon, TEST_UID).await.repo,
+            Some(app_repo.clone()),
+            "a listing reads no git"
+        );
+
+        let _ = std::fs::remove_dir_all(&app);
+        let restarted = daemon_on(Arc::clone(&store), Config::default());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            summary_of(&restarted, TEST_UID).await.repo,
+            Some(app_repo),
+            "kept across a restart, its folder gone"
+        );
+
+        let moved = |seq: u64, cwd: &std::path::Path| {
+            let restarted = Arc::clone(&restarted);
+            let cwd = cwd.to_str().unwrap().to_string();
+            async move {
+                restarted
+                    .ingest_host_message(
+                        TEST_UID,
+                        HOST,
+                        seq,
+                        Vec::new(),
+                        crate::store::RunNotes {
+                            cwd: Some(cwd),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap()
+                    .expect("the cursor moves");
+            }
+        };
+        moved(1, &next).await;
+        repo_becomes(
+            &restarted,
+            Some(protocol::event::RepoFact {
+                name: "next".into(),
+                remote: None,
+                main_path: real(&next),
+            }),
+        )
+        .await;
+        moved(2, &plain).await;
+        repo_becomes(&restarted, None).await;
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // -------------------------------------------------- seeded runs
