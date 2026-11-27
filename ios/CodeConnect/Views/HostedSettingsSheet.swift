@@ -26,6 +26,7 @@ struct HostedSettingsSheet: View {
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     /// A mode the menu marks `confirm`, tapped and awaiting the person's confirmation before it is sent.
     @State private var confirmingMode: MenuMode?
@@ -85,7 +86,23 @@ struct HostedSettingsSheet: View {
         // The effort menu is the selected model's; with nothing selected there is none to draw.
         if !live.efforts.isEmpty {
             CCSectionHeader("Effort · for \(live.modelDisplay.isEmpty ? "this model" : live.modelDisplay)")
-            effortRow(live)
+            if typeSize.isAccessibilitySize {
+                // Segments this wide cut every label at accessibility sizes, so the efforts are rows, as Permission's.
+                card {
+                    ForEach(Array(live.efforts.enumerated()), id: \.element.value) { index, entry in
+                        let isSelected = live.selectedEffort?.value == entry.value
+                        choiceRow(
+                            title: entry.label, detail: isSelected && live.effortIsDefault ? "Default" : nil,
+                            isSelected: isSelected, offered: live.offers(entry) || !isSelected,
+                            isLast: index == live.efforts.count - 1, disabled: live.inFlight
+                        ) {
+                            await model.setEffort(for: sessionKey, effortValue: entry.value)
+                        }
+                    }
+                }
+            } else {
+                effortRow(live)
+            }
         }
         CCSectionHeader("Permission")
         card {
