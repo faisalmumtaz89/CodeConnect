@@ -116,7 +116,7 @@ struct HunkHeader: View {
     }
 
     private func show(at rect: CGRect) {
-        menu.toggle(rect, owner: id, items: actions.items(file: file, hunk: hunk, id: id))
+        menu.toggle(rect, owner: id, items: actions.items(file: file, hunk: hunk, id: id), trailing: true)
     }
 }
 
