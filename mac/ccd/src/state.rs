@@ -179,6 +179,10 @@ pub struct Daemon {
     /// One per run folder: no two of its diff, repository read, session-list refresh and
     /// action run git at once ([`Daemon::git_gate`]).
     git_gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// One per (common git folder, remote, base): the base's last fetch for a conflicts read,
+    /// held while it fetches, so a repository's worktrees fetch it once per
+    /// [`BASE_FETCH_WINDOW`] ([`Daemon::fetched_base`]).
+    base_fetches: Mutex<HashMap<BaseKey, Arc<Mutex<Option<BaseFetch>>>>>,
     /// The runs' GitHub reads, bounded per branch ([`crate::github::Reads`]).
     github: crate::github::Reads,
     /// One gate per run, held by a person's message to a run with a switch of account from reading the run through
@@ -548,6 +552,7 @@ impl Daemon {
             inner: Arc::new(Mutex::new(Inner::default())),
             publish_gates: Mutex::new(HashMap::new()),
             git_gates: Arc::new(Mutex::new(HashMap::new())),
+            base_fetches: Mutex::new(HashMap::new()),
             github: crate::github::Reads::default(),
             move_gates: Mutex::new(HashMap::new()),
             registration_gates: Mutex::new(HashMap::new()),
@@ -5230,6 +5235,129 @@ impl Daemon {
         .await)
     }
 
+    /// A run's conflicts with its base: the commit checked out and the base, both pinned
+    /// before the base is fetched, merged in git's object store. Not behind the folder's gate:
+    /// it reads fixed commits and changes nothing in the folder, so a commit's hooks never hold
+    /// it. The reply's comparison and note ([`protocol::ws::ServerMessage::Conflicts`]).
+    pub async fn conflicts(
+        &self,
+        session_ref: &str,
+    ) -> Result<(Option<protocol::ws::RunConflicts>, Option<String>)> {
+        let row = self.resolve(session_ref).await?;
+        let timeout = Duration::from_millis(self.config.diff_timeout_ms);
+        let git_bin = self.config.git_bin.as_deref();
+        let ends = match crate::git::conflict_ends(&row.cwd, git_bin, timeout).await {
+            Ok(ends) => ends,
+            Err(note) => return Ok((None, Some(note))),
+        };
+        let (base_oid, fetched_at, note) = self.fetched_base(&row.cwd, &ends).await;
+        let Some(base_oid) = base_oid else {
+            return Ok((None, note));
+        };
+        let compared =
+            crate::git::conflicted_files(&row.cwd, git_bin, &ends.head_oid, &base_oid).await;
+        Ok(match compared {
+            Ok((clean, files, files_complete)) => (
+                Some(protocol::ws::RunConflicts {
+                    base: ends.base,
+                    base_oid,
+                    head_oid: ends.head_oid,
+                    fetched_at,
+                    clean,
+                    files,
+                    files_complete,
+                    read_at: protocol::time::now_rfc3339(),
+                }),
+                note,
+            ),
+            Err(why) => (None, Some(why)),
+        })
+    }
+
+    /// The base commit to compare with: fetched now unless its repository, remote and base were
+    /// tried within [`BASE_FETCH_WINDOW`], then that try's commit; after a failed try, the ref as
+    /// last fetched, with a note saying why. Returns the commit, when it was fetched, and the note.
+    async fn fetched_base(
+        &self,
+        cwd: &str,
+        ends: &crate::git::ConflictEnds,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let timeout = Duration::from_millis(self.config.diff_timeout_ms);
+        let git_bin = self.config.git_bin.as_deref();
+        let key = (
+            ends.common_dir.clone(),
+            ends.base.remote.clone(),
+            ends.base.name.clone(),
+        );
+        let slot = Arc::clone(self.base_fetches.lock().await.entry(key).or_default());
+        let mut last = slot.lock().await;
+        if last
+            .as_ref()
+            .is_none_or(|fetch| fetch.at.elapsed() >= BASE_FETCH_WINDOW)
+        {
+            let environment = crate::start_session::phone_environment();
+            let outcome = match crate::git::fetch_base(cwd, git_bin, &ends.base, &environment).await
+            {
+                Ok(()) => crate::git::ref_oid(cwd, git_bin, &ends.base.reference, timeout)
+                    .await
+                    .map(|oid| (oid, protocol::time::now_rfc3339()))
+                    .ok_or_else(|| format!("{} is not there after the fetch", ends.base.reference)),
+                Err(why) => Err(why),
+            };
+            *last = Some(BaseFetch {
+                at: std::time::Instant::now(),
+                outcome,
+            });
+        }
+        match last.as_ref().map(|fetch| &fetch.outcome) {
+            Some(Ok((oid, at))) => (Some(oid.clone()), Some(at.clone()), None),
+            Some(Err(why)) => {
+                let note = format!(
+                    "could not fetch {}/{}: {why}",
+                    ends.base.remote, ends.base.name
+                );
+                let oid = crate::git::ref_oid(cwd, git_bin, &ends.base.reference, timeout).await;
+                (oid, None, Some(note))
+            }
+            None => (None, None, None),
+        }
+    }
+
+    /// One conflicted file's hunks in the merge of `head_oid` with `base_oid`, as
+    /// [`Self::conflicts`] compared them; nothing fetched, and not behind the folder's gate, as
+    /// that read is not. The inner `Err` is the note.
+    pub async fn conflict(
+        &self,
+        session_ref: &str,
+        path: &str,
+        head_oid: &str,
+        base_oid: &str,
+    ) -> Result<std::result::Result<Vec<protocol::ws::ConflictHunk>, String>> {
+        let is_oid = |oid: &str| {
+            matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        };
+        if !is_oid(head_oid) || !is_oid(base_oid) {
+            return Ok(Err("not a commit id".into()));
+        }
+        let row = self.resolve(session_ref).await?;
+        let read = crate::git::conflict_hunks(
+            &row.cwd,
+            self.config.git_bin.as_deref(),
+            head_oid,
+            base_oid,
+            path,
+            Duration::from_millis(self.config.diff_timeout_ms),
+        );
+        Ok(tokio::time::timeout(CONFLICT_DEADLINE, read)
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "git did not answer within {} s",
+                    CONFLICT_DEADLINE.as_secs()
+                ))
+            }))
+    }
+
     /// A run's repository for its Changes panel, read in the run's own folder from our
     /// registry, as [`Self::diff`] is. The inner `Err` is the note saying why git gave none.
     pub async fn run_git(
@@ -6738,6 +6866,23 @@ async fn git_gate_in(gates: &Mutex<HashMap<String, Arc<Mutex<()>>>>, cwd: &str) 
     let mut gates = gates.lock().await;
     gates.retain(|_, gate| Arc::strong_count(gate) > 1);
     Arc::clone(gates.entry(cwd.to_string()).or_default())
+}
+
+/// How often a base is fetched for a conflicts read, at most: a read inside the window compares
+/// with that fetch, whether it worked or not.
+const BASE_FETCH_WINDOW: Duration = Duration::from_secs(30);
+
+/// How long reading one file's hunks may take, all of it.
+const CONFLICT_DEADLINE: Duration = Duration::from_secs(20);
+
+/// A base fetched for conflicts reads: the repository's common git folder, the remote, the base.
+type BaseKey = (String, String, String);
+
+/// A base's last fetch for a conflicts read.
+struct BaseFetch {
+    at: std::time::Instant,
+    /// The commit fetched and when; else git's line.
+    outcome: std::result::Result<(String, String), String>,
 }
 
 /// The refusal for GitHub not giving an answer before anything was done.
@@ -9208,6 +9353,146 @@ mod tests {
                 (code.clone(), detail.clone())
             }
             done => panic!("not refused: {done:?}"),
+        }
+    }
+
+    /// **A run's conflicts are read against its base as fetched, once per window**: the base
+    /// fetched where it moved on at its remote, and its conflict's hunks read from that
+    /// comparison; a second read inside the window compares with that same fetch; a remote that
+    /// cannot be reached gives the comparison with the base as last fetched and says why; and a
+    /// commit id that is not one is refused before git sees it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_runs_conflicts_are_read_against_its_fetched_base() {
+        let _env = crate::ProcessEnvRead::take();
+        let daemon = daemon_on(shared_store(), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNC66";
+        let dir = run_in_a_repository_as(
+            &daemon,
+            uid,
+            protocol::agent::AgentKind::Claude,
+            Lifecycle::Exited,
+        );
+        let bare = dir.with_extension("bare");
+        let other = dir.with_extension("other");
+        git_in(
+            &dir,
+            &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
+        );
+        std::fs::write(dir.join("a.txt"), "1\n2\n").unwrap();
+        git_in(&dir, &["add", "."]);
+        git_in(&dir, &["commit", "-q", "-m", "a"]);
+        git_in(&dir, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        git_in(&dir, &["push", "-q", "-u", "origin", "main"]);
+        git_in(&dir, &["remote", "set-head", "origin", "main"]);
+        git_in(&dir, &["switch", "-q", "-c", "feat"]);
+        std::fs::write(dir.join("a.txt"), "1\nFEAT\n").unwrap();
+        git_in(&dir, &["commit", "-q", "-am", "feat"]);
+        let head = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+        git_in(
+            &dir,
+            &[
+                "clone",
+                "-q",
+                bare.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        let moved = |file: &str, text: &str| {
+            std::fs::write(other.join(file), text).unwrap();
+            git_in(&other, &["add", "."]);
+            git_in(
+                &other,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.com",
+                    "commit",
+                    "-q",
+                    "-m",
+                    file,
+                ],
+            );
+            git_in(&other, &["push", "-q", "origin", "main"]);
+            git_in(&other, &["rev-parse", "HEAD"]).trim().to_string()
+        };
+        let base = moved("a.txt", "1\nMAIN\n");
+
+        let (Some(read), None) = daemon.conflicts(uid).await.unwrap() else {
+            panic!("no comparison");
+        };
+        assert_eq!(
+            (read.head_oid.as_str(), read.base_oid.as_str()),
+            (head.as_str(), base.as_str())
+        );
+        assert_eq!(read.base.reference, "refs/remotes/origin/main");
+        assert!(read.fetched_at.is_some());
+        assert!(!read.clean);
+        assert_eq!(read.files, ["a.txt"]);
+        assert_eq!(
+            daemon.conflict(uid, "a.txt", &head, &base).await.unwrap(),
+            Ok(vec![protocol::ws::ConflictHunk {
+                ours: "FEAT\n".into(),
+                theirs: "MAIN\n".into()
+            }])
+        );
+
+        // Inside the window: the base moved again, and the same fetch is compared.
+        moved("b.txt", "b\n");
+        let (Some(again), None) = daemon.conflicts(uid).await.unwrap() else {
+            panic!("no comparison");
+        };
+        assert_eq!(
+            (again.base_oid.as_str(), &again.fetched_at),
+            (base.as_str(), &read.fetched_at)
+        );
+
+        // The remote gone: the base as last fetched, and why it was not fetched now.
+        let unfetched = daemon_on(shared_store(), Config::default());
+        seed_run_in(
+            &unfetched,
+            uid,
+            &dir,
+            protocol::agent::AgentKind::Claude,
+            Lifecycle::Exited,
+        );
+        std::fs::rename(&bare, bare.with_extension("gone")).unwrap();
+        let (Some(stale), Some(note)) = unfetched.conflicts(uid).await.unwrap() else {
+            panic!("no comparison and note");
+        };
+        assert_eq!(
+            (stale.base_oid.as_str(), stale.fetched_at),
+            (base.as_str(), None)
+        );
+        assert!(note.starts_with("could not fetch origin/main: "), "{note}");
+
+        assert_eq!(
+            daemon
+                .conflict(uid, "a.txt", "--output=x", &base)
+                .await
+                .unwrap(),
+            Err("not a commit id".into())
+        );
+
+        // A commit's hooks holding the folder: neither read waits for it.
+        let gate = unfetched.git_gate(dir.to_str().unwrap()).await;
+        let _held = gate.lock().await;
+        let read = tokio::time::timeout(Duration::from_secs(5), async {
+            (
+                unfetched.conflicts(uid).await.unwrap(),
+                unfetched
+                    .conflict(uid, "a.txt", &head, &base)
+                    .await
+                    .unwrap(),
+            )
+        })
+        .await
+        .expect("a conflicts read waited for the folder's gate");
+        assert!(read.0 .0.is_some() && read.1.is_ok(), "{read:?}");
+        drop(_held);
+        for path in [dir, bare.with_extension("gone"), other] {
+            let _ = std::fs::remove_dir_all(path);
         }
     }
 

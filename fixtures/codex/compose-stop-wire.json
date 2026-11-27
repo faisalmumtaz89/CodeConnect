@@ -342,6 +342,7 @@
     "codex_compose": true,
     "codex_interrupt": true,
     "command_catalog": true,
+    "conflicts": true,
     "delete_session": true,
     "diff": true,
     "git_actions": [

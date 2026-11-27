@@ -297,9 +297,12 @@ where
             )
             .await?
         }
-        // Not advertised (`changes` is false, `git_actions` empty): answered as a daemon below
-        // minors 58 and 59 answers them.
-        ClientMessage::GetRunGit { .. } | ClientMessage::GitAction { .. } => {
+        // Not advertised (`changes` and `conflicts` false, `git_actions` empty): answered as a
+        // daemon below minors 58, 59 and 66 answers them.
+        ClientMessage::GetRunGit { .. }
+        | ClientMessage::GitAction { .. }
+        | ClientMessage::GetConflicts { .. }
+        | ClientMessage::GetConflict { .. } => {
             send(
                 sink,
                 &ServerMessage::Error {
@@ -574,6 +577,7 @@ fn capabilities() -> Capabilities {
         run_terminal: false,
         changes: false,
         git_actions: Vec::new(),
+        conflicts: false,
     }
 }
 

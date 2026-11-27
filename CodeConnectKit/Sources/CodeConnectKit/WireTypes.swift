@@ -1139,6 +1139,9 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// This daemon answers `get_run_git` (minor 58) for this paired device. An older one answers it with
     /// `bad_request`, so nothing is sent unless this is set.
     public var readsRunGit: Bool { advertises(["changes"]) }
+    /// This daemon answers `get_conflicts` and `get_conflict` (minor 66) for this paired device. An older one answers
+    /// them with `bad_request`, so nothing is sent unless this is set.
+    public var readsConflicts: Bool { advertises(["conflicts"]) }
     /// This daemon commits a run's changes from its Changes panel for this paired device (`git_actions` naming
     /// `commit`, minor 59). An older one answers `git_action` with `bad_request`, so nothing is sent unless this is set.
     public var commitsChanges: Bool {
@@ -2110,6 +2113,56 @@ public struct RunGitReply: Sendable, Hashable {
     public let note: String?
 }
 
+/// The answer to `get_conflicts`. `conflicts` nil, with the computer's note: nothing was compared. Both: the
+/// comparison is with the base as last fetched, and the note says why it could not be fetched now.
+public struct ConflictsReply: Sendable, Hashable {
+    public let sessionID: String
+    public let conflicts: RunConflicts?
+    public let note: String?
+}
+
+/// A run's commit merged, in git only, with its base (minor 66): what was compared, and what conflicts.
+public struct RunConflicts: Decodable, Sendable, Hashable {
+    public let base: RunGit.Base
+    public let baseOID: String
+    /// The commit checked out; uncommitted changes are not in it.
+    public let headOID: String
+    /// When the computer fetched `baseOID`; nil when it is the base as last fetched before.
+    public let fetchedAt: String?
+    /// Git merges the two with no conflict. False with no `files` is a conflict git names no file for.
+    public let clean: Bool
+    /// The conflicted paths, from the repository's top, at most 100.
+    public let files: [String]
+    public let filesComplete: Bool
+    public let readAt: String
+
+    private enum CodingKeys: String, CodingKey {
+        case base, clean, files
+        case baseOID = "base_oid"
+        case headOID = "head_oid"
+        case fetchedAt = "fetched_at"
+        case filesComplete = "files_complete"
+        case readAt = "read_at"
+    }
+}
+
+/// The answer to `get_conflict`. `hunks` empty: the file conflicts with no lines to show (binary, deleted on one side,
+/// renamed); nil, with the note: it could not be read.
+public struct ConflictReply: Sendable, Hashable {
+    public let sessionID: String
+    public let path: String
+    public let hunks: [ConflictHunk]?
+    /// False: these are the hunks that fit, in order, and the file has more.
+    public let hunksComplete: Bool
+    public let note: String?
+}
+
+/// One conflicting stretch of a file: the lines on the branch checked out, then the base's.
+public struct ConflictHunk: Decodable, Sendable, Hashable {
+    public let ours: String
+    public let theirs: String
+}
+
 /// A run's repository, as `get_run_git` reads it (minor 58).
 public struct RunGit: Decodable, Sendable, Hashable {
     /// Absent on a detached head.
@@ -2424,6 +2477,10 @@ public enum ClientMessage: Sendable {
     case getDiff(session: String)
     /// A run's repository for its Changes panel (minor 58, `changes`), answered with `runGit`.
     case getRunGit(session: String)
+    /// A run's conflicts with its base (minor 66, `conflicts`), answered with `conflicts`.
+    case getConflicts(session: String)
+    /// One file's hunks in the comparison a `conflicts` answer named (minor 66), answered with `conflict`.
+    case getConflict(session: String, path: String, headOID: String, baseOID: String)
     case getCommandCatalog(session: String)
     /// "Push me here." Sent whenever Apple issues a token, not only at
     /// handshake: permission can be granted mid-session and the token is
@@ -2589,6 +2646,8 @@ extension ClientMessage: Encodable {
         case resumeAfter = "resume_after"
         case takeover
         case bytes
+        case headOID = "head_oid"
+        case baseOID = "base_oid"
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -2622,6 +2681,15 @@ extension ClientMessage: Encodable {
         case .getRunGit(let session):
             try c.encode("get_run_git", forKey: .type)
             try c.encode(session, forKey: .sessionID)
+        case .getConflicts(let session):
+            try c.encode("get_conflicts", forKey: .type)
+            try c.encode(session, forKey: .sessionID)
+        case .getConflict(let session, let path, let headOID, let baseOID):
+            try c.encode("get_conflict", forKey: .type)
+            try c.encode(session, forKey: .sessionID)
+            try c.encode(path, forKey: .path)
+            try c.encode(headOID, forKey: .headOID)
+            try c.encode(baseOID, forKey: .baseOID)
         case .getCommandCatalog(let session):
             try c.encode("get_command_catalog", forKey: .type)
             try c.encode(session, forKey: .sessionID)
@@ -3077,6 +3145,10 @@ public enum ServerMessage: Sendable {
     case diff(SessionDiff)
     /// The answer to `getRunGit`.
     case runGit(RunGitReply)
+    /// The answer to `getConflicts`.
+    case conflicts(ConflictsReply)
+    /// The answer to `getConflict`.
+    case conflict(ConflictReply)
     /// The answer to one `interrupt`. `sessionID` and `requestID` are echoed
     /// back as the phone sent them, so correlation is exact-string on the id
     /// this end minted.
@@ -3180,6 +3252,9 @@ extension ServerMessage: Decodable {
         case bytes
         case reason
         case note
+        case conflicts
+        case hunks
+        case hunksComplete = "hunks_complete"
     }
 
     public init(from decoder: Decoder) throws {
@@ -3207,6 +3282,20 @@ extension ServerMessage: Decodable {
                 RunGitReply(
                     sessionID: try c.decode(String.self, forKey: .sessionID),
                     git: try c.decodeIfPresent(RunGit.self, forKey: .git),
+                    note: try c.decodeIfPresent(String.self, forKey: .note)))
+        case "conflicts":
+            self = .conflicts(
+                ConflictsReply(
+                    sessionID: try c.decode(String.self, forKey: .sessionID),
+                    conflicts: try c.decodeIfPresent(RunConflicts.self, forKey: .conflicts),
+                    note: try c.decodeIfPresent(String.self, forKey: .note)))
+        case "conflict":
+            self = .conflict(
+                ConflictReply(
+                    sessionID: try c.decode(String.self, forKey: .sessionID),
+                    path: try c.decode(String.self, forKey: .path),
+                    hunks: try c.decodeIfPresent([ConflictHunk].self, forKey: .hunks),
+                    hunksComplete: try c.decodeIfPresent(Bool.self, forKey: .hunksComplete) ?? false,
                     note: try c.decodeIfPresent(String.self, forKey: .note)))
         case "sessions":
             self = .sessions(try c.decode([SessionSummary].self, forKey: .sessions))
