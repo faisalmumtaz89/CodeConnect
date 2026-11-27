@@ -1006,7 +1006,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     `rejected`, or a Codex turn fails with `usageLimitExceeded`; gone once the run's next turn starts. It names the
 ///     limit ([`event::LimitKind`]), not its reset, which is the run's account's held window of that length. A daemon
 ///     below 65 sends none.
-pub const PROTOCOL_MINOR: u32 = 65;
+///   * `66` — **A run's conflicts with its base.**
+///
+///     [`ws::ClientMessage::GetConflicts`] fetches [`ws::RunGit`]'s base (at most once per 30 s for a repository, remote
+///     and base) and answers [`ws::RunConflicts`]: the two commits compared, whether git merges them cleanly, and the
+///     conflicted paths; [`ws::ClientMessage::GetConflict`] answers one file's [`ws::ConflictHunk`]s from that same
+///     comparison. Capability `conflicts`; a daemon below 66 has neither.
+pub const PROTOCOL_MINOR: u32 = 66;
 
 #[cfg(test)]
 mod ledger_tests {

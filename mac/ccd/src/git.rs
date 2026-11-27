@@ -389,6 +389,330 @@ pub async fn push(
     }
 }
 
+/// The two ends a run's conflicts are read between: the commit checked out and [`RunGit`]'s
+/// base, with the repository's common git folder (the same for all its worktrees).
+///
+/// [`RunGit`]: protocol::ws::RunGit
+pub struct ConflictEnds {
+    pub head_oid: String,
+    pub base: protocol::ws::RunGitBase,
+    pub common_dir: String,
+}
+
+/// [`ConflictEnds`] at `cwd`, read before anything is fetched so a commit made meanwhile is not
+/// what is compared. `Err` is the note saying why there are none.
+pub async fn conflict_ends(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    timeout: Duration,
+) -> std::result::Result<ConflictEnds, String> {
+    let git = git_bin(configured_bin).ok_or("git is not installed at a known location")?;
+    let common_dir = run(
+        &git,
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()
+    .filter(|out| out.ok)
+    .map(|out| out.stdout.trim().to_string())
+    .ok_or("not a git repository")?;
+    let head_oid = commit_oid(&git, cwd, "HEAD", timeout)
+        .await
+        .ok_or("no commit is checked out")?;
+    let branch = branch(cwd, configured_bin, timeout).await;
+    let base = remotes(&git, cwd, branch.as_deref(), Some(&head_oid), timeout)
+        .await
+        .base
+        .ok_or("no base branch is known: no remote names its default branch")?;
+    Ok(ConflictEnds {
+        head_oid,
+        base,
+        common_dir,
+    })
+}
+
+/// The commit `name` resolves to at `cwd` now.
+pub async fn ref_oid(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    name: &str,
+    timeout: Duration,
+) -> Option<String> {
+    commit_oid(&git_bin(configured_bin)?, cwd, name, timeout).await
+}
+
+async fn commit_oid(git: &Path, cwd: &str, name: &str, timeout: Duration) -> Option<String> {
+    let rev = format!("{name}^{{commit}}");
+    let out = run(
+        git,
+        cwd,
+        &["rev-parse", "--verify", "--quiet", &rev],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()?;
+    let oid = out.stdout.trim();
+    (out.ok && !oid.is_empty()).then(|| oid.to_string())
+}
+
+/// How long a fetch of a base may take.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `base` fetched from its remote into its own ref, through the login shell as [`push`] is (the
+/// person's credentials), with nothing that could ask: no askpass program (`GIT_ASKPASS` set
+/// empty), no ssh askpass, no credential manager window. `Err` is git's line.
+pub async fn fetch_base(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    base: &protocol::ws::RunGitBase,
+    environment: &std::collections::HashMap<std::ffi::OsString, std::ffi::OsString>,
+) -> std::result::Result<(), String> {
+    let git = git_bin(configured_bin).ok_or("git is not installed")?;
+    let mut environment = environment.clone();
+    environment.insert("GIT_ASKPASS".into(), "".into());
+    environment.insert("SSH_ASKPASS_REQUIRE".into(), "never".into());
+    let refspec = format!("+refs/heads/{}:{}", base.name, base.reference);
+    let args = [
+        "-c",
+        "credential.interactive=false",
+        "fetch",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--recurse-submodules=no",
+        "--",
+        base.remote.as_str(),
+        refspec.as_str(),
+    ];
+    match run_write(&git, cwd, &args, FETCH_TIMEOUT, &environment).await {
+        Ok(out) if out.ok => Ok(()),
+        Ok(out) => Err(out
+            .stderr
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| line.chars().take(300).collect())
+            .unwrap_or_else(|| "git fetch failed".into())),
+        Err(err) => Err(format!("{err:#}")),
+    }
+}
+
+/// How long a merge of the two ends may take.
+const MERGE_TREE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The most conflicted paths a reply names.
+const MAX_CONFLICT_FILES: usize = 100;
+
+/// `head_oid` merged with `base_oid` by git, in its object store only, from the repository's top
+/// (git names the paths from where it runs): that top, the tree it wrote, whether it merged
+/// cleanly (its exit status alone), and the conflicted paths. `Err` is the note.
+async fn merge_tree(
+    git: &Path,
+    cwd: &str,
+    head_oid: &str,
+    base_oid: &str,
+) -> std::result::Result<(String, String, bool, Vec<String>), String> {
+    let top = run(
+        git,
+        cwd,
+        &["rev-parse", "--show-toplevel"],
+        MERGE_TREE_TIMEOUT,
+        PROBE_CAP,
+    )
+    .await
+    .ok()
+    .filter(|out| out.ok)
+    .map(|out| out.stdout.trim().to_string())
+    .filter(|top| !top.is_empty())
+    .ok_or("not a git work tree")?;
+    let out = run(
+        git,
+        &top,
+        &[
+            "-c",
+            "merge.conflictStyle=merge",
+            "merge-tree",
+            "--write-tree",
+            "-z",
+            "--name-only",
+            head_oid,
+            base_oid,
+        ],
+        MERGE_TREE_TIMEOUT,
+        LISTING_CAP,
+    )
+    .await
+    .map_err(|err| format!("{err:#}"))?;
+    let clean = match out.code {
+        Some(0) => true,
+        Some(1) => false,
+        // 129 is git's usage error: a git before 2.38 has no `--write-tree`.
+        Some(129) => return Err("comparing with the base needs git 2.38 or later".into()),
+        _ => {
+            return Err(out
+                .stderr
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| line.chars().take(300).collect())
+                .unwrap_or_else(|| "git merge-tree did not finish".into()))
+        }
+    };
+    // The tree, then the conflicted paths up to an empty field; git's messages after it are
+    // not read (their layout differs between git versions).
+    let mut fields = out.stdout.split('\0');
+    let tree = fields.next().unwrap_or_default().trim().to_string();
+    let files = fields
+        .take_while(|field| !field.is_empty())
+        .map(str::to_string)
+        .collect();
+    Ok((top, tree, clean, files))
+}
+
+/// `head_oid` and `base_oid` at `cwd` compared: whether they merge cleanly, and the first
+/// [`MAX_CONFLICT_FILES`] conflicted paths with whether that is all of them.
+pub async fn conflicted_files(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    head_oid: &str,
+    base_oid: &str,
+) -> std::result::Result<(bool, Vec<String>, bool), String> {
+    let git = git_bin(configured_bin).ok_or("git is not installed at a known location")?;
+    let (_, _, clean, mut files) = merge_tree(&git, cwd, head_oid, base_oid).await?;
+    let complete = files.len() <= MAX_CONFLICT_FILES;
+    files.truncate(MAX_CONFLICT_FILES);
+    Ok((clean, files, complete))
+}
+
+/// The largest conflicted file whose hunks are read.
+const MAX_CONFLICT_FILE_BYTES: usize = 1024 * 1024;
+
+/// `path`'s hunks in the merge of `head_oid` with `base_oid`. `Err` is the note: the file has no
+/// conflict in that merge, is over [`MAX_CONFLICT_FILE_BYTES`], or has marker-like lines of its own
+/// that cannot be told apart from git's (a quoted marker, a title underlined as wide as the separator).
+pub async fn conflict_hunks(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    head_oid: &str,
+    base_oid: &str,
+    path: &str,
+    timeout: Duration,
+) -> std::result::Result<Vec<protocol::ws::ConflictHunk>, String> {
+    let git = git_bin(configured_bin).ok_or("git is not installed at a known location")?;
+    let (top, tree, _, files) = merge_tree(&git, cwd, head_oid, base_oid).await?;
+    if !files.iter().any(|file| file == path) {
+        return Err("the file has no conflict in that comparison".into());
+    }
+    let object = format!("{tree}:{path}");
+    let size = run(&git, &top, &["cat-file", "-s", &object], timeout, PROBE_CAP)
+        .await
+        .ok()
+        .filter(|out| out.ok)
+        .and_then(|out| out.stdout.trim().parse::<usize>().ok());
+    let Some(size) = size else {
+        // Deleted on one side, or a submodule: git kept no file to show.
+        return Ok(Vec::new());
+    };
+    if size > MAX_CONFLICT_FILE_BYTES {
+        return Err("the file is over 1 MB".into());
+    }
+    let blob = run(
+        &git,
+        &top,
+        &["cat-file", "blob", &object],
+        timeout,
+        MAX_CONFLICT_FILE_BYTES,
+    )
+    .await
+    .map_err(|err| format!("{err:#}"))?;
+    if !blob.ok || blob.stdout_truncated {
+        return Err("git could not read the file".into());
+    }
+    if blob.stdout.contains('\0') {
+        return Ok(Vec::new());
+    }
+    conflict_blocks(&blob.stdout, head_oid, base_oid)
+        .ok_or_else(|| "the file's conflict markers cannot be told apart from its own lines".into())
+}
+
+/// The conflict blocks of a file git merged `head_oid` and `base_oid` into, as `merge` style
+/// writes them: a line of 7 or more `<` and `head_oid` (a `:path` after it when git renamed the
+/// file), this branch's lines, a line of as many `=`, the base's lines, a line of as many `>`
+/// and `base_oid`. `None` when any other marker-like line does not fit that: a block written by
+/// someone else (a file that quotes markers, a merge driver's own format). An `=` line other than
+/// a block's one separator is the file's own (a heading's underline), inside a block or out.
+fn conflict_blocks(
+    text: &str,
+    head_oid: &str,
+    base_oid: &str,
+) -> Option<Vec<protocol::ws::ConflictHunk>> {
+    let opening = |line: &str| -> Option<usize> {
+        let width = line.bytes().take_while(|byte| *byte == b'<').count();
+        let label = line[width..].strip_prefix(' ')?;
+        (width >= 7 && (label == head_oid || label.strip_prefix(head_oid)?.starts_with(':')))
+            .then_some(width)
+    };
+    let looks_like_marker = |line: &str| {
+        ["<<<<<<<", "=======", ">>>>>>>", "|||||||"]
+            .iter()
+            .any(|marker| line.starts_with(marker))
+    };
+    let mut hunks = Vec::new();
+    let mut lines = text.split_inclusive('\n');
+    while let Some(line) = lines.next() {
+        let line_text = line.trim_end_matches(['\n', '\r']);
+        let Some(width) = opening(line_text) else {
+            // An `=` line opens nothing: outside a block it is a heading's underline.
+            if !line_text.starts_with('=') && looks_like_marker(line_text) {
+                return None;
+            }
+            continue;
+        };
+        let separator = "=".repeat(width);
+        let closing = ">".repeat(width);
+        let (mut ours, mut theirs) = (String::new(), String::new());
+        let mut in_theirs = false;
+        let mut closed = false;
+        for line in lines.by_ref() {
+            let line_text = line.trim_end_matches(['\n', '\r']);
+            if !in_theirs && line_text == separator {
+                in_theirs = true;
+            } else if in_theirs
+                && line_text
+                    .strip_prefix(closing.as_str())
+                    .and_then(|rest| rest.strip_prefix(' '))
+                    .is_some_and(|label| {
+                        label == base_oid
+                            || label
+                                .strip_prefix(base_oid)
+                                .is_some_and(|rest| rest.starts_with(':'))
+                    })
+            {
+                closed = true;
+                break;
+            } else if line_text == separator
+                || (!line_text.starts_with('=') && looks_like_marker(line_text))
+            {
+                // A second separator, or another marker: not a block git wrote. Any other `=`
+                // line is the file's own (a heading's underline).
+                return None;
+            } else if in_theirs {
+                theirs.push_str(line);
+            } else {
+                ours.push_str(line);
+            }
+        }
+        if !closed {
+            return None;
+        }
+        hunks.push(protocol::ws::ConflictHunk { ours, theirs });
+    }
+    Some(hunks)
+}
+
 /// The URL `remote` pushes to (`push`) or fetches from. A name holding a `:` is itself the URL:
 /// git refuses one in a remote's name, and `gh pr checkout` of a fork's PR sets the fork's URL
 /// as the branch's remote.
@@ -1290,6 +1614,8 @@ pub(crate) struct Output {
     pub(crate) stderr: String,
     /// The child produced more than the cap and was stopped.
     pub(crate) stdout_truncated: bool,
+    /// Its exit code; `None` when it was stopped (at the cap, or by a signal).
+    pub(crate) code: Option<i32>,
 }
 
 /// Run `command`, any short read-only child of ccd's (`gh`), as [`run`] runs git's: bounded
@@ -1437,6 +1763,7 @@ async fn run_child(
             stdout: String::from_utf8_lossy(&out_bytes).into_owned(),
             stderr: String::from_utf8_lossy(&err_bytes).into_owned(),
             stdout_truncated,
+            code: status.and_then(|status| status.code()),
         });
     }
 
@@ -1498,6 +1825,11 @@ async fn run_child(
         stdout: String::from_utf8_lossy(&out_bytes).into_owned(),
         stderr: String::from_utf8_lossy(&err_bytes).into_owned(),
         stdout_truncated,
+        code: if stdout_truncated {
+            None
+        } else {
+            status.and_then(|status| status.code())
+        },
     })
 }
 
@@ -2333,6 +2665,259 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// **A conflict block is the merge's own**: blocks labelled with the two commits compared
+    /// (a renamed file's `:path` after them, a person's wider markers) are read; a file quoting
+    /// markers of its own, or a block left open, gives none rather than a wrong hunk.
+    #[test]
+    fn a_conflict_block_is_the_merges_own() {
+        let (head, base) = ("a".repeat(40), "b".repeat(40));
+        let hunk = |ours: &str, theirs: &str| protocol::ws::ConflictHunk {
+            ours: ours.into(),
+            theirs: theirs.into(),
+        };
+        let merged = format!(
+            "one\n<<<<<<< {head}\nFEAT\n=======\nMAIN\n>>>>>>> {base}\ntwo\n\
+             <<<<<<<<<< {head}:new.txt\nx\r\n==========\n>>>>>>>>>> {base}:old.txt\n"
+        );
+        assert_eq!(
+            conflict_blocks(&merged, &head, &base),
+            Some(vec![hunk("FEAT\n", "MAIN\n"), hunk("x\r\n", "")])
+        );
+        assert_eq!(conflict_blocks("no markers\n", &head, &base), Some(vec![]));
+        let quoted = format!(
+            "<<<<<<< HEAD\nexample\n=======\nother\n>>>>>>> topic\n\
+             <<<<<<< {head}\nFEAT\n=======\nMAIN\n>>>>>>> {base}\n"
+        );
+        assert_eq!(conflict_blocks(&quoted, &head, &base), None);
+        let open = format!("<<<<<<< {head}\nFEAT\n=======\nMAIN\n");
+        assert_eq!(conflict_blocks(&open, &head, &base), None);
+        let underlined =
+            format!("Title\n=======\n\n<<<<<<< {head}\nFEAT\n=======\nMAIN\n>>>>>>> {base}\n");
+        assert_eq!(
+            conflict_blocks(&underlined, &head, &base),
+            Some(vec![hunk("FEAT\n", "MAIN\n")]),
+            "a heading's underline is not a marker"
+        );
+        let entries = format!(
+            "Changes\n=======\n\n<<<<<<< {head}\n1.1.0\n=====\n\n- feat\n=======\n\
+             1.0.1\n==================\n\n- fix\n>>>>>>> {base}\n"
+        );
+        assert_eq!(
+            conflict_blocks(&entries, &head, &base),
+            Some(vec![hunk(
+                "1.1.0\n=====\n\n- feat\n",
+                "1.0.1\n==================\n\n- fix\n"
+            )]),
+            "underlines inside a block are its lines"
+        );
+        let twice = format!("<<<<<<< {head}\nA\n=======\nB\n=======\nC\n>>>>>>> {base}\n");
+        assert_eq!(
+            conflict_blocks(&twice, &head, &base),
+            None,
+            "a second separator is not git's"
+        );
+        let other_commit = format!(
+            "<<<<<<< {}\nFEAT\n=======\nMAIN\n>>>>>>> {base}\n",
+            "c".repeat(40)
+        );
+        assert_eq!(conflict_blocks(&other_commit, &head, &base), None);
+    }
+
+    /// **A branch is compared with its base as git merges them**: the base fetched from its
+    /// remote where it moved on, the conflicted files named by git, a text file's hunks, a file
+    /// deleted on one side with none to show, a path with no conflict refused; and the base
+    /// compared with itself merges cleanly.
+    #[tokio::test]
+    async fn a_branch_is_compared_with_its_base_as_git_merges_them() {
+        let (dir, remote) = repo_with_origin("conflicts");
+        let cwd = dir.to_str().unwrap();
+        let timeout = Duration::from_secs(10);
+        std::fs::write(dir.join("gone.txt"), "x\n").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "gone"]);
+        git_sync(&dir, &["push", "-q", "origin", "main"]);
+        // The base moves on at its remote, and this clone has not fetched it.
+        let other = temp_dir("conflicts-other");
+        git_sync(&other, &["clone", "-q", remote.to_str().unwrap(), "."]);
+        std::fs::write(other.join("a.txt"), "1\nMAIN\n").unwrap();
+        git_sync(&other, &["rm", "-q", "gone.txt"]);
+        git_sync(&other, &["commit", "-qam", "main"]);
+        git_sync(&other, &["push", "-q", "origin", "main"]);
+        git_sync(&dir, &["switch", "-q", "-c", "feat"]);
+        std::fs::write(dir.join("a.txt"), "1\nFEAT\n").unwrap();
+        std::fs::write(dir.join("gone.txt"), "x\nmine\n").unwrap();
+        git_sync(&dir, &["commit", "-qam", "feat"]);
+
+        let ends = conflict_ends(cwd, None, timeout).await.unwrap();
+        assert_eq!(ends.head_oid, head_of(&dir));
+        assert_eq!(ends.base.reference, "refs/remotes/origin/main");
+        assert!(ends.common_dir.ends_with(".git"), "{}", ends.common_dir);
+        let stale = ref_oid(cwd, None, &ends.base.reference, timeout)
+            .await
+            .unwrap();
+        let environment = login_environment(&dir, "/usr/bin:/bin");
+        fetch_base(cwd, None, &ends.base, &environment)
+            .await
+            .unwrap();
+        let base_oid = ref_oid(cwd, None, &ends.base.reference, timeout)
+            .await
+            .unwrap();
+        assert_eq!(base_oid, head_of(&other), "the base as its remote has it");
+        assert_ne!(base_oid, stale);
+
+        let (clean, files, complete) = conflicted_files(cwd, None, &ends.head_oid, &base_oid)
+            .await
+            .unwrap();
+        assert!(!clean);
+        assert_eq!(files, ["a.txt", "gone.txt"]);
+        assert!(complete);
+        let hunks = conflict_hunks(cwd, None, &ends.head_oid, &base_oid, "a.txt", timeout)
+            .await
+            .unwrap();
+        assert_eq!(
+            hunks,
+            [protocol::ws::ConflictHunk {
+                ours: "FEAT\n".into(),
+                theirs: "MAIN\n".into()
+            }]
+        );
+        assert_eq!(
+            conflict_hunks(cwd, None, &ends.head_oid, &base_oid, "gone.txt", timeout).await,
+            Ok(vec![]),
+            "deleted on one side: no lines to show"
+        );
+        assert!(
+            conflict_hunks(cwd, None, &ends.head_oid, &base_oid, "b.txt", timeout)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            conflicted_files(cwd, None, &base_oid, &base_oid).await,
+            Ok((true, vec![], true))
+        );
+        for path in [dir, remote, other] {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    /// **A run in a subfolder reads its conflicts from the repository's top**: the path is named
+    /// from the top and its hunks are that file's, not a root file of the same name; a valid
+    /// UTF-8 file holding a replacement character is still read; a file whose markers git did
+    /// not write answers why.
+    #[tokio::test]
+    async fn a_run_in_a_subfolder_reads_its_conflicts_from_the_top() {
+        let dir = committable("subfolder");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/a.txt"), "1\n2\n").unwrap();
+        std::fs::write(dir.join("a.txt"), "root\n").unwrap();
+        std::fs::write(dir.join("q.md"), "quoted\n<<<<<<< HEAD\n1\n").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "base"]);
+        git_sync(&dir, &["switch", "-q", "-c", "feat"]);
+        std::fs::write(dir.join("sub/a.txt"), "\u{FFFD} kept\nFEAT\n").unwrap();
+        std::fs::write(dir.join("q.md"), "quoted\n<<<<<<< HEAD\nFEAT\n").unwrap();
+        git_sync(&dir, &["commit", "-qam", "feat"]);
+        let head = head_of(&dir);
+        git_sync(&dir, &["switch", "-q", "main"]);
+        std::fs::write(dir.join("sub/a.txt"), "\u{FFFD} kept\nMAIN\n").unwrap();
+        std::fs::write(dir.join("q.md"), "quoted\n<<<<<<< HEAD\nMAIN\n").unwrap();
+        git_sync(&dir, &["commit", "-qam", "main"]);
+        let base = head_of(&dir);
+        let sub = dir.join("sub");
+        let cwd = sub.to_str().unwrap();
+        let timeout = Duration::from_secs(10);
+        assert_eq!(
+            conflicted_files(cwd, None, &head, &base).await,
+            Ok((
+                false,
+                vec!["q.md".to_string(), "sub/a.txt".to_string()],
+                true
+            ))
+        );
+        assert_eq!(
+            conflict_hunks(cwd, None, &head, &base, "sub/a.txt", timeout).await,
+            Ok(vec![protocol::ws::ConflictHunk {
+                ours: "FEAT\n".into(),
+                theirs: "MAIN\n".into()
+            }])
+        );
+        assert!(
+            conflict_hunks(cwd, None, &head, &base, "q.md", timeout)
+                .await
+                .is_err(),
+            "marker-like lines of its own: a note, not an empty list"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **A conflict git names no file for is not clean**: one side splits a folder between two
+    /// new ones and the other adds a file to it; git says it conflicts and lists no path.
+    #[tokio::test]
+    async fn a_conflict_git_names_no_file_for_is_not_clean() {
+        let dir = committable("split");
+        std::fs::create_dir(dir.join("dir")).unwrap();
+        std::fs::write(dir.join("dir/a"), "a\n").unwrap();
+        std::fs::write(dir.join("dir/b"), "b\n").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "base"]);
+        git_sync(&dir, &["switch", "-q", "-c", "split"]);
+        std::fs::create_dir(dir.join("x")).unwrap();
+        std::fs::create_dir(dir.join("y")).unwrap();
+        git_sync(&dir, &["mv", "dir/a", "x/a"]);
+        git_sync(&dir, &["mv", "dir/b", "y/b"]);
+        git_sync(&dir, &["commit", "-qm", "split"]);
+        let split = head_of(&dir);
+        git_sync(&dir, &["switch", "-q", "main"]);
+        std::fs::write(dir.join("dir/c"), "c\n").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "add"]);
+        let main = head_of(&dir);
+        assert_eq!(
+            conflicted_files(dir.to_str().unwrap(), None, &split, &main).await,
+            Ok((false, vec![], true))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **A base is fetched with nothing that can ask**: the fetch's ssh is given no askpass
+    /// program and told never to ask, and a fetch that fails answers git's line.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_base_is_fetched_with_nothing_that_can_ask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = committable("fetch-asks");
+        let ssh = dir.join(".git").join("ssh");
+        let seen = dir.join(".git").join("ssh.env");
+        std::fs::write(
+            &ssh,
+            format!(
+                "#!/bin/sh\necho \"askpass=${{GIT_ASKPASS-unset}} ssh=${{SSH_ASKPASS_REQUIRE-unset}}\" > '{}'\n\
+                 echo 'Permission denied (publickey).' >&2\nexit 255\n",
+                seen.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git_sync(
+            &dir,
+            &["remote", "add", "origin", "ssh://git@example.invalid/x.git"],
+        );
+        git_sync(&dir, &["config", "core.sshCommand", ssh.to_str().unwrap()]);
+        let base = protocol::ws::RunGitBase {
+            name: "main".into(),
+            remote: "origin".into(),
+            reference: "refs/remotes/origin/main".into(),
+        };
+        let environment = login_environment(&dir, "/usr/bin:/bin");
+        let refused = fetch_base(dir.to_str().unwrap(), None, &base, &environment).await;
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap().trim(),
+            "askpass= ssh=never"
+        );
+        assert_eq!(refused, Err("Permission denied (publickey).".into()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A repository on `main` with one commit, its own identity, and nothing else.

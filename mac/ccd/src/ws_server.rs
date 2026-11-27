@@ -720,6 +720,33 @@ where
                     continue;
                 }
 
+                // A run's conflicts with its base: off the loop and for a paired device, as its
+                // repository is; the base's fetch may take seconds.
+                if matches!(parsed, ClientMessage::GetConflicts { .. } | ClientMessage::GetConflict { .. }) {
+                    if device_id.is_none() {
+                        send(&mut sink, &ServerMessage::Error {
+                            code: "not_authorised".into(),
+                            message: "only a paired device may read a run's conflicts".into(),
+                        }).await?;
+                        continue;
+                    }
+                    let daemon = daemon.clone();
+                    let replies = replies_tx.clone();
+                    tokio::spawn(async move {
+                        let reply = match parsed {
+                            ClientMessage::GetConflicts { session_id } => {
+                                conflicts_reply(&daemon, session_id).await
+                            }
+                            ClientMessage::GetConflict { session_id, path, head_oid, base_oid } => {
+                                conflict_reply(&daemon, session_id, path, &head_oid, &base_oid).await
+                            }
+                            _ => return,
+                        };
+                        let _ = replies.send(reply);
+                    });
+                    continue;
+                }
+
                 // Off the loop: a run's diff waits its turn at the folder's git gate, behind a
                 // commit whose hooks may take minutes.
                 if let ClientMessage::GetDiff { session_id } = parsed {
@@ -1184,6 +1211,8 @@ where
         // Answered off the loop by `handle_client`, which never passes them here.
         ClientMessage::GetDiff { .. }
         | ClientMessage::GetRunGit { .. }
+        | ClientMessage::GetConflicts { .. }
+        | ClientMessage::GetConflict { .. }
         | ClientMessage::GitAction { .. }
         | ClientMessage::ListProjects
         | ClientMessage::GetProjectGit { .. }
@@ -2411,6 +2440,81 @@ pub(crate) fn capabilities(
             ]
         } else {
             Vec::new()
+        },
+        // A run's conflicts with its base, read for a paired device, as its repository is.
+        conflicts: paired,
+    }
+}
+
+/// The most a [`ServerMessage::Conflict`] reply's hunks take, encoded.
+const CONFLICT_REPLY_BUDGET: usize = 64 * 1024;
+
+/// The first of `hunks` that fit in `budget` bytes encoded, and whether that is all of them.
+fn fitted_hunks(
+    mut hunks: Vec<protocol::ws::ConflictHunk>,
+    budget: usize,
+) -> (Vec<protocol::ws::ConflictHunk>, bool) {
+    // The array as encoded: its brackets, and a comma or bracket after each hunk.
+    let mut used = 1;
+    let fit = hunks
+        .iter()
+        .take_while(|hunk| {
+            used += serde_json::to_string(hunk).map_or(usize::MAX, |text| text.len()) + 1;
+            used <= budget
+        })
+        .count();
+    let complete = fit == hunks.len();
+    hunks.truncate(fit);
+    (hunks, complete)
+}
+
+/// The answer to a [`ClientMessage::GetConflicts`]; whatever git or the registry could not say
+/// is its note, so the reply always names the run it answers.
+async fn conflicts_reply(daemon: &Daemon, session_id: String) -> ServerMessage {
+    let (conflicts, note) = match daemon.conflicts(&session_id).await {
+        Ok(read) => read,
+        Err(err) => (None, Some(format!("{err}"))),
+    };
+    ServerMessage::Conflicts {
+        session_id,
+        conflicts,
+        note,
+    }
+}
+
+/// The answer to a [`ClientMessage::GetConflict`]: the file's hunks in order, as many as fit
+/// [`CONFLICT_REPLY_BUDGET`] encoded.
+async fn conflict_reply(
+    daemon: &Daemon,
+    session_id: String,
+    path: String,
+    head_oid: &str,
+    base_oid: &str,
+) -> ServerMessage {
+    let read = match daemon
+        .conflict(&session_id, &path, head_oid, base_oid)
+        .await
+    {
+        Ok(read) => read,
+        Err(err) => Err(format!("{err}")),
+    };
+    match read {
+        Ok(hunks) => {
+            let (hunks, hunks_complete) = fitted_hunks(hunks, CONFLICT_REPLY_BUDGET);
+            ServerMessage::Conflict {
+                session_id,
+                path,
+                hunks: Some(hunks),
+                hunks_complete,
+                note: None,
+            }
+        }
+        Err(note) => ServerMessage::Conflict {
+            session_id,
+            path,
+            hunks: None,
+            hunks_complete: false,
+            note: Some(note),
         },
     }
 }
@@ -7696,6 +7800,90 @@ mod tests {
         assert_eq!(reply["session_id"], "no-such-run", "{reply}");
         assert!(reply["note"].is_string(), "{reply}");
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// **A run's conflicts are read for a paired device only** (minor 66): advertised to it and
+    /// not to the bootstrap token, which is refused; the paired device's reads name the run and
+    /// path they answer, with git's reason as their note.
+    #[tokio::test]
+    async fn a_runs_conflicts_are_read_for_a_paired_device_only() {
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let repo = std::env::temp_dir().join(format!(
+            "ccd-conflicts-ws-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = crate::git::git_bin(None).expect("git must be installed");
+        let status = std::process::Command::new(git)
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q", "-b", "trunk"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        register_stub_session(&server.store, repo.to_str().unwrap().into());
+        let list = Message::Text(
+            serde_json::json!({"type": "get_conflicts", "session_id": "cc-9"}).to_string(),
+        );
+        let one = Message::Text(
+            serde_json::json!({"type": "get_conflict", "session_id": "cc-9", "path": "a.txt",
+                               "head_oid": "HEAD", "base_oid": "main"})
+            .to_string(),
+        );
+
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert!(ack["capabilities"].get("conflicts").is_none(), "{ack}");
+        for ask in [list.clone(), one.clone()] {
+            bootstrap.send(ask).await.unwrap();
+            let reply = next_json(&mut bootstrap).await.unwrap();
+            assert_eq!(reply["code"], "not_authorised", "{reply}");
+        }
+
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["conflicts"], true, "{ack}");
+        phone.send(list).await.unwrap();
+        assert_eq!(
+            next_json(&mut phone).await.unwrap(),
+            serde_json::json!({"type": "conflicts", "session_id": "cc-9", "note": "no commit is checked out"})
+        );
+        phone.send(one).await.unwrap();
+        assert_eq!(
+            next_json(&mut phone).await.unwrap(),
+            serde_json::json!({"type": "conflict", "session_id": "cc-9", "path": "a.txt",
+                               "hunks_complete": false, "note": "not a commit id"})
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// **A file's hunks fit the reply's budget, in order**: as many as fit, and whether that is
+    /// all of them.
+    #[test]
+    fn a_files_hunks_fit_the_replys_budget_in_order() {
+        let hunk = |text: &str| protocol::ws::ConflictHunk {
+            ours: text.into(),
+            theirs: String::new(),
+        };
+        let encoded =
+            |hunks: &[protocol::ws::ConflictHunk]| serde_json::to_string(hunks).unwrap().len();
+        let hunks = vec![hunk("ab"), hunk("cd"), hunk("ef")];
+        let all = encoded(&hunks);
+        assert_eq!(fitted_hunks(hunks.clone(), all), (hunks.clone(), true));
+        assert_eq!(
+            fitted_hunks(hunks.clone(), all - 1),
+            (hunks[..2].to_vec(), false)
+        );
+        assert_eq!(fitted_hunks(hunks, 0), (vec![], false));
+        // Two hunks whose own lengths sum to the budget: their array, with its brackets and
+        // comma, does not fit.
+        let big = hunk(&format!("{}\n", "a".repeat(32_743)));
+        let one = serde_json::to_string(&big).unwrap().len();
+        assert_eq!(2 * one, CONFLICT_REPLY_BUDGET);
+        let (kept, complete) = fitted_hunks(vec![big.clone(), big], CONFLICT_REPLY_BUDGET);
+        assert_eq!((kept.len(), complete), (1, false));
+        assert!(encoded(&kept) <= CONFLICT_REPLY_BUDGET);
     }
 
     /// **A slow repository read holds nothing else on the connection**: with git taking two

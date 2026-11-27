@@ -668,7 +668,7 @@ gate then refuses.
 `codex_compose`, `question_card`, `hook_only_approvals`, `history_pages`, `supported_agents`,
 `can_approve_reliably`, `command_catalog`, `private_transport`, `start_session`,
 `start_worktree`, `browse_folders`, `machine_stats`, `stop_run`, `uploads`, `run_terminal` (a run's
-shell, to a paired device on a private transport only; see [`SECURITY.md`](../SECURITY.md)), `changes` and `git_actions` so the app disables
+shell, to a paired device on a private transport only; see [`SECURITY.md`](../SECURITY.md)), `changes`, `git_actions` and `conflicts` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
@@ -1368,6 +1368,35 @@ to probe credentials.
   failed check run's first 10 annotations, the first at failure level that says
   more than the runner's "Process completed with exit code N.", its first line. A branch whose remote is a URL (as `gh pr checkout` sets for a
   fork's PR) is read from that URL.
+* **`get_conflicts{session_id}`** (`>= 66`, `conflicts`, paired devices only) →
+  `conflicts{session_id, conflicts?, note?}`: the commit checked out and `run_git`'s
+  `base` (both read first, so a commit made meanwhile is not what is compared), the
+  base fetched (`git -c credential.interactive=false fetch --no-tags
+  --no-write-fetch-head --recurse-submodules=no -- <remote>
+  +refs/heads/<name>:<ref>` through the login shell, with `GIT_ASKPASS` set empty and
+  `SSH_ASKPASS_REQUIRE=never` so nothing asks; 30 s; at most one try per 30 s for a
+  repository, remote and base, its worktrees counted as one, and not under the
+  folder's gate), then the two merged in git's object store only (`git -c
+  merge.conflictStyle=merge merge-tree --write-tree -z --name-only <head> <base>`,
+  15 s; it writes unreferenced objects, which git prunes after two weeks).
+  `conflicts{base, base_oid, head_oid, fetched_at?, clean, files, files_complete,
+  read_at}`: `clean` is merge-tree's exit status (0; 1 is a conflict, and with no
+  `files` one git names no file for), `files` the first 100 conflicted paths from
+  the repository's top. Uncommitted changes are not in it. A fetch that failed gives
+  the comparison with the base as last fetched, no `fetched_at`, and a `note` saying
+  why; nothing compared is a `note` alone (no commit, no base, a git before 2.38,
+  unrelated histories).
+* **`get_conflict{session_id, path, head_oid, base_oid}`** (`>= 66`, `conflicts`,
+  paired devices only) → `conflict{session_id, path, hunks?, hunks_complete, note?}`:
+  the same merge again (nothing fetched; the two ids must be commit ids), and
+  `path`'s blocks in it as `{ours, theirs}`, a block counted only when its markers
+  carry the two commits compared; as many as fit 64 KB encoded, `hunks_complete`
+  saying whether that is all. `hunks` empty: no lines to show (binary, deleted on
+  one side, renamed). No `hunks`, a `note`: not conflicted there, over 1 MB,
+  marker-like lines of its own (a quoted marker, a title underlined as wide as
+  git's separator), or not read within 20 s. Both reads run from the
+  repository's top, so a run in a subfolder names paths from the top too, and
+  neither waits for the folder's gate (a commit's hooks): they read fixed commits.
 * **`git_action{request_id, session_uid, action}`** (`>= 59`, `git_actions` names
   each action; paired devices only) → `git_action_result{request_id, session_uid,
   result}`, `done{sha}` or `refused{code, detail?}`. `action` is

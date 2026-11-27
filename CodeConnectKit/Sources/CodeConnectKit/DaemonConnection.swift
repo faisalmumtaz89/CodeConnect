@@ -325,6 +325,8 @@ public final class DaemonConnection {
     private var accountsWaiters: [String: [Waiter<AccountBook>]] = [:]
     private var diffWaiters: [String: [Waiter<SessionDiff>]] = [:]
     private var runGitWaiters: [String: [Waiter<RunGitReply>]] = [:]
+    private var conflictsWaiters: [String: [Waiter<ConflictsReply>]] = [:]
+    private var conflictWaiters: [String: [Waiter<ConflictReply>]] = [:]
     private var gitActionWaiters: [String: [Waiter<GitActionResult>]] = [:]
     /// Keyed by the phone's own `request_id`, not by session: the reply echoes
     /// it back, and a phone may hold a stop and a message in flight on one run.
@@ -1268,6 +1270,37 @@ public final class DaemonConnection {
             timeout: repositoryReadTimeout)
     }
 
+    /// A run's conflicts with its base (`get_conflicts`), correlated by the reference as `runGit` is. The computer
+    /// fetches the base first, at most once per 30 s.
+    public func conflicts(session: String) async throws -> ConflictsReply {
+        guard capabilities?.readsConflicts == true else {
+            throw ConnectionError.incompatible(
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can't show a run's conflicts on this connection."
+            )
+        }
+        return try await request(
+            key: session,
+            store: \.conflictsWaiters,
+            send: .getConflicts(session: session),
+            timeout: Self.requestTimeout + .seconds(45))
+    }
+
+    /// One file's hunks (`get_conflict`) in the comparison `conflicts` answered, correlated by the reference and path.
+    public func conflict(session: String, path: String, headOID: String, baseOID: String) async throws -> ConflictReply {
+        guard capabilities?.readsConflicts == true else {
+            throw ConnectionError.incompatible(
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can't show a run's conflicts on this connection."
+            )
+        }
+        return try await request(
+            key: Self.conflictKey(session: session, path: path),
+            store: \.conflictWaiters,
+            send: .getConflict(session: session, path: path, headOID: headOID, baseOID: baseOID),
+            timeout: Self.requestTimeout + .seconds(20))
+    }
+
+    private static func conflictKey(session: String, path: String) -> String { session + "\u{0}" + path }
+
     // MARK: - Codex mutations
 
     /// Why a Codex mutation was not sent, in the phone's own words.
@@ -1497,6 +1530,12 @@ public final class DaemonConnection {
         let runGits = runGitWaiters
         runGitWaiters = [:]
         for queue in runGits.values { for w in queue { w.continuation?.resume(throwing: error) } }
+        let conflictLists = conflictsWaiters
+        conflictsWaiters = [:]
+        for queue in conflictLists.values { for w in queue { w.continuation?.resume(throwing: error) } }
+        let conflictFiles = conflictWaiters
+        conflictWaiters = [:]
+        for queue in conflictFiles.values { for w in queue { w.continuation?.resume(throwing: error) } }
 
         let gitActions = gitActionWaiters
         gitActionWaiters = [:]
@@ -1651,6 +1690,10 @@ public final class DaemonConnection {
             deliver(store: \.diffWaiters, key: diff.sessionID, value: diff)
         case .runGit(let reply):
             deliver(store: \.runGitWaiters, key: reply.sessionID, value: reply)
+        case .conflicts(let reply):
+            deliver(store: \.conflictsWaiters, key: reply.sessionID, value: reply)
+        case .conflict(let reply):
+            deliver(store: \.conflictWaiters, key: Self.conflictKey(session: reply.sessionID, path: reply.path), value: reply)
         case .gitActionResult(let requestID, _, let result):
             deliver(store: \.gitActionWaiters, key: requestID, value: result)
         // **The echoed session is checked, not ignored.** Correlation is by

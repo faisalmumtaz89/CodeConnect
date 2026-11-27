@@ -305,6 +305,54 @@ final class ProtocolTests: XCTestCase {
         var frames: [ClientMessage] = []
     }
 
+    func testConflictsFramesDecodeAndEncode() throws {
+        let read = try decodeServer(
+            """
+            {"type":"conflicts","session_id":"cc-1",
+             "conflicts":{"base":{"name":"main","remote":"origin","ref":"refs/remotes/origin/main"},
+                          "base_oid":"bbb","head_oid":"aaa","fetched_at":"t","clean":false,
+                          "files":["a.txt","gone.txt"],"files_complete":true,"read_at":"r"}}
+            """)
+        guard case .conflicts(let reply) = read, let conflicts = reply.conflicts else { return XCTFail("wrong message") }
+        XCTAssertEqual(reply.sessionID, "cc-1")
+        XCTAssertNil(reply.note)
+        XCTAssertEqual(conflicts.base.reference, "refs/remotes/origin/main")
+        XCTAssertEqual(conflicts.headOID, "aaa")
+        XCTAssertEqual(conflicts.baseOID, "bbb")
+        XCTAssertEqual(conflicts.fetchedAt, "t")
+        XCTAssertFalse(conflicts.clean)
+        XCTAssertEqual(conflicts.files, ["a.txt", "gone.txt"])
+        XCTAssertTrue(conflicts.filesComplete)
+
+        let stale = try decodeServer(
+            #"{"type":"conflicts","session_id":"cc-1","conflicts":{"base":{"name":"main","remote":"origin","ref":"refs/remotes/origin/main"},"base_oid":"bbb","head_oid":"aaa","clean":true,"files":[],"files_complete":true,"read_at":"r"},"note":"could not fetch origin/main: offline"}"#)
+        guard case .conflicts(let offline) = stale else { return XCTFail("wrong message") }
+        XCTAssertNil(offline.conflicts?.fetchedAt)
+        XCTAssertEqual(offline.conflicts?.clean, true)
+        XCTAssertEqual(offline.note, "could not fetch origin/main: offline")
+
+        let hunks = try decodeServer(
+            #"{"type":"conflict","session_id":"cc-1","path":"a.txt","hunks":[{"ours":"FEAT\n","theirs":"MAIN\n"}],"hunks_complete":true}"#)
+        guard case .conflict(let file) = hunks else { return XCTFail("wrong message") }
+        XCTAssertEqual(file.path, "a.txt")
+        XCTAssertEqual(file.hunks, [ConflictHunk(ours: "FEAT\n", theirs: "MAIN\n")])
+        XCTAssertTrue(file.hunksComplete)
+        let unread = try decodeServer(
+            #"{"type":"conflict","session_id":"cc-1","path":"big.bin","hunks_complete":false,"note":"the file is over 1 MB"}"#)
+        guard case .conflict(let none) = unread else { return XCTFail("wrong message") }
+        XCTAssertNil(none.hunks)
+        XCTAssertEqual(none.note, "the file is over 1 MB")
+
+        let list = try encodeClient(.getConflicts(session: "cc-1"))
+        XCTAssertEqual(list["type"]?.stringValue, "get_conflicts")
+        XCTAssertEqual(list["session_id"]?.stringValue, "cc-1")
+        let one = try encodeClient(.getConflict(session: "cc-1", path: "a.txt", headOID: "aaa", baseOID: "bbb"))
+        XCTAssertEqual(one["type"]?.stringValue, "get_conflict")
+        XCTAssertEqual(one["path"]?.stringValue, "a.txt")
+        XCTAssertEqual(one["head_oid"]?.stringValue, "aaa")
+        XCTAssertEqual(one["base_oid"]?.stringValue, "bbb")
+    }
+
     /// `get_run_git` is sent only to a daemon that advertises `changes`: an older one would answer `bad_request` and
     /// leave the request waiting out its timeout.
     @MainActor

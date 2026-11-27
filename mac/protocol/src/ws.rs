@@ -281,6 +281,22 @@ pub enum ClientMessage {
         session_uid: String,
         action: GitAction,
     },
+    /// **A run's conflicts with its base** (minor 66, `conflicts`), answered with one
+    /// [`ServerMessage::Conflicts`]: the commit checked out merged, in git only, with
+    /// [`RunGit`]'s base as fetched now (at most one fetch per 30 s for a repository, remote and
+    /// base). Uncommitted changes are not in it. Paired devices only.
+    GetConflicts {
+        session_id: String,
+    },
+    /// **One conflicted file's hunks** (minor 66, `conflicts`), answered with one
+    /// [`ServerMessage::Conflict`]: `path` as [`RunConflicts::files`] names it, in the merge
+    /// of `head_oid` with `base_oid` that reply compared. Nothing is fetched. Paired devices only.
+    GetConflict {
+        session_id: String,
+        path: String,
+        head_oid: String,
+        base_oid: String,
+    },
     /// "Which slash commands does this session's Claude Code actually have?"
     ///
     /// Answered from the installed binary's own machine-readable init message,
@@ -804,6 +820,32 @@ pub enum ServerMessage {
         request_id: String,
         session_uid: String,
         result: GitActionResult,
+    },
+    /// The answer to [`ClientMessage::GetConflicts`]. `note` alone: no comparison (an unknown
+    /// run, no repository, no head, no base, a git without `merge-tree --write-tree`, unrelated
+    /// histories). Both: the comparison is with the base as last fetched, and `note` says why
+    /// it could not be fetched now.
+    Conflicts {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conflicts: Option<RunConflicts>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// The answer to [`ClientMessage::GetConflict`]. `hunks` empty: the file conflicts with no
+    /// lines to show (binary, deleted on one side, renamed). Absent, with a `note`: the file
+    /// could not be read (no conflict in that merge, over 1 MB, marker-like lines of its own, its
+    /// commits gone).
+    Conflict {
+        session_id: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hunks: Option<Vec<ConflictHunk>>,
+        /// `false`: the reply holds the hunks that fit, in order, and the file has more.
+        #[serde(default)]
+        hunks_complete: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     Error {
         code: String,
@@ -1692,6 +1734,35 @@ pub mod git_refusal {
     pub const MERGE_FAILED: &str = "merge_failed";
 }
 
+/// What [`ClientMessage::GetConflicts`] compared, and what conflicts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunConflicts {
+    /// [`RunGit`]'s base.
+    pub base: RunGitBase,
+    /// The base's commit compared.
+    pub base_oid: String,
+    /// The commit checked out, compared.
+    pub head_oid: String,
+    /// When ccd fetched `base_oid`. Absent: it is the base as last fetched before, and the
+    /// reply's `note` says why it was not fetched now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<String>,
+    /// Git merges the two with no conflict. `false` with no `files` is a conflict git names no
+    /// file for (a folder renamed on one side).
+    pub clean: bool,
+    /// The conflicted paths, from the repository's top, at most 100.
+    pub files: Vec<String>,
+    pub files_complete: bool,
+    pub read_at: String,
+}
+
+/// One conflicting stretch of a file: the lines on the branch checked out, then the base's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictHunk {
+    pub ours: String,
+    pub theirs: String,
+}
+
 /// A [`RunGit`]'s base branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunGitBase {
@@ -1938,6 +2009,11 @@ pub struct Capabilities {
     /// offered only by a daemon that has it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub git_actions: Vec<String>,
+    /// **This daemon answers [`ClientMessage::GetConflicts`] and
+    /// [`ClientMessage::GetConflict`]** (minor 66), to paired devices only. Absent decodes
+    /// `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conflicts: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -2946,9 +3022,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 65,
             "a run's usage limit (`limit`) is minor 65"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 66,
+            "a run's conflicts with its base (`get_conflicts`, `get_conflict`, `conflicts`) are minor 66"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 65);
+        assert_eq!(crate::PROTOCOL_MINOR, 66);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3663,6 +3743,7 @@ mod tests {
             run_terminal: true,
             changes: true,
             git_actions: vec!["commit".into(), "create_pr".into(), "merge".into()],
+            conflicts: true,
         }
     }
 
