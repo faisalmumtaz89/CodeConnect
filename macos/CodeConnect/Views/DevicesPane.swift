@@ -61,13 +61,8 @@ struct DevicesPane: View {
                 if let devices {
                     let (allowed, blocked) = DeviceGroup.groups(devices)
                     if allowed.isEmpty, blocked.isEmpty { note(DeviceGroup.empty) }
-                    if !allowed.isEmpty { list(allowed) }
-                    if !blocked.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(DeviceGroup.blockedTitle).font(Theme.ui(11.5, .medium)).foregroundStyle(Theme.text3)
-                            list(blocked)
-                        }
-                    }
+                    if !allowed.isEmpty { SettingsGroup { ForEach(allowed) { row($0) } } }
+                    if !blocked.isEmpty { SettingsGroup(title: DeviceGroup.blockedTitle) { ForEach(blocked) { row($0) } } }
                 } else {
                     note(answers ? DeviceGroup.reading : DeviceGroup.unreachable)
                 }
@@ -95,29 +90,19 @@ struct DevicesPane: View {
         Text(text).font(Theme.ui(12.5)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
     }
 
-    private func list(_ groups: [DeviceGroup]) -> some View {
-        VStack(spacing: 0) {
-            ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
-                if index > 0 { Rectangle().fill(Theme.hairline).frame(height: 1) }
-                row(group)
-            }
-        }
-        .background(Theme.boxFill, in: RoundedRectangle(cornerRadius: Theme.boxRadius))
-        .overlay(RoundedRectangle(cornerRadius: Theme.boxRadius).strokeBorder(Theme.hairline))
-    }
-
     private func row(_ group: DeviceGroup) -> some View {
         let isThisMac = group.devices.contains { $0.deviceID == thisDevice }
         // By the device Block and Allow Again act on.
         let id = "settings.device.\(group.devices[0].deviceID)"
         return HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(group.name).font(Theme.ui(13, .medium)).foregroundStyle(Theme.text)
+                // The app's own entry is "This Mac", its name under it.
+                Text(isThisMac ? DeviceGroup.thisDevice : group.name).font(Theme.ui(13)).foregroundStyle(Theme.text)
                 AgeText(since: group.isBlocked ? group.blockedAt : isThisMac ? nil : group.lastSeen) { now in
                     if group.isBlocked {
                         group.blockedLine(now: now)
                     } else if isThisMac {
-                        DeviceGroup.thisDevice
+                        group.name
                     } else {
                         group.seenLine(now: now)
                     }
@@ -132,13 +117,13 @@ struct DevicesPane: View {
                     asking = .allow(group)
                 }
             } else if !isThisMac, knowsThisDevice {
-                ActionButton(title: DeviceGroup.blockAction, key: nil, prominent: false, destructive: true, id: "\(id).block") {
+                ActionButton(title: DeviceGroup.blockAction, key: nil, prominent: false, id: "\(id).block") {
                     asking = .block(group)
                 }
             }
         }
-        .padding(.horizontal, Theme.rowInset)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(id)
     }

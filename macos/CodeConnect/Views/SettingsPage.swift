@@ -39,7 +39,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 }
 
 /// Settings in the main window, in the sidebar's place: a back row to the agents, then the sections under their
-/// headings. One stop for the keyboard: ↑ and ↓ choose the section above or below.
+/// headings, and the run list's foot. One stop for the keyboard: ↑ and ↓ choose the section above or below.
 struct SettingsList: View {
     @Binding var section: SettingsSection
     let close: () -> Void
@@ -47,8 +47,7 @@ struct SettingsList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Clear of the traffic lights.
-            Color.clear.frame(height: 52)
+            // Beside the traffic lights, where the list's toggle stands over the agents.
             Button(action: close) {
                 HStack(spacing: 7) {
                     Image(systemName: "chevron.left").font(.system(size: 10.5, weight: .semibold))
@@ -64,8 +63,9 @@ struct SettingsList: View {
             .help("Back to your agents")
             .accessibilityLabel("Back to your agents")
             .accessibilityIdentifier("settings.back")
-            .padding(.horizontal, 8)
-            .padding(.bottom, 6)
+            .padding(.leading, 84)
+            .padding(.trailing, 8)
+            .frame(height: 52)
             VStack(alignment: .leading, spacing: 1) {
                 ForEach(SettingsSection.allCases) { each in
                     if let group = each.group, group != previous(each)?.group {
@@ -92,6 +92,7 @@ struct SettingsList: View {
                 }
             }
             Spacer()
+            ListFoot(openSettings: close)
         }
         .background(Theme.sidebar)
         // The keyboard comes here from whatever had it under Settings.
@@ -147,7 +148,7 @@ struct SettingsPage: View {
                 case .accounts: titled(section.title) { AccountSettings() }
                 }
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: 640, alignment: .leading)
             .padding(.horizontal, 32)
             .padding(.top, 52)
             .padding(.bottom, 32)
@@ -167,20 +168,22 @@ struct SettingsPage: View {
 
 // MARK: - Rows
 
-/// A group of Settings rows: its heading, then a rounded card of rows with hairlines between them.
+/// A group of Settings rows: its heading, if it has one, then a rounded card of rows with hairlines between them.
 struct SettingsGroup<Rows: View>: View {
-    let title: String
+    var title: String? = nil
     @ViewBuilder let rows: Rows
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
-                .padding(.leading, 4)
-                .accessibilityAddTraits(.isHeader)
+            if let title {
+                Text(title).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text3)
+                    .padding(.leading, 4)
+                    .accessibilityAddTraits(.isHeader)
+            }
             VStack(spacing: 0) {
                 Group(subviews: rows) { subviews in
                     ForEach(Array(subviews.enumerated()), id: \.offset) { index, subview in
-                        if index > 0 { Rectangle().fill(Theme.hairline).frame(height: 1).padding(.leading, 14) }
+                        if index > 0 { Rectangle().fill(Theme.hairline).frame(height: 1).padding(.horizontal, 14) }
                         subview
                     }
                 }
@@ -397,6 +400,9 @@ private struct ComputerSettings: View {
             ActionButton(title: "Add Computer…", key: "⇧⌘N", prominent: false, id: "settings.computers.add", action: add)
         }
         .removesComputer($removing)
+        #if DEBUG
+            .task(id: computers.count) { if RenderWindow.confirm == "computer" { removing = computers.last } }
+        #endif
         .task(id: computers.map(\.machineID)) {
             guard let root = setup.installer?.root else { return }
             address = await Task.detached { LocalDaemon.address(root: root) }.value ?? address
@@ -457,9 +463,9 @@ private struct SettingsComputerRow<Control: View>: View {
 
 /// This Mac's agents and the accounts they start on. A service that keeps accounts per agent (minor 48) is asked for
 /// them each time the section opens: per agent its Default, then the accounts added, oldest first, a check on the one
-/// new runs use, Use on the others, and Add Account…. Only the account in use is known to be signed in or not, by the
-/// agents' own answer; the others carry no such word. An older service shows which agents are signed in, and nothing
-/// it cannot change.
+/// new runs use, a click on another to use it, and Add Account…. Only the account in use is known to be signed in or
+/// not, by the agents' own answer; the others carry no such word. An older service shows which agents are signed in,
+/// and nothing it cannot change.
 private struct AccountSettings: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
@@ -583,7 +589,7 @@ private struct AgentSignInGroup: View {
 
 /// One agent's accounts on this Mac, as design A draws them (decision 307): its Default, then the accounts added,
 /// each by the email its agent signs in as and its plan beneath; the share used of each window the agent names, in
-/// columns captioned on the group's title line; the row in use filled, with a check at its leading edge; a click on
+/// columns captioned on the group's title line; the row in use marked by a check at its leading edge; a click on
 /// another uses it. "…" on hover (and a right-click) holds Sign In Again… on a signed-out row and Remove… on an added
 /// one. "Add Account…" is the group's quiet last row: it adds an account and starts its sign-in in the browser at once,
 /// no name asked (the row reads its email once signed in). Under the group, a switch in progress in words. An agent with
@@ -808,7 +814,8 @@ private struct AccountRow: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 9)
             .background(
-                inUse ? Theme.selected : lit ? Color.white.opacity(Theme.hoverLift) : .clear,
+                // The check alone marks the row in use; only a row a click would choose lights under the pointer.
+                lit && !inUse ? Color.white.opacity(Theme.hoverLift) : .clear,
                 in: RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
         }

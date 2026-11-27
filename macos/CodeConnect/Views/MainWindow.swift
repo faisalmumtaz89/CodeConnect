@@ -100,7 +100,7 @@ struct MainWindow: View {
             if let section = settings {
                 HStack(spacing: 0) {
                     SettingsList(section: Binding(get: { section }, set: { settings = $0 })) { settings = nil }
-                        .frame(width: 216)
+                        .frame(width: 256)
                     Rectangle().fill(Theme.hairline).frame(width: 1)
                     SettingsPage(section: section, add: { adding = .computer }, pairAgain: pairAgain)
                 }
@@ -254,8 +254,8 @@ struct MainWindow: View {
                 }
             }
         #endif
-        .sheet(item: $adding, onDismiss: { repairing = nil }) { kind in
-            AddSheet(kind: kind, address: $repairing)
+        .sheet(item: $adding, onDismiss: { repairing = nil }) { _ in
+            AddSheet(address: $repairing)
             // A sheet stands in the middle of the window: clear of the 52-point header above it, so as far from the
             // bottom edge.
             .environment(\.sheetRoom, height - 2 * 52)

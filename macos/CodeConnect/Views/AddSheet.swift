@@ -3,7 +3,7 @@ import CoreImage.CIFilterBuiltins
 import SwiftUI
 
 /// What is added, and how: an agent from the start form in the window's main area (the run list's +, ⌘N); a computer
-/// or an iPhone from the Add sheet, which opens on either (the list's computer menu, ⇧⌘N, the iPhone's menu item).
+/// or an iPhone from the Add sheet, which shows both (the list's computer menu, ⇧⌘N, the iPhone's menu item).
 enum AddKind: String, Identifiable, CaseIterable {
     case agent, computer, iPhone
 
@@ -17,14 +17,6 @@ enum AddKind: String, Identifiable, CaseIterable {
         }
     }
 
-    var tab: String {
-        switch self {
-        case .agent: "Agent"
-        case .computer: "Computer"
-        case .iPhone: "iPhone"
-        }
-    }
-
     /// The key that opens it; the iPhone has none.
     var shortcut: String? {
         switch self {
@@ -35,45 +27,22 @@ enum AddKind: String, Identifiable, CaseIterable {
     }
 }
 
-/// The way a computer or an iPhone is added: a sheet with the two side by side.
+/// The way a computer or an iPhone is added: a sheet with the two side by side, each with its own bar.
 struct AddSheet: View {
-    @State private var kind: AddKind
     /// The address Add a computer starts with: a refused computer pairing again. A binding, so the sheet reads the
     /// address as it is when it opens, not as the window last rendered it.
-    @Binding private var address: String?
-
-    init(kind: AddKind, address: Binding<String?> = .constant(nil)) {
-        // An agent is started from the window: the sheet opened for one adds its computer, on the Computer side.
-        _kind = State(initialValue: kind == .agent ? .computer : kind)
-        _address = address
-    }
+    @Binding var address: String?
+    /// This Mac's Tailscale as the computer side's note says it: the iPhone side's words follow it.
+    @State private var tailscale: TailscaleNote.Status?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                SegmentedTrack(
-                    options: [AddKind.computer, .iPhone], chosen: kind, fill: Theme.window,
-                    id: { "add.tab.\($0.rawValue.lowercased())" }, choose: { kind = $0 }
-                ) { option, chosen in
-                    Text(option.tab).font(Theme.ui(12, chosen ? .medium : .regular))
-                        .foregroundStyle(chosen ? Theme.text : Theme.text3)
-                        .padding(.horizontal, 10)
-                        .frame(height: 24)
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 18)
-            .frame(height: 50)
-            Rectangle().fill(Theme.hairline).frame(height: 1)
-            switch kind {
-            // An agent is started from the window, never here.
-            case .agent, .computer: ComputerForm(address: address)
-            case .iPhone: IPhoneSide()
-            }
+        HStack(alignment: .top, spacing: 0) {
+            ComputerForm(address: address, reports: { tailscale = $0 })
+            Rectangle().fill(Theme.hairline).frame(width: 1)
+            IPhoneSide(tailscale: tailscale).frame(width: 330)
         }
-        // As tall as the chosen side's content, so the sheet changes height with its tab, its top edge and tabs staying;
-        // never taller than the window has room for, where the side gives way.
-        .frame(width: 640)
+        // As tall as the taller side's content; never taller than the window has room for, where a side gives way.
+        .frame(width: 900)
         .frame(maxHeight: room)
         .background(Theme.sheet)
         // A question asked in the sheet, such as New Folder's, is drawn over the sheet, not in the window behind it.
@@ -102,6 +71,8 @@ struct SheetBar<Leading: View>: View {
     let cancelID: String
     /// "Cancel", or "Close" where closing leaves the work going.
     var cancelTitle = "Cancel"
+    /// The action answers ⌘↩; not where another bar beside it already does.
+    var keyed = true
     @ViewBuilder let leading: Leading
     /// The sheet's questions, where it has them: while one is up, Esc and ⌘↩ are its, not the bar's.
     @Environment(ConfirmationQueue.self) private var asks: ConfirmationQueue?
@@ -120,8 +91,8 @@ struct SheetBar<Leading: View>: View {
                         .keyboardShortcut(asking ? nil : .cancelAction)
                 }
                 if let action {
-                    ActionButton(title: action, key: "⌘↩", prominent: true, id: actionID, action: perform)
-                        .keyboardShortcut(asking ? nil : KeyboardShortcut(.return, modifiers: .command))
+                    ActionButton(title: action, key: keyed ? "⌘↩" : nil, prominent: true, id: actionID, action: perform)
+                        .keyboardShortcut(asking || !keyed ? nil : KeyboardShortcut(.return, modifiers: .command))
                         .disabled(blocked)
                 }
             }
@@ -143,10 +114,13 @@ private struct ComputerForm: View {
     /// The address and code are shown: only when asked for, since a computer on the same Tailscale needs neither.
     @State private var usesCode = false
 
+    let reports: (TailscaleNote.Status?) -> Void
+
     /// With an address, the form opens on the code for that computer.
-    init(address: String?) {
+    init(address: String?, reports: @escaping (TailscaleNote.Status?) -> Void) {
         _address = State(initialValue: address ?? "")
         _usesCode = State(initialValue: address != nil)
+        self.reports = reports
     }
 
     private var exchanging: Bool { machines.isPairing && machines.pairingError == nil }
@@ -195,7 +169,7 @@ private struct ComputerForm: View {
             .padding(.horizontal, 18)
             .padding(.top, 18)
             if !machines.removedComputers.isEmpty { onYourTailscale }
-            TailscaleNote()
+            TailscaleNote(reports: reports)
 
             VStack(alignment: .leading, spacing: 14) {
                 Text(AttributedString(macMarkdown: "Get CodeConnect for the other computer at [codeconnect.sh](https://codeconnect.sh/#install)."))
@@ -322,8 +296,8 @@ private struct IPhoneSide: View {
     @Environment(Setup.self) private var setup
     @Environment(\.dismiss) private var dismiss
     @State private var code: Code?
-    /// What the Tailscale note under the intro says, so the two never disagree.
-    @State private var tailscale: TailscaleNote.Status?
+    /// What the computer side's Tailscale note says, so the two never disagree.
+    let tailscale: TailscaleNote.Status?
 
     private enum Code {
         case shown(PairingQRPayload)
@@ -345,36 +319,41 @@ private struct IPhoneSide: View {
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
-            TailscaleNote(reports: { tailscale = $0 })
             if case .shown(let payload) = code, let image = Self.qr(payload.link) {
                 Image(nsImage: image)
                     .interpolation(.none)
                     .resizable()
                     .accessibilityLabel("Pairing QR code")
                     .accessibilityIdentifier("iphone.qr")
-                    .frame(width: 196, height: 196)
+                    .frame(width: 138, height: 138)
                     .padding(12)
                     .background(.white, in: RoundedRectangle(cornerRadius: 10))
                     .frame(maxWidth: .infinity)
                     .padding(.top, 28)
                 // For what can't scan: an iPhone pairing by hand, or a Mac on another Tailscale account.
                 if case .pairingCode(let pairingCode) = payload.endpoint.credential {
-                    Text("Or enter this address and code: \(payload.endpoint.typedAddress) · \(pairingCode)")
-                        .font(Theme.ui(12))
-                        .foregroundStyle(Theme.text2)
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("iphone.code")
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 14)
+                    VStack(spacing: 4) {
+                        Text("Or enter this address and code:").font(Theme.ui(12)).foregroundStyle(Theme.text2)
+                        Text("\(payload.endpoint.typedAddress) · \(pairingCode)").font(Theme.mono(11.5)).foregroundStyle(Theme.text2)
+                            .textSelection(.enabled)
+                    }
+                    .multilineTextAlignment(.center)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("iphone.code")
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 14)
                 }
             }
             Spacer(minLength: 18)
+            // Beside the computer's bar, whose Cancel and Esc close the sheet and whose Connect answers ⌘↩: Done alone,
+            // lit once an iPhone has paired, answering a click.
             SheetBar(
-                action: added ? "Done" : nil, actionID: "iphone.done", blocked: !added, perform: { dismiss() },
-                cancel: added ? nil : { dismiss() }, cancelID: "iphone.cancel"
+                action: "Done", actionID: "iphone.done", blocked: !added, perform: { dismiss() },
+                cancel: nil, cancelID: "iphone.cancel", keyed: false
             ) {
-                if case .shown = code {
-                    Text(PairingWords.codeWorksOnce)
+                if !added {
+                    Text("Done lights once the iPhone has paired.")
                         .font(Theme.ui(11.5))
                         .foregroundStyle(Theme.text3)
                 }
@@ -384,6 +363,10 @@ private struct IPhoneSide: View {
             #if DEBUG
                 if RenderWindow.onLoopback {
                     code = .unreachable
+                    return
+                }
+                if let shown = RenderWindow.pairCode {
+                    code = .shown(PairingQRPayload(host: "100.64.0.1", port: 8787, code: shown))
                     return
                 }
             #endif

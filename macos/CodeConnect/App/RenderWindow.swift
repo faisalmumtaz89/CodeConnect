@@ -198,6 +198,8 @@
         /// `-CC_LOOPBACK YES`: this Mac's daemon is taken to answer devices only at loopback, as before Tailscale:
         /// the Tailscale note reads it so, and Add an iPhone has no code an iPhone could reach.
         static var onLoopback: Bool { UserDefaults.standard.bool(forKey: "CC_LOOPBACK") }
+        /// `-CC_PAIR_CODE <code>`: Add an iPhone shows this code at a tailnet address, in place of one from the daemon.
+        static var pairCode: String? { UserDefaults.standard.string(forKey: "CC_PAIR_CODE") }
 
         /// `-CC_TAILSCALE_APP YES`: this Mac is taken to have the Tailscale app (at a path never opened); without
         /// it, a render has none.
