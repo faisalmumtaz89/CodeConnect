@@ -2927,7 +2927,8 @@ mod tests {
         assert_eq!(of_kind(&seeded, &EventKind::UserMessage).len(), 1);
     }
 
-    /// **A failed turn says so on its end (run state 04)**, in Codex's words; a turn the person stopped does not.
+    /// **A failed turn says so on its end (run state 04)**, in Codex's words, an upstream error's own when Codex passed
+    /// one through as JSON; a turn the person stopped does not.
     #[test]
     fn a_failed_turn_says_so_on_its_end() {
         let end = |fixture: &str| {
@@ -2938,11 +2939,14 @@ mod tests {
         let failed = end(include_str!(
             "../../../fixtures/codex/resume-failed-turn-0.164.0.json"
         ));
+        // Codex passed the upstream HTTP error through as its JSON; the failure says its words.
+        assert!(failed["error"]["message"]
+            .as_str()
+            .is_some_and(|words| words.starts_with("{\"type\":\"error\"")));
         assert_eq!(
             failed["failed"],
-            json!({"message": failed["error"]["message"].clone()})
+            json!({"message": "The 'no-such-model-cc-probe' model is not supported when using Codex with a ChatGPT account."})
         );
-        assert!(failed["failed"]["message"].is_string());
         let stopped = end(include_str!(
             "../../../fixtures/codex/resume-interrupted-turn-0.164.0.json"
         ));
