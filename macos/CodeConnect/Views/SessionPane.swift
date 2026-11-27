@@ -101,7 +101,8 @@ struct SessionPane: View {
             ChangesPanel(row: row, model: model, back: inPlace ? { changesOpen = false } : nil)
                 .frame(width: inPlace ? nil : Self.panelWidth)
         }
-        .background(Theme.window)
+        // Not up into the window's toolbar band: the run's header stands there.
+        .background(Theme.window, ignoresSafeAreaEdges: [])
     }
 
     /// The changes panel's width, beside the conversation.

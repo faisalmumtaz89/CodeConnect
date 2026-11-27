@@ -118,7 +118,7 @@ struct MainWindow: View {
                 }
                 .disabled(!runIsOpen)
                 .padding(.leading, 84)
-                .padding(.top, 13)
+                .padding(.top, 14)
             }
         }
         // The update button is the window's, over Settings too; the run's toggle only over the panes.
@@ -137,10 +137,10 @@ struct MainWindow: View {
                     .disabled(!runIsOpen)
                 }
             }
-            // The toggle's height: the button stands centred on it.
+            // The toggle's height: the button stands centred on it, 26 pt down, on the window buttons' line.
             .frame(height: 24)
             .padding(.trailing, 12)
-            .padding(.top, 13)
+            .padding(.top, 14)
         }
         .focusedSceneValue(\.runIsOpen, runIsOpen)
         .focusedSceneValue(\.settingsShown, settings != nil)

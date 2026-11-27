@@ -84,7 +84,7 @@ struct ChangesPanel: View {
             TerminalFoot(row: row, model: model)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Theme.window)
+        .background(Theme.window, ignoresSafeAreaEdges: [])
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("changes.pane")
         // Read when it opens, again when a turn ends (an agent's commit or push changes no line count), and when the
