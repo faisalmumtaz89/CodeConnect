@@ -1349,7 +1349,8 @@ private struct DiffCommentSheet: View {
                     CCField(
                         label: "Your comment",
                         text: $text,
-                        placeholder: ChangesWords.commentPrompt,
+                        placeholder: ChangesWords.commentPrompt(
+                            model.shownSummary(for: key)?.agent.displayName ?? "the agent"),
                         axis: .vertical,
                         lineLimit: 3...8)
 

@@ -355,18 +355,27 @@ public enum ChangesWords {
     /// The folded stretch as a screen reader says it, and what opening it does.
     public static func foldedLinesSpoken(_ count: Int) -> String { "\(unchangedLines(count)) hidden" }
     public static let foldedLinesHint = "Shows them"
-    /// What a comment on a hunk asks for, in its empty field.
-    public static let commentPrompt = "What should the agent do here?"
+    /// What a comment on a hunk asks for, in its empty field: the run's agent by name.
+    public static func commentPrompt(_ agent: String) -> String { "Comment to \(agent) about these lines" }
     /// Under a hunk for a few seconds once its comment reached the agent, on the Mac, where the field closes.
-    public static let commentSent = "Comment sent"
+    public static let commentSent = "Sent"
     /// Which file and lines a comment on a hunk is about, so the agent reads it against the code: the lowest and
     /// highest line numbers in the hunk, new ones where a line has one.
     public static func commentAnchor(file: UnifiedDiff.FileDiff, hunk: UnifiedDiff.Hunk) -> String {
+        guard let lines = commentLines(hunk) else { return "In `\(file.displayPath)`" }
+        return "In `\(file.displayPath)` \(lines)"
+    }
+    /// The same place as the comment field shows it, over the field: the path, then its lines.
+    public static func commentPlace(file: UnifiedDiff.FileDiff, hunk: UnifiedDiff.Hunk) -> String {
+        guard let lines = commentLines(hunk) else { return file.displayPath }
+        return "\(file.displayPath) · \(lines)"
+    }
+    /// "line 7" or "lines 12–14": the lowest and highest line numbers in the hunk, new ones where a line has one; nil
+    /// when it numbers none.
+    private static func commentLines(_ hunk: UnifiedDiff.Hunk) -> String? {
         let numbers = hunk.lines.compactMap { $0.newNumber ?? $0.oldNumber }
-        guard let first = numbers.min(), let last = numbers.max() else { return "In `\(file.displayPath)`" }
-        return first == last
-            ? "In `\(file.displayPath)` line \(first)"
-            : "In `\(file.displayPath)` lines \(first)–\(last)"
+        guard let first = numbers.min(), let last = numbers.max() else { return nil }
+        return first == last ? "line \(first)" : "lines \(first)–\(last)"
     }
     /// A comment on a hunk as it is sent to the agent: its anchor, then the words.
     public static func comment(_ text: String, file: UnifiedDiff.FileDiff, hunk: UnifiedDiff.Hunk) -> String {
