@@ -5,6 +5,31 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.31
 
+- On the Mac, the window has a new layout: the list of runs at the side, with a filter for each computer, a header over
+  the open run, and Settings (Devices, Folders, Accounts and Computers) inside the main window instead of its own.
+- A run is named by its title, the first line of the first message you sent it, in the list, its header and End Run's
+  question.
+- The Changes panel shows the branch the run is on and how its changes stand, and does the next step for you: Commit,
+  with the run's title as the message to begin with, then Create PR, which pushes the branch and opens a pull request
+  titled by the run. Once a pull request is open, its number and state lead the panel, with a link to it on GitHub.
+- The run's shell sits at the foot of the Changes panel: a real terminal in the run's folder.
+- Files can be dropped anywhere on a conversation or on the Start pane, and each shows a mark for its type.
+- The Start bar's menus pick the computer, folder and branch. A new worktree is named after the task, another
+  computer's folders can be browsed, and a folder you haven't trusted yet asks first.
+- A run at its usage limit shows a red ring in the list and when the limit resets. Over the reply box it shows which
+  limit it hit, its windows and its account, and the box says to send after the reset.
+- A run whose computer can't be reached is dimmed, and its reply line and Changes panel name the computer. The panel
+  keeps what it last read and says how old it is. A starting run is listed under Working, and one that failed to start
+  under Needs you.
+- Every question that asks before acting, on the Mac and the iPhone, is one card: a line for each thing it does, and
+  its keys on its answers. ⌘↩ answers an open run's card while the run list has the keyboard.
+- Antigravity can have several accounts, each in its own folder, and a run moves with its conversation when you choose
+  another. An added account's weekly Gemini limit is shown too.
+- A commit or push that a git hook refused says why in the hook's own words.
+- After choosing another account, a moving run keeps its model and mode menus throughout. Before, they could vanish for
+  a moment.
+- A run in a folder under /Users/Shared shows its whole path.
+
 ## CodeConnect 0.19.30
 
 - On the Mac, every menu looks and works the same way: the chosen item has a check at its start, only the row under the
