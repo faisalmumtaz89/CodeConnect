@@ -38,6 +38,8 @@ public struct ProjectList: Sendable, Equatable {
         public let rows: [FleetRow]
         /// Its ended sessions not yet shown: "N earlier ›".
         public let earlier: Int
+        /// Its ended sessions in worktrees of their own, which need nothing: what Archive N Ended Sessions… offers.
+        public let archivable: [FleetRow]
         public let pinned: Bool
         /// Hidden, and shown only because something in it needs the person, or because its session is open.
         public let hidden: Bool
@@ -120,6 +122,7 @@ public struct ProjectList: Sendable, Equatable {
             var need: Int
             var sessions: Int
             var earlier: Int
+            var archivable: [FleetRow]
             var hidden: Bool
             var quiet: Bool
             /// The most urgent rank among what needs you; within it a card's place in the Deck (cards not yet in it
@@ -169,7 +172,9 @@ public struct ProjectList: Sendable, Equatable {
             let start = computer.flatMap { id in latest(all.filter { $0.machineID == id }) } ?? latest(all)!
             built.append(Built(
                 key: key, first: all.first!, start: start, rows: rows, need: need, sessions: whole[key]!.sessions,
-                earlier: earlier, hidden: isHidden, quiet: rows.isEmpty, urgency: urgency, latest: whole[key]!.latest))
+                earlier: earlier,
+                archivable: all.filter { $0.status == .ended && !Self.needsYou($0) && $0.summary.inWorktree && !$0.summary.archived },
+                hidden: isHidden, quiet: rows.isEmpty, urgency: urgency, latest: whole[key]!.latest))
         }
 
         let names = Self.names(built.map { ($0.key, $0.first) })
@@ -185,7 +190,7 @@ public struct ProjectList: Sendable, Equatable {
         var projects = built.filter { !$0.quiet }.map { entry in
             Project(
                 id: entry.key, name: names[entry.key]!, needsYou: entry.need, sessions: entry.sessions,
-                rows: entry.rows, earlier: entry.earlier, pinned: pins[entry.key] != nil, hidden: entry.hidden,
+                rows: entry.rows, earlier: entry.earlier, archivable: entry.archivable, pinned: pins[entry.key] != nil, hidden: entry.hidden,
                 machineID: entry.start.machineID, folder: Self.home(entry.start))
         }
         if let held, let at = projects.firstIndex(where: { $0.rows.contains { $0.id == held.session } }) {

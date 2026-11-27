@@ -73,6 +73,12 @@ struct FleetList: View {
     @State private var removingMany: [String]?
     @State private var batchRunning = false
     @State private var batchRefused: [String: String] = [:]
+    /// What the last batch did to the sessions it did: "removed" or "archived", for what it did not.
+    @State private var batchDid = "removed"
+    /// Archive N Ended Sessions… asking about a project's, once each one's repository has been read; and, when none
+    /// of them can go, why each stays.
+    @State private var archiving: ArchiveAsk?
+    @State private var archiveNone: String?
 
     /// The machine id the list is narrowed to.
     private var computer: String? {
@@ -133,7 +139,7 @@ struct FleetList: View {
             // Its dropdown opens over the rows below it.
             .zIndex(1)
             // What the last batch did not remove, and why, under the head.
-            if let note = batchNote(rows) {
+            if let note = batchNote(machines.fleet) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(note.title).font(Theme.ui(12, .medium)).foregroundStyle(Theme.amber)
                     Text(note.reasons).font(Theme.ui(12)).foregroundStyle(Theme.text2).lineLimit(2)
@@ -318,6 +324,20 @@ struct FleetList: View {
                 cancelID: "endRun.cancel",
                 confirmID: "endRun.confirm"
             ) { endRun(row) }
+        }
+        // Archiving a project's ended sessions asks once, itemised (artboard 48), naming those that stay.
+        .confirmation($archiving) { ask in
+            Confirmation(
+                FleetWords.archiveEndedAsk(
+                    project: ask.project, count: ask.plan.going.count, computers: ask.computers,
+                    staying: ask.plan.staying),
+                cancelID: "archiveEnded.cancel", confirmID: "archiveEnded.confirm"
+            ) { archive(ask.plan) }
+        }
+        .confirmation($archiveNone) { note in
+            Confirmation(
+                title: FleetWords.archiveEndedNone, message: note,
+                answers: [.init(title: "OK", kind: .ok, id: "archiveEnded.ok")])
         }
         .confirmation($endNote) { note in
             Confirmation(
@@ -605,9 +625,15 @@ struct FleetList: View {
     }
 
     /// A project's menu by `rect` (its "…", or a right-click's point): New Session Here, Pin to Top or Unpin, Collapse
-    /// Other Projects, then Hide Project, or Unhide Project on a hidden one shown because something in it needs you.
+    /// Other Projects, then Archive N Ended Sessions… while it has ended sessions in worktrees of their own on computers
+    /// that archive, and Hide Project, or Unhide Project on a hidden one shown because something in it needs you.
     private func projectMenu(_ project: ProjectList.Project, in list: ProjectList, at rect: CGRect) {
         let id = "fleet.project.\(project.name).more"
+        let archivable = project.archivable.filter { machines.model(for: $0.machineID)?.archivesRuns == true }
+        let archive = archivable.isEmpty ? nil : RowMenu.Item(
+            id: "\(id).archiveEnded", title: FleetWords.archiveEnded(archivable.count), symbol: "archivebox",
+            destructive: false, apart: true
+        ) { prepareArchive(project.name, archivable) }
         menu.toggle(rect, owner: id, items: [
             RowMenu.Item(id: "\(id).newSessionHere", title: RunListWords.newSessionHere, symbol: "plus", destructive: false) {
                 newSessionIn(project.machineID, project.folder)
@@ -625,13 +651,51 @@ struct FleetList: View {
             ) {
                 layout.folded = Set(list.projects.map(\.id)).subtracting([project.id])
             },
+            archive,
             RowMenu.Item(
                 id: "\(id).hide", title: RunListWords.hide(project.hidden), symbol: project.hidden ? "eye" : "eye.slash",
-                destructive: false, apart: true
+                destructive: false, apart: archive == nil
             ) {
                 layout.hidden[project.id] = project.hidden ? nil : project.name
             },
-        ])
+        ].compactMap { $0 })
+    }
+
+    /// Reads each of `rows`' repositories afresh on its computer, then asks about those that can go, naming those that
+    /// stay; when none can, says why each stays.
+    private func prepareArchive(_ project: String, _ rows: [FleetRow]) {
+        Task {
+            var gits: [String: RunGit] = [:]
+            for row in rows {
+                if let git = await machines.model(for: row.machineID)?.readRunGit(key: row.id) { gits[row.id] = git }
+            }
+            let plan = ArchiveEnded(rows, gits: gits)
+            let computers = Set(plan.going.compactMap { going in rows.first { $0.id == going.key }?.machineName })
+            if plan.going.isEmpty {
+                archiveNone = plan.staying.joined(separator: " ")
+            } else {
+                archiving = ArchiveAsk(project: project, computers: computers.sorted(), plan: plan)
+            }
+        }
+    }
+
+    /// Archives each that can go in turn, as Archive Session does; what was not archived is named under the list's head,
+    /// with the computer's reason.
+    private func archive(_ plan: ArchiveEnded) {
+        batchDid = "archived"
+        batchRunning = true
+        batchRefused = [:]
+        Task {
+            var refused: [String: String] = [:]
+            for going in plan.going {
+                guard let model = machines.model(for: going.machineID) else { continue }
+                if let why = await model.archive(key: going.key, branch: going.branch, headOID: going.headOID) {
+                    refused[going.key] = why
+                }
+            }
+            batchRunning = false
+            batchRefused = refused
+        }
     }
 
     /// Gives the list the keyboard, and gives it again once the window has laid out the run that opened: the new pane
@@ -671,6 +735,7 @@ struct FleetList: View {
 
     /// Removes each chosen run in turn; whatever was not removed stays chosen, with its reason on its row.
     private func removeChosen(_ keys: [String]) {
+        batchDid = "removed"
         batchRunning = true
         batchRefused = [:]
         Task {
@@ -690,8 +755,15 @@ struct FleetList: View {
     private func batchNote(_ rows: [FleetRow]) -> (title: String, reasons: String)? {
         let kept = rows.compactMap { batchRefused[$0.id] }
         guard !kept.isEmpty else { return nil }
-        return ("\(kept.count) not removed", Set(kept).sorted().joined(separator: " · "))
+        return ("\(kept.count) not \(batchDid)", Set(kept).sorted().joined(separator: " · "))
     }
+}
+
+/// Archive N Ended Sessions…'s question: the project, the computers whose worktrees go, and which go and stay.
+private struct ArchiveAsk {
+    let project: String
+    let computers: [String]
+    let plan: ArchiveEnded
 }
 
 /// A project's header, 30 pt: its disclosure, which folds and opens the project, its name,

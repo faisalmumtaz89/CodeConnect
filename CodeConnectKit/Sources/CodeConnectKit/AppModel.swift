@@ -4445,6 +4445,32 @@ public final class AppModel {
         }
     }
 
+    /// Reads the run's repository afresh and keeps it, as `loadRunGit` does, and answers with it: nil when it can't be
+    /// read.
+    public func readRunGit(key: String) async -> RunGit? {
+        guard connection.capabilities?.readsRunGit == true, connection.phase.isConnected,
+            let reply = try? await connection.runGit(session: key)
+        else { return nil }
+        runGits[key] = reply
+        return reply.git
+    }
+
+    /// Archives one run as Archive Session does, waiting for the computer's answer: nil once archived, else why not, in
+    /// the app's words.
+    public func archive(key: String, branch: String, headOID: String) async -> String? {
+        do {
+            switch try await connection.archiveRun(
+                sessionUID: key, branch: branch, headOID: headOID, requestID: UUID().uuidString)
+            {
+            case .done: return nil
+            case .refused(let code, let detail): return ChangesWords.actionRefused(code: code, detail: detail, step: .archive)
+            default: return ChangesWords.actionUnknown
+            }
+        } catch {
+            return ChangesWords.actionUnknown
+        }
+    }
+
     /// One action of the run's Changes panel, unless one is on its way. Done, the panel's diff and repository are read
     /// again, and they show what the action made; refused, the computer's reason is kept, in the app's words, until the
     /// step it was for has passed.
