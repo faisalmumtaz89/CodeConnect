@@ -973,20 +973,13 @@ struct AgentMark: View {
     let agent: AgentKind
 
     var body: some View {
-        Group {
-            switch agent {
-            case .claude: Image(systemName: "asterisk").font(.system(size: 9, weight: .bold))
-            case .codex: Image(systemName: "chevron.left.forwardslash.chevron.right").font(.system(size: 7.5, weight: .bold))
-            case .antigravity: Image(systemName: "sparkle").font(.system(size: 8.5, weight: .bold))
-            case .unsupported: Image(systemName: "questionmark").font(.system(size: 8, weight: .bold))
-            }
-        }
-        .foregroundStyle(Theme.text2)
-        .frame(width: 18, height: 18)
-        .background(Circle().fill(Color.white.opacity(0.08)))
-        .help(agent.productName)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(agent.productName)
+        Image(systemName: agent.mark.symbol).font(.system(size: agent.mark.size, weight: .bold))
+            .foregroundStyle(Theme.text2)
+            .frame(width: 18, height: 18)
+            .background(Circle().fill(Color.white.opacity(0.08)))
+            .help(agent.productName)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(agent.productName)
     }
 
 }
