@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.31
+
 ## CodeConnect 0.19.30
 
 - On the Mac, every menu looks and works the same way: the chosen item has a check at its start, only the row under the
