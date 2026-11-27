@@ -142,11 +142,23 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
 
     // MARK: The rows
 
+    /// Several requests waiting: the conversation says so once, by the first; the card in the reply box's place counts
+    /// the rest ("1 more waiting").
+    private static func oneWaiting(_ items: [TimelineItem]) -> [TimelineItem] {
+        var said = false
+        return items.filter { item in
+            guard case .approval(let approval) = item.content, approval.isPending else { return true }
+            defer { said = true }
+            return !said
+        }
+    }
+
     /// The published timeline, and its missed-events notice after the row the Kit places it by. New rows and rows
     /// whose item or notice changed are measured (once the column has a width), the rest keep their heights; then one
     /// `apply`: a page above, rows below, rows changed in place, or the rows set afresh.
     func show(_ items: [TimelineItem], drawnThrough: UInt64, gap: GapNotice?, model: AppModel) {
         self.model = model
+        let items = Self.oneWaiting(items)
         // Rows that arrived while the reader was away from the end, as the iPhone counts them.
         if let end, !layout.following { arrived += TimelineEnd.rowsAfter(end, in: items) }
         end = TimelineEnd(items, drawnThrough: drawnThrough)
