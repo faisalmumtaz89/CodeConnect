@@ -77,10 +77,15 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 /// How long a run sent `stop` has to exit before its host's group is stopped (H5).
 const STOP_GRACE: Duration = Duration::from_secs(10);
 
-/// The end of a run that was `stopping`, however it ended. It carries no exit code: the
-/// person asked for the stop, so claude's code (1 when it was mid-turn) says nothing.
+/// The end of a run the person ended (End Run), however it ended. It carries no exit code: the
+/// person asked for the stop, so claude's code (1 when it was mid-turn) says nothing; it says who
+/// ended it ([`protocol::event::ENDED_BY`]).
 pub(crate) fn stopped_end() -> serde_json::Value {
-    serde_json::json!({ "exit_code": null, "reason": "Stopped" })
+    serde_json::json!({
+        "exit_code": null,
+        "reason": "Stopped",
+        protocol::event::ENDED_BY: protocol::event::ENDED_BY_PERSON,
+    })
 }
 
 /// The end's reason for a `live` run whose agent ended without ccd stopping it: its host
@@ -6065,10 +6070,7 @@ mod tests {
         .await;
         assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
         assert_eq!(kept(&rig, &played.uid).0, "exited");
-        assert_eq!(
-            the_end(&rig, &played.uid),
-            serde_json::json!({"exit_code": null, "reason": "Stopped"})
-        );
+        assert_eq!(the_end(&rig, &played.uid), stopped_end());
         assert_eq!(
             rig.daemon.stop_run(&played.uid).await,
             StopRunResult::AlreadyEnded
@@ -6145,10 +6147,7 @@ mod tests {
         }
         assert!(!child_ran, "the host's group outlived it");
         assert_eq!(kept(&rig, &uid).0, "exited");
-        assert_eq!(
-            the_end(&rig, &uid),
-            serde_json::json!({"exit_code": null, "reason": "Stopped"})
-        );
+        assert_eq!(the_end(&rig, &uid), stopped_end());
     }
 
     /// **B7 G5b: claude's own end racing the stop.** The run turns `stopping` before its
@@ -6179,10 +6178,7 @@ mod tests {
         }
         rig.daemon.watch_hosted_runs().await;
         until_ended(&rig, &uid, "exited", None).await;
-        assert_eq!(
-            the_end(&rig, &uid),
-            serde_json::json!({"exit_code": null, "reason": "Stopped"})
-        );
+        assert_eq!(the_end(&rig, &uid), stopped_end());
     }
 
     /// **B7 G6: a restart while stopping.** ccd stopped a working run and died before
@@ -6240,10 +6236,7 @@ mod tests {
             .map(|message| protocol::sdk_map::map(&key, None, message).events.len())
             .sum();
         assert_eq!(filed.len(), expected, "each replayed message filed once");
-        assert_eq!(
-            the_end(&rig, &uid),
-            serde_json::json!({"exit_code": null, "reason": "Stopped"})
-        );
+        assert_eq!(the_end(&rig, &uid), stopped_end());
     }
 
     /// **B7 G6, a host that cannot answer across a restart.** A run is `stopping` and its
@@ -6284,10 +6277,7 @@ mod tests {
         }
         assert!(ended, "the recovered daemon never ended the run");
         assert!(!child_ran, "the host's group outlived it");
-        assert_eq!(
-            the_end(&rig, &uid),
-            serde_json::json!({"exit_code": null, "reason": "Stopped"})
-        );
+        assert_eq!(the_end(&rig, &uid), stopped_end());
     }
 
     /// The app's `send_text` of `text` to the run `uid` as request `request_id`, as the
@@ -8007,10 +7997,7 @@ mod tests {
             serde_json::from_value(committed[key].clone()).expect("an Event the apps decode")
         };
         for (key, payload) in [
-            (
-                "session_end_stopped",
-                serde_json::json!({"exit_code": null, "reason": "Stopped"}),
-            ),
+            ("session_end_stopped", stopped_end()),
             (
                 "session_end_exited",
                 serde_json::json!({"exit_code": 1, "reason": PROCESS_ENDED}),
@@ -12642,10 +12629,7 @@ mod tests {
             host_gone && claude_gone,
             "host gone {host_gone}, claude gone {claude_gone}"
         );
-        assert_eq!(
-            the_end(&rig, &uid),
-            serde_json::json!({"exit_code": null, "reason": "Stopped"})
-        );
+        assert_eq!(the_end(&rig, &uid), stopped_end());
     }
 
     /// **B7 G7 (a): uninstall's stop, on the real host.** ccd's answer comes only once the
@@ -12691,10 +12675,7 @@ mod tests {
         );
         assert_eq!((stopped, left), (1, vec![pending_pid as u32]));
         assert_eq!(kept(&rig, &uid).0, "exited");
-        assert_eq!(
-            the_end(&rig, &uid),
-            serde_json::json!({"exit_code": null, "reason": "Stopped"})
-        );
+        assert_eq!(the_end(&rig, &uid), stopped_end());
         assert_eq!(kept(&rig, &starting).0, "starting");
     }
 

@@ -6271,10 +6271,7 @@ mod tests {
             row_once(&rig, &uid, Lifecycle::Exited).await.lifecycle,
             Lifecycle::Exited
         );
-        assert_eq!(
-            the_end(&rig, &uid),
-            json!({"exit_code": null, "reason": "Stopped"})
-        );
+        assert_eq!(the_end(&rig, &uid), crate::claude_host::stopped_end());
         assert!(cards_of(&rig.daemon, &uid, 0).await.is_empty());
         assert!(matches!(
             rig.daemon.delete_exited_session(&uid).await.unwrap(),
@@ -6442,10 +6439,7 @@ mod tests {
             "the run ended {:?} after End run",
             asked.elapsed()
         );
-        assert_eq!(
-            the_end(&rig, &uid),
-            json!({"exit_code": null, "reason": "Stopped"})
-        );
+        assert_eq!(the_end(&rig, &uid), crate::claude_host::stopped_end());
     }
 
     /// **X8-1 G6: a run `stopping` across a ccd restart is ended by the restarted ccd.** Its
@@ -6508,10 +6502,7 @@ mod tests {
             group_ends(leader).await,
             "the app-server outlived the escalation"
         );
-        assert_eq!(
-            the_end(&rig, &uid),
-            json!({"exit_code": null, "reason": "Stopped"})
-        );
+        assert_eq!(the_end(&rig, &uid), crate::claude_host::stopped_end());
     }
 
     /// **X8-1 G7, the engine's half: uninstall's stop ends a run started on the engine**, as

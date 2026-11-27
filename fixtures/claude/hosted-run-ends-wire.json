@@ -29,6 +29,7 @@
   "session_end_stopped": {
     "kind": "session_end",
     "payload": {
+      "ended_by": "person",
       "exit_code": null,
       "reason": "Stopped"
     },
