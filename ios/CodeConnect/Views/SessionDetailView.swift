@@ -1738,8 +1738,8 @@ private struct SessionTimeline: View {
                     // The scroll target for "go to the latest" — nothing but
                     // an identity; the at-the-tail verdict lives in
                     // `TailObserver`, off the real scroll offset. No breathing
-                    // room under it: the reply box keeps the last line 30 pt
-                    // from its rim.
+                    // room under it: the reply box's own top padding is the
+                    // space between the last line and its rim.
                     //
                     // The probe rides this row because it must sit inside the
                     // collection view to walk up to it. A row exists only near
@@ -2157,25 +2157,37 @@ private struct SessionComposeBar: View {
     }
 
     private var field: some View {
-        TextField(
-            "", text: $text,
-            // At a usage limit the box says when a message goes through.
-            // While its computer is offline the box says so, and when a reply can go.
-            prompt: Text(
-                model.limitFoot(for: key, now: .now)?.prompt
-                    ?? model.offlineReply(for: key, draft: "")
-                    ?? SessionWords.replyPrompt(summary?.agent.displayName ?? "the agent"))
-                .foregroundStyle(CC.text.placeholder),
-            // `.vertical` keeps the system keyboard's dictation key available
-            // too — the mic in the circle is the first-class door, not the
-            // only one.
-            axis: .vertical
-        )
-        .lineLimit(typeSize.isAccessibilitySize ? 1...3 : 1...5)
-        .ccType(CC.type.callout)
-        .foregroundStyle(CC.text.primary)
-        .focused(focused)
-        .accessibilityLabel("Message for \(runLabel)")
+        // At a usage limit the box says when a message goes through.
+        // While its computer is offline the box says so, and when a reply can go.
+        let prompt = model.limitFoot(for: key, now: .now)?.prompt
+            ?? model.offlineReply(for: key, draft: "")
+            ?? SessionWords.replyPrompt(summary?.agent.displayName ?? "the agent")
+        let lines = typeSize.isAccessibilitySize ? 3 : 5
+        return ZStack(alignment: .topLeading) {
+            // iOS draws a field's prompt on one line, cut; drawn here it wraps to the field's lines while the field is
+            // empty. The field's own prompt, clear, is still what VoiceOver reads.
+            if text.isEmpty {
+                Text(prompt)
+                    .ccType(CC.type.callout)
+                    .foregroundStyle(CC.text.placeholder)
+                    .lineLimit(lines)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            TextField(
+                "", text: $text,
+                prompt: Text(prompt).foregroundStyle(.clear),
+                // `.vertical` keeps the system keyboard's dictation key available
+                // too — the mic in the circle is the first-class door, not the
+                // only one.
+                axis: .vertical
+            )
+            .lineLimit(1...lines)
+            .ccType(CC.type.callout)
+            .foregroundStyle(CC.text.primary)
+            .focused(focused)
+            .accessibilityLabel("Message for \(runLabel)")
+        }
     }
 
     /// What the recognizer heard, streaming. Committed words at full strength;
