@@ -154,7 +154,7 @@ final class CodexRefusalClassifierTests: XCTestCase {
         // claim it: the template's first literal segment anchors the start.
         XCTAssertFalse(
             CodexControls.isLinkStateRefusal(
-                "the operator said: CodeConnect has no connection to this run right now, so nothing "
+                "the operator said: CodeConnect has no connection to this session right now, so nothing "
                     + "was sent. — but that was yesterday"))
     }
 

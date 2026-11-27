@@ -1130,7 +1130,7 @@ uuid before the turn ended interrupted, which is the evidence Codex's own client
 message back on. A retry with the same request id is answered from the first, and a retry of
 a stopped message is told it was not sent and is not sent again. While a run's
 link is not attached, before its reconnect or after one that failed, an answer, a Stop and
-a message are refused with "CodeConnect has no connection to this run right now, so nothing
+a message are refused with "CodeConnect has no connection to this session right now, so nothing
 was sent." A retry of one already sent and not yet settled is answered from what was
 recorded instead: a Stop or a message is told it was sent and what became of it is not
 known, and an answer that it is already waiting to be confirmed. A run that a
