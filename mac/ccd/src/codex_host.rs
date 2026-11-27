@@ -193,7 +193,8 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         .await
     {
         Ok(Some(existing)) => return crate::claude_host::answer_for(existing),
-        Ok(None) => {}
+        // Its branch and repository, read on a task of its own while it comes up.
+        Ok(None) => daemon.refresh_tree(&uid),
         Err(err) => return failed(format!("could not record the session: {err:#}")),
     }
     // Kept where a Claude run keeps its start's answer, so its menu is read the same way; a
@@ -2257,7 +2258,11 @@ async fn new_thread(
                 run.thread
             ))
         }
-        Err(err) => return Err(format!("could not record the session's new thread: {err:#}")),
+        Err(err) => {
+            return Err(format!(
+                "could not record the session's new thread: {err:#}"
+            ))
+        }
     }
     crate::log_info!(
         "{uid}: thread {} had no message, so no rollout; thread {thread} started in its place",

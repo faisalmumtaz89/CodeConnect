@@ -114,6 +114,10 @@ db_ops! {
     fn run_titles() -> std::collections::HashMap<String, String>;
     /// The archived runs ([`Store::archived_runs`]).
     fn archived_runs() -> std::collections::HashSet<String>;
+    /// Keep a run's repository ([`Store::keep_run_repo`]).
+    fn keep_run_repo(session_uid: String, cwd: String, repo: protocol::event::RepoFact) -> ();
+    /// Each run's repository ([`Store::run_repos`]).
+    fn run_repos() -> std::collections::HashMap<String, (String, protocol::event::RepoFact)>;
     fn filed_event(session_uid: String, source: Source, source_event_id: String) -> Option<(u64, Option<String>)>;
     fn session_facts(session_uid: String) -> protocol::facts::SessionFacts;
     /// The settings Codex last named for a Codex run's thread, as filed.
