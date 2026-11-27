@@ -22,11 +22,13 @@ struct FoldersPane: View {
             .map(StartContext.init(model:))
         Group {
             VStack(alignment: .leading, spacing: 18) {
+                // The title as every section's, 24 pt above the first card.
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(FolderWords.paneTitle).font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
+                    Text(FolderWords.paneTitle).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
                     Text(FolderWords.paneIntro).font(Theme.ui(13)).foregroundStyle(Theme.text2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                .padding(.bottom, 6)
                 ForEach(contexts, id: \.id) { computer($0) }
                 Text(FolderWords.forgetHelp).font(Theme.ui(12)).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
