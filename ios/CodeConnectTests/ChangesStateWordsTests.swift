@@ -185,7 +185,7 @@ final class ChangesStateWordsTests: XCTestCase {
         XCTAssertEqual(said("github_unavailable"), "GitHub could not be reached, so nothing was merged.")
     }
 
-    /// Archive Run is offered where the computer would archive (artboard 11): a run in a worktree of its own, on a
+    /// Archive Session is offered where the computer would archive (artboard 11): a run in a worktree of its own, on a
     /// branch other than its base, with nothing uncommitted, whose commits are on the base already or merged by its
     /// pull request at the commit checked out. Anything else keeps it off, and the computer checks again on the press.
     func testArchiveIsOfferedWhereTheComputerWouldArchive() throws {

@@ -527,7 +527,7 @@ private struct ConflictBlock: View {
     }
 }
 
-/// A finished run's row (artboard 11): the state line, and at its end Archive Run, which asks first on the one card
+/// A finished run's row (artboard 11): the state line, and at its end Archive Session, which asks first on the one card
 /// (`FleetWords.archiveAsk`), then ends the run, removes its worktree and deletes its branch, only while the branch is
 /// at the commit the panel shows. What the computer said when it did not archive stays under it.
 private struct ArchiveRow: View {

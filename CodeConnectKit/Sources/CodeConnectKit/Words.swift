@@ -82,7 +82,7 @@ public enum FleetWords {
                 .init(mark: "arrow.triangle.branch", words: "Deletes the local branch"),
                 .init(mark: "terminal", words: "Ends the \(agent) session"),
             ],
-            note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive Run")
+            note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive Session")
     }
     /// An archived run's conversation ends with this (its `archived` notice).
     public static let archived = "Archived · worktree and branch removed"
@@ -458,7 +458,7 @@ public enum ChangesWords {
         case .rebase: "Rebase and merge"
         }
     }
-    /// Whether Archive Run is offered (artboard 11), by the computer's own gate as the run's repository shows it: a run
+    /// Whether Archive Session is offered (artboard 11), by the computer's own gate as the run's repository shows it: a run
     /// in a worktree of its own, on a branch other than its base, nothing uncommitted, its commits on the base already
     /// or merged by its pull request at the commit checked out. What the panel can't see (a worktree another run
     /// shares, a lock) the computer refuses on the press.
