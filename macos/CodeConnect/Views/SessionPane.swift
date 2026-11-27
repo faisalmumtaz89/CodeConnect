@@ -92,25 +92,14 @@ struct SessionPane: View {
             .accessibilityHidden(boxTaken)
     }
 
-    /// The run's changes: beside the conversation, behind a hairline, or in its place, under the row that gives it back.
+    /// The run's changes: beside the conversation, behind a hairline, or in its place.
     private var changes: some View {
         HStack(spacing: 0) {
             if !inPlace { Rectangle().fill(Theme.hairline).frame(width: 1) }
-            VStack(spacing: 0) {
-                if inPlace {
-                    HStack {
-                        Spacer()
-                        ActionButton(title: "‹ Conversation", key: "Esc", prominent: false, small: true,
-                            id: "session.changes.back") { changesOpen = false }
-                    }
-                    .padding(.horizontal, 12)
-                    .frame(height: 38)
-                    .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
-                }
-                // The panel ends with the run's shell at its foot, sized by itself: its bar closed, its screen open.
-                ChangesPanel(row: row, model: model)
-            }
-            .frame(width: inPlace ? nil : Self.panelWidth)
+            // The panel ends with the run's shell at its foot, sized by itself: its bar closed, its screen open. In the
+            // conversation's place, its tabs row gives the conversation back.
+            ChangesPanel(row: row, model: model, back: inPlace ? { changesOpen = false } : nil)
+                .frame(width: inPlace ? nil : Self.panelWidth)
         }
         .background(Theme.window)
     }

@@ -1296,7 +1296,7 @@ enum RenderCatalog {
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/com", row: "/compact")
-                try driver.require(app.buttons["Compact now"], "the always-active button")
+                try driver.require(app.buttons["Compact"], "the always-active button")
             }),
         RenderScenario(
             name: "session-clear-confirm",
@@ -1318,7 +1318,7 @@ enum RenderCatalog {
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/com", row: "/compact")
-                try driver.require(app.buttons["Compact now"], "the always-active button").tap()
+                try driver.require(app.buttons["Compact"], "the always-active button").tap()
                 try driver.require(
                     driver.text(containing: "does not confirm its outcome", in: app),
                     "the neutral duplicate line")

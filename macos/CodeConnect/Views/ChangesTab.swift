@@ -10,14 +10,17 @@ import SwiftUI
 struct ChangesPanel: View {
     let row: FleetRow
     let model: AppModel
+    /// Gives the conversation back, while the panel stands in its place: its tabs row then always shows.
+    let back: (() -> Void)?
     private var key: String { row.id }
     @State private var hunks: HunkActions
     /// The diff last read, kept on screen while it is read again, so a reread loses no place, fold or comment.
     @State private var shown: (raw: SessionDiff, parsed: UnifiedDiff, fetchedAt: Date)?
 
-    init(row: FleetRow, model: AppModel) {
+    init(row: FleetRow, model: AppModel, back: (() -> Void)?) {
         self.row = row
         self.model = model
+        self.back = back
         let key = row.id
         _hunks = State(initialValue: HunkActions(model: model, key: key))
         // A diff already on hand shows at once when the panel opens, while it is read again.
@@ -143,6 +146,7 @@ struct ChangesPanel: View {
     /// A state with no read diff to draw: reading, the app's link failing, or the computer's refusal in its words.
     @ViewBuilder
     private func unread(_ state: DiffState) -> some View {
+        backBand
         switch state {
         case .failed(.app(let reason)) where offline:
             Message(
@@ -159,6 +163,11 @@ struct ChangesPanel: View {
         case .idle, .loading, .loaded:
             Message(id: "changes.loading", title: ChangesWords.reading)
         }
+    }
+
+    /// The tabs row with no count, where there is no diff to count, only while it gives the conversation back.
+    @ViewBuilder private var backBand: some View {
+        if let back { Band(count: nil, cut: false, back: back) }
     }
 
     /// When the diff on hand was read, while one is.
@@ -178,8 +187,10 @@ struct ChangesPanel: View {
     @ViewBuilder
     private func loaded(_ raw: SessionDiff, _ parsed: UnifiedDiff, _ fetchedAt: Date, counted: Bool) -> some View {
         if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil {
+            backBand
             Message(id: "changes.clean", title: ChangesWords.noUncommitted, sentence: ChangesWords.clean)
         } else if parsed.isEmpty && raw.files?.isEmpty != false {
+            backBand
             Message(
                 id: "changes.empty", title: ChangesWords.noDiff,
                 sentence: ChangesWords.computersReason, quote: (raw.note ?? "", "changes.note"))
@@ -192,7 +203,7 @@ struct ChangesPanel: View {
                     read: raw.capturedDate ?? fetchedAt, unreachable: offline ? computer : nil, note: nil)
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             }
-            Band(count: files.count, cut: raw.truncated || raw.filesTruncated)
+            Band(count: files.count, cut: raw.truncated || raw.filesTruncated, back: back)
             Document(raw: raw, diff: parsed, files: files).environment(hunks)
         }
     }
@@ -375,27 +386,36 @@ private struct PullRequestRow: View {
     }
 }
 
-/// The panel's one tab before the run has a pull request: its changes, and how many files.
+/// The panel's tabs row before the run has a pull request: its changes, how many files when there are some, and while
+/// the panel stands in the conversation's place, at its trailing end, the way back to it (Esc does the same).
 private struct Band: View {
-    let count: Int
+    let count: Int?
     /// The computer cut the diff short.
     let cut: Bool
+    let back: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 8) {
-            Text("Changes").font(Theme.ui(13, .medium)).foregroundStyle(Theme.text)
-            Text(ChangesWords.files(count)).font(Theme.ui(12)).foregroundStyle(Theme.text3)
-            if cut {
-                Text("Cut short by your computer").font(Theme.ui(12)).foregroundStyle(Theme.amber)
-                    .accessibilityIdentifier("changes.truncated")
+            HStack(spacing: 8) {
+                Text("Changes").font(Theme.ui(13, .medium)).foregroundStyle(Theme.text)
+                if let count { Text(ChangesWords.files(count)).font(Theme.ui(12)).foregroundStyle(Theme.text3) }
+                if cut {
+                    Text("Cut short by your computer").font(Theme.ui(12)).foregroundStyle(Theme.amber)
+                        .accessibilityIdentifier("changes.truncated")
+                }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("changes.band")
             Spacer(minLength: 0)
+            if let back {
+                ActionButton(title: "‹ Conversation", key: "Esc", prominent: false, small: true,
+                    id: "session.changes.back", action: back)
+            }
         }
-        .padding(.horizontal, 20)
+        .padding(.leading, 20)
+        .padding(.trailing, back == nil ? 20 : 12)
         .frame(height: 38)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("changes.band")
     }
 }
 
