@@ -195,6 +195,8 @@ extension View {
 enum InputBoxLayout {
     static let barInset: CGFloat = 12
     static let lineSpacing: CGFloat = 5
+    /// From what stands above the box to the box itself: 30 pt to its lit rim, which is 4 pt outside it.
+    static let above: CGFloat = 30 + 4
 }
 
 /// The bar's chips' one size: their words 12.5 pt medium, 6 pt above and below; words cut keep `floor` while the bar
