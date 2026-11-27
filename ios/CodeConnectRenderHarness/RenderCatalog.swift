@@ -1130,6 +1130,18 @@ enum RenderCatalog {
                 try driver.require(
                     app.buttons["session.composer.settings"], "the composer settings control")
             }),
+        // **A session stopped at its limit**: the band over the box, its prompt, the ring red.
+        RenderScenario(
+            name: "session-limit-band",
+            purpose: "a Codex session stopped at its 5-hour limit: the band over the reply box, its prompt, the ring red",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 100),
+                "-CC_OPEN", "cx-1", "-CC_FIXTURE_LIMIT", "five_hour",
+            ],
+            reach: { app, driver in
+                try driver.requireExists(app.descendants(matching: .any)["session.limit"], "the band")
+            }),
         RenderScenario(
             name: "session-usage-context-only",
             purpose: "the reply box's figures with the context and no account limits read",
