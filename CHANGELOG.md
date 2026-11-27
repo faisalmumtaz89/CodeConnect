@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.34
+
 ## CodeConnect 0.19.33
 
 - On the Mac, the Changes panel shows an open pull request's checks: they lead its state line, and a Checks tab lists
