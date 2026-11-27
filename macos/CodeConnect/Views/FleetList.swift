@@ -61,11 +61,11 @@ struct FleetList: View {
         let picked = selectable.filter(chosen.contains)
         VStack(spacing: 0) {
             // The head's controls stand at the end of the list's 256 pt, whatever the list's width, so the computer menu
-            // opens from the same place, over whatever is beside the list; the ended runs are every computer's, so no
-            // computer is offered over them.
+            // opens from the same place, over whatever is beside the list; it narrows the ended runs as it does the
+            // active ones.
             HStack(spacing: 4) {
                 Spacer(minLength: 0)
-                if scope == .active { ComputerFilter(filter: $filter, addComputer: addComputer) }
+                ComputerFilter(filter: $filter, addComputer: addComputer)
                 Button(action: newRun) {
                     Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.text2)
                         .frame(width: 20, height: 24)
@@ -107,7 +107,7 @@ struct FleetList: View {
                         if scope == .active {
                             activeSections(list)
                         } else {
-                            endedSection(list.ended, selectable: selectable, picked: picked)
+                            endedSection(list.ended, selectable: selectable, picked: picked, narrowedTo: narrowedName)
                         }
                     }
                     // Room below the last row.
@@ -216,7 +216,7 @@ struct FleetList: View {
     /// Needs you, Working and Done. Unnarrowed, a section with no runs is left out; narrowed, it says so, and Needs
     /// you, which never narrows, says it holds every computer's. Done ends with the way to the ended runs, while any.
     @ViewBuilder private func activeSections(_ list: RunList) -> some View {
-        let narrowedTo = computer.flatMap { id in machines.models.first { $0.machineID == id }?.machineName }
+        let narrowedTo = narrowedName
         let sections: [(id: String, title: String, rows: [FleetRow])] = [
             ("needsYou", "Needs you", list.needsYou), ("working", "Working", list.working), ("done", "Done", list.done),
         ]
@@ -254,7 +254,15 @@ struct FleetList: View {
 
     /// The ended runs, on every computer, with the way back and, while any can be removed, Select; while choosing,
     /// how many are chosen and Done.
-    @ViewBuilder private func endedSection(_ ended: [FleetRow], selectable: [String], picked: [String]) -> some View {
+    /// The chosen computer's name, while the list is narrowed to one.
+    private var narrowedName: String? {
+        computer.flatMap { id in machines.models.first { $0.machineID == id }?.machineName }
+    }
+
+    /// The ended runs, of the chosen computer while one is chosen; with none, the list says so, naming that computer.
+    @ViewBuilder private func endedSection(
+        _ ended: [FleetRow], selectable: [String], picked: [String], narrowedTo: String?
+    ) -> some View {
         SectionLabel(title: selecting ? "\(picked.count) selected" : FleetScope.finished.title, id: "ended") {
             if selecting {
                 // No Done while a batch runs: the batch holds the choice until it has answered. While the card asks,
@@ -269,7 +277,8 @@ struct FleetList: View {
             }
         }
         if ended.isEmpty {
-            Text(FleetWords.noEndedRuns).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
+            Text(narrowedTo.map(RunListWords.noneOn) ?? FleetWords.noEndedRuns).font(Theme.ui(12.5))
+                .foregroundStyle(Theme.text3)
                 .padding(.horizontal, 18)
                 .frame(height: 30)
         }
