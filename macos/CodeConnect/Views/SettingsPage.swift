@@ -114,7 +114,7 @@ struct SettingsList: View {
                 Image(systemName: each.symbol).font(.system(size: 11.5)).foregroundStyle(Theme.text2)
                     .frame(width: 16)
                     .accessibilityHidden(true)
-                Text(each.title).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
+                Text(each.title).font(Theme.ui(12.5)).foregroundStyle(selected ? Theme.text : Theme.text2)
                 Spacer()
             }
             .padding(.horizontal, 10)
