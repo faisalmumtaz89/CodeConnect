@@ -4367,6 +4367,18 @@ public final class AppModel {
         }
     }
 
+    /// The computer archives a run (minor 67).
+    public var archivesRuns: Bool { connection.capabilities?.archivesRuns == true }
+
+    /// Archives the run: ends it, removes its worktree and deletes its local `branch`, only while `branch` is checked
+    /// out at `headOID`, what the panel showed. Each press is its own request.
+    public func archiveRun(key: String, branch: String, headOID: String) {
+        perform(key: key, step: .archive) { [connection] in
+            try await connection.archiveRun(
+                sessionUID: key, branch: branch, headOID: headOID, requestID: UUID().uuidString)
+        }
+    }
+
     /// One action of the run's Changes panel, unless one is on its way. Done, the panel's diff and repository are read
     /// again, and they show what the action made; refused, the computer's reason is kept, in the app's words, until the
     /// step it was for has passed.

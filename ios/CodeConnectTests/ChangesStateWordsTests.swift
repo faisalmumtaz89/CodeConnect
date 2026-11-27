@@ -185,6 +185,30 @@ final class ChangesStateWordsTests: XCTestCase {
         XCTAssertEqual(said("github_unavailable"), "GitHub could not be reached, so nothing was merged.")
     }
 
+    /// Archive Run is offered where the computer would archive (artboard 11): a run in a worktree of its own, on a
+    /// branch other than its base, with nothing uncommitted, whose commits are on the base already or merged by its
+    /// pull request at the commit checked out. Anything else keeps it off, and the computer checks again on the press.
+    func testArchiveIsOfferedWhereTheComputerWouldArchive() throws {
+        func merged(head: String = "1234567") -> String {
+            #"{"number":412,"url":"https://github.com/acme/app/pull/412","state":"merged","base":"main","#
+                + #""head_oid":"\#(head)","merged_at":"2026-11-27T10:00:00Z"}"#
+        }
+        func archivable(_ git: RunGit, inWorktree: Bool = true) -> Bool {
+            ChangesWords.archivable(git, inWorktree: inWorktree)
+        }
+        XCTAssertTrue(archivable(try git(ahead: 2, pushed: true, pr: merged())), "11: merged at this commit")
+        XCTAssertTrue(archivable(try git(ahead: 0)), "already on its base")
+        XCTAssertFalse(
+            archivable(try git(ahead: 2, pushed: true, pr: merged()), inWorktree: false), "the main checkout")
+        XCTAssertFalse(archivable(try git(files: 1, ahead: 0)), "uncommitted changes")
+        XCTAssertFalse(archivable(try git(files: 0, complete: false, ahead: 0)), "changes not all counted")
+        XCTAssertFalse(
+            archivable(try git(ahead: 2, pushed: true, pr: merged(head: "abcdef0"))), "merged at another commit")
+        XCTAssertFalse(archivable(try git(ahead: 2, pushed: true)), "commits on no base and in no merge")
+        XCTAssertFalse(archivable(try git(branch: nil, ahead: 0)), "no branch to delete")
+        XCTAssertFalse(archivable(try git(branch: "main", ahead: 0)), "the base branch itself")
+    }
+
     /// A check's duration as artboard 07 writes it: seconds alone under a minute, minutes and two-digit seconds under
     /// an hour, then hours and two-digit minutes.
     func testACheckDurationIsWrittenAsTheDesignWritesIt() {

@@ -69,6 +69,13 @@ struct ChangesPanel: View {
                         PullRequestRow(row: row, model: model, ready: pullRequestWait(git) == nil, line: line)
                     } else if !offline, model.mergesPullRequests, let pr = git.pullRequest, pr.state == .open {
                         MergeRow(row: row, model: model, pr: pr, quiet: commitWait(git) == nil, line: line)
+                    } else if !offline, model.archivesRuns, !row.summary.archived,
+                        ChangesWords.archivable(git, inWorktree: row.summary.inWorktree),
+                        let branch = git.branch, let head = git.headOID
+                    {
+                        ArchiveRow(
+                            row: row, model: model, branch: branch, headOID: head, quiet: commitWait(git) == nil,
+                            line: line)
                     } else {
                         line
                         if committable { CommitRow(row: row, model: model, ready: commitWait(git) == nil) }
@@ -393,6 +400,52 @@ private struct PullRequestRow: View {
                     .padding(.bottom, 12)
                     .accessibilityIdentifier("changes.createPR.refused")
             }
+        }
+    }
+}
+
+/// A finished run's row (artboard 11): the state line, and at its end Archive Run, which asks first on the one card
+/// (`FleetWords.archiveAsk`), then ends the run, removes its worktree and deletes its branch, only while the branch is
+/// at the commit the panel shows. What the computer said when it did not archive stays under it.
+private struct ArchiveRow: View {
+    let row: FleetRow
+    let model: AppModel
+    let branch: String
+    let headOID: String
+    /// The run's agent is quiet.
+    let quiet: Bool
+    let line: StateLine
+    /// The run whose archiving is being asked about.
+    @State private var asking: FleetRow?
+    /// A confirmation or a sheet covers the window.
+    @FocusedValue(\.windowCovered) private var covered
+
+    var body: some View {
+        let state = model.gitActionState(for: row.id)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                line
+                ActionButton(title: "Archive Run", key: nil, prominent: false, id: "changes.archive") { asking = row }
+                    .disabled(!quiet || state == .working || covered == true)
+                    .padding(.trailing, 20)
+            }
+            if case .refused(let why, .archive) = state {
+                Text(why)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.amber)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+                    .accessibilityIdentifier("changes.archive.refused")
+            }
+        }
+        .confirmation($asking) { asked in
+            Confirmation(
+                FleetWords.archiveAsk(asked.title), cancelID: "changes.archive.cancel",
+                confirmID: "changes.archive.confirm"
+            ) { model.archiveRun(key: asked.id, branch: branch, headOID: headOID) }
         }
     }
 }

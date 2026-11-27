@@ -426,6 +426,18 @@ public enum ChangesWords {
         case .rebase: "Rebase and merge"
         }
     }
+    /// Whether Archive Run is offered (artboard 11), by the computer's own gate as the run's repository shows it: a run
+    /// in a worktree of its own, on a branch other than its base, nothing uncommitted, its commits on the base already
+    /// or merged by its pull request at the commit checked out. What the panel can't see (a worktree another run
+    /// shares, a lock) the computer refuses on the press.
+    public static func archivable(_ git: RunGit, inWorktree: Bool) -> Bool {
+        guard inWorktree, let branch = git.branch, let head = git.headOID, let base = git.base?.name, branch != base,
+            git.changed.files == 0, git.changed.complete
+        else { return false }
+        if git.ahead == 0 { return true }
+        guard let pr = git.pullRequest else { return false }
+        return pr.state == .merged && pr.headOID == head
+    }
     /// The merge button's chevron, as a screen reader names it.
     public static let mergeMethods = "Merge methods"
     /// A merge method the repository turns off, as its menu row says it.
