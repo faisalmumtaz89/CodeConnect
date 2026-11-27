@@ -361,17 +361,19 @@ public enum ChangesWords {
     /// A Changes panel's state line from its run's repository: an unresolved merge, the files changed (at least so
     /// many when the computer could not count them all), and the commits not on the base, pushed or not, or nothing
     /// committed yet. Only what the computer read; nothing from an agent's words.
-    public static func state(_ git: RunGit) -> String {
+    public static func state(_ git: RunGit, conflicts: RunConflicts? = nil) -> String {
         var parts: [String] = []
+        let conflicted = conflicting(git, conflicts)
         // A branch's pull request speaks for its commits and its push.
         if let pr = git.pullRequest {
             switch pr.state {
-            case .open: parts.append("PR #\(pr.number) · \(openLead(pr))")
+            case .open: parts.append("PR #\(pr.number) · \(openLead(pr, conflictsWith: conflicted))")
             case .merged: parts.append("PR #\(pr.number) · Merged into \(pr.base)")
             case .closed: parts.append("PR #\(pr.number) · Closed")
             case .unknown: parts.append("PR #\(pr.number)")
             }
         }
+        if git.pullRequest == nil, let base = conflicted { parts.append("Conflicts with \(base)") }
         if git.unmerged { parts.append("Merge conflicts") }
         let changed = Int(git.changed.files)
         if changed > 0 {
@@ -397,9 +399,36 @@ public enum ChangesWords {
     }
     /// What leads an open pull request's state line: queued to merge, else what its checks say, else its merge state
     /// (artboards 07, 10), else Open.
-    private static func openLead(_ pr: RunGit.PullRequest) -> String {
+    private static func openLead(_ pr: RunGit.PullRequest, conflictsWith base: String?) -> String {
         if pr.mergeQueued == true { return "Queued to merge" }
-        return checksLead(pr) ?? mergeLead(pr) ?? "Open"
+        return checksLead(pr) ?? base.map { "Conflicts with \($0)" } ?? mergeLead(pr) ?? "Open"
+    }
+    /// The base a run's commit conflicts with, when the computer compared that very commit (artboard 17); nil when it
+    /// merges cleanly, was not compared, or was compared at another commit.
+    private static func conflicting(_ git: RunGit, _ conflicts: RunConflicts?) -> String? {
+        guard let conflicts, !conflicts.clean, conflicts.headOID == git.headOID else { return nil }
+        return conflicts.base.name
+    }
+    /// Under a state line led by conflicts (artboard 17): the files they are in, by name, three at most.
+    public static func conflictsNote(_ conflicts: RunConflicts) -> String? {
+        guard !conflicts.clean else { return nil }
+        guard !conflicts.files.isEmpty else { return conflictsUnnamed }
+        let names = conflicts.files.map { ($0 as NSString).lastPathComponent.displaySafe }.sorted()
+        let count = conflicts.filesComplete ? files(names.count) : "at least \(files(names.count))"
+        let shown = names.prefix(3).joined(separator: ", ")
+        return "In \(count): \(names.count > 3 ? "\(shown) and \(names.count - 3) more" : shown)"
+    }
+    /// The two sides of a conflicting hunk: the branch checked out, then the base by its name.
+    public static let conflictThisBranch = "this branch"
+    /// A conflicting file with no lines to show.
+    public static let conflictNoLines = "No lines to show: binary, renamed, or deleted on one side."
+    /// Under a file's hunks when it has more than were read.
+    public static let conflictMore = "More conflicts in this file than are shown."
+    /// A conflict git names no file for.
+    public static let conflictsUnnamed = "Git names no file for them"
+    /// A conflicting file's heading over its hunks (artboard 17).
+    public static func conflictTitle(_ path: String) -> String {
+        "Both changed in \((path as NSString).lastPathComponent.displaySafe)"
     }
     /// An open pull request's merge state as GitHub reports it, in words; nil while GitHub works it out.
     private static func mergeLead(_ pr: RunGit.PullRequest) -> String? {
@@ -414,8 +443,10 @@ public enum ChangesWords {
     }
     /// Whether the merge button may merge an open pull request: GitHub would merge it as it stands (a check it doesn't
     /// require may fail), and no queue holds it already.
-    public static func mergeable(_ pr: RunGit.PullRequest) -> Bool {
+    public static func mergeable(_ pr: RunGit.PullRequest, conflicts: RunConflicts? = nil) -> Bool {
         guard pr.state == .open, pr.mergeQueued != true else { return false }
+        // The computer found this commit conflicting with its base: GitHub would refuse it too.
+        if let conflicts, !conflicts.clean, conflicts.headOID == pr.headOID { return false }
         return [.clean, .unstable, .hasHooks].contains(pr.mergeState)
     }
     /// A merge method as the merge button and its menu name it (artboard 10).
@@ -458,13 +489,15 @@ public enum ChangesWords {
     }
     /// The line under an open pull request's state (artboard 07): how many of its checks passed, a skipped one with
     /// them, then which failed and how many still run. Nil when it has none read, or is not open.
-    public static func checksNote(_ git: RunGit) -> String? {
+    public static func checksNote(_ git: RunGit, conflicts: RunConflicts? = nil) -> String? {
         guard let pr = git.pullRequest, pr.state == .open, let checks = pr.checks, !checks.isEmpty else { return nil }
         var parts = ["\(passed(checks)) of \(checks.count) checks passed"]
         let failed = checks.filter { $0.state == .fail }.map(\.name.displaySafe)
         if !failed.isEmpty { parts.append("\(failed.joined(separator: ", ")) failed") }
         let running = checks.filter { $0.state == .pending }.count
         if running > 0 { parts.append("\(running) running") }
+        // A comparison of this very commit that merges cleanly says so (artboard 10).
+        if let conflicts, conflicts.clean, conflicts.headOID == git.headOID { parts.append("no conflicts") }
         return parts.joined(separator: " · ")
     }
     /// The Checks tab's label: how many of the checks passed, of how many.

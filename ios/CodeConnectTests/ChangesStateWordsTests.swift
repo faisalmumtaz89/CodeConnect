@@ -209,6 +209,41 @@ final class ChangesStateWordsTests: XCTestCase {
         XCTAssertFalse(archivable(try git(branch: "main", ahead: 0)), "the base branch itself")
     }
 
+    /// A run's conflicts with its base, as the computer compared them (artboard 17), lead its line after a queue and
+    /// its checks: "Conflicts with main", the files they're in under it, and the merge button withheld. A clean
+    /// comparison adds "no conflicts" after the checks (artboard 10).
+    func testConflictsWithTheBaseLeadTheLineAndHoldTheMerge() throws {
+        func compared(clean: Bool, files: [String] = [], complete: Bool = true) throws -> RunConflicts {
+            let list = files.map { #""\#($0)""# }.joined(separator: ",")
+            let json = #"{"base":{"name":"main","remote":"origin","ref":"refs/remotes/origin/main"},"#
+                + #""base_oid":"abcdef0","head_oid":"1234567","clean":\#(clean),"files":[\#(list)],"#
+                + #""files_complete":\#(complete),"read_at":"2026-11-27T12:00:00Z"}"#
+            return try JSONDecoder().decode(RunConflicts.self, from: Data(json.utf8))
+        }
+        let pr = #"{"number":412,"url":"https://github.com/acme/app/pull/412","state":"open","base":"main","#
+            + #""head_oid":"1234567","checks":[{"name":"kit","state":"pass"}],"merge_state":"clean","#
+            + #""merge_methods":["squash"],"merge_queued":false}"#
+        let git = try git(ahead: 1, pushed: true, pr: pr)
+        let two = try compared(clean: false, files: ["macos/Views/ReplyUsage.swift", "Kit/AgeTick.swift"])
+        XCTAssertEqual(ChangesWords.state(git, conflicts: two), "PR #412 · Conflicts with main", "17")
+        XCTAssertEqual(ChangesWords.conflictsNote(two), "In 2 files: AgeTick.swift, ReplyUsage.swift", "17")
+        XCTAssertFalse(ChangesWords.mergeable(git.pullRequest!, conflicts: two), "17: the merge button stays off")
+        let many = try compared(clean: false, files: ["a.swift", "b.swift", "c.swift", "d.swift", "e.swift"])
+        XCTAssertEqual(ChangesWords.conflictsNote(many), "In 5 files: a.swift, b.swift, c.swift and 2 more")
+        let cut = try compared(clean: false, files: ["a.swift"], complete: false)
+        XCTAssertEqual(ChangesWords.conflictsNote(cut), "In at least 1 file: a.swift")
+        let unnamed = try compared(clean: false)
+        XCTAssertEqual(ChangesWords.conflictsNote(unnamed), "Git names no file for them")
+        let clean = try compared(clean: true)
+        XCTAssertEqual(ChangesWords.state(git, conflicts: clean), "PR #412 · Ready to merge")
+        XCTAssertNil(ChangesWords.conflictsNote(clean))
+        XCTAssertEqual(ChangesWords.checksNote(git, conflicts: clean), "1 of 1 checks passed · no conflicts", "10")
+        XCTAssertTrue(ChangesWords.mergeable(git.pullRequest!, conflicts: clean))
+        XCTAssertEqual(ChangesWords.state(try self.git(ahead: 2, pushed: true), conflicts: two),
+            "Conflicts with main · 2 commits · pushed", "a branch with no pull request yet")
+        XCTAssertEqual(ChangesWords.conflictTitle("macos/Views/ReplyUsage.swift"), "Both changed in ReplyUsage.swift")
+    }
+
     /// A check's duration as artboard 07 writes it: seconds alone under a minute, minutes and two-digit seconds under
     /// an hour, then hours and two-digit minutes.
     func testACheckDurationIsWrittenAsTheDesignWritesIt() {

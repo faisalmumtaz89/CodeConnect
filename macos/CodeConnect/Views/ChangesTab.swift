@@ -57,18 +57,26 @@ struct ChangesPanel: View {
                 let proposable =
                     !offline && !committable && model.opensPullRequests && git.pullRequest == nil && opened == nil
                     && (git.ahead ?? 0) > 0 && git.branch != nil && target != nil
+                // The run's commit compared with its base (artboard 17): its conflicts lead the line and name their
+                // files under it.
+                let compared = model.conflicts(for: key)
                 let line = StateLine(
                     text: git.pullRequest == nil && opened != nil
-                        ? "PR #\(opened?.number ?? 0) · Open" : ChangesWords.state(git),
+                        ? "PR #\(opened?.number ?? 0) · Open" : ChangesWords.state(git, conflicts: compared),
                     delta: nil, read: ISO8601.parse(git.readAt), unreachable: offline ? computer : nil,
                     note: committable
                         ? commitWait(git) ?? ChangesWords.commitReady
-                        : proposable ? pullRequestWait(git) ?? target : ChangesWords.checksNote(git))
+                        : proposable
+                            ? pullRequestWait(git) ?? target
+                            : conflicted.flatMap(ChangesWords.conflictsNote)
+                                ?? ChangesWords.checksNote(git, conflicts: compared))
                 VStack(alignment: .leading, spacing: 0) {
                     if proposable {
                         PullRequestRow(row: row, model: model, ready: pullRequestWait(git) == nil, line: line)
                     } else if !offline, model.mergesPullRequests, let pr = git.pullRequest, pr.state == .open {
-                        MergeRow(row: row, model: model, pr: pr, quiet: commitWait(git) == nil, line: line)
+                        MergeRow(
+                            row: row, model: model, pr: pr, conflicts: compared, quiet: commitWait(git) == nil,
+                            line: line)
                     } else if !offline, model.archivesRuns, !row.summary.archived,
                         ChangesWords.archivable(git, inWorktree: row.summary.inWorktree),
                         let branch = git.branch, let head = git.headOID
@@ -143,6 +151,14 @@ struct ChangesPanel: View {
         return nil
     }
 
+    /// The run's commit's conflicts with its base, when the computer compared the commit checked out and found some.
+    private var conflicted: RunConflicts? {
+        guard let compared = model.conflicts(for: key), !compared.clean,
+            compared.headOID == model.runGit(for: key)?.git?.headOID
+        else { return nil }
+        return compared
+    }
+
     /// The run's open pull request's checks, when the computer read some; nil for none, or a pull request not open.
     private static func checks(_ git: RunGit) -> [RunGit.PullRequest.Check]? {
         guard let pr = git.pullRequest, pr.state == .open, let checks = pr.checks, !checks.isEmpty else { return nil }
@@ -206,7 +222,10 @@ struct ChangesPanel: View {
     private func loaded(
         _ raw: SessionDiff, _ parsed: UnifiedDiff, _ fetchedAt: Date, counted: Bool, banded: Bool
     ) -> some View {
-        if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil {
+        if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil, let conflicted {
+            // Nothing uncommitted, and the commit conflicts with its base: its conflicts stand where the diff would.
+            ConflictsList(key: key, model: model, compared: conflicted)
+        } else if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil {
             Message(id: "changes.clean", title: ChangesWords.noUncommitted, sentence: ChangesWords.clean)
         } else if parsed.isEmpty && raw.files?.isEmpty != false {
             Message(
@@ -404,6 +423,90 @@ private struct PullRequestRow: View {
     }
 }
 
+/// A commit's conflicts with its base (artboard 17), each file's under its name: the lines on this branch, then the
+/// base's, each marked at its edge. A file's hunks are read when its block comes into view.
+private struct ConflictsList: View {
+    let key: String
+    let model: AppModel
+    let compared: RunConflicts
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                if compared.files.isEmpty {
+                    Text(ChangesWords.conflictsUnnamed).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                }
+                ForEach(compared.files, id: \.self) { path in
+                    ConflictBlock(key: key, model: model, path: path, base: compared.base.name.displaySafe)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("changes.conflicts")
+    }
+}
+
+private struct ConflictBlock: View {
+    let key: String
+    let model: AppModel
+    let path: String
+    let base: String
+
+    var body: some View {
+        let reply = model.conflict(for: key, path: path)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(ChangesWords.conflictTitle(path)).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                .padding(.horizontal, 2)
+            VStack(alignment: .leading, spacing: 0) {
+                if let hunks = reply?.hunks {
+                    if hunks.isEmpty { quiet(ChangesWords.conflictNoLines) }
+                    ForEach(Array(hunks.enumerated()), id: \.offset) { _, hunk in
+                        side(ChangesWords.conflictThisBranch, hunk.ours)
+                        side(base, hunk.theirs)
+                    }
+                    if reply?.hunksComplete == false { quiet(ChangesWords.conflictMore) }
+                } else if let note = reply?.note {
+                    quiet(note.displaySafe)
+                } else {
+                    quiet(ChangesWords.reading)
+                }
+            }
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+        }
+        .task(id: path) { model.loadConflict(key: key, path: path) }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("changes.conflict.\(path)")
+    }
+
+    /// One side's lines under its name, each marked at its leading edge.
+    private func side(_ name: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(verbatim: name).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                .padding(.leading, 13)
+                .padding(.top, 3)
+                .padding(.bottom, 1)
+            ForEach(Array(text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) {
+                _, line in
+                HStack(spacing: 0) {
+                    Rectangle().fill(Theme.amber).frame(width: 3)
+                    Text(verbatim: String(line).displaySafe).font(Theme.mono(11.5)).foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                        .padding(.leading, 10)
+                }
+                .frame(height: 19)
+            }
+        }
+    }
+
+    private func quiet(_ text: String) -> some View {
+        Text(text).font(Theme.ui(12)).foregroundStyle(Theme.text3).padding(.horizontal, 13).padding(.vertical, 4)
+    }
+}
+
 /// A finished run's row (artboard 11): the state line, and at its end Archive Run, which asks first on the one card
 /// (`FleetWords.archiveAsk`), then ends the run, removes its worktree and deletes its branch, only while the branch is
 /// at the commit the panel shows. What the computer said when it did not archive stays under it.
@@ -459,6 +562,8 @@ private struct MergeRow: View {
     let model: AppModel
     let pr: RunGit.PullRequest
     /// The run's agent is quiet.
+    /// The run's commit compared with its base: a conflict withholds the merge.
+    let conflicts: RunConflicts?
     let quiet: Bool
     let line: StateLine
     /// The method chosen from the menu; until then the repository's default (`ChangesWords.defaultMergeMethod`).
@@ -471,7 +576,9 @@ private struct MergeRow: View {
         let state = model.gitActionState(for: row.id)
         let allowed = pr.mergeMethods ?? []
         let method = chosen.flatMap { allowed.contains($0) ? $0 : nil } ?? ChangesWords.defaultMergeMethod(allowed)
-        let ready = quiet && ChangesWords.mergeable(pr) && method != nil && state != .working && covered != true
+        let ready =
+            quiet && ChangesWords.mergeable(pr, conflicts: conflicts) && method != nil && state != .working
+            && covered != true
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 line

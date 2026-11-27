@@ -285,6 +285,11 @@ public final class AppModel {
     /// Each run's repository as its computer last read it (`runGit(for:)`), and the runs a read is on its way for.
     private(set) var runGits: [String: RunGitReply] = [:]
     private var runGitsReading: Set<String> = []
+    /// Each run's commit compared with its base (`conflicts(for:)`), the runs a comparison is on its way for, and each
+    /// compared file's hunks, by run and path.
+    private(set) var runConflicts: [String: RunConflicts] = [:]
+    private var conflictsReading: Set<String> = []
+    private(set) var conflictHunks: [String: [String: ConflictReply]] = [:]
     /// Each run's action from its Changes panel: on its way, or what the computer said when it did not do it.
     private(set) var gitActions: [String: GitActionState] = [:]
 
@@ -1932,6 +1937,8 @@ public final class AppModel {
         answersInFlight = []
         diffs = [:]
         runGits = [:]
+        runConflicts = [:]
+        conflictHunks = [:]
         gitActions = [:]
         // **The mutation controllers go with the fleet.** They were left
         // behind, so a reconnect that re-created a session under the same key
@@ -2293,6 +2300,10 @@ public final class AppModel {
         }
         if runGits.contains(where: { states[$0.key] == nil }) {
             runGits = runGits.filter { states[$0.key] != nil }
+        }
+        if runConflicts.contains(where: { states[$0.key] == nil }) {
+            runConflicts = runConflicts.filter { states[$0.key] != nil }
+            conflictHunks = conflictHunks.filter { states[$0.key] != nil }
         }
         // Each assigned only when it differs: `@Observable` fires on the
         // assignment, and an equal list redraws every row for nothing.
@@ -3147,6 +3158,8 @@ public final class AppModel {
         if departedMarks.remove(key) != nil { ReviewMarks.forget(sessionKey: key) }
         diffs[key] = nil
         runGits[key] = nil
+        runConflicts[key] = nil
+        conflictHunks[key] = nil
         gitActions[key] = nil
         catchUp?.list?.removeAll { $0.sessionKey == key }
         catchUp?.progressed = true
@@ -4330,6 +4343,55 @@ public final class AppModel {
     /// computer that does not read repositories, and in the sample fleet and fixtures, which have none.
     public func runGit(for key: String) -> RunGitReply? { runGits[key] }
 
+    /// The computer compares a run's commit with its base (minor 66).
+    public var readsConflicts: Bool { connection.capabilities?.readsConflicts == true }
+
+    /// The run's commit as its computer last compared it with its base: nil before one, for a branch with nothing on
+    /// its base, and from a computer that does not compare.
+    public func conflicts(for key: String) -> RunConflicts? { runConflicts[key] }
+
+    /// One conflicting file's hunks in that comparison, once read.
+    public func conflict(for key: String, path: String) -> ConflictReply? { conflictHunks[key]?[path] }
+
+    /// Compares the run's commit with its base when its repository shows one not compared yet: a branch with commits
+    /// its known base lacks. Asked on a new head only, never on a timer; a branch with none forgets the last.
+    private func loadConflicts(key: String, git: RunGit) {
+        guard readsConflicts, let head = git.headOID, git.branch != nil, git.base != nil, (git.ahead ?? 0) > 0 else {
+            runConflicts[key] = nil
+            conflictHunks[key] = nil
+            return
+        }
+        guard runConflicts[key]?.headOID != head, !conflictsReading.contains(key) else { return }
+        conflictsReading.insert(key)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.conflictsReading.remove(key) }
+            guard let reply = try? await self.connection.conflicts(session: key), let compared = reply.conflicts
+            else { return }
+            self.conflictHunks[key] = nil
+            self.runConflicts[key] = compared
+        }
+    }
+
+    /// Reads a conflicting file's hunks in the run's last comparison, unless they are read or on their way.
+    public func loadConflict(key: String, path: String) {
+        guard let compared = runConflicts[key], conflictHunks[key]?[path] == nil,
+            !conflictsReading.contains("\(key)\u{0}\(path)")
+        else { return }
+        let reading = "\(key)\u{0}\(path)"
+        conflictsReading.insert(reading)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.conflictsReading.remove(reading) }
+            guard
+                let reply = try? await self.connection.conflict(
+                    session: key, path: path, headOID: compared.headOID, baseOID: compared.baseOID),
+                self.runConflicts[key]?.headOID == compared.headOID
+            else { return }
+            self.conflictHunks[key, default: [:]][path] = reply
+        }
+    }
+
     /// The computer commits a run's changes from its Changes panel (minor 59).
     public var commitsChanges: Bool { connection.capabilities?.commitsChanges == true }
 
@@ -4418,6 +4480,7 @@ public final class AppModel {
             defer { self.runGitsReading.remove(key) }
             guard let reply = try? await self.connection.runGit(session: key) else { return }
             self.runGits[key] = reply
+            if let git = reply.git { self.loadConflicts(key: key, git: git) }
             // A clean repository ends what a refused commit said: the next changes are another commit.
             // What the panel holds has passed once the repository shows it: a whole clean repository ends a commit's
             // refusal; a pull request ends a pull request's refusal, and the one just opened.
