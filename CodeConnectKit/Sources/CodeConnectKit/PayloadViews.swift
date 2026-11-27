@@ -243,7 +243,7 @@ extension Event {
     /// The account a run was moved to, by its name (`switched_to`, minor 48): on the end ccd files for a switch, and
     /// on its `switch_failed` notice when the start there was refused.
     var switchedToLabel: String? { payload["switched_to"]?["label"]?.stringValue }
-    /// A run's end the person asked for (End Run): the daemon says so (`ended_by`, protocol `ENDED_BY`).
+    /// A run's end the person asked for (End Run, Archive): the daemon says so (`ended_by`, minor 69).
     var endedByPerson: Bool { kind == .sessionEnd && payload["ended_by"]?.stringValue == "person" }
     /// The id of that account (nil: the agent's Default), for the name this app's account book knows it by.
     var switchedToID: String? { payload["switched_to"]?["account_id"]?.stringValue }

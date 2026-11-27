@@ -106,7 +106,8 @@ pub fn sdk_event_id(message_uuid: &str, kind: &EventKind, block: usize) -> Strin
 pub const SWITCHED_TO: &str = "switched_to";
 
 /// The payload key of a [`EventKind::SessionEnd`] that says who ended the run: [`ENDED_BY_PERSON`] on the end of a run
-/// the person ended (End Run), and on no other end. An older daemon's ends carry none.
+/// the person ended (End Run, and Archive's end), never on a switch of account's (minor 69). An older daemon's ends
+/// carry none.
 pub const ENDED_BY: &str = "ended_by";
 /// [`ENDED_BY`]'s value on an end the person asked for.
 pub const ENDED_BY_PERSON: &str = "person";
@@ -583,7 +584,7 @@ pub struct SessionSummary {
     /// are gone, so it has no folder to pick up again. Omitted when false, and from an older daemon.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
-    /// The run works in a worktree of its own (a `.claude/worktrees/<name>` folder, as a start in a new worktree and
+    /// The run works in a worktree of its own (minor 69: a `.claude/worktrees/<name>` folder, as a start in a new worktree and
     /// claude's own `--worktree` make one), so its folder and branch stay when it ends; never on an [`Self::archived`]
     /// run, whose worktree and branch are gone. Omitted when false, and from an older daemon.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

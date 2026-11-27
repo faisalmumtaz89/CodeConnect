@@ -3063,9 +3063,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 68,
             "a computer's home folder on `hello_ack` (`machine_home`) and a device's `kind` are minor 68"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 69,
+            "who ended a run (`ended_by`) and whether it keeps its worktree (`in_worktree`) are minor 69"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 68);
+        assert_eq!(crate::PROTOCOL_MINOR, 69);
     }
 
     /// **The tags, pinned on this side too.**

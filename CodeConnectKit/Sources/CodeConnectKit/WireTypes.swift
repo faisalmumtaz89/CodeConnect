@@ -664,7 +664,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// next turn on, and from an older daemon. An ended run keeps its last one.
     public let limit: RunLimit?
     /// The run works in a worktree of its own (its folder `.claude/worktrees/<name>`), so its folder and branch stay
-    /// when it ends. False from an older daemon.
+    /// when it ends (minor 69); never an archived run. False from a daemon below 69.
     public let inWorktree: Bool
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
     /// last ended. `nil` outside a repository, on a detached head, before the
