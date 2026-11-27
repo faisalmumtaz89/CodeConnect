@@ -252,13 +252,13 @@ final class ProtocolTests: XCTestCase {
         guard case .runGit(let laterReply) = later else { return XCTFail("wrong message") }
         XCTAssertEqual(laterReply.git?.pullRequest?.mergeState, .unknown)
 
-        let fields = try encodeClient(
+        let mergeFields = try encodeClient(
             .mergePullRequest(requestID: "m-1", sessionUID: "u-1", number: 7, method: .squash, headOID: "abc"))
-        XCTAssertEqual(fields["type"]?.stringValue, "git_action")
-        XCTAssertEqual(fields["action"]?.objectValue?["kind"]?.stringValue, "merge")
-        XCTAssertEqual(fields["action"]?.objectValue?["method"]?.stringValue, "squash")
-        XCTAssertEqual(fields["action"]?.objectValue?["head_oid"]?.stringValue, "abc")
-        XCTAssertEqual(fields["action"]?.objectValue?["number"]?.intValue, 7)
+        XCTAssertEqual(mergeFields["type"]?.stringValue, "git_action")
+        XCTAssertEqual(mergeFields["action"]?.objectValue?["kind"]?.stringValue, "merge")
+        XCTAssertEqual(mergeFields["action"]?.objectValue?["method"]?.stringValue, "squash")
+        XCTAssertEqual(mergeFields["action"]?.objectValue?["head_oid"]?.stringValue, "abc")
+        XCTAssertEqual(mergeFields["action"]?.objectValue?["number"]?.intValue, 7)
 
         let newer = try decodeServer(
             """
