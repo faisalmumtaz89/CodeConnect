@@ -1210,7 +1210,7 @@ public final class DaemonConnection {
     public func commit(sessionUID: String, message: String, requestID: String) async throws -> GitActionResult {
         guard capabilities?.commitsChanges == true else {
             throw ConnectionError.incompatible(
-                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can’t commit a run’s changes on this connection."
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can’t commit a session’s changes on this connection."
             )
         }
         return try await request(
@@ -1264,7 +1264,7 @@ public final class DaemonConnection {
     {
         guard capabilities?.archivesRuns == true else {
             throw ConnectionError.incompatible(
-                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can’t archive a run on this connection."
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can’t archive a session on this connection."
             )
         }
         return try await request(
@@ -1278,7 +1278,7 @@ public final class DaemonConnection {
     public func runGit(session: String) async throws -> RunGitReply {
         guard capabilities?.readsRunGit == true else {
             throw ConnectionError.incompatible(
-                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can't show a run's branch on this connection."
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can't show a session's branch on this connection."
             )
         }
         return try await request(
@@ -1293,7 +1293,7 @@ public final class DaemonConnection {
     public func conflicts(session: String) async throws -> ConflictsReply {
         guard capabilities?.readsConflicts == true else {
             throw ConnectionError.incompatible(
-                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can't show a run's conflicts on this connection."
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can't show a session's conflicts on this connection."
             )
         }
         return try await request(
@@ -1307,7 +1307,7 @@ public final class DaemonConnection {
     public func conflict(session: String, path: String, headOID: String, baseOID: String) async throws -> ConflictReply {
         guard capabilities?.readsConflicts == true else {
             throw ConnectionError.incompatible(
-                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can't show a run's conflicts on this connection."
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can't show a session's conflicts on this connection."
             )
         }
         return try await request(
@@ -1376,7 +1376,7 @@ public final class DaemonConnection {
     public func stopRun(session: String, requestID: String) async throws -> StopRunResult {
         guard capabilities?.endsRuns == true else {
             throw ConnectionError.incompatible(
-                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) has an older CodeConnect that cannot end a run. Update CodeConnect on it, then try again."
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) has an older CodeConnect that cannot end a session. Update CodeConnect on it, then try again."
             )
         }
         mutationSessions[requestID] = session
@@ -1770,7 +1770,7 @@ public final class DaemonConnection {
         guard let expected = mutationSessions[requestID] else { return true }
         guard expected == sessionID else {
             unreadableFrame =
-                "\(HostDevice.current.computer("The computer", named: helloAck?.machineName)) answered this \(HostDevice.current.name)’s \(kind) for one run with another run’s "
+                "\(HostDevice.current.computer("The computer", named: helloAck?.machineName)) answered this \(HostDevice.current.name)’s \(kind) for one session with another session’s "
                 + "result. It was ignored."
             unreadableFrameAt = Date()
             return false

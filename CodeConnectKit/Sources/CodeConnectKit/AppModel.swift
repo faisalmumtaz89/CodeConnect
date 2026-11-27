@@ -126,6 +126,7 @@ public enum GitActionState: Sendable, Equatable {
 public enum GitStep: Sendable, Equatable {
     case commit
     case pullRequest
+    case merge
     case archive
 }
 
@@ -284,6 +285,11 @@ public final class AppModel {
     /// Each run's repository as its computer last read it (`runGit(for:)`), and the runs a read is on its way for.
     private(set) var runGits: [String: RunGitReply] = [:]
     private var runGitsReading: Set<String> = []
+    /// Each run's commit compared with its base (`conflicts(for:)`), the runs a comparison is on its way for, and each
+    /// compared file's hunks, by run and path.
+    private(set) var runConflicts: [String: RunConflicts] = [:]
+    private var conflictsReading: Set<String> = []
+    private(set) var conflictHunks: [String: [String: ConflictReply]] = [:]
     /// Each run's action from its Changes panel: on its way, or what the computer said when it did not do it.
     private(set) var gitActions: [String: GitActionState] = [:]
 
@@ -1931,6 +1937,8 @@ public final class AppModel {
         answersInFlight = []
         diffs = [:]
         runGits = [:]
+        runConflicts = [:]
+        conflictHunks = [:]
         gitActions = [:]
         // **The mutation controllers go with the fleet.** They were left
         // behind, so a reconnect that re-created a session under the same key
@@ -2293,6 +2301,10 @@ public final class AppModel {
         }
         if runGits.contains(where: { states[$0.key] == nil }) {
             runGits = runGits.filter { states[$0.key] != nil }
+        }
+        if runConflicts.contains(where: { states[$0.key] == nil }) {
+            runConflicts = runConflicts.filter { states[$0.key] != nil }
+            conflictHunks = conflictHunks.filter { states[$0.key] != nil }
         }
         // Each assigned only when it differs: `@Observable` fires on the
         // assignment, and an equal list redraws every row for nothing.
@@ -3147,6 +3159,8 @@ public final class AppModel {
         if departedMarks.remove(key) != nil { ReviewMarks.forget(sessionKey: key) }
         diffs[key] = nil
         runGits[key] = nil
+        runConflicts[key] = nil
+        conflictHunks[key] = nil
         gitActions[key] = nil
         catchUp?.list?.removeAll { $0.sessionKey == key }
         catchUp?.progressed = true
@@ -3503,7 +3517,7 @@ public final class AppModel {
 
     /// Why Stop is not offered on this session as drawn, or nil when it is.
     public func stopUnavailable(for key: String) -> String? {
-        guard let summary = shownSummary(for: key) else { return "This run is not in the fleet." }
+        guard let summary = shownSummary(for: key) else { return "This session is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
         return CodexProse.stopUnavailable(
             agent: summary.agent,
@@ -3516,7 +3530,7 @@ public final class AppModel {
 
     /// The same rule against the truth: what decides whether a stop may leave.
     private func stopBlocked(for key: String) -> String? {
-        guard let summary = summary(for: key) else { return "This run is not in the fleet." }
+        guard let summary = summary(for: key) else { return "This session is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
         return CodexProse.stopUnavailable(
             agent: summary.agent,
@@ -3529,7 +3543,7 @@ public final class AppModel {
 
     /// Why the Codex composer cannot send as drawn, or nil when it can.
     public func composeUnavailable(for key: String) -> String? {
-        guard let summary = shownSummary(for: key) else { return "This run is not in the fleet." }
+        guard let summary = shownSummary(for: key) else { return "This session is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
         return Self.composeUnavailable(summary, profile: daemonProfile, cardShown: cardShown(for: key))
     }
@@ -3537,7 +3551,7 @@ public final class AppModel {
     /// What decides whether a message may leave — the truth summary (`summary(for:)`) for the pending
     /// ref, and the shown card for `cardShown`, which the submit path's `rebuildNow` makes current first.
     public func composeBlocked(for key: String) -> String? {
-        guard let summary = summary(for: key) else { return "This run is not in the fleet." }
+        guard let summary = summary(for: key) else { return "This session is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
         return Self.composeUnavailable(summary, profile: daemonProfile, cardShown: cardShown(for: key))
     }
@@ -3591,7 +3605,7 @@ public final class AppModel {
     public func stopCodexTurn(sessionKey key: String) async -> InterruptResult? {
         let controls = codexControls(for: key)
         guard let summary = summary(for: key) else {
-            controls.stopNotSent("This run is not in the fleet.")
+            controls.stopNotSent("This session is not in the fleet.")
             return nil
         }
         // Agent, daemon capability, running turn and **link state**, in the one
@@ -3661,7 +3675,7 @@ public final class AppModel {
         let files = withFiles ? arrivedFileIDs(key) : []
         let controls = codexControls(for: key)
         guard let summary = summary(for: key) else {
-            controls.composeNotSent("This run is not in the fleet.")
+            controls.composeNotSent("This session is not in the fleet.")
             return nil
         }
         // A card may have arrived as an event and not yet been built into the shown
@@ -3733,7 +3747,7 @@ public final class AppModel {
     /// hash of the words, so a re-send of the same words is recognised by the daemon and replayed, never
     /// typed twice. A refusal comes back in the app's own words, never ccd's raw sentence.
     private func composeComment(text: String, to key: String) async -> ComposeAttempt {
-        guard let summary = summary(for: key) else { return .failed("This run is not in the fleet.") }
+        guard let summary = summary(for: key) else { return .failed("This session is not in the fleet.") }
         states[key]?.rebuildNow()
         if let blocked = composeBlocked(for: key) { return .refused(blocked) }
         if let blocked = ComposeDraft(text: text).blockedReason { return .refused(blocked) }
@@ -3907,7 +3921,7 @@ public final class AppModel {
     }
 
     private static let noUidSentence =
-        "\(HostDevice.current.computer("The computer")) has not given this run an id of its own, so nothing was sent."
+        "\(HostDevice.current.computer("The computer")) has not given this session an id of its own, so nothing was sent."
 
     /// A stop or a message whose outcome nobody knows, refused again. "Sent" for both, as the computer's own sentence
     /// for the same case says: a stop that was "stopped" would claim the turn ended, which nobody knows.
@@ -3929,7 +3943,7 @@ public final class AppModel {
             return
                 "\(HostDevice.current.computer("The computer"))’s CodeConnect never said it could \(verb), so nothing was sent. Update it."
         case .notACodexSession(let agent):
-            return "This is a \(agent) run, so nothing was sent."
+            return "This is a \(agent) session, so nothing was sent."
         case .nothingToSend(let reason):
             return reason
         }
@@ -3952,7 +3966,7 @@ public final class AppModel {
         // had left the fleet sent an `allow` for an agent nobody could name.
         guard let agent = summary(for: item.sessionKey)?.agent else {
             return .rejected(
-                "This run is no longer on the fleet, so nothing was sent. Answer it at \(HostDevice.current.computer("the computer", named: machineName)).")
+                "This session is no longer on the fleet, so nothing was sent. Answer it at \(HostDevice.current.computer("the computer", named: machineName)).")
         }
         if let mismatch = Self.decisionMismatch(
             decision: decision, agent: agent,
@@ -4058,7 +4072,7 @@ public final class AppModel {
             // Codex vocabulary the Mac refuses by name.
             return nil
         case (.claude, .optionId):
-            return "An option id is for a Codex run; this is a Claude run, "
+            return "An option id is for a Codex session; this is a Claude session, "
                 + "so nothing was sent."
         case (.antigravity, .allow), (.antigravity, .deny):
             // Answered through the agent host that holds agy's request, as a Claude card is.
@@ -4070,7 +4084,7 @@ public final class AppModel {
         case (.antigravity, _):
             return "An Antigravity card is answered Allow or Deny, so nothing was sent."
         case (.unsupported(let raw), _):
-            return "This app does not know how to answer a \(raw) run, so nothing was sent."
+            return "This app does not know how to answer a \(raw) session, so nothing was sent."
         default:
             return nil
         }
@@ -4124,11 +4138,11 @@ public final class AppModel {
         // itself is never typed through a side door.
         switch ClaudeCommandPolicy.action(for: text) {
         case .nativeModel:
-            return .refused("Use the run’s settings to change the model.")
+            return .refused("Use the session’s settings to change the model.")
         case .nativeDiff:
             return .refused("Open Changes to see the diff.")
         case .nativeEffort:
-            return .refused("Use the run’s settings to change the effort.")
+            return .refused("Use the session’s settings to change the effort.")
         case .nativeCompact:
             return .refused("Type /compact in the reply box to compact the context.")
         case .nativeClear:
@@ -4330,6 +4344,55 @@ public final class AppModel {
     /// computer that does not read repositories, and in the sample fleet and fixtures, which have none.
     public func runGit(for key: String) -> RunGitReply? { runGits[key] }
 
+    /// The computer compares a run's commit with its base (minor 66).
+    public var readsConflicts: Bool { connection.capabilities?.readsConflicts == true }
+
+    /// The run's commit as its computer last compared it with its base: nil before one, for a branch with nothing on
+    /// its base, and from a computer that does not compare.
+    public func conflicts(for key: String) -> RunConflicts? { runConflicts[key] }
+
+    /// One conflicting file's hunks in that comparison, once read.
+    public func conflict(for key: String, path: String) -> ConflictReply? { conflictHunks[key]?[path] }
+
+    /// Compares the run's commit with its base when its repository shows one not compared yet: a branch with commits
+    /// its known base lacks. Asked on a new head only, never on a timer; a branch with none forgets the last.
+    private func loadConflicts(key: String, git: RunGit) {
+        guard readsConflicts, let head = git.headOID, git.branch != nil, git.base != nil, (git.ahead ?? 0) > 0 else {
+            runConflicts[key] = nil
+            conflictHunks[key] = nil
+            return
+        }
+        guard runConflicts[key]?.headOID != head, !conflictsReading.contains(key) else { return }
+        conflictsReading.insert(key)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.conflictsReading.remove(key) }
+            guard let reply = try? await self.connection.conflicts(session: key), let compared = reply.conflicts
+            else { return }
+            self.conflictHunks[key] = nil
+            self.runConflicts[key] = compared
+        }
+    }
+
+    /// Reads a conflicting file's hunks in the run's last comparison, unless they are read or on their way.
+    public func loadConflict(key: String, path: String) {
+        guard let compared = runConflicts[key], conflictHunks[key]?[path] == nil,
+            !conflictsReading.contains("\(key)\u{0}\(path)")
+        else { return }
+        let reading = "\(key)\u{0}\(path)"
+        conflictsReading.insert(reading)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.conflictsReading.remove(reading) }
+            guard
+                let reply = try? await self.connection.conflict(
+                    session: key, path: path, headOID: compared.headOID, baseOID: compared.baseOID),
+                self.runConflicts[key]?.headOID == compared.headOID
+            else { return }
+            self.conflictHunks[key, default: [:]][path] = reply
+        }
+    }
+
     /// The computer commits a run's changes from its Changes panel (minor 59).
     public var commitsChanges: Bool { connection.capabilities?.commitsChanges == true }
 
@@ -4352,6 +4415,30 @@ public final class AppModel {
     public func createPullRequest(key: String) {
         perform(key: key, step: .pullRequest) { [connection] in
             try await connection.createPullRequest(sessionUID: key, requestID: UUID().uuidString)
+        }
+    }
+
+    /// The computer merges a run's pull request (minor 64).
+    public var mergesPullRequests: Bool { connection.capabilities?.mergesPullRequests == true }
+
+    /// Merges the run's open pull request `number` by `method`, only while its head is `headOID`: the pull request and
+    /// commit the panel showed, so a push since is never merged unseen. Each press is its own request.
+    public func mergePullRequest(key: String, number: UInt64, method: MergeMethod, headOID: String) {
+        perform(key: key, step: .merge) { [connection] in
+            try await connection.mergePullRequest(
+                sessionUID: key, number: number, method: method, headOID: headOID, requestID: UUID().uuidString)
+        }
+    }
+
+    /// The computer archives a run (minor 67).
+    public var archivesRuns: Bool { connection.capabilities?.archivesRuns == true }
+
+    /// Archives the run: ends it, removes its worktree and deletes its local `branch`, only while `branch` is checked
+    /// out at `headOID`, what the panel showed. Each press is its own request.
+    public func archiveRun(key: String, branch: String, headOID: String) {
+        perform(key: key, step: .archive) { [connection] in
+            try await connection.archiveRun(
+                sessionUID: key, branch: branch, headOID: headOID, requestID: UUID().uuidString)
         }
     }
 
@@ -4394,6 +4481,7 @@ public final class AppModel {
             defer { self.runGitsReading.remove(key) }
             guard let reply = try? await self.connection.runGit(session: key) else { return }
             self.runGits[key] = reply
+            if let git = reply.git { self.loadConflicts(key: key, git: git) }
             // A clean repository ends what a refused commit said: the next changes are another commit.
             // What the panel holds has passed once the repository shows it: a whole clean repository ends a commit's
             // refusal; a pull request ends a pull request's refusal, and the one just opened.
@@ -4402,6 +4490,9 @@ public final class AppModel {
                     switch self.gitActions[key] {
                     case .refused(_, .commit): git.changed.files == 0 && git.changed.complete
                     case .refused(_, .pullRequest), .opened: git.pullRequest != nil
+                    // A merge's refusal holds while the pull request it was for stays open and unqueued.
+                    case .refused(_, .merge):
+                        git.pullRequest.map { $0.state != .open || $0.mergeQueued == true } ?? true
                     default: false
                     }
                 if passed { self.gitActions[key] = nil }

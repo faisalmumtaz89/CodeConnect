@@ -68,7 +68,7 @@
   "interrupt_no_connection": {
     "request_id": "stop-5",
     "result": {
-      "reason": "CodeConnect has no connection to this run right now, so nothing was sent.",
+      "reason": "CodeConnect has no connection to this session right now, so nothing was sent.",
       "status": "rejected"
     },
     "session_id": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",

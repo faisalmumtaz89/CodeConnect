@@ -400,7 +400,7 @@ extension DecisionCard {
     public static func unavailableBanner(on host: HostDevice = .current) -> Banner {
         Banner(
             title: "No longer available",
-            message: "This decision can’t be acted on here. The run is no longer on \(host.computer("your computer")), "
+            message: "This decision can’t be acted on here. The session is no longer on \(host.computer("your computer")), "
                 + "or its log was reset.",
             provenance: nil, tone: .warning, icon: "question")
     }
@@ -463,7 +463,7 @@ extension DecisionCard {
     /// The run is gone, or has not been described yet: there is no vocabulary to offer, and never Claude's sentence
     /// by default.
     public static let notOnTheFleetReason =
-        "This run is no longer on the fleet, so this card cannot be answered from here."
+        "This session is no longer on the fleet, so this card cannot be answered from here."
 
     /// Why a Codex card offers nothing to tap. `computer` is the run's computer by name, where the device knows it.
     ///
@@ -501,7 +501,7 @@ extension DecisionCard {
     public static func unsupportedAgentReason(
         _ raw: String, computer: String? = nil, on host: HostDevice = .current
     ) -> String {
-        "This app does not know how to answer a \(raw) run. Answer it at "
+        "This app does not know how to answer a \(raw) session. Answer it at "
             + "\(host.computer("the computer", named: computer))."
     }
 

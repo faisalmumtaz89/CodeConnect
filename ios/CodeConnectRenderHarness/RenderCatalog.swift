@@ -917,7 +917,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "switch-then-end-session",
-            purpose: "End run on a run due to move: Run ended, and no reply box",
+            purpose: "End run on a run due to move: Session ended, and no reply box",
             arguments: [
                 "-CC_SWITCH", "switch-then-end-claude",
                 "-CC_DEEPLINK", "codeconnect://session/01M89G4WF8XNPTVJRGNRVE69DY",
@@ -1831,7 +1831,7 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.fleet(app)
                 try driver.require(
-                    driver.element(containing: "no connection to this run", in: app),
+                    driver.element(containing: "no connection to this session", in: app),
                     "the daemon's own sentence, unedited")
             }),
         // **What a refusal said, opened from Stop's place on the row**, with
@@ -1844,7 +1844,7 @@ enum RenderCatalog {
                 try driver.fleet(app)
                 try driver.require(app.buttons["stop-outcome-\(codexSessionKey)"], "the outcome's word").tap()
                 try driver.require(
-                    driver.text(containing: "no connection to this run", in: app),
+                    driver.text(containing: "no connection to this session", in: app),
                     "the daemon's own sentence, unedited")
                 // Stop itself, on screen with nothing over it: while a word
                 // stands in its place on the row, this is the way to stop the
@@ -1962,7 +1962,7 @@ enum RenderCatalog {
             route: "session",
             reach: { app, driver in
                 try driver.require(
-                    driver.element(containing: "no connection to this run", in: app),
+                    driver.element(containing: "no connection to this session", in: app),
                     "the refusal, verbatim")
             }),
         codexScenario(

@@ -11,7 +11,7 @@ enum AddKind: String, Identifiable, CaseIterable {
 
     var title: String {
         switch self {
-        case .agent: "New Run"
+        case .agent: "New Session"
         case .computer: "Add Computer…"
         case .iPhone: "Add iPhone"
         }

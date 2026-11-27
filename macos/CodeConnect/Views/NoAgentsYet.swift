@@ -1,7 +1,7 @@
 import CodeConnectKit
 import SwiftUI
 
-/// The Active list with nothing in it: where runs come from, in plain words at the list's top, and New Run.
+/// The Active list with nothing in it: where runs come from, in plain words at the list's top, and New Session.
 struct NoAgentsYet: View {
     let newAgent: () -> Void
 

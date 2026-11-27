@@ -296,14 +296,14 @@ impl Uploads {
             }
         }
         let folder = session_folder(root, session_uid)
-            .map_err(|err| format!("could not make the run's uploads folder: {err}"))?;
+            .map_err(|err| format!("could not make the session's uploads folder: {err}"))?;
         for (index, id) in ids.iter().enumerate() {
             if let Err(err) = std::fs::rename(root.join(PENDING).join(id), folder.join(id)) {
                 // Every one moved so far goes back, so a refused start leaves them all pending.
                 for moved in &ids[..index] {
                     let _ = std::fs::rename(folder.join(moved), root.join(PENDING).join(moved));
                 }
-                return Err(format!("could not move {id} to the run: {err}"));
+                return Err(format!("could not move {id} to the session: {err}"));
             }
         }
         let mut paths = Vec::with_capacity(ids.len());

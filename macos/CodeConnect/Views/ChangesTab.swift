@@ -16,6 +16,8 @@ struct ChangesPanel: View {
     @State private var hunks: HunkActions
     /// The diff last read, kept on screen while it is read again, so a reread loses no place, fold or comment.
     @State private var shown: (raw: SessionDiff, parsed: UnifiedDiff, fetchedAt: Date)?
+    /// Changes or Checks, while the run's open pull request has checks to show.
+    @State private var tab = PanelTab.changes
 
     init(row: FleetRow, model: AppModel, back: (() -> Void)?) {
         self.row = row
@@ -58,16 +60,33 @@ struct ChangesPanel: View {
                 let proposable =
                     !offline && !committable && model.opensPullRequests && git.pullRequest == nil && opened == nil
                     && (git.ahead ?? 0) > 0 && git.branch != nil && target != nil
+                // The run's commit compared with its base (artboard 17): its conflicts lead the line and name their
+                // files under it.
+                let compared = model.conflicts(for: key)
                 let line = StateLine(
                     text: git.pullRequest == nil && opened != nil
-                        ? "PR #\(opened?.number ?? 0) · Open" : ChangesWords.state(git),
+                        ? "PR #\(opened?.number ?? 0) · Open" : ChangesWords.state(git, conflicts: compared),
                     delta: nil, read: ISO8601.parse(git.readAt), unreachable: offline ? computer : nil,
                     note: committable
                         ? commitWait(git) ?? ChangesWords.commitReady
-                        : proposable ? pullRequestWait(git) ?? target : nil)
+                        : proposable
+                            ? pullRequestWait(git) ?? target
+                            : conflicted.flatMap(ChangesWords.conflictsNote)
+                                ?? ChangesWords.checksNote(git, conflicts: compared))
                 VStack(alignment: .leading, spacing: 0) {
                     if proposable {
                         PullRequestRow(row: row, model: model, ready: pullRequestWait(git) == nil, line: line)
+                    } else if !offline, model.mergesPullRequests, let pr = git.pullRequest, pr.state == .open {
+                        MergeRow(
+                            row: row, model: model, pr: pr, conflicts: compared, quiet: commitWait(git) == nil,
+                            line: line)
+                    } else if !offline, model.archivesRuns, !row.summary.archived,
+                        ChangesWords.archivable(git, inWorktree: row.summary.inWorktree),
+                        let branch = git.branch, let head = git.headOID
+                    {
+                        ArchiveRow(
+                            row: row, model: model, branch: branch, headOID: head, quiet: commitWait(git) == nil,
+                            line: line)
                     } else {
                         line
                         if committable { CommitRow(row: row, model: model, ready: commitWait(git) == nil) }
@@ -77,10 +96,21 @@ struct ChangesPanel: View {
             } else if reply == nil, let branch = row.summary.gitBranch?.displaySafe {
                 BranchLine(branch: branch, base: nil, pullRequest: nil, host: "")
             }
-            // One branch draws a read diff, the one on hand or, while it is read again, the last one, so a reread keeps
-            // the same views and their folds, scroll and unsent comment.
-            if let diff = onHand(state) ?? (state.isLoading ? shown : nil) {
-                loaded(diff.raw, diff.parsed, diff.fetchedAt, counted: git == nil)
+            // An open pull request's checks take a tab beside its changes (artboards 00, 07); the tabs stand where the
+            // changes' band stood.
+            let checks = git.flatMap(Self.checks)
+            let diff = onHand(state) ?? (state.isLoading ? shown : nil)
+            if let checks {
+                PanelTabs(
+                    tab: $tab, checks: checks, cut: diff.map { $0.raw.truncated || $0.raw.filesTruncated } ?? false,
+                    back: back)
+            }
+            if let checks, tab == .checks {
+                ChecksList(checks: checks, complete: git?.pullRequest?.checksComplete != false)
+            } else if let diff {
+                // One branch draws a read diff, the one on hand or, while it is read again, the last one, so a reread
+                // keeps the same views and their folds, scroll and unsent comment.
+                loaded(diff.raw, diff.parsed, diff.fetchedAt, counted: git == nil, banded: checks == nil)
             } else {
                 unread(state)
             }
@@ -125,6 +155,20 @@ struct ChangesPanel: View {
         return nil
     }
 
+    /// The run's commit's conflicts with its base, when the computer compared the commit checked out and found some.
+    private var conflicted: RunConflicts? {
+        guard let compared = model.conflicts(for: key), !compared.clean,
+            compared.headOID == model.runGit(for: key)?.git?.headOID
+        else { return nil }
+        return compared
+    }
+
+    /// The run's open pull request's checks, when the computer read some; nil for none, or a pull request not open.
+    private static func checks(_ git: RunGit) -> [RunGit.PullRequest.Check]? {
+        guard let pr = git.pullRequest, pr.state == .open, let checks = pr.checks, !checks.isEmpty else { return nil }
+        return checks
+    }
+
     /// Why Create PR cannot be pressed yet: what holds a commit back, then what the computer would refuse it for (the
     /// branch is the base itself; gh is missing or signed out); nil when it can.
     private func pullRequestWait(_ git: RunGit) -> String? {
@@ -165,9 +209,12 @@ struct ChangesPanel: View {
         }
     }
 
-    /// The tabs row with no count, where there is no diff to count, only while it gives the conversation back.
+    /// The tabs row with no count, where there is no diff to count, only while it gives the conversation back and the
+    /// Checks tabs (which give it back themselves) are not shown.
     @ViewBuilder private var backBand: some View {
-        if let back { Band(count: nil, cut: false, back: back) }
+        if let back, model.runGit(for: key)?.git.flatMap(Self.checks) == nil {
+            Band(count: nil, cut: false, back: back)
+        }
     }
 
     /// When the diff on hand was read, while one is.
@@ -185,8 +232,14 @@ struct ChangesPanel: View {
     /// A diff the computer read: clean when it changed nothing and said nothing, its note when it said why it is
     /// empty, else the band and the document, under the diff's own count where the repository gave none (`counted`).
     @ViewBuilder
-    private func loaded(_ raw: SessionDiff, _ parsed: UnifiedDiff, _ fetchedAt: Date, counted: Bool) -> some View {
-        if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil {
+    private func loaded(
+        _ raw: SessionDiff, _ parsed: UnifiedDiff, _ fetchedAt: Date, counted: Bool, banded: Bool
+    ) -> some View {
+        if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil, let conflicted {
+            // Nothing uncommitted, and the commit conflicts with its base: its conflicts stand where the diff would.
+            backBand
+            ConflictsList(key: key, model: model, compared: conflicted)
+        } else if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil {
             backBand
             Message(id: "changes.clean", title: ChangesWords.noUncommitted, sentence: ChangesWords.clean)
         } else if parsed.isEmpty && raw.files?.isEmpty != false {
@@ -203,7 +256,7 @@ struct ChangesPanel: View {
                     read: raw.capturedDate ?? fetchedAt, unreachable: offline ? computer : nil, note: nil)
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             }
-            Band(count: files.count, cut: raw.truncated || raw.filesTruncated, back: back)
+            if banded { Band(count: files.count, cut: raw.truncated || raw.filesTruncated, back: back) }
             Document(raw: raw, diff: parsed, files: files).environment(hunks)
         }
     }
@@ -278,7 +331,8 @@ private struct StateLine: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("changes.lastSaid")
             } else if let note {
-                Text(note).font(Theme.ui(12)).foregroundStyle(Theme.text3).accessibilityIdentifier("changes.note.action")
+                Text(note).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.tail)
+                    .accessibilityIdentifier("changes.note.action")
             } else {
                 AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
                     .font(Theme.ui(12))
@@ -382,6 +436,408 @@ private struct PullRequestRow: View {
                     .padding(.bottom, 12)
                     .accessibilityIdentifier("changes.createPR.refused")
             }
+        }
+    }
+}
+
+/// A commit's conflicts with its base (artboard 17), each file's under its name: the lines on this branch, then the
+/// base's, each marked at its edge. A file's hunks are read when its block comes into view.
+private struct ConflictsList: View {
+    let key: String
+    let model: AppModel
+    let compared: RunConflicts
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                if compared.files.isEmpty {
+                    Text(ChangesWords.conflictsUnnamed).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                }
+                ForEach(compared.files, id: \.self) { path in
+                    ConflictBlock(key: key, model: model, path: path, base: compared.base.name.displaySafe)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("changes.conflicts")
+    }
+}
+
+private struct ConflictBlock: View {
+    let key: String
+    let model: AppModel
+    let path: String
+    let base: String
+
+    var body: some View {
+        let reply = model.conflict(for: key, path: path)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(ChangesWords.conflictTitle(path)).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                .padding(.horizontal, 2)
+            VStack(alignment: .leading, spacing: 0) {
+                if let hunks = reply?.hunks {
+                    if hunks.isEmpty { quiet(ChangesWords.conflictNoLines) }
+                    ForEach(Array(hunks.enumerated()), id: \.offset) { _, hunk in
+                        side(ChangesWords.conflictThisBranch, hunk.ours)
+                        side(base, hunk.theirs)
+                    }
+                    if reply?.hunksComplete == false { quiet(ChangesWords.conflictMore) }
+                } else if let note = reply?.note {
+                    quiet(note.displaySafe)
+                } else {
+                    quiet(ChangesWords.reading)
+                }
+            }
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+        }
+        .task(id: path) { model.loadConflict(key: key, path: path) }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("changes.conflict.\(path)")
+    }
+
+    /// One side's lines under its name, each marked at its leading edge.
+    private func side(_ name: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(verbatim: name).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                .padding(.leading, 13)
+                .padding(.top, 3)
+                .padding(.bottom, 1)
+            // A side's text ends its last line with a newline, which is not a line of its own.
+            let lines = (text.hasSuffix("\n") ? String(text.dropLast()) : text)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+            ForEach(Array(lines.enumerated()), id: \.offset) {
+                _, line in
+                HStack(spacing: 0) {
+                    Rectangle().fill(Theme.amber).frame(width: 3)
+                    Text(verbatim: String(line).displaySafe).font(Theme.mono(11.5)).foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                        .padding(.leading, 10)
+                }
+                .frame(height: 19)
+            }
+        }
+    }
+
+    private func quiet(_ text: String) -> some View {
+        Text(text).font(Theme.ui(12)).foregroundStyle(Theme.text3).padding(.horizontal, 13).padding(.vertical, 4)
+    }
+}
+
+/// A finished run's row (artboard 11): the state line, and at its end Archive Session, which asks first on the one card
+/// (`FleetWords.archiveAsk`), then ends the run, removes its worktree and deletes its branch, only while the branch is
+/// at the commit the panel shows. What the computer said when it did not archive stays under it.
+private struct ArchiveRow: View {
+    let row: FleetRow
+    let model: AppModel
+    let branch: String
+    let headOID: String
+    /// The run's agent is quiet.
+    let quiet: Bool
+    let line: StateLine
+    /// The run whose archiving is being asked about.
+    @State private var asking: FleetRow?
+    /// A confirmation or a sheet covers the window.
+    @FocusedValue(\.windowCovered) private var covered
+
+    var body: some View {
+        let state = model.gitActionState(for: row.id)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                line
+                ActionButton(title: "Archive Session", key: nil, prominent: false, id: "changes.archive") { asking = row }
+                    .disabled(!quiet || state == .working || covered == true)
+                    .padding(.trailing, 20)
+            }
+            if case .refused(let why, .archive) = state {
+                Text(why)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.amber)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+                    .accessibilityIdentifier("changes.archive.refused")
+            }
+        }
+        .confirmation($asking) { asked in
+            Confirmation(
+                FleetWords.archiveAsk(asked.title, agent: asked.summary.agent.displayName),
+                cancelID: "changes.archive.cancel", confirmID: "changes.archive.confirm"
+            ) { model.archiveRun(key: asked.id, branch: branch, headOID: headOID) }
+        }
+    }
+}
+
+/// An open pull request's row: the state line, and at its end the merge button (artboard 10), which names the method it
+/// merges by, ⇧⌘M, with the repository's methods a click away on its chevron. It merges only what GitHub would merge as
+/// it stands, while the run's agent is quiet, and only the pull request and commit the panel shows; what the computer
+/// said when it did not merge stays under it.
+private struct MergeRow: View {
+    let row: FleetRow
+    let model: AppModel
+    let pr: RunGit.PullRequest
+    /// The run's agent is quiet.
+    /// The run's commit compared with its base: a conflict withholds the merge.
+    let conflicts: RunConflicts?
+    let quiet: Bool
+    let line: StateLine
+    /// The method chosen from the menu; until then the repository's default (`ChangesWords.defaultMergeMethod`).
+    @State private var chosen: MergeMethod?
+    @State private var menuOpen = false
+    /// A confirmation or a sheet covers the window: ⇧⌘M must not act under it.
+    @FocusedValue(\.windowCovered) private var covered
+
+    var body: some View {
+        let state = model.gitActionState(for: row.id)
+        let allowed = pr.mergeMethods ?? []
+        let method = chosen.flatMap { allowed.contains($0) ? $0 : nil } ?? ChangesWords.defaultMergeMethod(allowed)
+        let ready =
+            quiet && ChangesWords.mergeable(pr, conflicts: conflicts) && method != nil && state != .working
+            && covered != true
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                line
+                HStack(spacing: 1) {
+                    Button {
+                        if let method {
+                            model.mergePullRequest(key: row.id, number: pr.number, method: method, headOID: pr.headOID)
+                        }
+                    } label: {
+                        HStack(spacing: 7) {
+                            Text(method.map(ChangesWords.mergeMethod) ?? ChangesWords.mergeMethod(.squash))
+                                .font(Theme.ui(12.5, .medium))
+                            KeyCap("⇧⌘M", onLight: true)
+                        }
+                        .foregroundStyle(Color.black)
+                        .padding(.horizontal, 10)
+                        .frame(height: 26)
+                        .background(Theme.text, in: UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 6))
+                    }
+                    // Only the pair's own 0.5 dims it, so both halves read as one button.
+                    .buttonStyle(.hover(over: true, fades: false, id: "changes.merge"))
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+                    .disabled(!ready)
+                    .accessibilityIdentifier("changes.merge")
+                    Button { menuOpen.toggle() } label: {
+                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(Color.black)
+                            .padding(.horizontal, 7)
+                            .frame(height: 26)
+                            .background(
+                                Theme.text, in: UnevenRoundedRectangle(bottomTrailingRadius: 6, topTrailingRadius: 6))
+                    }
+                    .buttonStyle(.hover(over: true, id: "changes.merge.methods"))
+                    .disabled(allowed.isEmpty || state == .working)
+                    .accessibilityLabel(ChangesWords.mergeMethods)
+                    .accessibilityIdentifier("changes.merge.methods")
+                }
+                .opacity(ready ? 1 : 0.5)
+                .overlay(alignment: .topTrailing) {
+                    if menuOpen {
+                        menu(chosen: method)
+                            .openPanel()
+                            .offset(y: 26 + Theme.panelGap)
+                    }
+                }
+                .closesPanel($menuOpen)
+                .padding(.trailing, 20)
+            }
+            if case .refused(let why, .merge) = state {
+                Text(why)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.amber)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+                    .accessibilityIdentifier("changes.merge.refused")
+            }
+        }
+        .zIndex(1)
+    }
+
+    /// The methods the repository allows, the one the button uses checked, then a rule and the ones it turns off,
+    /// dimmed, each saying so.
+    private func menu(chosen method: MergeMethod?) -> some View {
+        let allowed = MergeMethod.ordered.filter { (pr.mergeMethods ?? []).contains($0) }
+        let off = MergeMethod.ordered.filter { !allowed.contains($0) }
+        return VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(allowed.enumerated()), id: \.element) { index, option in
+                let choose = {
+                    chosen = option
+                    menuOpen = false
+                }
+                Button(action: choose) {
+                    MenuRow(chosen: option == method) {
+                        Text(ChangesWords.mergeMethod(option)).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
+                            .lineLimit(1)
+                    }
+                }
+                .buttonStyle(.panelRow)
+                .panelRow(index, id: "changes.merge.method.\(option.rawValue)", choose: choose)
+                .accessibilityIdentifier("changes.merge.method.\(option.rawValue)")
+                .accessibilityAddTraits(option == method ? .isSelected : [])
+            }
+            if !off.isEmpty && !allowed.isEmpty { MenuDivider().padding(.vertical, 5) }
+            ForEach(off, id: \.self) { option in
+                MenuRow(chosen: false) {
+                    Text(ChangesWords.mergeMethodOff(option)).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                }
+                .opacity(0.45)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("changes.merge.method.\(option.rawValue)")
+            }
+        }
+        .frame(width: 270 - 2 * MenuMetrics.inset)
+        .fixedSize(horizontal: false, vertical: true)
+        .menuCard()
+        // Every click inside the card is its own: one on a dimmed row or a gap does nothing below it.
+        .contentShape(RoundedRectangle(cornerRadius: MenuMetrics.cardRadius))
+        .onTapGesture {}
+    }
+}
+
+extension MergeMethod {
+    /// The menu's order (artboard 10): squash, a merge commit, then rebase.
+    static let ordered: [MergeMethod] = [.squash, .merge, .rebase]
+}
+
+/// The panel's two tabs once its open pull request has checks: Changes, and Checks with how many passed. Where the
+/// band said the diff was cut short, so does this row while Changes is chosen.
+enum PanelTab: Hashable { case changes, checks }
+
+private struct PanelTabs: View {
+    @Binding var tab: PanelTab
+    let checks: [RunGit.PullRequest.Check]
+    let cut: Bool
+    /// Gives the conversation back, while the panel stands in its place (Esc does the same).
+    let back: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            SegmentedTrack(
+                options: [PanelTab.changes, .checks], chosen: tab, fill: Theme.window,
+                id: { $0 == .changes ? "changes.tab.changes" : "changes.tab.checks" }, choose: { tab = $0 }
+            ) { option, chosen in
+                Text(option == .changes ? "Changes" : ChangesWords.checksTab(checks))
+                    .font(Theme.ui(12, chosen ? .medium : .regular))
+                    .foregroundStyle(chosen ? Theme.text : Theme.text3)
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+            }
+            .fixedSize()
+            if cut && tab == .changes {
+                Text("Cut short by your computer").font(Theme.ui(12)).foregroundStyle(Theme.amber)
+                    .accessibilityIdentifier("changes.truncated")
+            }
+            Spacer(minLength: 0)
+            if let back {
+                ActionButton(
+                    title: "‹ Conversation", key: "Esc", prominent: false, small: true, id: "session.changes.back",
+                    action: back)
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 38)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+    }
+}
+
+/// An open pull request's checks, in the computer's order (a failure first), as artboard 07 lists them: each one's
+/// mark, name and duration, and a failure open in place with its first failure line and its log.
+private struct ChecksList: View {
+    let checks: [RunGit.PullRequest.Check]
+    /// False when there were more than the computer reads, or its head moved while they were read.
+    let complete: Bool
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(checks.enumerated()), id: \.offset) { _, check in
+                    CheckRow(check: check)
+                }
+                if !complete {
+                    Text(ChangesWords.checksNotAll).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier("changes.checks.notAll")
+                }
+            }
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("changes.checks")
+    }
+}
+
+/// One check: its state's mark, its name, its duration ("running" while it runs), and, failed, its first failure line
+/// and a link to its log, open in place.
+private struct CheckRow: View {
+    let check: RunGit.PullRequest.Check
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 9) {
+                Image(systemName: mark.symbol).font(.system(size: 12)).foregroundStyle(mark.tint)
+                    .accessibilityLabel(mark.spoken)
+                Text(verbatim: check.name.displaySafe).font(Theme.ui(12)).foregroundStyle(Theme.text)
+                    .lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 8)
+                let duration: String? =
+                    check.state == .pending ? ChangesWords.checkRunning : ChangesWords.checkDuration(check, now: .now)
+                if let duration {
+                    Text(verbatim: duration).font(Theme.mono(10.5)).foregroundStyle(Theme.text3)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 30)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("changes.check.\(check.name)")
+            if check.state == .fail, check.failureLine != nil || check.url != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let line = check.failureLine {
+                        Text(verbatim: line.displaySafe).font(Theme.mono(11.5)).foregroundStyle(Theme.text2)
+                            .lineSpacing(4)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("changes.check.failure")
+                    }
+                    if let url = check.url.flatMap(URL.init(string:)) {
+                        Link(destination: url) { Text(verbatim: "Log ↗") }
+                            .font(Theme.ui(11.5))
+                            .foregroundStyle(Theme.text3)
+                            .accessibilityIdentifier("changes.check.log")
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.red.opacity(0.18)))
+                .padding(.leading, 35)
+                .padding(.trailing, 14)
+                .padding(.top, 2)
+                .padding(.bottom, 10)
+            }
+        }
+    }
+
+    /// The mark for the check's state, its color, and what a screen reader says for it.
+    private var mark: (symbol: String, tint: Color, spoken: String) {
+        switch check.state {
+        case .pass: ("checkmark.circle", Theme.green, "Passed")
+        case .fail: ("xmark.circle", Theme.red, "Failed")
+        case .pending: ("clock", Theme.amber, "Running")
+        case .cancelled: ("minus.circle", Theme.text3, "Cancelled")
+        case .skipped: ("arrow.right.circle", Theme.text3, "Skipped")
+        case .unknown: ("questionmark.circle", Theme.text3, "Unknown")
         }
     }
 }

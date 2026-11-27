@@ -48,7 +48,7 @@ final class RelaunchableRunTests: XCTestCase {
         let badge = FleetStatusRule.capability(
             summary: try summary("session_summary_ended_by_end_run"), capabilities: try caps())
         XCTAssertFalse(badge.canAct)
-        XCTAssertEqual(badge.reason, "This run has ended.")
+        XCTAssertEqual(badge.reason, "This session has ended.")
     }
 
     /// **An empty conversation says "yet" only while the run can still record something.** A run ended by End run

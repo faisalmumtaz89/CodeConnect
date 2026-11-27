@@ -672,7 +672,7 @@ private struct StartProgress: View {
                             id: "start.step.asking")
                         step(
                             answered ? .running : .waiting,
-                            (start.prompt == nil ? "Opening the run · " : StartWords.waitingForFirstWords(start.agent.displayName))
+                            (start.prompt == nil ? "Opening the session · " : StartWords.waitingForFirstWords(start.agent.displayName))
                                 + Format.age(clock.date.timeIntervalSince(start.sentAt)),
                             id: "start.step.waiting")
                     }

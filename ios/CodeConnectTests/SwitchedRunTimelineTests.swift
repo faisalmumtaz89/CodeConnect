@@ -67,7 +67,7 @@ final class SwitchedRunTimelineTests: XCTestCase {
             "\(resource): the switch draws nothing but the message")
         XCTAssertFalse(
             notices(drawn).contains { $0.kind == .sessionEnded || $0.kind == .sessionStart },
-            "\(resource): no Run ended, no Run resumed or Run started")
+            "\(resource): no Session ended, no Session resumed or Session started")
     }
 
     func testAClaudeSwitchDrawsNothing() async throws {
@@ -79,7 +79,7 @@ final class SwitchedRunTimelineTests: XCTestCase {
     }
 
     /// **A page that begins after a switch's end draws no start**: opened cold where the first event loaded follows the
-    /// switch's end, the conversation draws no "Run resumed" either, so loading the page before it changes nothing drawn.
+    /// switch's end, the conversation draws no "Session resumed" either, so loading the page before it changes nothing drawn.
     func testAPageBeginningAfterTheSwitchsEndDrawsNoStart() async throws {
         for resource in ["switch-codex-wire", "relaunch-plan-default-codex-wire", "switch-failed-then-recovered-claude-wire"] {
             let all = events(try frames(resource))
@@ -164,11 +164,11 @@ final class SwitchedRunTimelineTests: XCTestCase {
         XCTAssertFalse(last.status == .ended || last.status == .failed, "recovered, it reads live: \(last.status)")
     }
 
-    /// **End run on a run due to move** files an ordinary end: "Run ended"; the ended listing reads ended with no reply
+    /// **End run on a run due to move** files an ordinary end: "Session ended"; the ended listing reads ended with no reply
     /// box.
     func testEndRunOnADueRunReadsRunEnded() async throws {
         let drawn = await state(events(try frames("switch-then-end-claude-wire")))
-        XCTAssertEqual(notices(drawn).map(\.title), ["Run ended"])
+        XCTAssertEqual(notices(drawn).map(\.title), ["Session ended"])
         let read = try await listings("switch-then-end-claude-wire")
         XCTAssertEqual(read.map(\.summary.lifecycle), [.exited])
         XCTAssertEqual(read.last?.status, .ended)
