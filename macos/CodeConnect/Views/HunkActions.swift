@@ -123,8 +123,8 @@ struct HunkHeader: View {
     }
 }
 
-/// The comment field under a hunk's header, in the reply box's style: the file and lines it is about over the field,
-/// Return sends it to the run's agent (⇧ or ⌥ Return adds a line), Esc closes it. Whether it can be sent, and what
+/// The comment field under a hunk's header, in the reply box itself (`InputBox`): the file and lines it is about over
+/// the box, its send at the bar's end; Return sends it to the run's agent (⇧ or ⌥ Return adds a line), Esc closes it. Whether it can be sent, and what
 /// became of it, are the Kit's words for the run, as under the reply box. Once it reaches the agent the field closes;
 /// a refusal keeps the words.
 struct HunkCommentField: View {
@@ -150,25 +150,29 @@ struct HunkCommentField: View {
             Text(ChangesWords.commentPlace(file: file, hunk: hunk).displaySafe)
                 .font(Theme.mono(11)).foregroundStyle(Theme.text3)
                 .lineLimit(1).truncationMode(.middle)
-            TextField(
-                "", text: $draft, prompt: Text(ChangesWords.commentPrompt(actions.agent)).foregroundStyle(Theme.text3),
-                axis: .vertical
-            )
-                .textFieldStyle(.plain)
-                .font(Theme.ui(13))
-                .foregroundStyle(Theme.text)
-                .lineLimit(1...5)
-                .sendsOnReturn(send)
-                // It appears because Comment to <agent>… was just chosen: what is typed next is the comment.
-                .takesKeyboardWhenShown($focused)
-                .onExitCommand { actions.commenting = nil }
-                .accessibilityLabel(ChangesWords.commentPrompt(actions.agent))
-                .accessibilityIdentifier("changes.comment.field")
-                .padding(10)
-                .background {
-                    RoundedRectangle(cornerRadius: 8).fill(Theme.raised)
-                    RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.09))
-                }
+            InputBox(barHeight: 40) {
+                TextField(
+                    "", text: $draft, prompt: Text(ChangesWords.commentPrompt(actions.agent)).foregroundStyle(Theme.text3),
+                    axis: .vertical
+                )
+                    .textFieldStyle(.plain)
+                    .font(Theme.ui(15))
+                    .lineSpacing(InputBoxLayout.lineSpacing)
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1...5)
+                    .sendsOnReturn(send)
+                    // It appears because Comment to <agent>… was just chosen: what is typed next is the comment.
+                    .takesKeyboardWhenShown($focused)
+                    .onExitCommand { actions.commenting = nil }
+                    .accessibilityLabel(ChangesWords.commentPrompt(actions.agent))
+                    .accessibilityIdentifier("changes.comment.field")
+            } leading: {
+                EmptyView()
+            } trailing: {
+                InputBoxSubmit(
+                    enabled: canSend, id: "changes.comment.send", label: "Send",
+                    help: blocked ?? (sending ? "Sending…" : "Send"), action: send)
+            }
             if let note { KitNote(text: note.text, tone: note.tone, id: "changes.comment.note") }
         }
         .padding(.horizontal, 12)
@@ -196,9 +200,14 @@ struct HunkCommentField: View {
         return model.standingNote(for: key, draft: draft)
     }
 
+    /// Words typed, nothing on its way, and nothing holding a comment back.
+    private var canSend: Bool {
+        blocked == nil && !sending && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard blocked == nil, !sending, !text.isEmpty else { return }
+        guard canSend else { return }
         let message = ChangesWords.comment(text, file: file, hunk: hunk)
         let hunkID = HunkActions.id(file: file, hunk: hunk)
         sending = true
