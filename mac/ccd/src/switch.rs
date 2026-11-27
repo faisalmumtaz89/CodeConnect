@@ -331,6 +331,11 @@ pub(crate) mod window {
             label,
             "{ends:?}"
         );
+        assert_eq!(
+            ends[0]["event"]["payload"].get(protocol::event::ENDED_BY),
+            None,
+            "a switch's end is not one the person asked for: {ends:?}"
+        );
         assert!(
             !frames
                 .iter()

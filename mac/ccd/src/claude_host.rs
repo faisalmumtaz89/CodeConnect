@@ -15569,6 +15569,11 @@ mod tests {
             .map(|frame| frame["event"]["payload"].clone())
             .collect();
         assert_eq!(ends, [stopped_end()], "End files the end End run files");
+        assert_eq!(
+            ends[0][protocol::event::ENDED_BY],
+            protocol::event::ENDED_BY_PERSON,
+            "an end the person asked for says so: {ends:?}"
+        );
         crate::switch::window::keep(&frames, "switch-then-end-claude-wire.json");
     }
 

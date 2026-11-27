@@ -105,6 +105,12 @@ pub fn sdk_event_id(message_uuid: &str, kind: &EventKind, block: usize) -> Strin
 /// The payload key of a [`EventKind::SessionEnd`] that is a switch of account.
 pub const SWITCHED_TO: &str = "switched_to";
 
+/// The payload key of a [`EventKind::SessionEnd`] that says who ended the run: [`ENDED_BY_PERSON`] on the end of a run
+/// the person ended (End Run), and on no other end. An older daemon's ends carry none.
+pub const ENDED_BY: &str = "ended_by";
+/// [`ENDED_BY`]'s value on an end the person asked for.
+pub const ENDED_BY_PERSON: &str = "person";
+
 pub mod notice {
     /// `/clear` reset the conversation; the run's Claude session id changes.
     pub const CONVERSATION_CLEARED: &str = "conversation_cleared";
