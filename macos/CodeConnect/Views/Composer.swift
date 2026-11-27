@@ -186,12 +186,16 @@ private struct Composer: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if compacting {
+                // A card in the reply box's place, as a request is: the conversation column's hairline over it, its
+                // words 16 pt under that.
+                Rectangle().fill(Theme.hairline).frame(height: 1).padding(.horizontal, -28)
                 CompactCard(instructions: $instructions, agent: summary?.agent ?? .claude) {
                     compacting = false
                     run(.compact(instructions: instructions))
                 } cancel: {
                     compacting = false
                 }
+                .padding(.top, 16 - 8)
             } else {
                 if let line { note(line) }
                 box
@@ -201,7 +205,7 @@ private struct Composer: View {
         // conversation's last line at its end to the box's rim (its row's 7 pt inset and the column's 1 pt end, then
         // the rest).
         .padding(.horizontal, 28)
-        .padding(.top, InputBoxLayout.above - 8)
+        .padding(.top, compacting ? 0 : InputBoxLayout.above - 8)
         .padding(.bottom, 20)
         .onChange(of: kept.reply) { old, new in
             // If the draft has moved off the words it held — the same normalisation the send's mutation key uses, so a
