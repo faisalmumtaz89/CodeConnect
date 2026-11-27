@@ -82,7 +82,7 @@ struct HostedSettingsBar: View {
     private func figuresRow(_ settings: HostedSettings, bar: ReplyBar, fullestOnly: Bool) -> some View {
         settingsButton(settings, usage: bar) {
             HStack(spacing: 0) {
-                UsageFigures(bar: bar, fullestOnly: fullestOnly)
+                UsageFigures(bar: bar, form: fullestOnly ? .ringAndShare : .full)
                 Spacer(minLength: CC.space.sm)
                 line(settings).fixedSize()
             }

@@ -42,6 +42,8 @@ struct CCVoiceButton: View {
     /// daemon that refuses typed text, a stop on its way). Never blocks `stop`:
     /// a recording can always be ended.
     var blockedReason: String?
+    /// The disc's drawn size: 36 in the start's pill, 34 in a session's reply box; the hit area is 44 either way.
+    var disc: CGFloat = CC.size.controlSm
     let action: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -76,7 +78,7 @@ struct CCVoiceButton: View {
         }
         // Fixed like every control height in the kit: the circle grows only
         // if its content demands it, which a glyph never does.
-        .frame(width: CC.size.controlSm, height: CC.size.controlSm)
+        .frame(width: disc, height: disc)
         .overlay {
             if phase == .stop {
                 recordingRing

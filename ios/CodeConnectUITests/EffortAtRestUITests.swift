@@ -1,9 +1,9 @@
 import XCTest
 
-/// The settings line above the reply box names the effort in use after the model, at rest, by Kit's one rule
+/// The reply box's model chip names the effort in use after the model to VoiceOver, at rest, by Kit's one rule
 /// (`RunSettings.effortName`): the effort the agent named, or while it has named none its model's own default, by name
-/// (decision 313). The model's own words
-/// are `RunSettings`' to choose, so only what follows them is asserted.
+/// (decision 313); on screen the chip draws the model alone. The model's own words are `RunSettings`' to choose, so only
+/// what follows them is asserted.
 final class EffortAtRestUITests: XCTestCase {
 
     override func setUpWithError() throws {
@@ -19,7 +19,7 @@ final class EffortAtRestUITests: XCTestCase {
         ]
         app.launch()
         let line = app.buttons["session.composer.settings"]
-        XCTAssertTrue(line.waitForExistence(timeout: 25), "\(session): the settings line")
+        XCTAssertTrue(line.waitForExistence(timeout: 25), "\(session): the model chip")
         return line
     }
 

@@ -1043,7 +1043,6 @@ struct SessionDetailView: View {
                     if let palette = paletteContent {
                         CommandPalette(content: palette, onAction: route)
                     }
-                    HostedSettingsBar(model: model, key: key, onOpen: { showHostedSettingsSheet = true })
                     // The box writes into the run's drafts, so it is drawn while the screen lists the run, as on
                     // the Mac.
                     if let drafts = model.drafts(for: key) {
@@ -1056,12 +1055,13 @@ struct SessionDetailView: View {
                             summary: summary,
                             onWhy: { showLinkDetail = true },
                             onSend: send,
+                            onSettings: { showHostedSettingsSheet = true },
+                            onUsage: { showHostedSettingsSheet = true },
                             focused: $composerFocused)
                     }
                 }
             }
-            // One ground under the whole block — the settings line and the reply box together — so the
-            // conversation ends at its top edge and never shows through either.
+            // One ground under the whole block, so the conversation ends at its top edge and never shows through.
             .background { BottomBlockGround() }
             .onChange(of: composeText) { old, new in
                 // If the draft has moved off the words it held — the same
@@ -1999,7 +1999,7 @@ private struct SessionBanner: View {
     }
 }
 
-/// The ground under the screen's bottom block (the settings line over the reply box): the page's own ground,
+/// The ground under the screen's bottom block (the reply box and the notes over it): the page's own ground,
 /// faded in over the block's top padding, so a row scrolled under it ends softly instead of at a slab's edge and
 /// every line of the block reads on solid ground.
 private struct BottomBlockGround: View {
@@ -2037,6 +2037,9 @@ private struct SessionComposeBar: View {
     let summary: SessionSummary?
     let onWhy: () -> Void
     let onSend: () -> Void
+    /// Open the run's settings sheet (the bar's chip) and its usage (the bar's figures).
+    let onSettings: () -> Void
+    let onUsage: () -> Void
 
     @Environment(AppModel.self) private var model
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -2069,11 +2072,11 @@ private struct SessionComposeBar: View {
             }
             composer
         }
-        .padding(.horizontal, CC.space.md)
-        .padding(.top, CC.space.xs)
-        // At rest the pill sits on the safe-area line, just above the home
-        // indicator; over the keyboard it keeps 8pt of air.
-        .padding(.bottom, focused.wrappedValue ? CC.space.xs : 0)
+        // 12 pt in from the screen's edges; 30 pt from the conversation's last line to the box's rim, which stands 4 pt
+        // outside the box; 8 pt above the home indicator, and above the keyboard.
+        .padding(.horizontal, 12)
+        .padding(.top, 34)
+        .padding(.bottom, 8)
         // Typing is the user's next act as much as retrying the mic is; a
         // stale mic-failure note must not stand over a hand-typed message.
         .onChange(of: text) { _, _ in dictation.clearFailure() }
@@ -2081,72 +2084,45 @@ private struct SessionComposeBar: View {
         .onDisappear { dictation.cancel() }
     }
 
-    // MARK: The pill
+    // MARK: The box
 
-    /// One pill: the field, and the circle inside its trailing end, where the
-    /// thumb finishing a line finds it. The pill wears no focus ring: the caret
-    /// and the keyboard say it has focus, and the rim stays as it rests.
-    ///
-    /// One circle does the whole job — mic when the field is empty, send once a
-    /// single character exists — so the pill never grows a second button for a
-    /// thumb to arbitrate at 2am. In the bottom corner, so the circle stays at
-    /// the end of the last line as the field grows.
-    ///
-    /// **An overlay over room the field leaves, not an `HStack` beside it.**
-    /// Measured: as a row sibling of the circle, the field lost its own scroll
-    /// position after a paste past the line limit — the last line, and the
-    /// caret on it, sat below the field's bottom edge, at L and at AX5 — while
-    /// the same field with the circle overlaid kept the caret in view. The
-    /// overlay also means nothing the field holds (at AX5 the placeholder alone
-    /// is wider than the pill) can push the circle out.
+    /// **The box**: the field over one 48 pt bar (`ReplyBoxBar`): `+` where the computer takes files, the model chip,
+    /// the figures, and one circle — mic when there is neither text nor a file, Send otherwise, Stop while a turn runs —
+    /// so the box never grows a second button for a thumb to arbitrate at 2am. The box wears no focus ring: the caret and
+    /// the keyboard say it has focus, and the rim stays as it rests.
     private var composer: some View {
-        Group {
-            if dictation.isRecording {
-                transcript
-            } else {
-                field
+        VStack(spacing: 0) {
+            Group {
+                if dictation.isRecording {
+                    transcript
+                } else {
+                    field
+                }
             }
-        }
-        // 12pt, not 16: the disc's 8pt inset took 4pt from the trailing side,
-        // and the text keeps the width it wraps at.
-        .padding(.leading, model.canUpload(key) ? CC.size.hitTarget + CC.space.xxs : CC.space.sm)
-        .padding(
-            .trailing,
-            dictation.isRecording
-                ? 2 * CC.size.hitTarget + 2 * CC.space.xxs : CC.size.hitTarget + CC.space.xxs)
-        .padding(.vertical, CC.space.xs)
-        .frame(minHeight: CCPillSurface.height)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // Read first: VoiceOver orders by position, and on one line the
-        // circle's 44pt frame starts above the field's.
-        .accessibilitySortPriority(1)
-        .overlay(alignment: .bottomTrailing) {
-            HStack(spacing: CC.space.xxs) {
-                // While the mic is hot the pill carries no meters or clocks:
-                // the live transcript is proof the mic hears you, and the
-                // button's stop face is the recording state. Chrome that
-                // restates both was removed at the owner's call.
+            .padding(.top, 12)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            ReplyBoxBar(
+                model: model, key: key, agent: summary?.agent, onSettings: onSettings, onUsage: onUsage
+            ) {
+                if model.canUpload(key) {
+                    AttachMenu(room: Attachment.maxCount - files.count) { name, size, read in
+                        model.attach(name: name, size: size, to: key, read: read)
+                    }
+                }
+            } trailing: {
+                // While the mic is hot the box carries no meters or clocks: the live transcript is proof the mic hears
+                // you, and the button's stop face is the recording state. Chrome that restates both was removed at
+                // the owner's call.
                 if dictation.isRecording {
                     cancelButton
                 }
-                CCVoiceButton(phase: phase, blockedReason: blockedReason) { act() }
+                CCVoiceButton(phase: phase, blockedReason: blockedReason, disc: 34) { act() }
                     .accessibilityIdentifier(phase == .stopTurn ? "stop-\(key)" : "session.composer.send")
             }
-            // 4pt round the 44pt frame puts the 36pt disc 8pt inside the
-            // pill's bottom and trailing edges.
-            .padding(CC.space.xxs)
         }
-        // `+` at the leading edge, where the computer takes files: the circle's 4pt inset, mirrored.
-        .overlay(alignment: .bottomLeading) {
-            if model.canUpload(key) {
-                AttachMenu(room: Attachment.maxCount - files.count) { name, size, read in
-                    model.attach(name: name, size: size, to: key, read: read)
-                }
-                .padding(CC.space.xxs)
-            }
-        }
-        .background { CCPillSurface() }
-        // The sort priority above ranks within the pill alone.
+        .background { CCBoxSurface() }
         .accessibilityElement(children: .contain)
         .ccAnimation(CC.motion.small, value: dictation.isRecording)
     }
@@ -2162,7 +2138,7 @@ private struct SessionComposeBar: View {
             axis: .vertical
         )
         .lineLimit(typeSize.isAccessibilitySize ? 1...3 : 1...5)
-        .ccType(CC.type.body)
+        .ccType(CC.type.callout)
         .foregroundStyle(CC.text.primary)
         .focused(focused)
         .accessibilityLabel("Message for \(runLabel)")
@@ -2175,7 +2151,7 @@ private struct SessionComposeBar: View {
     private var transcript: some View {
         if dictation.transcript.isEmpty {
             Text("Listening…")
-                .ccType(CC.type.body)
+                .ccType(CC.type.callout)
                 .foregroundStyle(CC.text.tertiary)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .accessibilityLabel("Listening")
@@ -2185,7 +2161,7 @@ private struct SessionComposeBar: View {
                     dictation.finalizedText.isEmpty || dictation.volatileText.isEmpty
                         ? "" : " ")
                 + Text(dictation.volatileText).foregroundStyle(CC.text.tertiary))
-                .ccType(CC.type.body)
+                .ccType(CC.type.callout)
                 .foregroundStyle(CC.text.primary)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .accessibilityLabel("Transcript: \(dictation.transcript)")
