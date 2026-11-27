@@ -45,9 +45,9 @@ final class FixtureUsageTests: XCTestCase {
         XCTAssertEqual(bar.context, .init(used: "390k", window: "1M"))
         XCTAssertEqual(bar.limits, [
             .init(usedPercent: 23, caption: "5-hour", resets: "resets in 2h 10m"),
-            .init(usedPercent: 61, caption: "Week", resets: "resets in 3d"),
+            .init(usedPercent: 61, caption: "Weekly", resets: "resets in 3d"),
         ])
-        XCTAssertEqual(bar.account, "you@example.com")
+        XCTAssertEqual(bar.account, "you@example.com · Max")
         for run in runs(frames) {
             XCTAssertNotNil(run.account, run.sessionKey)
             let usage = try XCTUnwrap(events(frames, of: run.sessionKey).last, run.sessionKey)
@@ -62,7 +62,7 @@ final class FixtureUsageTests: XCTestCase {
         let bar = try bar(frames, "fx-7", book: try book())
         XCTAssertNil(bar.context)
         XCTAssertEqual(bar.limits.map(\.usedPercent), [23, 61])
-        XCTAssertEqual(bar.account, "you@example.com")
+        XCTAssertEqual(bar.account, "you@example.com · Max")
     }
 
     /// The post-process adds only what it says: the original frames' events stay as they were, in order, and each

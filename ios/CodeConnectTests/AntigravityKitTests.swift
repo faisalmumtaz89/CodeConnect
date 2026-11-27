@@ -235,14 +235,14 @@ final class AntigravityKitTests: XCTestCase {
     }
 
     /// **Antigravity's plan limits are one window, Gemini's week, read as Claude Code's are** (minor 55; the owner's
-    /// ruling, 2026-11-26): ccd's own frame gives Antigravity's Default one window, captioned "Week" with its reset, and
+    /// ruling, 2026-11-26): ccd's own frame gives Antigravity's Default one window, captioned "Weekly" with its reset, and
     /// the bar's figures are that window alone; none of the "Claude and GPT models" windows reaches the app. A daemon of
     /// 54 sends its windows by group in `grouped_windows`, which this app reads as none.
     func testAntigravitysLimitsAreGeminisWeekAlone() throws {
         let now = Date(timeIntervalSince1970: 1_795_660_000)
         let facts = try XCTUnwrap(try signInBook("signed_in_usage").defaultFacts(for: .antigravity))
         let limits = ReplyBar.limits(facts, now: now)
-        XCTAssertEqual(limits.map(\.caption), ["Week"])
+        XCTAssertEqual(limits.map(\.caption), ["Weekly"])
         XCTAssertEqual(limits.map(\.usedPercent), [20])
         XCTAssertEqual(limits.first?.resets, "resets in 6d 22h")
         let older = try JSONDecoder().decode(

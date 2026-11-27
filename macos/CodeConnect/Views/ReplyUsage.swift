@@ -68,8 +68,7 @@ struct ReplyUsage: View {
             if let note = bar.limitsNote { row(note) }
             if let account = bar.account { row("Account", rest: account) }
         }
-        // A tip, not a menu: 250 wide, its own fill, border, corners and room, under the box's shadows.
-        .frame(width: 250 - 26)
+        // A tip, not a menu: as wide as its rows, its own fill, border, corners and room, under the box's shadows.
         .padding(.vertical, 9)
         .padding(.horizontal, 13)
         .background {

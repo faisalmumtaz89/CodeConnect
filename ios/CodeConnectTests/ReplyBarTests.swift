@@ -87,15 +87,15 @@ final class ReplyBarTests: XCTestCase {
         let bar = ReplyBar.of(events: [], summary: run, book: book, now: now)
         XCTAssertEqual(bar.limits, [
             .init(usedPercent: 12, caption: "5-hour", resets: "resets in 2h 10m"),
-            .init(usedPercent: 42, caption: "Week", resets: "resets in 5d 21h"),
+            .init(usedPercent: 42, caption: "Weekly", resets: "resets in 5d 21h"),
         ])
         XCTAssertEqual(bar.limits, ReplyBar.limits(d.facts, now: now), "the page's row for the same account")
         XCTAssertNil(bar.limitsNote)
-        XCTAssertEqual(bar.account, d.facts?.email)
+        XCTAssertEqual(bar.account, "\(try XCTUnwrap(d.facts?.email)) · Max", "its email and plan, as the band names it")
 
         let codex = ReplyBar.of(events: [], summary: try summary(.codex, account: onCodexDefault), book: book, now: now)
         XCTAssertEqual(codex.limits, ReplyBar.limits(book.defaultFacts(for: .codex), now: now), "the Default's row")
-        XCTAssertEqual(codex.account, "default@example.test")
+        XCTAssertEqual(codex.account, "default@example.test · Plus")
     }
 
     // MARK: Context
@@ -186,7 +186,7 @@ final class ReplyBarTests: XCTestCase {
             facts["windows"] = .array(windows.filter { $0["window_minutes"]?.intValue != 300 })
         }
         let (_, run) = try on("D", in: book)
-        XCTAssertEqual(ReplyBar.of(events: [], summary: run, book: book, now: now).limits.map(\.caption), ["Week"])
+        XCTAssertEqual(ReplyBar.of(events: [], summary: run, book: book, now: now).limits.map(\.caption), ["Weekly"])
     }
 
     func testACodexAccountWithNoWindowsHasNoLimits() throws {
@@ -202,7 +202,7 @@ final class ReplyBarTests: XCTestCase {
         let bar = ReplyBar.of(events: [], summary: run, book: book, now: now)
         XCTAssertEqual(bar.limits, [])
         XCTAssertEqual(bar.limitsNote, "No plan limits")
-        XCTAssertEqual(bar.account, c.facts?.email)
+        XCTAssertEqual(bar.account, "\(try XCTUnwrap(c.facts?.email)) · Max")
     }
 
     func testAPassedResetHasNoCountdown() throws {
@@ -222,15 +222,15 @@ final class ReplyBarTests: XCTestCase {
         let email = try XCTUnwrap(d.facts?.email)
         XCTAssertEqual(
             ReplyBar.of(events: try claudeEvents(), summary: run, book: book, now: now).spoken,
-            "Context 32k of 1M; 5-hour 12%, resets in 2h 10m; Week 42%, resets in 5d 21h; Account \(email)")
+            "Context 32k of 1M; 5-hour 12%, resets in 2h 10m; Weekly 42%, resets in 5d 21h; Account \(email) · Max")
         let (c, noLimits) = try on("C", in: book)
         XCTAssertEqual(
             ReplyBar.of(events: [], summary: noLimits, book: book, now: now).spoken,
-            "No plan limits; Account \(try XCTUnwrap(c.facts?.email))")
+            "No plan limits; Account \(try XCTUnwrap(c.facts?.email)) · Max")
         let passed = ReplyBar.of(
             events: [], summary: try summary(.codex, account: onCodexDefault), book: book,
             now: Date(timeIntervalSince1970: 1_800_000_000))
-        XCTAssertEqual(passed.spoken, "5-hour 42%; Account default@example.test")
+        XCTAssertEqual(passed.spoken, "5-hour 42%; Account default@example.test · Plus")
         XCTAssertEqual(ReplyBar.of(events: [], summary: try summary(.claude, account: nil), book: nil, now: now).spoken, "")
     }
 
@@ -285,7 +285,7 @@ final class ReplyBarTests: XCTestCase {
         let foot = try XCTUnwrap(LimitFoot.of(summary: run, book: book, now: now, timeZone: .gmt))
         XCTAssertEqual(foot.title, "Weekly limit reached")
         XCTAssertEqual(foot.resets, "Resets Fri 4 Dec, 4:00 PM")
-        XCTAssertEqual(foot.full, "Week")
+        XCTAssertEqual(foot.full, "Weekly")
     }
 
     /// A run left at its limit past that window's reset: the account's window of that length is a later one, begun
