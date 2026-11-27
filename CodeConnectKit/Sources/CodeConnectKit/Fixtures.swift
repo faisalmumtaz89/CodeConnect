@@ -265,9 +265,25 @@ enum Fixtures {
         return Date()
     }
 
+    /// `-CC_FIXTURE_SITE YES`: the website's sample, as the design team's Mac pictures hold it: the computer is "Mac
+    /// Studio", the runs are in docs-site, web-dashboard, data-pipeline, storefront-api and query-parser, `fx-7` is
+    /// query-parser's "Parse ISO dates with offsets", and `stacked` holds five decisions (its four and `mcpCard`).
+    static var site: Bool {
+        #if DEBUG
+            UserDefaults.standard.bool(forKey: "CC_FIXTURE_SITE")
+        #else
+            false
+        #endif
+    }
+
+    /// The site's folders, by run: query-parser is `fx-7`, the website's conversation.
+    private static let siteNames = [
+        "storefront-api", "data-pipeline", "docs-site", "web-dashboard", "query-parser", "docs-site", "query-parser",
+    ]
+
     static func frames(now: Date = Fixtures.now, variant: Variant = .deck) -> [ServerMessage] {
         if variant == .antigravity { return antigravityFrames(now: now) }
-        let cards = variant.cards
+        let cards = variant.cards + (site && variant == .stacked ? [mcpCard] : [])
         let held = variant.heldCard.map { [$0] } ?? []
         var messages: [ServerMessage] = []
         var ackJSON: String
@@ -289,6 +305,7 @@ enum Fixtures {
         default:
             ackJSON = helloAckJSON
         }
+        if site { ackJSON = ackJSON.replacingOccurrences(of: "Jordan’s Mac Studio", with: "Mac Studio") }
         // `-CC_FIXTURE_UPLOADS YES` (or `-CC_FIXTURE_FILES YES`, which also fills a run's tray): the computer takes
         // files, so the box draws its file control.
         if UserDefaults.standard.bool(forKey: "CC_FIXTURE_UPLOADS") || UserDefaults.standard.bool(forKey: "CC_FIXTURE_FILES") {
@@ -671,6 +688,7 @@ enum Fixtures {
     private static func projectLabel(_ index: Int) -> String {
         if index == 1, let long = longLabel { return long.sent }
         #if DEBUG
+            if site, index <= siteNames.count { return siteNames[index - 1] }
             if UserDefaults.standard.bool(forKey: "CC_FIXTURE_REAL_NAMES"), index <= realNames.count {
                 return realNames[index - 1]
             }
@@ -705,7 +723,9 @@ enum Fixtures {
             #if DEBUG
                 // `-CC_FIXTURE_TITLES YES`: each run carries a title (minor 63), the first line of its first message,
                 // as ccd sends one, so the list and the run's header draw it.
-                if UserDefaults.standard.bool(forKey: "CC_FIXTURE_TITLES") {
+                if site, index == 7 {
+                    hosted += "\"title\":\"Parse ISO dates with offsets\","
+                } else if UserDefaults.standard.bool(forKey: "CC_FIXTURE_TITLES") {
                     let titles = [
                         "Retry the router on 5xx", "Batch remove ended runs", "Default checkpoint for the importer",
                         "Support page for 0.19.23", "Usage reset countdown", "Audit setup against installed",
