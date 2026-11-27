@@ -283,8 +283,8 @@ public enum ChangesWords {
         base.map { "Pushes the branch, then opens a PR into \($0) on \(repo)" }
             ?? "Pushes the branch, then opens a PR into \(repo)"
     }
-    /// Why the computer did not do `step` (commit or open a pull request), by its code (`git_refusal`), with git's or
-    /// gh's own words after where it gave them.
+    /// Why the computer did not do `step` (commit, open a pull request, merge it, archive the run), by its code
+    /// (`git_refusal`), with git's or gh's own words after where it gave them.
     public static func actionRefused(code: String, detail: String?, step: GitStep) -> String {
         let reason: String
         switch (code, step) {
@@ -292,6 +292,17 @@ public enum ChangesWords {
         case ("unmerged", .pullRequest): reason = "A merge has unresolved files, so nothing was pushed."
         case ("git_failed", .pullRequest): reason = "Git could not push the branch, so no PR was opened."
         case ("timeout", .pullRequest): reason = "Git took too long; the branch may or may not have been pushed, and no PR was opened."
+        case ("busy", .merge): reason = "A run in this folder is working or waiting for you, so nothing was merged."
+        case ("head_moved", .merge):
+            reason = "The pull request or its commit changed since the panel showed it, so nothing was merged."
+        case ("method_not_allowed", .merge):
+            reason = "This repository doesn’t allow that merge method, so nothing was merged."
+        case ("no_pull_request", .merge): reason = "This branch has no open pull request, so nothing was merged."
+        case ("merge_failed", .merge): reason = "GitHub did not merge it."
+        case ("timeout", .merge): reason = "GitHub took too long; the pull request may or may not have been merged."
+        case ("gh_missing", .merge): reason = "This computer has no gh, so nothing was merged."
+        case ("gh_signed_out", .merge): reason = "This computer’s gh isn’t signed in to GitHub, so nothing was merged."
+        case ("github_unavailable", .merge): reason = "GitHub could not be reached, so nothing was merged."
         case ("busy", .archive): reason = "A run in this folder is working or waiting for you, so nothing was archived."
         case ("head_moved", .archive): reason = "The branch or its commit changed since the panel showed it, so nothing was archived."
         case ("on_base_branch", .archive): reason = "The branch checked out is the base branch itself, so nothing was archived."
@@ -355,7 +366,7 @@ public enum ChangesWords {
         // A branch's pull request speaks for its commits and its push.
         if let pr = git.pullRequest {
             switch pr.state {
-            case .open: parts.append("PR #\(pr.number) · \(checksLead(pr) ?? "Open")")
+            case .open: parts.append("PR #\(pr.number) · \(openLead(pr))")
             case .merged: parts.append("PR #\(pr.number) · Merged into \(pr.base)")
             case .closed: parts.append("PR #\(pr.number) · Closed")
             case .unknown: parts.append("PR #\(pr.number)")
@@ -383,6 +394,45 @@ public enum ChangesWords {
         // Clean, with no base to count commits against: nothing more is known than that nothing is uncommitted.
         if parts.isEmpty { return git.ahead == nil && git.headOID != nil ? "No uncommitted changes" : "No changes" }
         return parts.joined(separator: " · ")
+    }
+    /// What leads an open pull request's state line: queued to merge, else what its checks say, else its merge state
+    /// (artboards 07, 10), else Open.
+    private static func openLead(_ pr: RunGit.PullRequest) -> String {
+        if pr.mergeQueued == true { return "Queued to merge" }
+        return checksLead(pr) ?? mergeLead(pr) ?? "Open"
+    }
+    /// An open pull request's merge state as GitHub reports it, in words; nil while GitHub works it out.
+    private static func mergeLead(_ pr: RunGit.PullRequest) -> String? {
+        switch pr.mergeState {
+        case .clean, .unstable, .hasHooks: "Ready to merge"
+        case .behind: "Behind \(pr.base)"
+        case .dirty: "Conflicts with \(pr.base)"
+        case .draft: "Draft"
+        case .blocked: "Blocked by \(pr.base)’s rules"
+        case .unknown, nil: nil
+        }
+    }
+    /// Whether the merge button may merge an open pull request: GitHub would merge it as it stands (a check it doesn't
+    /// require may fail), and no queue holds it already.
+    public static func mergeable(_ pr: RunGit.PullRequest) -> Bool {
+        guard pr.state == .open, pr.mergeQueued != true else { return false }
+        return [.clean, .unstable, .hasHooks].contains(pr.mergeState)
+    }
+    /// A merge method as the merge button and its menu name it (artboard 10).
+    public static func mergeMethod(_ method: MergeMethod) -> String {
+        switch method {
+        case .squash: "Squash and merge"
+        case .merge: "Create a merge commit"
+        case .rebase: "Rebase and merge"
+        }
+    }
+    /// The merge button's chevron, as a screen reader names it.
+    public static let mergeMethods = "Merge methods"
+    /// A merge method the repository turns off, as its menu row says it.
+    public static func mergeMethodOff(_ method: MergeMethod) -> String { "\(mergeMethod(method)) (off in this repo)" }
+    /// The method the merge button starts on: squash where the repository allows it, else the first it allows.
+    public static func defaultMergeMethod(_ allowed: [MergeMethod]) -> MergeMethod? {
+        allowed.contains(.squash) ? .squash : allowed.first
     }
     /// What an open pull request's checks lead its state line with: a failure, else what still runs; nil when every
     /// check passed or none was read, and the line says Open.

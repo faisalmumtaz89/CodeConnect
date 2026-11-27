@@ -126,6 +126,7 @@ public enum GitActionState: Sendable, Equatable {
 public enum GitStep: Sendable, Equatable {
     case commit
     case pullRequest
+    case merge
     case archive
 }
 
@@ -4354,6 +4355,18 @@ public final class AppModel {
         }
     }
 
+    /// The computer merges a run's pull request (minor 64).
+    public var mergesPullRequests: Bool { connection.capabilities?.mergesPullRequests == true }
+
+    /// Merges the run's open pull request `number` by `method`, only while its head is `headOID`: the pull request and
+    /// commit the panel showed, so a push since is never merged unseen. Each press is its own request.
+    public func mergePullRequest(key: String, number: UInt64, method: MergeMethod, headOID: String) {
+        perform(key: key, step: .merge) { [connection] in
+            try await connection.mergePullRequest(
+                sessionUID: key, number: number, method: method, headOID: headOID, requestID: UUID().uuidString)
+        }
+    }
+
     /// One action of the run's Changes panel, unless one is on its way. Done, the panel's diff and repository are read
     /// again, and they show what the action made; refused, the computer's reason is kept, in the app's words, until the
     /// step it was for has passed.
@@ -4401,6 +4414,9 @@ public final class AppModel {
                     switch self.gitActions[key] {
                     case .refused(_, .commit): git.changed.files == 0 && git.changed.complete
                     case .refused(_, .pullRequest), .opened: git.pullRequest != nil
+                    // A merge's refusal holds while the pull request it was for stays open and unqueued.
+                    case .refused(_, .merge):
+                        git.pullRequest.map { $0.state != .open || $0.mergeQueued == true } ?? true
                     default: false
                     }
                 if passed { self.gitActions[key] = nil }

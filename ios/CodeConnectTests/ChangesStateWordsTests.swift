@@ -113,6 +113,78 @@ final class ChangesStateWordsTests: XCTestCase {
         XCTAssertNil(ChangesWords.checksNote(merged), "a merged one's checks are not its state")
     }
 
+    /// An open pull request's merge state leads its line once its checks have nothing to say (artboard 10): ready,
+    /// queued (which leads before anything), behind or in conflict with its base, a draft, or held by its base's rules;
+    /// and the merge button is offered only where GitHub would merge it.
+    func testAnOpenPullRequestsMergeStateLeadsItsLine() throws {
+        let passing = #"[{"name":"kit","state":"pass"}]"#
+        func pr(_ mergeState: String, checks: String, queued: Bool) -> String {
+            #"{"number":412,"url":"https://github.com/acme/app/pull/412","state":"open","base":"main","#
+                + #""head_oid":"1234567","#
+                + #""checks":\#(checks),"merge_state":"\#(mergeState)","merge_methods":["merge","squash"],"#
+                + #""merge_queued":\#(queued)}"#
+        }
+        func line(_ state: String, checks: String? = nil, queued: Bool = false) throws
+            -> (String, Bool)
+        {
+            let git = try git(ahead: 1, pushed: true, pr: pr(state, checks: checks ?? passing, queued: queued))
+            return (ChangesWords.state(git), ChangesWords.mergeable(git.pullRequest!))
+        }
+        XCTAssertEqual(try line("clean").0, "PR #412 · Ready to merge", "10")
+        XCTAssertTrue(try line("clean").1)
+        XCTAssertEqual(try line("has_hooks").0, "PR #412 · Ready to merge")
+        XCTAssertTrue(try line("has_hooks").1)
+        XCTAssertEqual(try line("behind").0, "PR #412 · Behind main")
+        XCTAssertFalse(try line("behind").1)
+        XCTAssertEqual(try line("dirty").0, "PR #412 · Conflicts with main")
+        XCTAssertFalse(try line("dirty").1)
+        XCTAssertEqual(try line("draft").0, "PR #412 · Draft")
+        XCTAssertFalse(try line("draft").1)
+        XCTAssertEqual(try line("blocked").0, "PR #412 · Blocked by main’s rules")
+        XCTAssertFalse(try line("blocked").1)
+        XCTAssertEqual(try line("unknown").0, "PR #412 · Open", "GitHub still working it out says nothing more")
+        XCTAssertFalse(try line("unknown").1)
+        let failed = #"[{"name":"ui-tests","state":"fail"}]"#
+        XCTAssertEqual(
+            try line("blocked", checks: failed).0, "PR #412 · 1 check failed", "a failure leads, as 07 draws it")
+        XCTAssertEqual(try line("unstable", checks: failed).0, "PR #412 · 1 check failed")
+        XCTAssertTrue(try line("unstable", checks: failed).1, "a check GitHub doesn't require holds nothing back")
+        XCTAssertEqual(try line("clean", queued: true).0, "PR #412 · Queued to merge")
+        XCTAssertFalse(try line("clean", queued: true).1, "a queued one is not merged again")
+    }
+
+    /// The merge button names the method it uses, and the menu names each; one the repository turns off says so (10).
+    func testTheMergeMethodsAreNamedAsTheMenuNamesThem() {
+        XCTAssertEqual(ChangesWords.mergeMethod(.squash), "Squash and merge")
+        XCTAssertEqual(ChangesWords.mergeMethod(.merge), "Create a merge commit")
+        XCTAssertEqual(ChangesWords.mergeMethod(.rebase), "Rebase and merge")
+        XCTAssertEqual(ChangesWords.mergeMethodOff(.rebase), "Rebase and merge (off in this repo)")
+        XCTAssertEqual(ChangesWords.defaultMergeMethod([.merge, .squash]), .squash, "squash where it is allowed")
+        XCTAssertEqual(ChangesWords.defaultMergeMethod([.merge, .rebase]), .merge, "else the first allowed")
+        XCTAssertNil(ChangesWords.defaultMergeMethod([]))
+    }
+
+    /// A merge the computer did not make is worded as a merge's, never as a commit's or a push's.
+    func testAMergesRefusalIsWordedByItsCode() {
+        func said(_ code: String, _ detail: String? = nil) -> String {
+            ChangesWords.actionRefused(code: code, detail: detail, step: .merge)
+        }
+        XCTAssertEqual(
+            said("head_moved"),
+            "The pull request or its commit changed since the panel showed it, so nothing was merged.")
+        XCTAssertEqual(
+            said("method_not_allowed"), "This repository doesn’t allow that merge method, so nothing was merged.")
+        XCTAssertEqual(said("no_pull_request"), "This branch has no open pull request, so nothing was merged.")
+        XCTAssertEqual(
+            said("merge_failed", "Required status check \"ci\" is expected."),
+            "GitHub did not merge it. Required status check \"ci\" is expected.")
+        XCTAssertEqual(said("busy"), "A run in this folder is working or waiting for you, so nothing was merged.")
+        XCTAssertEqual(said("timeout"), "GitHub took too long; the pull request may or may not have been merged.")
+        XCTAssertEqual(said("gh_missing"), "This computer has no gh, so nothing was merged.")
+        XCTAssertEqual(said("gh_signed_out"), "This computer’s gh isn’t signed in to GitHub, so nothing was merged.")
+        XCTAssertEqual(said("github_unavailable"), "GitHub could not be reached, so nothing was merged.")
+    }
+
     /// A check's duration as artboard 07 writes it: seconds alone under a minute, minutes and two-digit seconds under
     /// an hour, then hours and two-digit minutes.
     func testACheckDurationIsWrittenAsTheDesignWritesIt() {

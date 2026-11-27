@@ -67,6 +67,8 @@ struct ChangesPanel: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if proposable {
                         PullRequestRow(row: row, model: model, ready: pullRequestWait(git) == nil, line: line)
+                    } else if !offline, model.mergesPullRequests, let pr = git.pullRequest, pr.state == .open {
+                        MergeRow(row: row, model: model, pr: pr, quiet: commitWait(git) == nil, line: line)
                     } else {
                         line
                         if committable { CommitRow(row: row, model: model, ready: commitWait(git) == nil) }
@@ -393,6 +395,137 @@ private struct PullRequestRow: View {
             }
         }
     }
+}
+
+/// An open pull request's row: the state line, and at its end the merge button (artboard 10), which names the method it
+/// merges by, ⇧⌘M, with the repository's methods a click away on its chevron. It merges only what GitHub would merge as
+/// it stands, while the run's agent is quiet, and only the pull request and commit the panel shows; what the computer
+/// said when it did not merge stays under it.
+private struct MergeRow: View {
+    let row: FleetRow
+    let model: AppModel
+    let pr: RunGit.PullRequest
+    /// The run's agent is quiet.
+    let quiet: Bool
+    let line: StateLine
+    /// The method chosen from the menu; until then the repository's default (`ChangesWords.defaultMergeMethod`).
+    @State private var chosen: MergeMethod?
+    @State private var menuOpen = false
+    /// A confirmation or a sheet covers the window: ⇧⌘M must not act under it.
+    @FocusedValue(\.windowCovered) private var covered
+
+    var body: some View {
+        let state = model.gitActionState(for: row.id)
+        let allowed = pr.mergeMethods ?? []
+        let method = chosen.flatMap { allowed.contains($0) ? $0 : nil } ?? ChangesWords.defaultMergeMethod(allowed)
+        let ready = quiet && ChangesWords.mergeable(pr) && method != nil && state != .working && covered != true
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                line
+                HStack(spacing: 1) {
+                    Button {
+                        if let method {
+                            model.mergePullRequest(key: row.id, number: pr.number, method: method, headOID: pr.headOID)
+                        }
+                    } label: {
+                        HStack(spacing: 7) {
+                            Text(method.map(ChangesWords.mergeMethod) ?? ChangesWords.mergeMethod(.squash))
+                                .font(Theme.ui(12.5, .medium))
+                            KeyCap("⇧⌘M", onLight: true)
+                        }
+                        .foregroundStyle(Color.black)
+                        .padding(.horizontal, 10)
+                        .frame(height: 26)
+                        .background(Theme.text, in: UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 6))
+                    }
+                    .buttonStyle(.hover(over: true, id: "changes.merge"))
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+                    .disabled(!ready)
+                    .accessibilityIdentifier("changes.merge")
+                    Button { menuOpen.toggle() } label: {
+                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(Color.black)
+                            .padding(.horizontal, 7)
+                            .frame(height: 26)
+                            .background(
+                                Theme.text, in: UnevenRoundedRectangle(bottomTrailingRadius: 6, topTrailingRadius: 6))
+                    }
+                    .buttonStyle(.hover(over: true, id: "changes.merge.methods"))
+                    .disabled(allowed.isEmpty || state == .working)
+                    .accessibilityLabel(ChangesWords.mergeMethods)
+                    .accessibilityIdentifier("changes.merge.methods")
+                }
+                .opacity(ready ? 1 : 0.5)
+                .overlay(alignment: .topTrailing) {
+                    if menuOpen {
+                        menu(chosen: method)
+                            .openPanel()
+                            .offset(y: 26 + Theme.panelGap)
+                    }
+                }
+                .closesPanel($menuOpen)
+                .padding(.trailing, 20)
+            }
+            if case .refused(let why, .merge) = state {
+                Text(why)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.amber)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+                    .accessibilityIdentifier("changes.merge.refused")
+            }
+        }
+        .zIndex(1)
+    }
+
+    /// The methods the repository allows, the one the button uses checked, then a rule and the ones it turns off,
+    /// dimmed, each saying so.
+    private func menu(chosen method: MergeMethod?) -> some View {
+        let allowed = MergeMethod.ordered.filter { (pr.mergeMethods ?? []).contains($0) }
+        let off = MergeMethod.ordered.filter { !allowed.contains($0) }
+        return VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(allowed.enumerated()), id: \.element) { index, option in
+                let choose = {
+                    chosen = option
+                    menuOpen = false
+                }
+                Button(action: choose) {
+                    MenuRow(chosen: option == method) {
+                        Text(ChangesWords.mergeMethod(option)).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
+                            .lineLimit(1)
+                    }
+                }
+                .buttonStyle(.panelRow)
+                .panelRow(index, id: "changes.merge.method.\(option.rawValue)", choose: choose)
+                .accessibilityIdentifier("changes.merge.method.\(option.rawValue)")
+                .accessibilityAddTraits(option == method ? .isSelected : [])
+            }
+            if !off.isEmpty && !allowed.isEmpty { MenuDivider().padding(.vertical, 5) }
+            ForEach(off, id: \.self) { option in
+                MenuRow(chosen: false) {
+                    Text(ChangesWords.mergeMethodOff(option)).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                }
+                .opacity(0.45)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("changes.merge.method.\(option.rawValue)")
+            }
+        }
+        .frame(width: 270 - 2 * MenuMetrics.inset)
+        .fixedSize(horizontal: false, vertical: true)
+        .menuCard()
+        // Every click inside the card is its own: one on a dimmed row or a gap does nothing below it.
+        .contentShape(RoundedRectangle(cornerRadius: MenuMetrics.cardRadius))
+        .onTapGesture {}
+    }
+}
+
+extension MergeMethod {
+    /// The menu's order (artboard 10): squash, a merge commit, then rebase.
+    static let ordered: [MergeMethod] = [.squash, .merge, .rebase]
 }
 
 /// The panel's two tabs once its open pull request has checks: Changes, and Checks with how many passed. Where the
