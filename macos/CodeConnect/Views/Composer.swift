@@ -298,9 +298,11 @@ private struct Composer: View {
 
     // MARK: The box
 
-    /// The reply field's prompt: at a usage limit, when a message goes through again.
+    /// The reply field's prompt: at a usage limit, when a message goes through again; while the run's computer is
+    /// offline, that it is and when a reply can go.
     private func prompt(_ agent: String) -> String {
-        model.limitFoot(for: key, now: .now)?.prompt ?? SessionWords.replyPrompt(agent)
+        model.limitFoot(for: key, now: .now)?.prompt ?? model.offlineReply(for: key, draft: kept.reply)
+            ?? SessionWords.replyPrompt(agent)
     }
 
     private var box: some View {
@@ -400,12 +402,12 @@ private struct Composer: View {
         .pastesFiles(model.canUpload(key) && fieldFocused, takeFile)
         .environment(\.filesOver, filesDragged && model.canUpload(key))
         .onGeometryChange(for: CGFloat.self) { $0.size.width - 2 * InputBoxLayout.barInset } action: { rowWidth = $0 }
-        // The slash palette above the box, clear of it by the panels' one gap, as wide as the box.
+        // The slash palette above the box at its leading edge, clear of it by the panels' one gap, 420 pt wide.
         .overlay(alignment: .topLeading) {
             if let slash {
                 SlashPanel(
                     content: slash, lit: min(slashLit, slash.rows.count - 1), light: { slashLit = $0 }, run: runSlash)
-                    .frame(width: rowWidth + 24)
+                    .frame(width: 420)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { slashHeight = $0 }
                     .openPanel()
                     .offset(y: -(slashHeight + Theme.panelGap))
@@ -457,8 +459,11 @@ private struct Composer: View {
         if case .hostedLive(let settings) = model.runSettings(for: key), let outcome = settings.lastOutcome {
             return Line(text: outcome.text, tone: outcome.tone.composeTone)
         }
-        // Why the files hold the message back stands under them, not here as well.
-        let standing = blocked != nil && runBlocked == nil ? nil : model.standingNote(for: key, draft: kept.reply)
+        // Why the files hold the message back stands under them, not here as well; an offline computer is said in the
+        // field's prompt.
+        let standing =
+            blocked != nil && runBlocked == nil || model.offlineReply(for: key, draft: kept.reply) != nil
+            ? nil : model.standingNote(for: key, draft: kept.reply)
         if let kit = model.outcomeNote(for: key, lastSend: result) ?? standing {
             return Line(text: kit.text, tone: kit.tone)
         }

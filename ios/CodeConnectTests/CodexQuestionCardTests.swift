@@ -122,9 +122,9 @@ final class CodexQuestionCardTests: XCTestCase {
             codexStatus(codex: try resolution("answered")).banner(on: .current, agent: .codex))
         XCTAssertTrue(banner.message.contains("Codex has the answers"), banner.message)
         XCTAssertFalse(banner.message.contains("Claude"), banner.message)
-        XCTAssertEqual(QuestionCard.heading(agent: .codex, count: 1), "Codex asks")
-        XCTAssertEqual(QuestionCard.heading(agent: .codex, count: 2), "Codex asks 2 questions")
-        XCTAssertEqual(QuestionCard.heading(agent: .claude, count: 1), "Claude asks")
+        XCTAssertEqual(QuestionCard.heading(agent: .codex, count: 1), "Codex has a question")
+        XCTAssertEqual(QuestionCard.heading(agent: .codex, count: 2), "Codex has 2 questions")
+        XCTAssertEqual(QuestionCard.heading(agent: .claude, count: 1), "Claude has a question")
     }
 
     // MARK: 5b — a recorded outcome names the resolving device, not the viewer's

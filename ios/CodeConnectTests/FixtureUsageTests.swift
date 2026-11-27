@@ -45,7 +45,7 @@ final class FixtureUsageTests: XCTestCase {
         XCTAssertEqual(bar.context, .init(used: "390k", window: "1M"))
         XCTAssertEqual(bar.limits, [
             .init(usedPercent: 23, caption: "5-hour", resets: "resets in 2h 10m"),
-            .init(usedPercent: 61, caption: "Week", resets: "resets in 3 days"),
+            .init(usedPercent: 61, caption: "Week", resets: "resets in 3d"),
         ])
         XCTAssertEqual(bar.account, "you@example.com")
         for run in runs(frames) {

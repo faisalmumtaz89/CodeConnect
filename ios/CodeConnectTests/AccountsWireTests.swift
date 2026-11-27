@@ -503,8 +503,9 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertEqual(words(60 * 60), "resets in 1h")
         XCTAssertEqual(words(2 * 3600 + 10 * 60 + 30), "resets in 2h 10m")
         XCTAssertEqual(words(47 * 3600 + 59 * 60), "resets in 47h 59m")
-        XCTAssertEqual(words(48 * 3600), "resets in 2 days")
-        XCTAssertEqual(words(3 * 86400 + 23 * 3600), "resets in 3 days")
+        XCTAssertEqual(words(48 * 3600), "resets in 2d")
+        XCTAssertEqual(words(3 * 86400 + 23 * 3600), "resets in 3d 23h")
+        XCTAssertEqual(words(3 * 86400 + 6 * 3600 + 59 * 60), "resets in 3d 6h", "whole hours, rounded down")
         XCTAssertNil(words(0), "at the reset time")
         XCTAssertNil(words(-60), "past it")
     }

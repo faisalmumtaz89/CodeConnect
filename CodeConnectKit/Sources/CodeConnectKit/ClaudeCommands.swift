@@ -241,14 +241,14 @@ public struct SlashRow: Equatable, Identifiable, Sendable {
 /// What the slash palette shows above a Claude run's reply box while the box holds a bare `/` or a prefix of a command
 /// this app answers itself. Anything else (arguments, unknown fragments) shows no palette; typing simply continues.
 public enum SlashPalette {
-    /// The rows for one text, and whether the discovery caption goes under them.
+    /// The rows for one text, and the discovery caption that goes under them, if any.
     public struct Content: Equatable, Sendable {
         public var rows: [SlashRow]
-        public var showsCaption: Bool
+        public var caption: String?
     }
 
-    /// Under the rows of a bare `/`: the commands this app doesn't answer itself still run.
-    public static let caption = "Run other commands on the computer."
+    /// Under the rows of a bare `/`: the commands this app doesn't answer itself still go to `agent`.
+    public static func caption(for agent: AgentKind) -> String { "Any other command goes to \(agent.productName) as typed" }
 
     /// The five native commands, in the order they are worth attention: the two levers, the two context acts, then
     /// the diff.
@@ -275,12 +275,12 @@ public enum SlashPalette {
         let fragment = afterLeading.dropFirst()
         let offered = rows(for: agent)
         if fragment.isEmpty {
-            return Content(rows: offered, showsCaption: true)
+            return Content(rows: offered, caption: caption(for: agent))
         }
         guard !fragment.contains(where: \.isWhitespace) else { return nil }
         let needle = fragment.lowercased()
         let matches = offered.filter { $0.command.hasPrefix(needle) }
-        return matches.isEmpty ? nil : Content(rows: matches, showsCaption: false)
+        return matches.isEmpty ? nil : Content(rows: matches, caption: nil)
     }
 
     /// Whether the palette is closed on the draft as it stands. Esc, a click outside or a row run close it; any edit of

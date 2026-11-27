@@ -30,8 +30,8 @@ struct SlashPanel: View {
                 .accessibilityIdentifier("session.slash.\(row.command)")
                 .accessibilityAddTraits(index == lit ? .isSelected : [])
             }
-            if content.showsCaption {
-                Text(SlashPalette.caption).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+            if let caption = content.caption {
+                Text(caption).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
                     .padding(.horizontal, 12)
                     .padding(.top, 5)
                     .padding(.bottom, 2)

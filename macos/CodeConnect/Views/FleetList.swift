@@ -99,8 +99,8 @@ struct FleetList: View {
 
             if scope == .active, machines.fleet.isEmpty {
                 NoAgentsYet(newAgent: newRun)
-                    .padding(.horizontal, 18)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(18)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {

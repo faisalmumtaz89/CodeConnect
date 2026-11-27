@@ -148,7 +148,7 @@ struct DecisionBlock: View {
                     .font(Theme.ui(12.5, .medium))
                     .foregroundStyle(actionable ? Theme.text : Theme.text2)
                 Spacer(minLength: 8)
-                if let cwd = CodexCard.cwd(in: approval.card.toolInput) {
+                if let cwd = CodexCard.cwd(in: approval.card.toolInput) ?? summary?.shownCwd {
                     Text(FleetGroup.shellPath(cwd)).font(Theme.mono(11)).foregroundStyle(Theme.text3).lineLimit(1)
                         .truncationMode(.head)
                 }

@@ -24,12 +24,12 @@ public struct QuestionCard: Sendable, Hashable {
         name == toolName || name == codexToolName
     }
 
-    /// The card's heading in the words both apps read — "<Agent> asks" for one
-    /// question, "<Agent> asks N questions" for more. The one place the attribution
-    /// is composed, so the Mac reads this rather than writing "Claude asks" itself.
+    /// The card's heading — "<Agent> has a question" for one, "<Agent> has N
+    /// questions" for more. The one place the attribution is composed, so the Mac
+    /// reads this rather than writing the agent's name itself.
     public static func heading(agent: AgentKind?, count: Int) -> String {
         let who = agent?.displayName ?? "Claude"
-        return count == 1 ? "\(who) asks" : "\(who) asks \(count) questions"
+        return count == 1 ? "\(who) has a question" : "\(who) has \(count) questions"
     }
 
     public struct Option: Sendable, Hashable {
@@ -165,6 +165,11 @@ public struct QuestionDraft: Sendable, Hashable {
             selected: entry.selected.map { UInt32($0) },
             other: entry.otherChosen ? entry.otherText : nil,
             notes: card.questions[question].takesNotes && !entry.notes.isEmpty ? entry.notes : nil)
+    }
+
+    /// How many of the card's questions have an answer.
+    public func answered(in card: QuestionCard) -> Int {
+        card.questions.indices.filter { answer(for: $0, in: card) != nil }.count
     }
 
     /// Every question's answer, in card order — or nil until all of them have

@@ -87,7 +87,7 @@ final class ReplyBarTests: XCTestCase {
         let bar = ReplyBar.of(events: [], summary: run, book: book, now: now)
         XCTAssertEqual(bar.limits, [
             .init(usedPercent: 12, caption: "5-hour", resets: "resets in 2h 10m"),
-            .init(usedPercent: 42, caption: "Week", resets: "resets in 5 days"),
+            .init(usedPercent: 42, caption: "Week", resets: "resets in 5d 21h"),
         ])
         XCTAssertEqual(bar.limits, ReplyBar.limits(d.facts, now: now), "the page's row for the same account")
         XCTAssertNil(bar.limitsNote)
@@ -205,7 +205,7 @@ final class ReplyBarTests: XCTestCase {
         let email = try XCTUnwrap(d.facts?.email)
         XCTAssertEqual(
             ReplyBar.of(events: try claudeEvents(), summary: run, book: book, now: now).spoken,
-            "Context 32k of 1M; 5-hour 12%, resets in 2h 10m; Week 42%, resets in 5 days; Account \(email)")
+            "Context 32k of 1M; 5-hour 12%, resets in 2h 10m; Week 42%, resets in 5d 21h; Account \(email)")
         let (c, noLimits) = try on("C", in: book)
         XCTAssertEqual(
             ReplyBar.of(events: [], summary: noLimits, book: book, now: now).spoken,

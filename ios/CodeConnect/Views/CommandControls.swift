@@ -44,7 +44,7 @@ struct CommandPalette: View {
                             row.title,
                             titleIsMono: true,
                             subtitle: row.subtitle,
-                            separator: row != content.rows.last || content.showsCaption,
+                            separator: row != content.rows.last || content.caption != nil,
                             action: { onAction(row.action) }
                         ) {
                             CCIcon(Self.icon(for: row.command), size: 16, weight: .regular, relativeTo: .body)
@@ -62,8 +62,8 @@ struct CommandPalette: View {
                     // truncating, and it arrives exactly when a reader who has
                     // scanned the whole list starts wondering where the rest of
                     // the commands went.
-                    if content.showsCaption {
-                        Text(SlashPalette.caption)
+                    if let caption = content.caption {
+                        Text(caption)
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.tertiary)
                             .fixedSize(horizontal: false, vertical: true)

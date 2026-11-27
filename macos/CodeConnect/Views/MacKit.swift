@@ -839,13 +839,17 @@ private struct RightClick: NSViewRepresentable {
         let owner: String
         let rect: CGRect
         let items: [Item]
+        /// Its trailing edge on the rect's, where the leading edge would be.
+        let trailing: Bool
     }
 
     private(set) var shown: Shown?
 
-    /// Opens `items` by `rect`, in the window's coordinates; the same control asking again closes it.
-    func toggle(_ rect: CGRect, owner: String, items: [Item]) {
-        shown = shown?.owner == owner && shown?.rect == rect ? nil : Shown(owner: owner, rect: rect, items: items)
+    /// Opens `items` by `rect`, in the window's coordinates, ending at the rect's trailing edge when `trailing`; the same
+    /// control asking again closes it.
+    func toggle(_ rect: CGRect, owner: String, items: [Item], trailing: Bool = false) {
+        shown = shown?.owner == owner && shown?.rect == rect
+            ? nil : Shown(owner: owner, rect: rect, items: items, trailing: trailing)
     }
 
     func close() { shown = nil }
@@ -872,7 +876,7 @@ private struct RowMenuHost: ViewModifier {
                 GeometryReader { window in
                     if let shown = menu.shown {
                         let bounds = window.frame(in: .global)
-                        let corner = place(shown.rect, in: bounds)
+                        let corner = place(shown, in: bounds)
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(Array(shown.items.enumerated()), id: \.element.id) { index, item in
                                 PanelItem(
@@ -898,15 +902,18 @@ private struct RowMenuHost: ViewModifier {
                 open: Binding(get: { menu.shown != nil }, set: { if !$0 { menu.close() } }), measuresControl: false))
     }
 
-    /// Its top leading corner: its leading edge on the rect's, below it where it fits, above it where it would cross
-    /// the window's bottom, inside the window's sides. A right-click's point: its top leading corner there.
-    private func place(_ rect: CGRect, in bounds: CGRect) -> CGPoint {
+    /// Its top leading corner: its leading edge on the rect's (its trailing edge, for a `trailing` menu), below it where
+    /// it fits, above it where it would cross the window's bottom, inside the window's sides. A right-click's point: its
+    /// top leading corner there.
+    private func place(_ shown: RowMenu.Shown, in bounds: CGRect) -> CGPoint {
+        let rect = shown.rect
         let point = rect.size == .zero
         let gap = point ? 0 : Theme.panelGap
         let below = rect.maxY + gap
         let above = rect.minY - gap - size.height
         let y = below + size.height <= bounds.maxY || above < bounds.minY ? below : above
-        return CGPoint(x: PanelPlace.place(widest: size.width, leading: rect.minX, box: bounds).x, y: y)
+        let leading = shown.trailing && !point ? rect.maxX - size.width : rect.minX
+        return CGPoint(x: PanelPlace.place(widest: size.width, leading: leading, box: bounds).x, y: y)
     }
 }
 
