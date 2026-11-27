@@ -837,7 +837,15 @@ pub async fn commit(
     match run_write(
         &git,
         cwd,
-        &["-c", "core.fsmonitor=false", "add", "-A", "--", ":/"],
+        &[
+            "-c",
+            "core.fsmonitor=false",
+            "add",
+            "-A",
+            "--",
+            ":/",
+            CLAUDE_WORKTREES,
+        ],
         COMMIT_TIMEOUT,
         environment,
     )
@@ -1078,6 +1086,11 @@ const UNTRACKED_READ_BUDGET: u64 = 4 * 1024 * 1024;
 /// Git's own test for a binary file: a NUL in its first 8000 bytes.
 const BINARY_PROBE: u64 = 8000;
 
+/// Claude Code's own worktrees (`claude --worktree`), which it makes in `.claude/worktrees/<name>` inside the
+/// repository and ignores nowhere: never the main checkout's changes, so never listed (in its changes or its diff)
+/// or committed there.
+const CLAUDE_WORKTREES: &str = ":(exclude,top).claude/worktrees/";
+
 /// The untracked files, from the repository's top, with no configured program run.
 const UNTRACKED_ARGS: &[&str] = &[
     "-c",
@@ -1089,6 +1102,7 @@ const UNTRACKED_ARGS: &[&str] = &[
     "--full-name",
     "--",
     ":/",
+    CLAUDE_WORKTREES,
 ];
 
 /// A working tree's changed files.
@@ -1674,6 +1688,9 @@ async fn collect_inner(
             "ls-files",
             "--others",
             "--exclude-standard",
+            "--",
+            ".",
+            CLAUDE_WORKTREES,
         ],
         timeout,
         // A name list, not file contents. Capped well below the diff so a
@@ -3168,6 +3185,63 @@ mod tests {
         ] {
             assert_eq!(claude_lock_pid(other, at), None, "{other:?}");
         }
+    }
+
+    /// **A Claude worktree in the main checkout is not one of its changes**: `claude --worktree` makes
+    /// `.claude/worktrees/<name>` inside the repository and ignores it nowhere, so git lists it as
+    /// untracked. The run in the main checkout counts no change for it, a commit there never stages it
+    /// (as a gitlink no clone could resolve), and with nothing else changed there is nothing to commit.
+    #[tokio::test]
+    async fn a_claude_worktree_in_the_main_checkout_is_not_one_of_its_changes() {
+        let dir = committable("claude-worktree");
+        git_sync(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "worktree-fix+login",
+                ".claude/worktrees/fix+login",
+            ],
+        );
+        let cwd = dir.to_str().unwrap();
+        let read = run_git(cwd, None, Duration::from_secs(10)).await.unwrap();
+        assert_eq!(read.changed.files, 0, "{:?}", read.changed);
+        assert!(matches!(
+            commit_in(&dir, "nothing").await,
+            CommitOutcome::Refused {
+                code: protocol::ws::git_refusal::NOTHING_TO_COMMIT,
+                ..
+            }
+        ));
+
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        assert_eq!(
+            run_git(cwd, None, Duration::from_secs(10))
+                .await
+                .unwrap()
+                .changed
+                .files,
+            1
+        );
+        let CommitOutcome::Committed { files, .. } = commit_in(&dir, "edit a").await else {
+            panic!("not committed");
+        };
+        assert_eq!(files, 1);
+        let tree = git_out(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(!tree.contains(".claude"), "{tree}");
+
+        // The run's diff names its untracked files, not the worktree.
+        std::fs::write(dir.join("new.txt"), "n\n").unwrap();
+        let diff = collect(cwd, None, 512 * 1024, Duration::from_secs(10)).await;
+        assert!(diff.unified.contains("new.txt"), "{}", diff.unified);
+        assert!(
+            !diff.unified.contains(".claude/worktrees"),
+            "{}",
+            diff.unified
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A repository on `main` with one commit, its own identity, and nothing else.
