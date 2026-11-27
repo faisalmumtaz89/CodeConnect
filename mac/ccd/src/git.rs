@@ -1301,6 +1301,8 @@ pub struct WorktreeEntry {
     pub branch: Option<String>,
     /// git still lists it, but its folder is gone.
     pub prunable: bool,
+    /// git has it locked (`git worktree lock`), with the lock's reason, empty when none was given.
+    pub locked: Option<String>,
 }
 
 /// The worktrees of the repository `cwd` is in, the main checkout first; `None`
@@ -1333,12 +1335,17 @@ fn parse_worktrees(listing: &str) -> Vec<WorktreeEntry> {
                 path: path.to_string(),
                 branch: None,
                 prunable: false,
+                locked: None,
             });
         } else if let Some(entry) = entries.last_mut() {
             if let Some(branch) = field.strip_prefix("branch refs/heads/") {
                 entry.branch = Some(branch.to_string());
             } else if field == "prunable" || field.starts_with("prunable ") {
                 entry.prunable = true;
+            } else if field == "locked" {
+                entry.locked = Some(String::new());
+            } else if let Some(reason) = field.strip_prefix("locked ") {
+                entry.locked = Some(reason.to_string());
             }
         }
     }
@@ -1373,6 +1380,157 @@ pub async fn local_branches(
             .map(str::to_string)
             .collect()
     })
+}
+
+/// The switches Archive reads a worktree's changes with, and removes it with: untracked files
+/// counted whatever `status.showUntrackedFiles` says (a person's `no` would otherwise let git
+/// remove them unseen), and no fsmonitor program run.
+const ARCHIVE_STATUS: [&str; 4] = [
+    "-c",
+    "status.showUntrackedFiles=normal",
+    "-c",
+    "core.fsmonitor=false",
+];
+
+/// Whether the worktree at `top` has uncommitted or untracked changes, for Archive: `Err` when
+/// git cannot say (it fails, or warns, as for a folder it cannot open), which Archive takes as a
+/// refusal, never as clean. A tracked file git is told to
+/// assume unchanged or to skip (`update-index`) counts as one: status does not look at it, and an
+/// edit there would go with the worktree.
+pub async fn archive_dirty(
+    top: &str,
+    configured_bin: Option<&str>,
+    timeout: Duration,
+) -> std::result::Result<bool, String> {
+    let git = git_bin(configured_bin).ok_or("git is not installed at a known location")?;
+    let mut args = ARCHIVE_STATUS.to_vec();
+    args.extend(["status", "--porcelain"]);
+    let out = run(&git, top, &args, timeout, 1)
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+    match out.code {
+        Some(0) if !out.stdout.is_empty() => return Ok(true),
+        // A warning (a folder git could not open) means files it could not count.
+        Some(0) if !out.stderr.trim().is_empty() => {
+            return Err(out
+                .stderr
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string())
+        }
+        Some(0) => {}
+        // Stopped at the one byte the answer needs: there are changes.
+        None if out.stdout_truncated => return Ok(true),
+        _ => {
+            return Err(out
+                .stderr
+                .lines()
+                .next()
+                .unwrap_or("git status failed")
+                .to_string())
+        }
+    }
+    // `ls-files -v` tags an assume-unchanged entry in lower case and a skip-worktree one `S`.
+    let mut args = ARCHIVE_STATUS.to_vec();
+    args.extend(["ls-files", "-v"]);
+    let tagged = run(&git, top, &args, timeout, ARCHIVE_LISTING_CAP)
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+    if !tagged.ok || tagged.stdout_truncated {
+        return Err("git could not list the worktree's files".into());
+    }
+    Ok(tagged
+        .stdout
+        .lines()
+        .any(|line| line.starts_with(|tag: char| tag.is_ascii_lowercase() || tag == 'S')))
+}
+
+/// The most of a worktree's `ls-files -v` Archive reads (about 700,000 files); past it, it refuses.
+const ARCHIVE_LISTING_CAP: usize = 64 * 1024 * 1024;
+
+/// How long removing a worktree may take: its files are deleted.
+const WORKTREE_REMOVE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The linked worktree `worktree` removed, from the main checkout `main`, never forced: git
+/// itself refuses one with uncommitted or untracked changes ([`ARCHIVE_STATUS`]); files it
+/// ignores go with it. `Err` is git's line.
+pub async fn remove_worktree(
+    main: &str,
+    configured_bin: Option<&str>,
+    worktree: &str,
+) -> std::result::Result<(), String> {
+    let git = git_bin(configured_bin).ok_or("git is not installed at a known location")?;
+    let mut args = ARCHIVE_STATUS.to_vec();
+    args.extend(["worktree", "remove", worktree]);
+    git_line(&git, main, &args, WORKTREE_REMOVE_TIMEOUT).await
+}
+
+/// The local `branch` deleted from `main`, only while its tip is `head_oid`. `Err` is the
+/// reason it was kept.
+pub async fn delete_branch(
+    main: &str,
+    configured_bin: Option<&str>,
+    branch: &str,
+    head_oid: &str,
+    timeout: Duration,
+) -> std::result::Result<(), String> {
+    let git = git_bin(configured_bin).ok_or("git is not installed at a known location")?;
+    let tip = commit_oid(&git, main, &format!("refs/heads/{branch}"), timeout).await;
+    if tip.as_deref() != Some(head_oid) {
+        return Err(format!("{branch} moved"));
+    }
+    git_line(&git, main, &["branch", "-D", branch], timeout).await
+}
+
+/// Whether `oid` is already on `reference` (`merge-base --is-ancestor`); `None` when git
+/// cannot say.
+pub async fn on_reference(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    oid: &str,
+    reference: &str,
+    timeout: Duration,
+) -> Option<bool> {
+    let git = git_bin(configured_bin)?;
+    let out = run(
+        &git,
+        cwd,
+        &["merge-base", "--is-ancestor", oid, reference],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()?;
+    match out.code {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// `args` run in `cwd`: `Err` is git's first line when it refuses.
+async fn git_line(
+    git: &Path,
+    cwd: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::result::Result<(), String> {
+    let out = run(git, cwd, args, timeout, PROBE_CAP)
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+    if out.ok {
+        Ok(())
+    } else {
+        Err(out
+            .stderr
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| line.chars().take(300).collect())
+            .unwrap_or_else(|| format!("git {} failed", args.join(" "))))
+    }
 }
 
 /// Whether the worktree at `cwd` has uncommitted changes, untracked files
@@ -1849,19 +2007,21 @@ mod tests {
         assert_eq!(
             parse_worktrees(listing),
             [
-                ("/r/app", Some("main"), false),
+                ("/r/app", Some("main"), false, None),
                 (
                     "/r/app/.claude/worktrees/fix+login",
                     Some("worktree-fix+login"),
-                    false
+                    false,
+                    Some("")
                 ),
-                ("/r/old", None, true),
-                ("/r/a b\nc", Some("feature/x"), false),
+                ("/r/old", None, true, None),
+                ("/r/a b\nc", Some("feature/x"), false, None),
             ]
-            .map(|(path, branch, prunable)| WorktreeEntry {
+            .map(|(path, branch, prunable, locked)| WorktreeEntry {
                 path: path.into(),
                 branch: branch.map(str::to_string),
                 prunable,
+                locked: locked.map(str::to_string),
             })
         );
     }

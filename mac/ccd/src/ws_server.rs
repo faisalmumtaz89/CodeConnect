@@ -2437,6 +2437,7 @@ pub(crate) fn capabilities(
                 "commit".to_string(),
                 "create_pr".to_string(),
                 "merge".to_string(),
+                "archive".to_string(),
             ]
         } else {
             Vec::new()
@@ -6223,6 +6224,7 @@ mod tests {
             account: None,
             title: None,
             limit: None,
+            archived: false,
         };
         serde_json::json!({
             "hello_ack_capabilities": ack["capabilities"],
@@ -6292,6 +6294,7 @@ mod tests {
                 account: None,
                 title: None,
                 limit: None,
+                archived: false,
             }
         };
         serde_json::json!({
@@ -7980,7 +7983,7 @@ mod tests {
             .await;
         assert_eq!(
             ack["capabilities"]["git_actions"],
-            serde_json::json!(["commit", "create_pr", "merge"]),
+            serde_json::json!(["commit", "create_pr", "merge", "archive"]),
             "{ack}"
         );
         phone.send(ask).await.unwrap();

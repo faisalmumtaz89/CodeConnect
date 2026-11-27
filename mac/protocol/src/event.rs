@@ -131,6 +131,10 @@ pub mod notice {
     /// message: ccd puts one line per commit since it was last told ("You committed 2 files ·
     /// <sha7>", the newest five) above that message's words; the person's row keeps their words.
     pub const COMMITTED: &str = "committed";
+    /// The person archived the run from its Changes panel (`{worktree, branch}`: the folder removed and the local
+    /// branch deleted; minor 67, [`crate::ws::GitAction::Archive`]). The app draws "Archived · worktree and branch
+    /// removed".
+    pub const ARCHIVED: &str = "archived";
 }
 
 /// Item kinds, following the thread -> turn -> item model.
@@ -569,6 +573,10 @@ pub struct SessionSummary {
     /// run's next turn on, and from a daemon below 65. Its reset is the run's account's held window of that length.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<RunLimit>,
+    /// The run was archived (minor 67, [`crate::ws::GitAction::Archive`]): it ended, and its worktree and local branch
+    /// are gone, so it has no folder to pick up again. Omitted when false, and from an older daemon.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
 }
 
 /// The usage limit a run stopped at ([`SessionSummary::limit`]).
@@ -882,6 +890,7 @@ mod tests {
             account: None,
             title: None,
             limit: None,
+            archived: false,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);

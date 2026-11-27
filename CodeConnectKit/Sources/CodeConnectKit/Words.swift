@@ -71,6 +71,21 @@ public enum FleetWords {
             note: "Its folder stays as it is.", cancel: "Cancel", confirm: "End Run")
     }
 
+    /// Archiving run `name` (artboard n-11): it removes the worktree, deletes the local branch and ends the session, and
+    /// says first that files git ignores there go too, so a person keeping secrets in it is told before pressing.
+    public static func archiveAsk(_ name: String) -> AskWords {
+        AskWords(
+            title: "Archive “\(name)”?",
+            items: [
+                .init(mark: "folder", words: "Removes the worktree"),
+                .init(mark: "trash", words: "Deletes the local branch"),
+                .init(mark: "stop", words: "Ends the session"),
+            ],
+            note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive Run")
+    }
+    /// An archived run's conversation ends with this (its `archived` notice).
+    public static let archived = "Archived · worktree and branch removed"
+
     public static func removeTitle(_ project: String) -> String { "Remove \(project)?" }
     public static func removeKeeps(_ agent: String) -> String { "\(agent)’s own transcript stays on the computer." }
     public static func removeManyTitle(_ count: Int) -> String { "Remove \(count) runs?" }
@@ -271,6 +286,15 @@ public enum ChangesWords {
         case ("unmerged", .pullRequest): reason = "A merge has unresolved files, so nothing was pushed."
         case ("git_failed", .pullRequest): reason = "Git could not push the branch, so no PR was opened."
         case ("timeout", .pullRequest): reason = "Git took too long; the branch may or may not have been pushed, and no PR was opened."
+        case ("busy", .archive): reason = "A run in this folder is working or waiting for you, so nothing was archived."
+        case ("head_moved", .archive): reason = "The branch or its commit changed since the panel showed it, so nothing was archived."
+        case ("on_base_branch", .archive): reason = "The branch checked out is the base branch itself, so nothing was archived."
+        case ("base_unknown", .archive): reason = "No base branch is known for this repository, so nothing was archived."
+        case ("github_unavailable", .archive): reason = "GitHub could not be reached to check the merge, so nothing was archived."
+        case ("timeout", .archive): reason = "Git took too long, so the run was not archived."
+        // Its detail says how far it got ("ended, worktree removed; <branch> kept: …"), so it leads.
+        case ("git_failed", .archive):
+            return detail.map { "Git did not finish archiving: \($0)" } ?? "Git did not archive the run."
         default: return actionRefused(code: code, detail: detail)
         }
         guard let detail, !detail.isEmpty else { return reason }
@@ -298,6 +322,14 @@ public enum ChangesWords {
         case "base_unknown": reason = "No base branch is known for this repository, so nothing was pushed."
         case "nothing_to_propose": reason = "The branch has no commits its base lacks, so no PR was opened."
         case "create_failed": reason = "GitHub did not open the PR."
+        case "main_worktree": reason = "This run is in the repository’s main folder, not a worktree, so nothing was archived."
+        case "shared_worktree":
+            reason = "Another run works in this worktree, or another worktree has its branch, so nothing was archived."
+        case "has_changes":
+            reason = "The worktree has changes git may not show: uncommitted, untracked, or in files git is told not to check, so nothing was archived."
+        case "branch_has_commits": reason = "The branch has commits that are not merged, so nothing was archived."
+        case "locked": reason = "Git has this worktree locked, so nothing was archived."
+        case "still_running": reason = "The run did not end, so nothing was archived."
         default: return actionUnknown
         }
         guard let detail, !detail.isEmpty else { return reason }

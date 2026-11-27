@@ -846,7 +846,7 @@ first send, so nothing is sent twice.
 A run whose claude ended without anyone stopping it (its end reads "Stopped: its process
 ended", after a crash or a Mac restart alike) is relaunched by the person's next message,
 never at ccd's start; its summary says so (`relaunchable`, minor 42). A run End run ended, a
-start that failed, and a run claude never named a session for (one started without a first
+start that failed, an archived run (`archived`, minor 67), and a run claude never named a session for (one started without a first
 message whose claude ended before any, with nothing to resume) stay ended ("This session isn't
 running, so nothing was sent."). Before anything is launched, the run's old host must be gone
 and its process group empty (for a run its account switch ended, what is left in that group is
@@ -1468,6 +1468,29 @@ to probe credentials.
   and when gh is missing, signed out, or GitHub cannot be reached (`gh_missing`,
   `gh_signed_out`, `github_unavailable`). The branch's GitHub read is asked again
   after it.
+  From `>= 67` `action` may be `{kind: "archive", branch, head_oid}`, answered
+  `done{}`: the run ended, its linked worktree removed and its local branch deleted.
+  First, with nothing changed: the run's folder is in a linked worktree
+  (`main_worktree`), not locked (`locked{reason}`), on `branch` at `head_oid`
+  (`detached`, `head_moved`), `branch` is not the base (`on_base_branch`), no other
+  run starting, live or stopping works in it and no other worktree has `branch` checked
+  out (`shared_worktree`), nothing in it is uncommitted or untracked (`has_changes`,
+  read with `-c status.showUntrackedFiles=normal -c core.fsmonitor=false`, whatever
+  the person's config says, and refused too when a tracked file is marked
+  assume-unchanged or skip-worktree, whose edits status does not see; a sparse
+  checkout's worktree is refused so, and so is one whose file listing passes 64 MB or
+  whose status warns, as for a folder git cannot open), and the branch may go: `head_oid` is on the base, or its pull request
+  merged with `head_oid` as its head (`branch_has_commits`; GitHub unreadable is
+  `github_unavailable`). Then End Run, and `exited` within 30 s (`still_running`,
+  End Run's reason as detail when it refused); the run still ended (a message from
+  another device may have relaunched it: `still_running`) and the same checks again; `git -C <main>
+  worktree remove <worktree>` (never forced; files git ignores go with it), and
+  `branch -D <branch>` while its tip is still `head_oid`; the remote branch is left.
+  A step that fails after the run ended is `git_failed{"ended; …"}` or `{"ended,
+  worktree removed; <branch> kept: …"}`, and nothing is resumed on its own. Done, it
+  files an `archived{worktree, branch}` notice and the run's summary reads `archived`
+  (kept with the notice, in one transaction); an archived run is never relaunched,
+  and Archive of it again is `done` with no second notice.
 * **`EventKind::TurnComplete`** marks the end of a turn. For Claude it is filed
   from the SDK's `result`, which the run's agent host relays as each turn ends.
   `SessionEnd` now means only what it says: the run ended.

@@ -1648,6 +1648,13 @@ pub enum GitAction {
         /// The pull request the panel showed: another one from the branch is not merged.
         number: u64,
     },
+    /// The run ended, its linked worktree removed and its local `branch` deleted (minor 67), only
+    /// while `branch` is checked out there at `head_oid`, the commit the panel showed, nothing in
+    /// the worktree is uncommitted or untracked, and the branch is merged (its pull request
+    /// merged with `head_oid` as its head) or already on the base. Files git ignores in the
+    /// worktree go with it. The remote branch is left. Files a
+    /// [`crate::event::notice::ARCHIVED`] notice and sets [`crate::event::SessionSummary::archived`].
+    Archive { branch: String, head_oid: String },
 }
 
 /// Ceiling on a [`GitAction::Commit`]'s message, the same as a typed message's.
@@ -1732,6 +1739,18 @@ pub mod git_refusal {
     pub const HEAD_MOVED: &str = "head_moved";
     /// GitHub refused the merge; `detail` is gh's line (a rule, a review, a conflict).
     pub const MERGE_FAILED: &str = "merge_failed";
+    /// Archive: the run's folder is the repository's main checkout, not a linked worktree.
+    pub const MAIN_WORKTREE: &str = "main_worktree";
+    /// Archive: another run that has not ended works in the same worktree.
+    pub const SHARED_WORKTREE: &str = "shared_worktree";
+    /// Archive: the worktree has uncommitted or untracked files.
+    pub const HAS_CHANGES: &str = "has_changes";
+    /// Archive: the branch has commits neither merged by its pull request nor on the base.
+    pub const BRANCH_HAS_COMMITS: &str = "branch_has_commits";
+    /// Archive: git has the worktree locked; `detail` is the lock's reason, if it gave one.
+    pub const LOCKED: &str = "locked";
+    /// Archive: the run did not end within 30 s, or End Run refused (`detail`, its reason).
+    pub const STILL_RUNNING: &str = "still_running";
 }
 
 /// What [`ClientMessage::GetConflicts`] compared, and what conflicts.
@@ -3026,9 +3045,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 66,
             "a run's conflicts with its base (`get_conflicts`, `get_conflict`, `conflicts`) are minor 66"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 67,
+            "archiving a run (`archive`, `archived`) is minor 67"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 66);
+        assert_eq!(crate::PROTOCOL_MINOR, 67);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3742,7 +3765,12 @@ mod tests {
             uploads: true,
             run_terminal: true,
             changes: true,
-            git_actions: vec!["commit".into(), "create_pr".into(), "merge".into()],
+            git_actions: vec![
+                "commit".into(),
+                "create_pr".into(),
+                "merge".into(),
+                "archive".into(),
+            ],
             conflicts: true,
         }
     }

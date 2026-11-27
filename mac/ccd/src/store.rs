@@ -674,6 +674,7 @@ fn relaunchable_in(conn: &Connection, session_uid: &str) -> Result<Option<LiveCo
                   WHERE h.session_uid = ?1 AND s.lifecycle = ?2
                     AND (h.host_pid IS NOT NULL OR h.switching IS NOT NULL)
                     AND s.codex_thread_id IS NOT NULL
+                    AND NOT EXISTS (SELECT 1 FROM archived_runs WHERE session_uid = ?1)
                     AND EXISTS (SELECT 1 FROM (SELECT json_extract(payload, '$.reason') AS reason FROM events
                                                 WHERE session_uid = ?1 AND kind = ?3
                                                 ORDER BY seq DESC LIMIT 1)
@@ -718,6 +719,7 @@ fn claude_relaunchable_in(conn: &Connection, session_uid: &str) -> Result<Option
                    FROM run_hosts AS h JOIN {table} AS s USING(session_uid)
                   WHERE h.session_uid = ?1 AND s.lifecycle = ?2 AND h.start IS NOT NULL
                     AND s.claude_session_id IS NOT NULL
+                    AND NOT EXISTS (SELECT 1 FROM archived_runs WHERE session_uid = ?1)
                     AND EXISTS (SELECT 1 FROM (SELECT json_extract(payload, '$.reason') AS reason FROM events
                                                 WHERE session_uid = ?1 AND kind = ?3
                                                 ORDER BY seq DESC LIMIT 1)
@@ -814,6 +816,7 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "mail_runs",
     "run_hosts",
     "run_titles",
+    "archived_runs",
 ];
 
 /// One run removed by `codeconnect sessions prune`, and what went with it.
@@ -1775,6 +1778,16 @@ impl Store {
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(titles)
+    }
+
+    /// The runs archived ([`protocol::event::notice::ARCHIVED`]), by uid.
+    pub fn archived_runs(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare_cached("SELECT session_uid FROM archived_runs")?;
+        let runs = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(runs)
     }
 
     /// What the log holds of the Codex turn `turn_id` of this run: whether its end is
@@ -6764,6 +6777,12 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             title       TEXT NOT NULL
         );
 
+        -- A run archived (`notice::ARCHIVED`): kept with that notice, in its transaction, so an archived run is never
+        -- relaunched and the listing says so without reading its history.
+        CREATE TABLE IF NOT EXISTS archived_runs(
+            session_uid TEXT PRIMARY KEY
+        );
+
         CREATE TABLE IF NOT EXISTS run_hosts(
             session_uid     TEXT PRIMARY KEY,
             request_id      TEXT    NOT NULL UNIQUE,
@@ -7542,6 +7561,14 @@ fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Resul
         tx.execute(
             "INSERT OR IGNORE INTO run_titles(session_uid, title) VALUES(?1, ?2)",
             params![pending.session_uid, title],
+        )?;
+    }
+    if pending.kind == EventKind::Notification
+        && pending.payload["notification_type"] == protocol::event::notice::ARCHIVED
+    {
+        tx.execute(
+            "INSERT OR IGNORE INTO archived_runs(session_uid) VALUES(?1)",
+            params![pending.session_uid],
         )?;
     }
 

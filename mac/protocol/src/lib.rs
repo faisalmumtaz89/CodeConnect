@@ -1012,7 +1012,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     and base) and answers [`ws::RunConflicts`]: the two commits compared, whether git merges them cleanly, and the
 ///     conflicted paths; [`ws::ClientMessage::GetConflict`] answers one file's [`ws::ConflictHunk`]s from that same
 ///     comparison. Capability `conflicts`; a daemon below 66 has neither.
-pub const PROTOCOL_MINOR: u32 = 66;
+///   * `67` — **Archiving a run from the Changes panel.**
+///
+///     [`ws::GitAction::Archive`] ends the run, removes its linked worktree and deletes its local branch, only at the
+///     branch and commit the panel showed, with nothing uncommitted or untracked there, and the branch merged or on the
+///     base; it files [`event::notice::ARCHIVED`] and sets [`event::SessionSummary::archived`], and an archived run is
+///     never relaunched. `git_actions` names `archive`; a daemon below 67 does not.
+pub const PROTOCOL_MINOR: u32 = 67;
 
 #[cfg(test)]
 mod ledger_tests {
