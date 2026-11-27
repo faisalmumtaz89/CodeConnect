@@ -742,7 +742,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         account = try c.decodeIfPresent(RunAccount.self, forKey: .account)
         switching = try c.decodeIfPresent(String.self, forKey: .switching).flatMap(RunSwitching.init(rawValue:))
         limit = try c.decodeIfPresent(RunLimit.self, forKey: .limit)
-        inWorktree = false
+        inWorktree = try c.decodeIfPresent(Bool.self, forKey: .inWorktree) ?? false
         gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
         diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
         title = try c.decodeIfPresent(String.self, forKey: .title)

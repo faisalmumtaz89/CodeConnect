@@ -40,7 +40,9 @@ private struct EndedLine: View {
                     .frame(width: 14)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(SessionWords.runEnded)
+                    Text(
+                        SessionWords.ended(
+                            byPerson: model.shown(for: key)?.endedByPerson == true, inWorktree: summary.inWorktree))
                     agentLine
                 }
                 .font(Theme.ui(12))

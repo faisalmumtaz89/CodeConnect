@@ -185,6 +185,11 @@ public enum TimelineBuilder {
     /// drawn or not, or 0 when there is none. A prompt Claude Code annulled is
     /// none: resuming a session whose last prompt went unanswered, it writes
     /// its placeholder reply, and that prompt will never be answered.
+    /// Whether the run's latest end is one the person asked for (End Run), as the daemon marks it.
+    static func endedByPerson(_ events: [Event]) -> Bool {
+        events.last { $0.kind == .sessionEnd }?.endedByPerson == true
+    }
+
     static func lastPromptSeq(_ events: [Event]) -> UInt64 {
         for event in events.reversed() {
             if event.isClaudePlaceholderReply { return 0 }

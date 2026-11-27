@@ -170,7 +170,10 @@ public enum SessionWords {
     public static let runEnded = "This run has ended"
     /// In the reply box's place on a run that takes no reply: that the person ended it (End Run), and, in a worktree
     /// of its own, that its worktree and branch are kept; else `runEnded`.
-    public static func ended(byPerson: Bool, inWorktree: Bool) -> String { runEnded }
+    public static func ended(byPerson: Bool, inWorktree: Bool) -> String {
+        guard byPerson else { return runEnded }
+        return inWorktree ? "You ended this run · its worktree and branch are kept" : "You ended this run"
+    }
     /// A conversation with nothing in it: "yet" only while the run can still record something, not on one that has
     /// ended and takes no reply (`SessionSummary.takesNoReply`).
     public static func nothingRecorded(endedRun: Bool) -> String {
