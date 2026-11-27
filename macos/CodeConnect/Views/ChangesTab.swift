@@ -310,6 +310,7 @@ private struct CommitRow: View {
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.hairline))
                     .disabled(!ready || state == .working)
                     .onSubmit { if enabled { model.commit(key: row.id, message: words) } }
+                    .accessibilityLabel("Commit message")
                     .accessibilityIdentifier("changes.commit.message")
                 ActionButton(title: "Commit", key: "↩", prominent: true, id: "changes.commit") {
                     model.commit(key: row.id, message: words)
