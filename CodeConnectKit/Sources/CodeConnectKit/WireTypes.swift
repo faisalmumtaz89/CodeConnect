@@ -663,6 +663,9 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// The usage limit the run stopped at (minor 65), as its agent said it: `nil` while it is at none, from the run's
     /// next turn on, and from an older daemon. An ended run keeps its last one.
     public let limit: RunLimit?
+    /// The run works in a worktree of its own (its folder `.claude/worktrees/<name>`), so its folder and branch stay
+    /// when it ends. False from an older daemon.
+    public let inWorktree: Bool
     /// The branch checked out in `cwd` (minor 31), as git read it when a turn
     /// last ended. `nil` outside a repository, on a detached head, before the
     /// first read, and from an older daemon.
@@ -709,6 +712,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case diffStat = "diff_stat"
         case title
         case archived
+        case inWorktree = "in_worktree"
     }
 
     public init(from decoder: Decoder) throws {
@@ -738,6 +742,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         account = try c.decodeIfPresent(RunAccount.self, forKey: .account)
         switching = try c.decodeIfPresent(String.self, forKey: .switching).flatMap(RunSwitching.init(rawValue:))
         limit = try c.decodeIfPresent(RunLimit.self, forKey: .limit)
+        inWorktree = false
         gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
         diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
         title = try c.decodeIfPresent(String.self, forKey: .title)
