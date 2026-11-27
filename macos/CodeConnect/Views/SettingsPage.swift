@@ -857,9 +857,11 @@ private struct AccountRow: View {
                 HStack(spacing: 0) {
                     ForEach(columns, id: \.self) { caption in
                         let window = limits.first { $0.caption == caption }
+                        let used = window?.usedPercent ?? 0
                         VStack(alignment: .trailing, spacing: 2) {
+                            // Red once the window is spent, amber from 90%.
                             Text(window.map { "\($0.usedPercent)%" } ?? " ").font(Theme.ui(13)).monospacedDigit()
-                                .foregroundStyle((window?.usedPercent ?? 0) >= 90 ? Theme.amber : Theme.text2)
+                                .foregroundStyle(used >= 100 ? Theme.red : used >= 90 ? Theme.amber : Theme.text2)
                             Text(window?.resets ?? " ")
                                 .font(Theme.ui(11.5)).monospacedDigit().foregroundStyle(Theme.text3).lineLimit(1)
                         }
