@@ -4034,21 +4034,21 @@ lint-only-in-bashrc
     #[test]
     fn a_remote_is_one_key_however_it_is_spelled() {
         for url in [
-            "https://github.com/Faisal/CodeConnect.git",
-            "https://github.com/faisal/codeconnect",
-            "https://github.com/faisal/codeconnect/",
-            "ssh://git@github.com/Faisal/CodeConnect.git",
-            "git@GitHub.com:FAISAL/codeconnect.git",
+            "https://github.com/Ada/CodeConnect.git",
+            "https://github.com/ada/codeconnect",
+            "https://github.com/ada/codeconnect/",
+            "ssh://git@github.com/Ada/CodeConnect.git",
+            "git@GitHub.com:ADA/codeconnect.git",
         ] {
             assert_eq!(
                 remote_key(url).as_deref(),
-                Some("github.com/faisal/codeconnect"),
+                Some("github.com/ada/codeconnect"),
                 "{url}"
             );
         }
         for url in [
-            "https://gitlab.com/faisal/codeconnect.git",
-            "git@ghe.example.com:faisal/codeconnect.git",
+            "https://gitlab.com/ada/codeconnect.git",
+            "git@ghe.example.com:ada/codeconnect.git",
             "/srv/git/codeconnect.git",
             "",
         ] {
@@ -4081,18 +4081,10 @@ lint-only-in-bashrc
         let one = committable("repo-one");
         git_sync(
             &one,
-            &[
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/Faisal/App.git",
-            ],
+            &["remote", "add", "origin", "https://github.com/Ada/App.git"],
         );
         let two = committable("repo-two");
-        git_sync(
-            &two,
-            &["remote", "add", "origin", "git@github.com:faisal/app"],
-        );
+        git_sync(&two, &["remote", "add", "origin", "git@github.com:ada/app"]);
         let fork = committable("repo-fork");
         git_sync(
             &fork,
@@ -4100,24 +4092,24 @@ lint-only-in-bashrc
         );
         git_sync(
             &fork,
-            &["remote", "add", "upstream", "https://github.com/faisal/app"],
+            &["remote", "add", "upstream", "https://github.com/ada/app"],
         );
         let local = committable("repo-local");
         let other = committable("repo-other");
         git_sync(
             &other,
-            &["remote", "add", "upstream", "https://github.com/faisal/app"],
+            &["remote", "add", "upstream", "https://github.com/ada/app"],
         );
         let hosted = committable("repo-hosted");
         git_sync(
             &hosted,
-            &["remote", "add", "origin", "https://gitlab.com/faisal/app"],
+            &["remote", "add", "origin", "https://gitlab.com/ada/app"],
         );
 
         let fact = repo_of(&one).await.expect("a repository");
         assert_eq!(fact.main_path, real(&one));
         assert_eq!(fact.name, one.file_name().unwrap().to_str().unwrap());
-        assert_eq!(fact.remote.as_deref(), Some("github.com/faisal/app"));
+        assert_eq!(fact.remote.as_deref(), Some("github.com/ada/app"));
         let second = repo_of(&two).await.unwrap();
         assert_eq!(second.remote, fact.remote, "two checkouts, one repository");
         assert_ne!(second.main_path, fact.main_path);
