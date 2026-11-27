@@ -21,7 +21,8 @@ struct PendingRequests: View {
     var body: some View {
         let pending = model.shown(for: key)?.pendingApprovals ?? []
         if let first = pending.first {
-            Rectangle().fill(Theme.hairline).frame(height: 1)
+            // On the conversation's column, as the card under it.
+            Rectangle().fill(Theme.hairline).frame(height: 1).onConversationColumn()
             RequestBlock(approval: first, model: model)
                 // A request of its own: the next one starts with its own read gate and an empty reason.
                 .id(first.id)
