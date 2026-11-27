@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.33
+
 ## CodeConnect 0.19.32
 
 - A turn that fails ends on a "Turn failed" row in its agent's own words, with its API error's reply, and the run
