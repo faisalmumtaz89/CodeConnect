@@ -1471,7 +1471,10 @@ to probe credentials.
   From `>= 67` `action` may be `{kind: "archive", branch, head_oid}`, answered
   `done{}`: the run ended, its linked worktree removed and its local branch deleted.
   First, with nothing changed: the run's folder is in a linked worktree
-  (`main_worktree`), not locked (`locked{reason}`), on `branch` at `head_oid`
+  (`main_worktree`), not locked (`locked{reason}`; Claude Code's own lock on a
+  `--worktree` it made, "claude session <name> (pid N)" or "(pid N start <time>)" with
+  `<name>` the worktree's folder (a `/` in it written `+`), is let through, and once the run has ended it is unlocked only if pid N is
+  gone, else `locked`), on `branch` at `head_oid`
   (`detached`, `head_moved`), `branch` is not the base (`on_base_branch`), no other
   run starting, live or stopping works in it and no other worktree has `branch` checked
   out (`shared_worktree`), nothing in it is uncommitted or untracked (`has_changes`,
