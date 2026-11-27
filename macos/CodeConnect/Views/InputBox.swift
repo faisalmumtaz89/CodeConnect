@@ -87,8 +87,9 @@ struct InputBoxSubmit: View {
                 .frame(width: 30, height: 30)
                 .background(enabled ? Self.lit : Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
         }
-        // The hover style takes a click on its whole frame, so the square's corners press.
-        .buttonStyle(.hover(radius: 9, over: true, id: id))
+        // The hover style takes a click on its whole frame, so the square's corners press; its faint face is its off look,
+        // with no fade on top.
+        .buttonStyle(.hover(radius: 9, over: true, fades: false, id: id))
         .disabled(!enabled)
         .help(help)
         .accessibilityLabel(label)
