@@ -1039,11 +1039,13 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
                 // One row holds the name and, under it, the description as the agent sends it, price included.
-                // At AX5 the Model section is below the fold, and a lazy list draws no row until it is scrolled to.
-                try driver.require(
-                    driver.element(containing: "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok", in: app),
-                    "the Sonnet row with its description",
-                    scrollingWithin: driver.list(holding: "Permission", in: app))
+                // At AX5 the Model section is below the fold, and a lazy list draws no row until it is scrolled to,
+                // so the sheet is dragged until the row exists before it is required.
+                let sheet = driver.list(holding: "Permission", in: app)
+                let sonnet = driver.element(
+                    containing: "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok", in: app)
+                for _ in 0..<16 where !sonnet.exists { driver.dragUp(within: sheet) }
+                try driver.require(sonnet, "the Sonnet row with its description", scrollingWithin: sheet)
             }),
         RenderScenario(
             name: "session-hosted-settings-modes",
