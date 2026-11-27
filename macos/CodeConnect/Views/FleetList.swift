@@ -472,13 +472,18 @@ private struct ComputerFilter: View {
         Button { open.toggle() } label: {
             HStack(spacing: 6) {
                 ComputerMark(os: chosen?.machineOS, size: 11)
-                Text(chosen?.machineName ?? "All").font(Theme.ui(12.5, .medium)).lineLimit(1).truncationMode(.middle)
+                Text(chosen?.machineName ?? "All").font(Theme.ui(11.5, .medium)).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(Theme.text2)
-            .inputBoxChip(open: open, bordered: true)
+            // The small button, as the run header's Changes is drawn.
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(Color.white.opacity(open ? 0.13 : 0.08), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.white.opacity(0.06)))
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 8, id: "fleet.computers"))
+        .buttonStyle(.hover(radius: 6, id: "fleet.computers"))
         .focusable(false)
         .help(chosen?.machineName ?? RunListWords.allTitle)
         .accessibilityIdentifier("fleet.computers")
