@@ -379,7 +379,7 @@ public enum CodexLinkState: Sendable, Hashable {
         case .boundNotStarted:
             switch ask {
             case .compose: return nil
-            case .stop: return "This Codex run has not started a turn yet."
+            case .stop: return "This Codex session has not started a turn yet."
             }
         case .none: return "There is no live link to this Codex session."
         case .unknown: return "\(HostDevice.current.computer("The computer")) reports a link state this app does not recognise."
@@ -698,6 +698,9 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// The run was archived (minor 67): it ended, and its worktree and local branch are gone, so it has no folder to
     /// pick up again. False from an older daemon.
     public let archived: Bool
+    /// The repository `cwd` is in (minor 71), kept for the run once read. `nil` outside a repository, before the first
+    /// read, and from an older daemon.
+    public let repo: RepoFact?
 
     enum CodingKeys: String, CodingKey {
         case sessionUID = "session_uid"
@@ -730,6 +733,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case title
         case archived
         case inWorktree = "in_worktree"
+        case repo
     }
 
     public init(from decoder: Decoder) throws {
@@ -764,6 +768,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
         title = try c.decodeIfPresent(String.self, forKey: .title)
         archived = try c.decodeIfPresent(Bool.self, forKey: .archived) ?? false
+        repo = try c.decodeIfPresent(RepoFact.self, forKey: .repo)
     }
 
     /// Whether the Codex vocabulary applies here. The one place the question is
@@ -825,6 +830,22 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
 public struct DiffStat: Codable, Sendable, Hashable {
     public let added: UInt64
     public let removed: UInt64
+}
+
+/// The repository a run works in (`SessionSummary.repo`, minor 71).
+public struct RepoFact: Codable, Sendable, Hashable {
+    /// The last folder name of `mainPath`.
+    public let name: String
+    /// Its `origin` on GitHub as `github.com/<owner>/<name>`, in lower case; `nil` with none, or on another host.
+    public let remote: String?
+    /// Its main checkout: the checkout a worktree belongs to, the run's folder's top otherwise.
+    public let mainPath: String
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case remote
+        case mainPath = "main_path"
+    }
 }
 
 /// One open card, named without its body (`SessionSummary.pending`).

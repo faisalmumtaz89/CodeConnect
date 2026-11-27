@@ -59,7 +59,7 @@ public struct GapNotice: Sendable, Hashable {
             return "Resynced. \(HostDevice.current.computer("The computer"))’s log was reset; cached history was discarded."
         case .cacheDiscarded:
             return
-                "Resynced. \(HostDevice.current.computer("The computer")) now tells its runs apart, so history cached under the old name was discarded."
+                "Resynced. \(HostDevice.current.computer("The computer")) now tells its sessions apart, so history cached under the old name was discarded."
         }
     }
 }
@@ -293,7 +293,7 @@ public final class SessionState {
 
     public static func silentNotice(permissionMode: String?) -> String? {
         permissionMode == "bypassPermissions"
-            ? "Permissions bypassed - this run decides for itself and will not ask you"
+            ? "Permissions bypassed - this session decides for itself and will not ask you"
             : nil
     }
 

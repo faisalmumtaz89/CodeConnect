@@ -1753,7 +1753,7 @@ pub mod git_refusal {
     pub const BRANCH_HAS_COMMITS: &str = "branch_has_commits";
     /// Archive: git has the worktree locked; `detail` is the lock's reason, if it gave one.
     pub const LOCKED: &str = "locked";
-    /// Archive: the run did not end within 30 s, or End Run refused (`detail`, its reason).
+    /// Archive: the run did not end within 30 s, or End Session refused (`detail`, its reason).
     pub const STILL_RUNNING: &str = "still_running";
 }
 
@@ -3071,9 +3071,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 70,
             "a failed turn's end (`failed` on `turn_complete`) is minor 70"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 71,
+            "the repository a run works in (`repo` on a session) is minor 71"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 70);
+        assert_eq!(crate::PROTOCOL_MINOR, 71);
     }
 
     /// **The tags, pinned on this side too.**

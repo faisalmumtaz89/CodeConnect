@@ -337,18 +337,18 @@ public enum CodexProse {
             guard daemonHonoursStop else {
                 return "\(HostDevice.current.computer("This computer"))’s CodeConnect is too old to stop \(agent == .antigravity ? "an" : "a") \(agent.displayName) turn. Update it."
             }
-            guard isLive else { return "This run has ended, so there is no turn to stop." }
+            guard isLive else { return "This session has ended, so there is no turn to stop." }
             guard runningTurn != nil else { return "Nothing is running to stop." }
             // The interrupt rides ccd's own link to the host; when that link has dropped the daemon
             // buffers for re-attach and cannot deliver the Stop, so it is not offered. A detached run
             // stays live with its turn still running, so "live + a turn" do not catch it — the
             // link does (G-1).
             guard runLink == .attached else {
-                return "This run has lost its link to \(HostDevice.current.computer("the computer")), so the Stop cannot reach it."
+                return "This session has lost its link to \(HostDevice.current.computer("the computer")), so the Stop cannot reach it."
             }
             return nil
         case .unsupported:
-            return "Only a Claude, Codex or Antigravity run can be stopped from here."
+            return "Only a Claude, Codex or Antigravity session can be stopped from here."
         }
     }
 
@@ -356,7 +356,7 @@ public enum CodexProse {
     static func composeUnavailable(
         agent: AgentKind, daemonUnderstandsCompose: Bool, link: CodexLinkState
     ) -> String? {
-        guard agent == .codex else { return "Only a Codex run is spoken to this way." }
+        guard agent == .codex else { return "Only a Codex session is spoken to this way." }
         guard daemonUnderstandsCompose else {
             return "\(HostDevice.current.computer("This computer"))’s CodeConnect is too old to carry a message to Codex. Update it."
         }

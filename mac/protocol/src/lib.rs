@@ -1026,7 +1026,7 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     A daemon below 68 sends neither: an app shows such a folder whole, and a device with no mark.
 ///   * `69` — **Who ended a run, and whether its worktree stays.**
 ///
-///     A [`event::EventKind::SessionEnd`] the person asked for (End Run, and Archive's end) carries
+///     A [`event::EventKind::SessionEnd`] the person asked for (End Session, and Archive's end) carries
 ///     [`event::ENDED_BY`] `person`; a switch of account's end carries none. [`event::SessionSummary::in_worktree`] says
 ///     the run works in a `.claude/worktrees/<name>` folder of its own that it keeps, never on an archived run. An app
 ///     ends such a run's conversation "You ended this run", with "its worktree and branch are kept" when it keeps one.
@@ -1036,7 +1036,12 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     A [`event::EventKind::TurnComplete`] of a turn that failed, and that the person did not stop, carries
 ///     `failed`: `{"status": <its HTTP status, when the agent gave one>, "message": <the agent's words, or null>}`.
 ///     A daemon below 70 sends none, and an app reads such a turn's end as an ordinary one.
-pub const PROTOCOL_MINOR: u32 = 70;
+///   * `71` — **The repository a run works in.**
+///
+///     [`event::SessionSummary::repo`] ([`event::RepoFact`]): the repository's main checkout, its folder name, and its
+///     `origin` on github.com as `github.com/<owner>/<name>`, read with the run's branch and kept for the run. A daemon
+///     below 71 sends none, and an app groups such a run by its folder.
+pub const PROTOCOL_MINOR: u32 = 71;
 
 #[cfg(test)]
 mod ledger_tests {

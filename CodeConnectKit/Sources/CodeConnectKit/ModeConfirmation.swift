@@ -12,7 +12,7 @@ public enum ModeConfirmation {
     public static func words(for agent: AgentKind) -> AskWords {
         let withoutAsking = AskWords.Item(mark: "apple.terminal", words: "Runs commands and edits files without asking")
         // The mode is the run's own: the note says so, and until when (decision 221).
-        let inThisRun = "In this run, until you change the mode back."
+        let inThisRun = "In this session, until you change the mode back."
         switch agent {
         case .codex:
             // The folder and network lines are true: the confirmed mode is Codex's own full-access preset — sandbox

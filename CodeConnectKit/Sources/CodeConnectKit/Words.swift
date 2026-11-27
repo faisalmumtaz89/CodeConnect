@@ -54,9 +54,9 @@ public enum FleetWords {
     }
     public static let agentsAppearHere = "Agents you start with CodeConnect appear here."
     /// The Mac's run list with nothing in it: its title, then where runs come from.
-    public static let noRunsYet = "No runs yet"
-    public static let runsComeFrom = "Start one here or from your iPhone. Runs started at a computer appear on their own."
-    public static let noEndedRuns = "No ended runs."
+    public static let noRunsYet = "No sessions yet"
+    public static let runsComeFrom = "Start one here or from your iPhone. Sessions started at a computer appear on their own."
+    public static let noEndedRuns = "No ended sessions."
     public static let noComputersYet = "No computers yet"
 
     /// Ending run `name` (its whole `RunLabel.inline`, which tells it from another run in the same project), whose agent
@@ -66,34 +66,35 @@ public enum FleetWords {
             title: "End “\(name)”?",
             items: [
                 .init(mark: "stop", words: "\(agent) stops"),
-                .init(mark: "arrow.right", words: "The run moves to \(FleetStatus.ended.label)"),
+                .init(mark: "arrow.right", words: "The session moves to \(FleetStatus.ended.label)"),
             ],
-            note: "Its folder stays as it is.", cancel: "Cancel", confirm: "End Run")
+            note: "Its folder stays as it is.", cancel: "Cancel", confirm: "End Session")
     }
 
-    /// Archiving run `name` (artboard n-11): it removes the worktree, deletes the local branch and ends the session, and
-    /// says first that files git ignores there go too, so a person keeping secrets in it is told before pressing.
-    public static func archiveAsk(_ name: String) -> AskWords {
+    /// Archiving run `name` (artboard n-11): it removes the worktree, deletes the local branch and ends `agent`’s
+    /// session, and says first that files git ignores there go too, so a person keeping secrets in it is told before
+    /// pressing.
+    public static func archiveAsk(_ name: String, agent: String) -> AskWords {
         AskWords(
             title: "Archive “\(name)”?",
             items: [
                 .init(mark: "folder", words: "Removes the worktree"),
-                .init(mark: "trash", words: "Deletes the local branch"),
-                .init(mark: "stop", words: "Ends the session"),
+                .init(mark: "arrow.triangle.branch", words: "Deletes the local branch"),
+                .init(mark: "terminal", words: "Ends the \(agent) session"),
             ],
-            note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive Run")
+            note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive Session")
     }
     /// An archived run's conversation ends with this (its `archived` notice).
     public static let archived = "Archived · worktree and branch removed"
 
     public static func removeTitle(_ project: String) -> String { "Remove \(project)?" }
     public static func removeKeeps(_ agent: String) -> String { "\(agent)’s own transcript stays on the computer." }
-    public static func removeManyTitle(_ count: Int) -> String { "Remove \(count) runs?" }
+    public static func removeManyTitle(_ count: Int) -> String { "Remove \(count) sessions?" }
     public static let removeManyKeeps = "Their own transcripts stay on the computer."
 
     /// The notices after an end or a removal that did not happen: what happened, then why, in a sentence.
-    public static let endFailedTitle = "Couldn’t end the run"
-    public static let removeFailedTitle = "Couldn’t remove the run"
+    public static let endFailedTitle = "Couldn’t end the session"
+    public static let removeFailedTitle = "Couldn’t remove the session"
     /// An answer this build does not know: refused, with nothing quoted.
     public static var refusedPlainly: String { "\(HostDevice.current.computer("The computer")) refused." }
     /// Why a removal did not happen, for each answer ccd gives, or nil when it did (or the run was already gone).
@@ -102,7 +103,7 @@ public enum FleetWords {
         switch result {
         case .deleted, .notFound: return nil
         case .stillRunning: return "It’s still running. End it first, then remove it."
-        case .notExited: return "\(computer) doesn’t know whether it has stopped, so it keeps the run."
+        case .notExited: return "\(computer) doesn’t know whether it has stopped, so it keeps the session."
         case .failed: return "\(computer) couldn’t remove it."
         case .unknown: return refusedPlainly
         case .none: return "\(computer) didn’t answer."
@@ -153,26 +154,26 @@ public enum SessionWords {
     public static let jumpToLatest = "Jump to the latest event"
     public static let stopThisTurn = "Stop this turn"
     public static let stopping = "Stopping…"
-    public static let stopHelp = "Stop the turn this run is running"
+    public static let stopHelp = "Stop the turn this session is running"
     public static let tryAgainInAMoment = "Try again in a moment."
     /// A tool call or its result the computer cut whole before sending it.
     public static var cutShort: String {
         "Cut short by \(HostDevice.current.computer("your computer")). This is not the whole output."
     }
-    public static let nothingLiveYet = "Nothing live has arrived for this run yet."
+    public static let nothingLiveYet = "Nothing live has arrived for this session yet."
     /// In a run's place while a catch-up holds it: the computer's list names the run and its conversation has not
     /// arrived yet.
     public static func catchingUp(with computer: String?) -> String {
         "Catching up with \(computer ?? "your computer")…"
     }
-    public static let catchingUpMessage = "This run’s conversation appears here once it has arrived."
+    public static let catchingUpMessage = "This session’s conversation appears here once it has arrived."
     /// In the reply box's place on a run that takes no reply (`SessionSummary.takesNoReply`).
-    public static let runEnded = "This run has ended"
-    /// The conversation's end of a run the person ended (End Run), and, in a worktree of its own, that its worktree
+    public static let runEnded = "This session has ended"
+    /// The conversation's end of a run the person ended (End Session), and, in a worktree of its own, that its worktree
     /// and branch are kept; else `runEnded`.
     public static func ended(byPerson: Bool, inWorktree: Bool) -> String {
         guard byPerson else { return runEnded }
-        return inWorktree ? "You ended this run · its worktree and branch are kept" : "You ended this run"
+        return inWorktree ? "You ended this session · its worktree and branch are kept" : "You ended this session"
     }
     /// A conversation with nothing in it: "yet" only while the run can still record something, not on one that has
     /// ended and takes no reply (`SessionSummary.takesNoReply`).
@@ -257,12 +258,12 @@ public enum ChangesWords {
         "Showing what it last said, \(Format.ago(since: date, now: now))"
     }
     public static let checkAgain = "Check again"
-    public static let reading = "Reading this run’s changes on its computer…"
-    public static let stillReading = "Still reading this run’s changes…"
+    public static let reading = "Reading this session’s changes on its computer…"
+    public static let stillReading = "Still reading this session’s changes…"
     public static let couldNotRead = "Your computer could not read the changes"
     public static let itsReason = "Its reason, word for word:"
     public static let noUncommitted = "No uncommitted changes"
-    public static let clean = "This run’s folder was clean when it was read."
+    public static let clean = "This session’s folder was clean when it was read."
     public static let noDiff = "No diff to show"
     public static let computersReason = "Your computer’s reason, word for word:"
     public static func files(_ count: Int) -> String { count == 1 ? "1 file" : "\(count) files" }
@@ -272,7 +273,7 @@ public enum ChangesWords {
         "You committed \(files(count)) · \(sha.prefix(7))"
     }
     /// The Changes panel's line under its state while it can commit, or why it cannot yet.
-    public static let commitReady = "The run has stopped, so you can commit what it left"
+    public static let commitReady = "The session has stopped, so you can commit what it left"
     public static let commitWaitsWorking = "Agent is working · actions wait until it stops"
     public static let commitWaitsCard = "Waiting on you · actions wait until the agent stops"
     public static let commitWaitsMerge = "A merge has unresolved files · resolve them to commit"
@@ -283,24 +284,35 @@ public enum ChangesWords {
         base.map { "Pushes the branch, then opens a PR into \($0) on \(repo)" }
             ?? "Pushes the branch, then opens a PR into \(repo)"
     }
-    /// Why the computer did not do `step` (commit or open a pull request), by its code (`git_refusal`), with git's or
-    /// gh's own words after where it gave them.
+    /// Why the computer did not do `step` (commit, open a pull request, merge it, archive the run), by its code
+    /// (`git_refusal`), with git's or gh's own words after where it gave them.
     public static func actionRefused(code: String, detail: String?, step: GitStep) -> String {
         let reason: String
         switch (code, step) {
-        case ("busy", .pullRequest): reason = "A run in this folder is working or waiting for you, so nothing was pushed."
+        case ("busy", .pullRequest): reason = "A session in this folder is working or waiting for you, so nothing was pushed."
         case ("unmerged", .pullRequest): reason = "A merge has unresolved files, so nothing was pushed."
         case ("git_failed", .pullRequest): reason = "Git could not push the branch, so no PR was opened."
         case ("timeout", .pullRequest): reason = "Git took too long; the branch may or may not have been pushed, and no PR was opened."
-        case ("busy", .archive): reason = "A run in this folder is working or waiting for you, so nothing was archived."
+        case ("busy", .merge): reason = "A session in this folder is working or waiting for you, so nothing was merged."
+        case ("head_moved", .merge):
+            reason = "The pull request or its commit changed since the panel showed it, so nothing was merged."
+        case ("method_not_allowed", .merge):
+            reason = "This repository doesn’t allow that merge method, so nothing was merged."
+        case ("no_pull_request", .merge): reason = "This branch has no open pull request, so nothing was merged."
+        case ("merge_failed", .merge): reason = "GitHub did not merge it."
+        case ("timeout", .merge): reason = "GitHub took too long; the pull request may or may not have been merged."
+        case ("gh_missing", .merge): reason = "This computer has no gh, so nothing was merged."
+        case ("gh_signed_out", .merge): reason = "This computer’s gh isn’t signed in to GitHub, so nothing was merged."
+        case ("github_unavailable", .merge): reason = "GitHub could not be reached, so nothing was merged."
+        case ("busy", .archive): reason = "A session in this folder is working or waiting for you, so nothing was archived."
         case ("head_moved", .archive): reason = "The branch or its commit changed since the panel showed it, so nothing was archived."
         case ("on_base_branch", .archive): reason = "The branch checked out is the base branch itself, so nothing was archived."
         case ("base_unknown", .archive): reason = "No base branch is known for this repository, so nothing was archived."
         case ("github_unavailable", .archive): reason = "GitHub could not be reached to check the merge, so nothing was archived."
-        case ("timeout", .archive): reason = "Git took too long, so the run was not archived."
+        case ("timeout", .archive): reason = "Git took too long, so the session was not archived."
         // Its detail says how far it got ("ended, worktree removed; <branch> kept: …"), so it leads.
         case ("git_failed", .archive):
-            return detail.map { "Git did not finish archiving: \($0)" } ?? "Git did not archive the run."
+            return detail.map { "Git did not finish archiving: \($0)" } ?? "Git did not archive the session."
         default: return actionRefused(code: code, detail: detail)
         }
         guard let detail, !detail.isEmpty else { return reason }
@@ -311,12 +323,12 @@ public enum ChangesWords {
     static func actionRefused(code: String, detail: String?) -> String {
         let reason: String
         switch code {
-        case "busy": reason = "A run in this folder is working or waiting for you, so nothing was committed."
+        case "busy": reason = "A session in this folder is working or waiting for you, so nothing was committed."
         case "unmerged": reason = "A merge has unresolved files, so nothing was committed."
         case "nothing_to_commit": reason = "Nothing has changed since the last commit."
         case "detached": reason = "No branch is checked out, so nothing was done."
-        case "not_a_repository": reason = "This run’s folder is not in a git repository."
-        case "unknown_session": reason = "This run is no longer on its computer."
+        case "not_a_repository": reason = "This session’s folder is not in a git repository."
+        case "unknown_session": reason = "This session is no longer on its computer."
         case "bad_request": reason = "The computer could not take this request, so nothing was done."
         case "git_failed": reason = "Git did not commit."
         case "timeout": reason = "Git took too long, so nothing was committed."
@@ -328,14 +340,14 @@ public enum ChangesWords {
         case "base_unknown": reason = "No base branch is known for this repository, so nothing was pushed."
         case "nothing_to_propose": reason = "The branch has no commits its base lacks, so no PR was opened."
         case "create_failed": reason = "GitHub did not open the PR."
-        case "main_worktree": reason = "This run is in the repository’s main folder, not a worktree, so nothing was archived."
+        case "main_worktree": reason = "This session is in the repository’s main folder, not a worktree, so nothing was archived."
         case "shared_worktree":
-            reason = "Another run works in this worktree, or another worktree has its branch, so nothing was archived."
+            reason = "Another session works in this worktree, or another worktree has its branch, so nothing was archived."
         case "has_changes":
             reason = "The worktree has changes git may not show: uncommitted, untracked, or in files git is told not to check, so nothing was archived."
         case "branch_has_commits": reason = "The branch has commits that are not merged, so nothing was archived."
         case "locked": reason = "Git has this worktree locked, so nothing was archived."
-        case "still_running": reason = "The run did not end, so nothing was archived."
+        case "still_running": reason = "The session did not end, so nothing was archived."
         default: return actionUnknown
         }
         guard let detail, !detail.isEmpty else { return reason }
@@ -350,17 +362,19 @@ public enum ChangesWords {
     /// A Changes panel's state line from its run's repository: an unresolved merge, the files changed (at least so
     /// many when the computer could not count them all), and the commits not on the base, pushed or not, or nothing
     /// committed yet. Only what the computer read; nothing from an agent's words.
-    public static func state(_ git: RunGit) -> String {
+    public static func state(_ git: RunGit, conflicts: RunConflicts? = nil) -> String {
         var parts: [String] = []
+        let conflicted = conflicting(git, conflicts)
         // A branch's pull request speaks for its commits and its push.
         if let pr = git.pullRequest {
             switch pr.state {
-            case .open: parts.append("PR #\(pr.number) · Open")
+            case .open: parts.append("PR #\(pr.number) · \(openLead(pr, conflictsWith: conflicted))")
             case .merged: parts.append("PR #\(pr.number) · Merged into \(pr.base)")
             case .closed: parts.append("PR #\(pr.number) · Closed")
             case .unknown: parts.append("PR #\(pr.number)")
             }
         }
+        if git.pullRequest == nil, let base = conflicted { parts.append("Conflicts with \(base)") }
         if git.unmerged { parts.append("Merge conflicts") }
         let changed = Int(git.changed.files)
         if changed > 0 {
@@ -383,6 +397,135 @@ public enum ChangesWords {
         // Clean, with no base to count commits against: nothing more is known than that nothing is uncommitted.
         if parts.isEmpty { return git.ahead == nil && git.headOID != nil ? "No uncommitted changes" : "No changes" }
         return parts.joined(separator: " · ")
+    }
+    /// What leads an open pull request's state line: queued to merge, else what its checks say, else its merge state
+    /// (artboards 07, 10), else Open.
+    private static func openLead(_ pr: RunGit.PullRequest, conflictsWith base: String?) -> String {
+        if pr.mergeQueued == true { return "Queued to merge" }
+        return checksLead(pr) ?? base.map { "Conflicts with \($0)" } ?? mergeLead(pr) ?? "Open"
+    }
+    /// The base a run's commit conflicts with, when the computer compared that very commit (artboard 17); nil when it
+    /// merges cleanly, was not compared, or was compared at another commit.
+    private static func conflicting(_ git: RunGit, _ conflicts: RunConflicts?) -> String? {
+        guard let conflicts, !conflicts.clean, conflicts.headOID == git.headOID else { return nil }
+        return conflicts.base.name
+    }
+    /// Under a state line led by conflicts (artboard 17): the files they are in, by name, three at most.
+    public static func conflictsNote(_ conflicts: RunConflicts) -> String? {
+        guard !conflicts.clean else { return nil }
+        guard !conflicts.files.isEmpty else { return conflictsUnnamed }
+        let names = conflicts.files.map { ($0 as NSString).lastPathComponent.displaySafe }.sorted()
+        let count = conflicts.filesComplete ? files(names.count) : "at least \(files(names.count))"
+        let shown = names.prefix(3).joined(separator: ", ")
+        return "In \(count): \(names.count > 3 ? "\(shown) and \(names.count - 3) more" : shown)"
+    }
+    /// The two sides of a conflicting hunk: the branch checked out, then the base by its name.
+    public static let conflictThisBranch = "this branch"
+    /// A conflicting file with no lines to show.
+    public static let conflictNoLines = "No lines to show: binary, renamed, or deleted on one side."
+    /// Under a file's hunks when it has more than were read.
+    public static let conflictMore = "More conflicts in this file than are shown."
+    /// A conflict git names no file for.
+    public static let conflictsUnnamed = "Git names no file for them"
+    /// A conflicting file's heading over its hunks (artboard 17).
+    public static func conflictTitle(_ path: String) -> String {
+        "Both changed in \((path as NSString).lastPathComponent.displaySafe)"
+    }
+    /// An open pull request's merge state as GitHub reports it, in words; nil while GitHub works it out.
+    private static func mergeLead(_ pr: RunGit.PullRequest) -> String? {
+        switch pr.mergeState {
+        case .clean, .unstable, .hasHooks: "Ready to merge"
+        case .behind: "Behind \(pr.base)"
+        case .dirty: "Conflicts with \(pr.base)"
+        case .draft: "Draft"
+        case .blocked: "Blocked by \(pr.base)’s rules"
+        case .unknown, nil: nil
+        }
+    }
+    /// Whether the merge button may merge an open pull request: GitHub would merge it as it stands (a check it doesn't
+    /// require may fail), and no queue holds it already.
+    public static func mergeable(_ pr: RunGit.PullRequest, conflicts: RunConflicts? = nil) -> Bool {
+        guard pr.state == .open, pr.mergeQueued != true else { return false }
+        // The computer found this commit conflicting with its base: GitHub would refuse it too.
+        if let conflicts, !conflicts.clean, conflicts.headOID == pr.headOID { return false }
+        return [.clean, .unstable, .hasHooks].contains(pr.mergeState)
+    }
+    /// A merge method as the merge button and its menu name it (artboard 10).
+    public static func mergeMethod(_ method: MergeMethod) -> String {
+        switch method {
+        case .squash: "Squash and merge"
+        case .merge: "Create a merge commit"
+        case .rebase: "Rebase and merge"
+        }
+    }
+    /// Whether Archive Session is offered (artboard 11), by the computer's own gate as the run's repository shows it: a run
+    /// in a worktree of its own, on a branch other than its base, nothing uncommitted, its commits on the base already
+    /// or merged by its pull request at the commit checked out. What the panel can't see (a worktree another run
+    /// shares, a lock) the computer refuses on the press.
+    public static func archivable(_ git: RunGit, inWorktree: Bool) -> Bool {
+        guard inWorktree, let branch = git.branch, let head = git.headOID, let base = git.base?.name, branch != base,
+            git.changed.files == 0, git.changed.complete
+        else { return false }
+        if git.ahead == 0 { return true }
+        guard let pr = git.pullRequest else { return false }
+        return pr.state == .merged && pr.headOID == head
+    }
+    /// The merge button's chevron, as a screen reader names it.
+    public static let mergeMethods = "Merge methods"
+    /// A merge method the repository turns off, as its menu row says it.
+    public static func mergeMethodOff(_ method: MergeMethod) -> String { "\(mergeMethod(method)) (off in this repo)" }
+    /// The method the merge button starts on: squash where the repository allows it, else the first it allows.
+    public static func defaultMergeMethod(_ allowed: [MergeMethod]) -> MergeMethod? {
+        allowed.contains(.squash) ? .squash : allowed.first
+    }
+    /// What an open pull request's checks lead its state line with: a failure, else what still runs; nil when every
+    /// check passed or none was read, and the line says Open.
+    private static func checksLead(_ pr: RunGit.PullRequest) -> String? {
+        guard let checks = pr.checks else { return nil }
+        let failed = checks.filter { $0.state == .fail }.count
+        if failed > 0 { return failed == 1 ? "1 check failed" : "\(failed) checks failed" }
+        let running = checks.filter { $0.state == .pending }.count
+        if running > 0 { return running == 1 ? "1 check running" : "\(running) checks running" }
+        return nil
+    }
+    /// The line under an open pull request's state (artboard 07): how many of its checks passed, a skipped one with
+    /// them, then which failed and how many still run. Nil when it has none read, or is not open.
+    public static func checksNote(_ git: RunGit, conflicts: RunConflicts? = nil) -> String? {
+        guard let pr = git.pullRequest, pr.state == .open, let checks = pr.checks, !checks.isEmpty else { return nil }
+        var parts = ["\(passed(checks)) of \(checks.count) checks passed"]
+        let failed = checks.filter { $0.state == .fail }.map(\.name.displaySafe)
+        if !failed.isEmpty { parts.append("\(failed.joined(separator: ", ")) failed") }
+        let running = checks.filter { $0.state == .pending }.count
+        if running > 0 { parts.append("\(running) running") }
+        // A comparison of this very commit that merges cleanly says so (artboard 10), unless a check failed (07).
+        if failed.isEmpty, let conflicts, conflicts.clean, conflicts.headOID == git.headOID {
+            parts.append("no conflicts")
+        }
+        return parts.joined(separator: " · ")
+    }
+    /// The Checks tab's label: how many of the checks passed, of how many.
+    public static func checksTab(_ checks: [RunGit.PullRequest.Check]) -> String {
+        "Checks \(passed(checks))/\(checks.count)"
+    }
+    private static func passed(_ checks: [RunGit.PullRequest.Check]) -> Int {
+        checks.filter { $0.state == .pass || $0.state == .skipped }.count
+    }
+    /// Where a running check's duration goes.
+    public static let checkRunning = "running"
+    /// Under the checks when the computer could not read them all (more than it reads, or the head moved meanwhile).
+    public static let checksNotAll = "Not every check is shown"
+    /// How long a check ran (artboard 07): "22s", "4m 12s", "5m 03s", "1h 02m".
+    public static func checkDuration(_ seconds: Int) -> String {
+        let seconds = max(0, seconds)
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60)m \(String(format: "%02d", seconds % 60))s" }
+        return "\(seconds / 3600)h \(String(format: "%02d", seconds % 3600 / 60))m"
+    }
+    /// A check's duration from its start to its end, or to `now` while it runs; nil for one with no start (a status).
+    public static func checkDuration(_ check: RunGit.PullRequest.Check, now: Date) -> String? {
+        guard let start = check.startedAt.flatMap(ISO8601.parse) else { return nil }
+        let end = check.completedAt.flatMap(ISO8601.parse) ?? now
+        return checkDuration(Int(end.timeIntervalSince(start)))
     }
     public static func showMoreLines(_ count: Int) -> String { "Show \(count) more line\(count == 1 ? "" : "s")" }
     public static func unchangedLines(_ count: Int) -> String {
@@ -415,9 +558,94 @@ public enum ChangesWords {
         guard let first = numbers.min(), let last = numbers.max() else { return nil }
         return first == last ? "line \(first)" : "lines \(first)–\(last)"
     }
-    /// A comment on a hunk as it is sent to the agent: its anchor, then the words.
+    /// A comment on a hunk as it is sent to the agent: its anchor, the words, then the hunk itself, so the agent reads
+    /// the comment against the lines it is about. At most `Wire.maxComposeBytes`: only the hunk is cut.
     public static func comment(_ text: String, file: UnifiedDiff.FileDiff, hunk: UnifiedDiff.Hunk) -> String {
-        "\(commentAnchor(file: file, hunk: hunk)): \(text)"
+        fitted(
+            head: "\(commentAnchor(file: file, hunk: hunk)): \(text)\n\n",
+            excerpts: [Excerpt(label: "", text: hunk.text, language: "diff")], tail: "")
+    }
+
+    /// A failed check sent to the agent: its name, its first failure line and its log, then the person's words, if any.
+    public static func sendCheck(_ words: String?, check: RunGit.PullRequest.Check) -> String {
+        var head = "The check `\(check.name)` failed"
+        if let line = check.failureLine, !line.isEmpty { head += ": \(line)" }
+        if let url = check.url, !url.isEmpty { head += "\nIts log: \(url)" }
+        return fitted(head: head, excerpts: [], tail: following(words))
+    }
+
+    /// A file's conflict with the base sent to the agent: each conflicting stretch, this branch's lines then the
+    /// base's, then the person's words, if any. At most `Wire.maxComposeBytes`: only the stretches are cut.
+    public static func sendConflict(_ words: String?, path: String, base: String, hunks: [ConflictHunk]) -> String {
+        fitted(
+            head: "`\(path)` conflicts with \(base):\n\n",
+            excerpts: hunks.flatMap { hunk in
+                [
+                    Excerpt(label: "This branch:\n", text: hunk.ours, language: ""),
+                    Excerpt(label: "\(base):\n", text: hunk.theirs, language: ""),
+                ]
+            },
+            tail: following(words))
+    }
+
+    /// The person's words after an excerpt, a blank line apart; nothing when there are none.
+    private static func following(_ words: String?) -> String {
+        guard let words = words?.trimmingCharacters(in: .whitespacesAndNewlines), !words.isEmpty else { return "" }
+        return "\n\n\(words)"
+    }
+
+    /// Lines sent as code: a label over its fenced block, the block's language.
+    private struct Excerpt {
+        let label: String
+        let text: String
+        let language: String
+    }
+
+    /// `head`, each excerpt under its label in a fenced block, then `tail`, in at most `Wire.maxComposeBytes` of UTF-8:
+    /// `head` and `tail` whole, the excerpts cut at a character where the rest does not fit, ending "… (cut)". A fence is
+    /// longer than any run of backticks in its text.
+    private static func fitted(head: String, excerpts: [Excerpt], tail: String) -> String {
+        let cut = "… (cut)"
+        var body = ""
+        let room = { Wire.maxComposeBytes - (head + body + tail).utf8.count }
+        for (index, excerpt) in excerpts.enumerated() {
+            let fence = String(repeating: "`", count: max(3, longestBackticks(excerpt.text) + 1))
+            let open = (index == 0 ? "" : "\n") + excerpt.label + fence + excerpt.language + "\n"
+            let close = (excerpt.text.hasSuffix("\n") ? "" : "\n") + fence
+            if (open + excerpt.text + close).utf8.count <= room() {
+                body += open + excerpt.text + close
+                continue
+            }
+            // Cut here: what fits of this excerpt, its fence closed, and the mark.
+            let suffix = "\n" + fence + "\n" + cut
+            var kept = ""
+            var left = room() - (open + suffix).utf8.count
+            for character in excerpt.text {
+                let size = String(character).utf8.count
+                if size > left { break }
+                kept.append(character)
+                left -= size
+            }
+            if kept.isEmpty {
+                let mark = (body.isEmpty ? "" : "\n") + cut
+                if mark.utf8.count <= room() { body += mark }
+            } else {
+                body += open + kept + suffix
+            }
+            break
+        }
+        return head + body + tail
+    }
+
+    /// The longest run of backticks in `text`.
+    private static func longestBackticks(_ text: String) -> Int {
+        var longest = 0
+        var run = 0
+        for character in text {
+            run = character == "`" ? run + 1 : 0
+            longest = max(longest, run)
+        }
+        return longest
     }
 }
 

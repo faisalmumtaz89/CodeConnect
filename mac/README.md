@@ -1130,7 +1130,7 @@ uuid before the turn ended interrupted, which is the evidence Codex's own client
 message back on. A retry with the same request id is answered from the first, and a retry of
 a stopped message is told it was not sent and is not sent again. While a run's
 link is not attached, before its reconnect or after one that failed, an answer, a Stop and
-a message are refused with "CodeConnect has no connection to this run right now, so nothing
+a message are refused with "CodeConnect has no connection to this session right now, so nothing
 was sent." A retry of one already sent and not yet settled is answered from what was
 recorded instead: a Stop or a message is told it was sent and what became of it is not
 known, and an answer that it is already waiting to be confirmed. A run that a
@@ -1218,7 +1218,14 @@ for `get_diff`; a binary file and a file git does not track add nothing; from
 `>= 53` it is the sum of `get_diff`'s `files`, untracked files' lines included). They are read when a turn ends
 and when the daemon starts, never on a `sessions` request, and
 omitted outside a repository, before the first read, and on a detached head
-(the branch). It also answers `get_machine_stats` (the `machine_stats`
+(the branch). `>= 71` adds `repo {name, remote?, main_path}`: the repository's
+main checkout (the folder holding the `.git` its worktrees share; a submodule's
+own folder), its last folder name, and its `origin` on github.com as
+`github.com/<owner>/<name>` in lower case (absent with no `origin` or on another
+host). It is read with the branch, also when a run starts and when its agent
+moves it to another folder, and kept in the store with the folder it was read
+in, so an ended run keeps it across a restart; a run is listed with it only
+while it is still in that folder. It also answers `get_machine_stats` (the `machine_stats`
 capability, offered to every connection) with one `machine_stats {cpu?,
 memory_used?, memory_total?, disk_used?, disk_total?, captured_at}`, taken when
 asked and never stored: `cpu` is the share of all cores busy over half a
@@ -1484,8 +1491,8 @@ to probe credentials.
   checkout's worktree is refused so, and so is one whose file listing passes 64 MB or
   whose status warns, as for a folder git cannot open), and the branch may go: `head_oid` is on the base, or its pull request
   merged with `head_oid` as its head (`branch_has_commits`; GitHub unreadable is
-  `github_unavailable`). Then End Run, and `exited` within 30 s (`still_running`,
-  End Run's reason as detail when it refused); the run still ended (a message from
+  `github_unavailable`). Then End Session, and `exited` within 30 s (`still_running`,
+  End Session's reason as detail when it refused); the run still ended (a message from
   another device may have relaunched it: `still_running`) and the same checks again; `git -C <main>
   worktree remove <worktree>` (never forced; files git ignores go with it), and
   `branch -D <branch>` while its tip is still `head_oid`; the remote branch is left.

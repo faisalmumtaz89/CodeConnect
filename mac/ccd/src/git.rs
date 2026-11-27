@@ -139,15 +139,73 @@ pub async fn toplevel(
 pub struct TreeFacts {
     pub branch: Option<String>,
     pub diff_stat: Option<protocol::event::DiffStat>,
+    pub repo: Option<protocol::event::RepoFact>,
 }
 
-/// The branch and line counts of the working tree at `cwd`, each `None` when git
+/// The branch, line counts and repository of the working tree at `cwd`, each `None` when git
 /// cannot say.
 pub async fn tree_facts(cwd: &str, configured_bin: Option<&str>, timeout: Duration) -> TreeFacts {
     TreeFacts {
         branch: branch(cwd, configured_bin, timeout).await,
         diff_stat: diff_stat(cwd, configured_bin, timeout).await,
+        repo: repo_fact(cwd, configured_bin, timeout).await,
     }
+}
+
+/// The repository `cwd` is in: its main checkout, the folder holding the `.git` its worktrees
+/// share, else (a submodule) the top of `cwd`'s own work tree; and its `origin` ([`remote_key`]).
+/// `None` outside a repository, or when git cannot answer.
+pub async fn repo_fact(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    timeout: Duration,
+) -> Option<protocol::event::RepoFact> {
+    let git = git_bin(configured_bin)?;
+    let dirs = run(
+        &git,
+        cwd,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+            "--show-toplevel",
+        ],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()?;
+    if !dirs.ok || dirs.stdout_truncated {
+        return None;
+    }
+    let mut lines = dirs.stdout.lines();
+    let (common, top) = (Path::new(lines.next()?), lines.next()?);
+    let main_path = match common.parent() {
+        Some(main) if common.file_name() == Some(".git".as_ref()) => main.to_str()?.to_string(),
+        _ => top.to_string(),
+    };
+    let origin = run(
+        &git,
+        cwd,
+        &["remote", "get-url", "origin"],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()?;
+    let remote = origin.ok.then(|| remote_key(&origin.stdout)).flatten();
+    Some(protocol::event::RepoFact {
+        name: Path::new(&main_path).file_name()?.to_str()?.to_string(),
+        remote,
+        main_path,
+    })
+}
+
+/// A remote's URL as one key for its repository: `github.com/<owner>/<name>` in lower case, as
+/// [`crate::github::parse_remote`] reads it; `None` for any other host.
+pub fn remote_key(url: &str) -> Option<String> {
+    let repo = crate::github::parse_remote(url)?;
+    Some(format!("{}/{}/{}", repo.host, repo.owner, repo.name).to_ascii_lowercase())
 }
 
 /// The sum of [`files`]' counted lines: what the open diff's files add up to. A file with
@@ -837,7 +895,15 @@ pub async fn commit(
     match run_write(
         &git,
         cwd,
-        &["-c", "core.fsmonitor=false", "add", "-A", "--", ":/"],
+        &[
+            "-c",
+            "core.fsmonitor=false",
+            "add",
+            "-A",
+            "--",
+            ":/",
+            CLAUDE_WORKTREES,
+        ],
         COMMIT_TIMEOUT,
         environment,
     )
@@ -1078,6 +1144,11 @@ const UNTRACKED_READ_BUDGET: u64 = 4 * 1024 * 1024;
 /// Git's own test for a binary file: a NUL in its first 8000 bytes.
 const BINARY_PROBE: u64 = 8000;
 
+/// Claude Code's own worktrees (`claude --worktree`), which it makes in `.claude/worktrees/<name>` inside the
+/// repository and ignores nowhere: never the main checkout's changes, so never listed (in its changes or its diff)
+/// or committed there.
+const CLAUDE_WORKTREES: &str = ":(exclude,top).claude/worktrees/";
+
 /// The untracked files, from the repository's top, with no configured program run.
 const UNTRACKED_ARGS: &[&str] = &[
     "-c",
@@ -1089,6 +1160,7 @@ const UNTRACKED_ARGS: &[&str] = &[
     "--full-name",
     "--",
     ":/",
+    CLAUDE_WORKTREES,
 ];
 
 /// A working tree's changed files.
@@ -1674,6 +1746,9 @@ async fn collect_inner(
             "ls-files",
             "--others",
             "--exclude-standard",
+            "--",
+            ".",
+            CLAUDE_WORKTREES,
         ],
         timeout,
         // A name list, not file contents. Capped well below the diff so a
@@ -2218,6 +2293,7 @@ mod tests {
                     added: 0,
                     removed: 0
                 }),
+                repo: Some(local_repo(&dir)),
             },
             "a clean tree is zero lines, not unknown"
         );
@@ -2264,6 +2340,7 @@ mod tests {
                     added: 2,
                     removed: 0
                 }),
+                repo: Some(local_repo(&dir)),
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -3170,6 +3247,63 @@ mod tests {
         }
     }
 
+    /// **A Claude worktree in the main checkout is not one of its changes**: `claude --worktree` makes
+    /// `.claude/worktrees/<name>` inside the repository and ignores it nowhere, so git lists it as
+    /// untracked. The run in the main checkout counts no change for it, a commit there never stages it
+    /// (as a gitlink no clone could resolve), and with nothing else changed there is nothing to commit.
+    #[tokio::test]
+    async fn a_claude_worktree_in_the_main_checkout_is_not_one_of_its_changes() {
+        let dir = committable("claude-worktree");
+        git_sync(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "worktree-fix+login",
+                ".claude/worktrees/fix+login",
+            ],
+        );
+        let cwd = dir.to_str().unwrap();
+        let read = run_git(cwd, None, Duration::from_secs(10)).await.unwrap();
+        assert_eq!(read.changed.files, 0, "{:?}", read.changed);
+        assert!(matches!(
+            commit_in(&dir, "nothing").await,
+            CommitOutcome::Refused {
+                code: protocol::ws::git_refusal::NOTHING_TO_COMMIT,
+                ..
+            }
+        ));
+
+        std::fs::write(dir.join("a.txt"), "2\n").unwrap();
+        assert_eq!(
+            run_git(cwd, None, Duration::from_secs(10))
+                .await
+                .unwrap()
+                .changed
+                .files,
+            1
+        );
+        let CommitOutcome::Committed { files, .. } = commit_in(&dir, "edit a").await else {
+            panic!("not committed");
+        };
+        assert_eq!(files, 1);
+        let tree = git_out(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(!tree.contains(".claude"), "{tree}");
+
+        // The run's diff names its untracked files, not the worktree.
+        std::fs::write(dir.join("new.txt"), "n\n").unwrap();
+        let diff = collect(cwd, None, 512 * 1024, Duration::from_secs(10)).await;
+        assert!(diff.unified.contains("new.txt"), "{}", diff.unified);
+        assert!(
+            !diff.unified.contains(".claude/worktrees"),
+            "{}",
+            diff.unified
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A repository on `main` with one commit, its own identity, and nothing else.
     fn committable(tag: &str) -> PathBuf {
         let dir = temp_dir(tag);
@@ -3893,5 +4027,178 @@ lint-only-in-bashrc
         // A configured path that does not exist falls through rather than
         // taking the feature down with it.
         assert!(git_bin(Some("/nonexistent/git")).is_some());
+    }
+
+    /// **A remote is one key however its URL spells it**: https, ssh and scp forms, a trailing
+    /// `.git` or `/`, and any case give one `github.com/<owner>/<name>`; another host gives none.
+    #[test]
+    fn a_remote_is_one_key_however_it_is_spelled() {
+        for url in [
+            "https://github.com/Faisal/CodeConnect.git",
+            "https://github.com/faisal/codeconnect",
+            "https://github.com/faisal/codeconnect/",
+            "ssh://git@github.com/Faisal/CodeConnect.git",
+            "git@GitHub.com:FAISAL/codeconnect.git",
+        ] {
+            assert_eq!(
+                remote_key(url).as_deref(),
+                Some("github.com/faisal/codeconnect"),
+                "{url}"
+            );
+        }
+        for url in [
+            "https://gitlab.com/faisal/codeconnect.git",
+            "git@ghe.example.com:faisal/codeconnect.git",
+            "/srv/git/codeconnect.git",
+            "",
+        ] {
+            assert_eq!(remote_key(url), None, "{url}");
+        }
+    }
+
+    async fn repo_of(dir: &Path) -> Option<protocol::event::RepoFact> {
+        repo_fact(dir.to_str().unwrap(), None, Duration::from_secs(10)).await
+    }
+
+    fn real(dir: &Path) -> String {
+        dir.canonicalize().unwrap().to_str().unwrap().to_string()
+    }
+
+    /// The repository a checkout with no remote is read as.
+    fn local_repo(dir: &Path) -> protocol::event::RepoFact {
+        protocol::event::RepoFact {
+            name: dir.file_name().unwrap().to_str().unwrap().into(),
+            remote: None,
+            main_path: real(dir),
+        }
+    }
+
+    /// **A run's repository**: its main checkout and folder name, and its GitHub `origin` as one
+    /// key: the same for two checkouts of one repository, another for a fork; none with no
+    /// `origin`, with only another remote, or on another host; nothing outside git.
+    #[tokio::test]
+    async fn a_run_is_read_into_its_repository() {
+        let one = committable("repo-one");
+        git_sync(
+            &one,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Faisal/App.git",
+            ],
+        );
+        let two = committable("repo-two");
+        git_sync(
+            &two,
+            &["remote", "add", "origin", "git@github.com:faisal/app"],
+        );
+        let fork = committable("repo-fork");
+        git_sync(
+            &fork,
+            &["remote", "add", "origin", "https://github.com/someone/app"],
+        );
+        git_sync(
+            &fork,
+            &["remote", "add", "upstream", "https://github.com/faisal/app"],
+        );
+        let local = committable("repo-local");
+        let other = committable("repo-other");
+        git_sync(
+            &other,
+            &["remote", "add", "upstream", "https://github.com/faisal/app"],
+        );
+        let hosted = committable("repo-hosted");
+        git_sync(
+            &hosted,
+            &["remote", "add", "origin", "https://gitlab.com/faisal/app"],
+        );
+
+        let fact = repo_of(&one).await.expect("a repository");
+        assert_eq!(fact.main_path, real(&one));
+        assert_eq!(fact.name, one.file_name().unwrap().to_str().unwrap());
+        assert_eq!(fact.remote.as_deref(), Some("github.com/faisal/app"));
+        let second = repo_of(&two).await.unwrap();
+        assert_eq!(second.remote, fact.remote, "two checkouts, one repository");
+        assert_ne!(second.main_path, fact.main_path);
+        assert_eq!(
+            repo_of(&fork).await.unwrap().remote.as_deref(),
+            Some("github.com/someone/app")
+        );
+        for dir in [&local, &other, &hosted] {
+            let fact = repo_of(dir).await.unwrap();
+            assert_eq!((fact.main_path, fact.remote), (real(dir), None), "{dir:?}");
+        }
+        assert_eq!(repo_of(&temp_dir("repo-plain")).await, None);
+    }
+
+    /// **A folder in a repository reads as its main checkout**: a subfolder, a
+    /// `.claude/worktrees` worktree and one elsewhere all name the main checkout; a submodule
+    /// names its own folder; a repository with no commit yet is read too, and the same after
+    /// its first.
+    #[tokio::test]
+    async fn a_folder_in_a_repository_reads_as_its_main_checkout() {
+        let main = committable("repo-main");
+        let top = real(&main);
+        std::fs::create_dir_all(main.join("src/deep")).unwrap();
+        git_sync(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "worktree-x",
+                ".claude/worktrees/x",
+            ],
+        );
+        let elsewhere = temp_dir("repo-elsewhere").join("wt");
+        git_sync(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "far",
+                elsewhere.to_str().unwrap(),
+            ],
+        );
+        for dir in [
+            main.join("src/deep"),
+            main.join(".claude/worktrees/x"),
+            elsewhere.clone(),
+        ] {
+            let fact = repo_of(&dir).await.unwrap();
+            assert_eq!(fact.main_path, top, "{dir:?}");
+            assert_eq!(fact.name, main.file_name().unwrap().to_str().unwrap());
+        }
+
+        let child = committable("repo-child");
+        git_sync(
+            &main,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                child.to_str().unwrap(),
+                "vendor/child",
+            ],
+        );
+        assert_eq!(
+            repo_of(&main.join("vendor/child")).await.unwrap().main_path,
+            real(&main.join("vendor/child"))
+        );
+
+        let empty = temp_dir("repo-empty");
+        git_sync(&empty, &["init", "-q", "-b", "main"]);
+        let before = repo_of(&empty).await.expect("a repository with no commit");
+        assert_eq!(before.main_path, real(&empty));
+        std::fs::write(empty.join("a.txt"), "1\n").unwrap();
+        git_sync(&empty, &["add", "."]);
+        git_sync(&empty, &["commit", "-qm", "first"]);
+        assert_eq!(repo_of(&empty).await, Some(before));
     }
 }

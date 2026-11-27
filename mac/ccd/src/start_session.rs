@@ -788,7 +788,7 @@ async fn existing_run(db: &crate::db::Db, request_id: &str) -> Option<StartSessi
         Ok(None) => None,
         Err(err) => Some(failed(
             StartFailure::LaunchFailed,
-            format!("could not read this computer's runs: {err:#}"),
+            format!("could not read this computer's sessions: {err:#}"),
         )),
     }
 }
@@ -4690,6 +4690,23 @@ mod tests {
             .cloned()
             .unwrap();
         assert_eq!(run["in_worktree"], true, "{run}");
+        // Its repository is read at its start, before any turn ends: the main checkout.
+        let mut repo = serde_json::Value::Null;
+        for _ in 0..200 {
+            let listed = serde_json::to_value(rig.daemon.sessions().await.unwrap()).unwrap();
+            repo = listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| run["cwd"] == folder.display().to_string())
+                .map(|run| run["repo"].clone())
+                .unwrap();
+            if !repo.is_null() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(repo["main_path"], main.as_str(), "{repo}");
         assert_eq!(
             git(&folder, &["symbolic-ref", "--short", "HEAD"]),
             "fix/login"

@@ -818,6 +818,7 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "mail_runs",
     "run_hosts",
     "run_titles",
+    "run_repos",
     "archived_runs",
 ];
 
@@ -1782,6 +1783,46 @@ impl Store {
         Ok(titles)
     }
 
+    /// Keep `repo` as the repository of the run `session_uid` read in its folder `cwd`, in place of any before.
+    pub fn keep_run_repo(
+        &self,
+        session_uid: &str,
+        cwd: &str,
+        repo: &protocol::event::RepoFact,
+    ) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "INSERT OR REPLACE INTO run_repos(session_uid, cwd, name, remote, main_path) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![session_uid, cwd, repo.name, repo.remote, repo.main_path],
+        )?;
+        Ok(())
+    }
+
+    /// Each run's repository ([`Store::keep_run_repo`]), by its uid, with the folder it was read in.
+    pub fn run_repos(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (String, protocol::event::RepoFact)>> {
+        let conn = self.read();
+        let mut stmt =
+            conn.prepare_cached("SELECT session_uid, cwd, name, remote, main_path FROM run_repos")?;
+        let repos = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (
+                        row.get::<_, String>(1)?,
+                        protocol::event::RepoFact {
+                            name: row.get(2)?,
+                            remote: row.get(3)?,
+                            main_path: row.get(4)?,
+                        },
+                    ),
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(repos)
+    }
+
     /// The runs archived ([`protocol::event::notice::ARCHIVED`]), by uid.
     pub fn archived_runs(&self) -> Result<std::collections::HashSet<String>> {
         let conn = self.read();
@@ -2131,7 +2172,7 @@ impl Store {
         )?;
         anyhow::ensure!(
             changed == 1,
-            "{session_uid} has no hosted run to record a host for"
+            "{session_uid} has no hosted session to record a host for"
         );
         Ok(())
     }
@@ -2530,7 +2571,7 @@ impl Store {
         models
             .map(|json| serde_json::from_str(&json))
             .transpose()
-            .context("a hosted run's models")
+            .context("a hosted session's models")
     }
 
     /// The modes of the hosted Antigravity run `session_uid`, as its start's outcome gave them (`{value, label}`);
@@ -2548,7 +2589,7 @@ impl Store {
         Ok(modes
             .map(|json| serde_json::from_str(&json))
             .transpose()
-            .context("a hosted run's modes")?
+            .context("a hosted session's modes")?
             .unwrap_or_default())
     }
 
@@ -2768,12 +2809,12 @@ impl Store {
             commands: commands
                 .map(|json| serde_json::from_str(&json))
                 .transpose()
-                .context("a hosted run's command list")?,
+                .context("a hosted session's command list")?,
             commands_at,
             screen_only: screen_only
                 .map(|json| serde_json::from_str(&json))
                 .transpose()
-                .context("a hosted run's screen-only commands")?,
+                .context("a hosted session's screen-only commands")?,
             claude_version,
         }))
     }
@@ -6790,6 +6831,16 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
         CREATE TABLE IF NOT EXISTS run_titles(
             session_uid TEXT PRIMARY KEY,
             title       TEXT NOT NULL
+        );
+
+        -- The repository a run's folder was last read in (`RepoFact`), with that folder: kept from the read, so an
+        -- ended run keeps its project across a restart, and read for the run only while it is still in that folder.
+        CREATE TABLE IF NOT EXISTS run_repos(
+            session_uid TEXT PRIMARY KEY,
+            cwd         TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            remote      TEXT,
+            main_path   TEXT NOT NULL
         );
 
         -- A run archived (`notice::ARCHIVED`): kept with that notice, in its transaction, so an archived run is never

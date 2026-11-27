@@ -50,7 +50,7 @@
         /// `-CC_ADD_IPHONE YES`: the same sheet, on its iPhone side.
         static var opensOnIPhone: Bool { UserDefaults.standard.bool(forKey: "CC_ADD_IPHONE") }
 
-        /// `-CC_ADD_AGENT YES`: New Run at launch: the start form, its first message given the keyboard.
+        /// `-CC_ADD_AGENT YES`: New Session at launch: the start form, its first message given the keyboard.
         static var opensOnAgent: Bool { UserDefaults.standard.bool(forKey: "CC_ADD_AGENT") }
 
         /// `-CC_RESIZE_AFTER <seconds>`: that long after launch, the main window grows 40 pt wider, as a person

@@ -2,7 +2,7 @@ import XCTest
 
 @testable import CodeConnectKit
 
-/// Archive Run (minor 67): its request, its capability, an archived run's summary, and the card that asks first.
+/// Archive Session (minor 67): its request, its capability, an archived run's summary, and the card that asks first.
 final class ArchiveTests: XCTestCase {
     private func summary(archived: Bool) throws -> SessionSummary {
         let url = try XCTUnwrap(Bundle(for: type(of: self)).url(forResource: "minor-46-wire", withExtension: "json"))
@@ -64,13 +64,14 @@ final class ArchiveTests: XCTestCase {
             "Git has this worktree locked, so nothing was archived. claude agent")
     }
 
-    /// The card says what goes, and that files git ignores go too, before Archive Run is pressed.
+    /// The card says what goes, and that files git ignores go too, before Archive Session is pressed.
     func testTheArchiveCardSaysIgnoredFilesGoToo() {
-        let ask = FleetWords.archiveAsk("fix the tests")
+        let ask = FleetWords.archiveAsk("fix the tests", agent: "Codex")
         XCTAssertEqual(ask.title, "Archive “fix the tests”?")
         XCTAssertEqual(
-            ask.items.map(\.words), ["Removes the worktree", "Deletes the local branch", "Ends the session"])
+            ask.items.map(\.words), ["Removes the worktree", "Deletes the local branch", "Ends the Codex session"])
+        XCTAssertEqual(ask.items.map(\.mark), ["folder", "arrow.triangle.branch", "terminal"])
         XCTAssertEqual(ask.note, "Files git ignores in it, like .env, are deleted too.")
-        XCTAssertEqual(ask.confirm, "Archive Run")
+        XCTAssertEqual(ask.confirm, "Archive Session")
     }
 }

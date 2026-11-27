@@ -257,6 +257,7 @@ mod tests {
             limit: None,
             archived: false,
             in_worktree: false,
+            repo: None,
         }
     }
 

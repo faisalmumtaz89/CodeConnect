@@ -21,7 +21,8 @@ final class DiffCommentAnchorTests: XCTestCase {
             UnifiedDiff.Line(id: 3, kind: .addition, text: "let c = 4", newNumber: 14),
         ]
         XCTAssertEqual(
-            ChangesWords.comment("fix", file: file, hunk: hunk(lines)), "In `a/b.swift` lines 12–14: fix")
+            ChangesWords.comment("fix", file: file, hunk: hunk(lines)),
+            "In `a/b.swift` lines 12–14: fix\n\n```diff\n@@ -12,3 +12,4 @@ func send()\n let a = 1\n-let b = 2\n+let b = 3\n+let c = 4\n```")
     }
 
     func testAHunkOfOneLineNamesIt() {
@@ -31,7 +32,7 @@ final class DiffCommentAnchorTests: XCTestCase {
 
     func testAHunkWithNoNumbersNamesOnlyTheFile() {
         let lines = [UnifiedDiff.Line(id: 0, kind: .note, text: "\\ No newline at end of file")]
-        XCTAssertEqual(ChangesWords.comment("why?", file: file, hunk: hunk(lines)), "In `a/b.swift`: why?")
+        XCTAssertTrue(ChangesWords.comment("why?", file: file, hunk: hunk(lines)).hasPrefix("In `a/b.swift`: why?\n\n"))
     }
 
     func testTheCommentFieldShowsItsPlaceAsPathAndLines() {
@@ -44,8 +45,8 @@ final class DiffCommentAnchorTests: XCTestCase {
         XCTAssertEqual(ChangesWords.commentPlace(file: file, hunk: hunk(one)), "a/b.swift · line 7")
         let none = [UnifiedDiff.Line(id: 0, kind: .note, text: "\\ No newline at end of file")]
         XCTAssertEqual(ChangesWords.commentPlace(file: file, hunk: hunk(none)), "a/b.swift")
-        XCTAssertEqual(
-            ChangesWords.comment("fix", file: file, hunk: hunk(several)), "In `a/b.swift` lines 12–13: fix",
+        XCTAssertTrue(
+            ChangesWords.comment("fix", file: file, hunk: hunk(several)).hasPrefix("In `a/b.swift` lines 12–13: fix\n\n"),
             "what reaches the agent keeps its backticked anchor")
     }
 

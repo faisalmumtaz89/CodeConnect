@@ -162,7 +162,7 @@ final class LiveDaemonUITests: XCTestCase {
                 format: "label CONTAINS 'Turn complete'")
         ).firstMatch
         let ended = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'Run ended'")
+            NSPredicate(format: "label CONTAINS 'Session ended'")
         ).firstMatch
 
         _ = turn.waitForExistence(timeout: 25)

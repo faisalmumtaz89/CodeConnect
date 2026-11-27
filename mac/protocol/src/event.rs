@@ -106,7 +106,7 @@ pub fn sdk_event_id(message_uuid: &str, kind: &EventKind, block: usize) -> Strin
 pub const SWITCHED_TO: &str = "switched_to";
 
 /// The payload key of a [`EventKind::SessionEnd`] that says who ended the run: [`ENDED_BY_PERSON`] on the end of a run
-/// the person ended (End Run, and Archive's end), never on a switch of account's (minor 69). An older daemon's ends
+/// the person ended (End Session, and Archive's end), never on a switch of account's (minor 69). An older daemon's ends
 /// carry none.
 pub const ENDED_BY: &str = "ended_by";
 /// [`ENDED_BY`]'s value on an end the person asked for.
@@ -592,6 +592,25 @@ pub struct SessionSummary {
     /// run, whose worktree and branch are gone. Omitted when false, and from an older daemon.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_worktree: bool,
+    /// The repository `cwd` is in (minor 71), as git read it when a turn last ended or its agent last named its folder,
+    /// and kept for the run while it stays in that folder, across a restart too. Absent outside a repository, before
+    /// the first read, and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<RepoFact>,
+}
+
+/// The repository a run works in ([`SessionSummary::repo`]): what an app groups runs into one project by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoFact {
+    /// The last folder name of `main_path`.
+    pub name: String,
+    /// The repository's `origin`, as `github.com/<owner>/<name>` in lower case, however its URL spells it. Absent
+    /// with no `origin` and for one on any other host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// The repository's main checkout: the folder itself for a run in it or below it, the checkout a linked worktree
+    /// belongs to, a submodule's own folder.
+    pub main_path: String,
 }
 
 /// The usage limit a run stopped at ([`SessionSummary::limit`]).
@@ -907,6 +926,7 @@ mod tests {
             limit: None,
             archived: false,
             in_worktree: false,
+            repo: None,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);

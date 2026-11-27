@@ -153,7 +153,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     let (uid, start_uuid) =
         match protocol::uid::new().and_then(|uid| Ok((uid, protocol::uid::uuid_v4()?))) {
             Ok(names) => names,
-            Err(err) => return failed(format!("could not name the run: {err}")),
+            Err(err) => return failed(format!("could not name the session: {err}")),
         };
     // As a Claude run's: the start's uploads become the run's before its row, or nothing.
     let prompt = match daemon
@@ -193,8 +193,9 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         .await
     {
         Ok(Some(existing)) => return crate::claude_host::answer_for(existing),
-        Ok(None) => {}
-        Err(err) => return failed(format!("could not record the run: {err:#}")),
+        // Its branch and repository, read on a task of its own while it comes up.
+        Ok(None) => daemon.refresh_tree(&uid),
+        Err(err) => return failed(format!("could not record the session: {err:#}")),
     }
     // Kept where a Claude run keeps its start's answer, so its menu is read the same way; a
     // run whose check listed none offers its modes alone, and one that could not keep them
@@ -212,7 +213,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     let brought_up = match crate::start_session::make_run_dir(run.root, &dir) {
         Ok(log) => bring_up(daemon, &uid, &run, &folders, log, deadline, &mut launched).await,
         Err(err) => Err(format!(
-            "could not make the run's folder {}: {err}",
+            "could not make the session's folder {}: {err}",
             dir.display()
         )),
     };
@@ -1317,7 +1318,7 @@ async fn answer(
             );
         }
         Ok(crate::store::MutationClaim::NoSession) => {
-            return not_applied(ask, "this run is gone, so its card cannot be answered");
+            return not_applied(ask, "this session is gone, so its card cannot be answered");
         }
         Err(err) => {
             return not_applied(
@@ -2209,7 +2210,7 @@ async fn resume_thread(
 /// Why a run that has had a message is not relaunched when Codex has no record of its thread (its logged reason
 /// begins so; a switch's line says it in the person's words, [`crate::switch::relaunch_failed`]).
 pub(crate) const NO_ROLLOUT_AFTER_A_MESSAGE: &str =
-    "Codex has no rollout of the run's thread, and the run has had a message";
+    "Codex has no rollout of the session's thread, and the session has had a message";
 
 /// A new thread for the run `run`, whose thread has no rollout (it never ran a turn) and so
 /// cannot be resumed: `thread/start` as the run's first start sends it, on `fallback`, the model a resume on
@@ -2257,7 +2258,11 @@ async fn new_thread(
                 run.thread
             ))
         }
-        Err(err) => return Err(format!("could not record the run's new thread: {err:#}")),
+        Err(err) => {
+            return Err(format!(
+                "could not record the session's new thread: {err:#}"
+            ))
+        }
     }
     crate::log_info!(
         "{uid}: thread {} had no message, so no rollout; thread {thread} started in its place",
@@ -2375,8 +2380,8 @@ pub(crate) async fn relaunch(
             .await
         {
             Ok(true) => Ok(resumed),
-            Ok(false) => Err("the run left `starting` while it was relaunched".to_string()),
-            Err(err) => Err(format!("could not mark the run live: {err:#}")),
+            Ok(false) => Err("the session left `starting` while it was relaunched".to_string()),
+            Err(err) => Err(format!("could not mark the session live: {err:#}")),
         },
         Err(why) => Err(why),
     };
@@ -2744,8 +2749,8 @@ async fn send_first(
         .await
     {
         Ok(true) => {}
-        Ok(false) => return Err("the run ended before its thread was recorded".into()),
-        Err(err) => return Err(format!("could not record the run's thread: {err:#}")),
+        Ok(false) => return Err("the session ended before its thread was recorded".into()),
+        Err(err) => return Err(format!("could not record the session's thread: {err:#}")),
     }
     if !send.prompt.is_empty() {
         client
@@ -3118,7 +3123,7 @@ async fn bring_up(
     let dir = crate::claude_host::run_dir(run.root, uid);
     let since = log
         .metadata()
-        .map_err(|err| format!("could not read the run's host.log: {err}"))?
+        .map_err(|err| format!("could not read the session's host.log: {err}"))?
         .len();
     let mut listen = OsString::from("unix://");
     listen.push(dir.join("as.sock"));
