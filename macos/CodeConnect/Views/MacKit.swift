@@ -835,6 +835,8 @@ private struct RightClick: NSViewRepresentable {
         let title: String
         let symbol: String
         let destructive: Bool
+        /// Set apart from what comes before it by a divider.
+        var apart = false
         let perform: () -> Void
     }
 
@@ -882,8 +884,8 @@ private struct RowMenuHost: ViewModifier {
                         let corner = place(shown, in: bounds)
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(Array(shown.items.enumerated()), id: \.element.id) { index, item in
-                                // The red item stands apart from what comes before it.
-                                if item.destructive, index > 0, !shown.items[index - 1].destructive {
+                                // The red item stands apart from what comes before it, as does one set apart.
+                                if index > 0, item.apart || item.destructive && !shown.items[index - 1].destructive {
                                     MenuDivider().padding(.vertical, 4)
                                 }
                                 PanelItem(

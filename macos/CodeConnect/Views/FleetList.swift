@@ -3,12 +3,31 @@ import SwiftUI
 
 /// How the person has laid the list out: only what needs them, the projects folded, how many times each project's
 /// ended sessions were revealed, and where the open session stood when it was opened, which it keeps while it is
-/// open. The app's, so a hidden list or a closed window comes back to it.
+/// open. The app's, so a hidden list or a closed window comes back to it. The projects pinned (first first) and hidden
+/// (with the name each had when hidden), by project key, are kept across launches too (`kept`, `keep`).
 struct ListLayout: Equatable {
     var onlyNeedsYou = false
     var folded: Set<String> = []
     var revealed: [String: Int] = [:]
     var held: ProjectList.Held?
+    var pinned: [String] = []
+    var hidden: [String: String] = [:]
+
+    private static let pinnedKey = "projects.pinned"
+    private static let hiddenKey = "projects.hidden"
+
+    /// A launch's list: Pin to Top and Hide Project as they were last kept.
+    static var kept: ListLayout {
+        let defaults = UserDefaults.standard
+        return ListLayout(
+            pinned: defaults.stringArray(forKey: pinnedKey) ?? [],
+            hidden: defaults.dictionary(forKey: hiddenKey) as? [String: String] ?? [:])
+    }
+
+    func keep() {
+        UserDefaults.standard.set(pinned, forKey: Self.pinnedKey)
+        UserDefaults.standard.set(hidden, forKey: Self.hiddenKey)
+    }
 }
 
 /// The window's session list, 256 pt down its leading side: in its head the computer it is narrowed to ("All ▾") and
@@ -24,6 +43,8 @@ struct FleetList: View {
     /// The session open beside the list, if any.
     @Binding var opened: String?
     let newRun: () -> Void
+    /// New Session Here: the start form, on the computer and in the folder given.
+    let newSessionIn: (_ machineID: String?, _ folder: String) -> Void
     let addComputer: () -> Void
     let openSettings: () -> Void
     /// The row under the pointer, and the row whose "…" panel is open.
@@ -56,8 +77,8 @@ struct FleetList: View {
     /// The list as it stands, the open session held at `held`.
     private func projects(held: ProjectList.Held?) -> ProjectList {
         ProjectList(
-            machines.fleet, computer: computer, onlyNeedsYou: layout.onlyNeedsYou, revealed: layout.revealed,
-            deck: machines.deck.map(\.sessionKey), held: held)
+            machines.fleet, computer: computer, onlyNeedsYou: layout.onlyNeedsYou, pinned: layout.pinned,
+            hidden: Set(layout.hidden.keys), revealed: layout.revealed, deck: machines.deck.map(\.sessionKey), held: held)
     }
 
     var body: some View {
@@ -71,7 +92,7 @@ struct FleetList: View {
             // opens from the same place, over whatever is beside the list.
             HStack(spacing: 4) {
                 Spacer(minLength: 0)
-                ComputerFilter(filter: $filter, addComputer: addComputer)
+                ComputerFilter(filter: $filter, hidden: $layout.hidden, addComputer: addComputer)
                 Button(action: newRun) {
                     Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.text2)
                         .frame(width: 20, height: 24)
@@ -127,9 +148,13 @@ struct FleetList: View {
                                 // 8 pt above the next header.
                                 Color.clear.frame(height: 8)
                             } header: {
-                                ProjectHeader(project: project, folded: folded) {
-                                    if folded { layout.folded.remove(project.id) } else { layout.folded.insert(project.id) }
-                                }
+                                ProjectHeader(
+                                    project: project, folded: folded,
+                                    toggle: {
+                                        if folded { layout.folded.remove(project.id) } else { layout.folded.insert(project.id) }
+                                    },
+                                    newHere: { newSessionIn(project.machineID, project.folder) },
+                                    more: { rect in projectMenu(project, in: list, at: rect) })
                             }
                         }
                         if list.onlyNeedsYou, !list.quiet.isEmpty {
@@ -233,6 +258,7 @@ struct FleetList: View {
                 for project in list.projects {
                     if RenderWindow.folds.contains(project.name) { layout.folded.insert(project.id) }
                     if let reveals = RenderWindow.reveals[project.name] { layout.revealed[project.id] = reveals }
+                    if RenderWindow.hides.contains(project.name) { layout.hidden[project.id] = project.name }
                 }
             }
         #endif
@@ -437,6 +463,36 @@ struct FleetList: View {
         .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
     }
 
+    /// A project's menu by `rect` (its "…", or a right-click's point): New Session Here, Pin to Top or Unpin, Collapse
+    /// Other Projects, then Hide Project, or Unhide Project on a hidden one shown because something in it needs you.
+    private func projectMenu(_ project: ProjectList.Project, in list: ProjectList, at rect: CGRect) {
+        let id = "fleet.project.\(project.name).more"
+        menu.toggle(rect, owner: id, items: [
+            RowMenu.Item(id: "\(id).newSessionHere", title: RunListWords.newSessionHere, symbol: "plus", destructive: false) {
+                newSessionIn(project.machineID, project.folder)
+            },
+            RowMenu.Item(
+                id: "\(id).pin", title: RunListWords.pin(project.pinned), symbol: project.pinned ? "pin.slash" : "pin",
+                destructive: false
+            ) {
+                layout.pinned.removeAll { $0 == project.id }
+                if !project.pinned { layout.pinned.insert(project.id, at: 0) }
+            },
+            RowMenu.Item(
+                id: "\(id).collapseOthers", title: RunListWords.collapseOthers, symbol: "chevron.up.chevron.down",
+                destructive: false
+            ) {
+                layout.folded = Set(list.projects.map(\.id)).subtracting([project.id])
+            },
+            RowMenu.Item(
+                id: "\(id).hide", title: RunListWords.hide(project.hidden), symbol: project.hidden ? "eye" : "eye.slash",
+                destructive: false, apart: true
+            ) {
+                layout.hidden[project.id] = project.hidden ? nil : project.name
+            },
+        ])
+    }
+
     /// Gives the list the keyboard, and gives it again once the window has laid out the run that opened: the new pane
     /// beside the list otherwise hands the keyboard to the first control left in the window.
     private func keepListFocus() {
@@ -498,12 +554,23 @@ struct FleetList: View {
 }
 
 /// A project's header, 30 pt: its disclosure, which folds and opens the project, its name,
-/// and at its end how many of its sessions need the person, in amber, or else how many sessions it has. It sticks to
-/// the list's top while its sessions scroll under it, opaque, with a hairline under it.
+/// and at its end how many of its sessions need the person, in amber, or else how many sessions it has; under the
+/// pointer, its "…" (the project's menu, as a right-click on it opens it) and + (New Session Here) in the count's place.
+/// It sticks to the list's top while its sessions scroll under it, opaque, with a hairline under it.
 private struct ProjectHeader: View {
     let project: ProjectList.Project
     let folded: Bool
     let toggle: () -> Void
+    let newHere: () -> Void
+    /// Opens the project's menu by a rect, in the window's coordinates.
+    let more: (CGRect) -> Void
+    @Environment(RowMenu.self) private var menu
+    @State private var hovered = false
+    @State private var moreFrame: CGRect = .zero
+
+    private var moreID: String { "fleet.project.\(project.name).more" }
+    /// Its "…" and + show: under the pointer, or while its menu is open.
+    private var showsActs: Bool { hovered || menu.shown?.owner == moreID }
 
     /// What VoiceOver reads after its name: folded or open, then its count as drawn.
     private var spoken: String {
@@ -525,6 +592,7 @@ private struct ProjectHeader: View {
                     .foregroundStyle(project.needsYou > 0 ? Theme.amber : Theme.text3)
                     .monospacedDigit()
                     .fixedSize()
+                    .opacity(showsActs ? 0 : 1)
             }
             .padding(.leading, 8)
             .padding(.trailing, 6)
@@ -545,10 +613,54 @@ private struct ProjectHeader: View {
         .accessibilityLabel(project.name)
         .accessibilityValue(spoken)
         .accessibilityIdentifier("fleet.project.\(project.name)")
+        // VoiceOver, which does not hover, has the "…"'s acts as the header's own.
+        .accessibilityActions {
+            Button(RunListWords.newSessionHere, action: newHere)
+                .accessibilityIdentifier("fleet.project.\(project.name).newSessionAction")
+            Button("More") { more(moreFrame) }
+                .accessibilityIdentifier("\(moreID)Action")
+        }
+        .overlay(alignment: .trailing) {
+            if showsActs {
+                HStack(spacing: 0) {
+                    act("ellipsis", size: 12, id: moreID, help: "More") { more(moreFrame) }
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { moreFrame = $0 }
+                    act("plus", size: 11, id: "fleet.project.\(project.name).newSession", help: RunListWords.newSessionHere,
+                        action: newHere)
+                }
+                .padding(.trailing, 6)
+            }
+        }
+        .onHover { hovered = $0 }
+        .onRightClick { point in more(CGRect(origin: point, size: .zero)) }
+        #if DEBUG
+            .task {
+                guard RenderWindow.projectMenu == project.name else { return }
+                hovered = true
+                // After the render has sized and placed its window, as a click comes on a window at rest.
+                try? await Task.sleep(for: .seconds(1))
+                more(moreFrame)
+            }
+        #endif
         .padding(.horizontal, 8)
         .padding(.bottom, 2)
         // Opaque, so the sessions it is stuck over do not show through it.
         .background(Theme.sidebar)
+    }
+
+    /// One of its acts under the pointer: a 22 pt square, as a row's "…" is drawn.
+    private func act(_ symbol: String, size: CGFloat, id: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: size, weight: .semibold)).foregroundStyle(Theme.text2)
+                .frame(width: 22, height: 22)
+                .background(menu.shown?.owner == id ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.hover(radius: 5, id: id))
+        .focusable(false)
+        .help(help)
+        .accessibilityLabel(help)
+        .accessibilityIdentifier(id)
     }
 }
 
@@ -559,6 +671,8 @@ private struct ProjectHeader: View {
 private struct ComputerFilter: View {
     @Environment(Machines.self) private var machines
     @Binding var filter: FleetFilter?
+    /// The hidden projects, by key, with their names: the menu's way back to each.
+    @Binding var hidden: [String: String]
     let addComputer: () -> Void
     @State private var open = false
     @State private var height: CGFloat = 0
@@ -635,6 +749,28 @@ private struct ComputerFilter: View {
             .buttonStyle(.panelRow)
             .panelRow(computers.count + 1, id: "fleet.computers.addComputer", choose: chooseAdd)
             .accessibilityIdentifier("fleet.computers.addComputer")
+            if !hidden.isEmpty {
+                MenuDivider().padding(.vertical, 4)
+                MenuHeader(text: RunListWords.hiddenProjects)
+                ForEach(Array(hidden.sorted { ($0.value, $0.key) < ($1.value, $1.key) }.enumerated()), id: \.element.key) {
+                    index, project in
+                    let unhide = {
+                        hidden[project.key] = nil
+                        open = false
+                    }
+                    Button(action: unhide) {
+                        MenuRow(chosen: false) {
+                            Image(systemName: "eye.slash").font(.system(size: 11)).foregroundStyle(Theme.text2)
+                            Text(project.value).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    .buttonStyle(.panelRow)
+                    .panelRow(computers.count + 2 + index, id: "fleet.computers.hidden.\(project.value)", choose: unhide)
+                    .help(RunListWords.hide(true))
+                    .accessibilityIdentifier("fleet.computers.hidden.\(project.value)")
+                }
+            }
         }
         .frame(minWidth: 280)
         .fixedSize()

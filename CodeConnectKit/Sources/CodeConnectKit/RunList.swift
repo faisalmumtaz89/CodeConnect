@@ -30,6 +30,13 @@ public enum RunListWords {
     public static func earlier(_ count: Int) -> String { "\(count) earlier ›" }
     public static let showFewer = "Show fewer"
 
+    /// A project's header menu, and the head menu's way back to a hidden project.
+    public static let newSessionHere = "New Session Here"
+    public static func pin(_ pinned: Bool) -> String { pinned ? "Unpin" : "Pin to Top" }
+    public static let collapseOthers = "Collapse Other Projects"
+    public static func hide(_ hidden: Bool) -> String { hidden ? "Unhide Project" : "Hide Project" }
+    public static let hiddenProjects = "Hidden Projects"
+
     /// The list with nothing in it while it is narrowed to one computer.
     public static func noneOn(_ computer: String) -> String { "None on \(computer)" }
 

@@ -281,6 +281,13 @@ struct MainWindow: View {
     private func runList(besideAPane: Bool) -> some View {
         FleetList(
             layout: $layout, filter: $filter, opened: $opened, newRun: { adding = .agent },
+            newSessionIn: { machine, folder in
+                if let machine {
+                    startDraft.computerID = machine
+                    startDraft.chooseFolder(folder, on: machine)
+                }
+                adding = .agent
+            },
             addComputer: { adding = .computer }, openSettings: { settings = .general }
         )
         .frame(width: besideAPane ? 256 : nil)

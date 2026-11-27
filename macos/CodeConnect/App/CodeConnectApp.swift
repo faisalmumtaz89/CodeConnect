@@ -17,7 +17,7 @@ struct CodeConnectApp: App {
     /// Help › CodeConnect Support.
     private static let support = URL(string: "https://codeconnect.sh/support")!
     /// Where the main window was, kept while it is closed: it opens again on the same list and session.
-    @State private var layout = ListLayout()
+    @State private var layout = ListLayout.kept
     @State private var filter: FleetFilter?
     @State private var opened: String?
     @State private var pendingAdd: AddKind?
@@ -47,6 +47,13 @@ struct CodeConnectApp: App {
         _updates = State(initialValue: Updates.forThisLaunch())
     }
 
+    private func keepLayout() {
+        #if DEBUG
+            guard !RenderWindow.throwaway else { return }
+        #endif
+        layout.keep()
+    }
+
     var body: some Scene {
         // The app's one window: no New Window, and no window tabs.
         Window("CodeConnect", id: "main") {
@@ -58,6 +65,9 @@ struct CodeConnectApp: App {
                 .preferredColorScheme(.dark)
                 .tint(CC.color.accent)
                 .environment(\.updates, updates)
+                // Pin to Top and Hide Project outlast the launch; a render's do not.
+                .onChange(of: layout.pinned) { keepLayout() }
+                .onChange(of: layout.hidden) { keepLayout() }
                 // Once a launch, not once a window: the window opened again keeps the computers as they are.
                 .task {
                     guard !started else { return }

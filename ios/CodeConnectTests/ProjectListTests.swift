@@ -72,6 +72,21 @@ final class ProjectListTests: XCTestCase {
         XCTAssertEqual(list.projects[1].folder, "/src/api")
     }
 
+    /// A new session in a project starts where it was last at work: on the computer the list is narrowed to when the
+    /// project has a session there, else on the computer of its latest session, in that computer's checkout.
+    func testANewSessionStartsWhereTheProjectWasLastAtWork() {
+        let web = #"{"name":"web","remote":"github.com/o/web","main_path":"/src/web"}"#
+        let copy = #"{"name":"web","remote":"github.com/o/web","main_path":"/home/f/web"}"#
+        let rows = [
+            row("here", .done, cwd: "/src/web", on: "m1", minutes: 1, repo: web),
+            row("there", .blocked, cwd: "/home/f/web", on: "m2", minutes: 5, repo: copy),
+        ]
+        let all = ProjectList(rows).projects[0]
+        XCTAssertEqual([all.machineID, all.folder], ["m2", "/home/f/web"])
+        let narrowed = ProjectList(rows, computer: "m1").projects[0]
+        XCTAssertEqual([narrowed.machineID, narrowed.folder], ["m1", "/src/web"])
+    }
+
     /// Two projects with one name say their computers when no other of that name is on it, else the folder each is
     /// in; a hidden project lends no one a suffix; suffixes are drawn on one line.
     func testTwoProjectsWithOneNameSayWhatTellsThemApart() {

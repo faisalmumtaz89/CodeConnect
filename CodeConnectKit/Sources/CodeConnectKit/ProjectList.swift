@@ -41,7 +41,8 @@ public struct ProjectList: Sendable, Equatable {
         public let pinned: Bool
         /// Hidden, and shown only because something in it needs the person, or because its session is open.
         public let hidden: Bool
-        /// The computer and the folder it is on: where a new session in it starts.
+        /// Where a new session in it starts: the computer the list is narrowed to when it has a session there, else the
+        /// computer of its latest session, and the project's folder on that computer.
         public let machineID: String?
         public let folder: String
     }
@@ -101,6 +102,8 @@ public struct ProjectList: Sendable, Equatable {
         struct Built {
             var key: String
             var first: FleetRow
+            /// Where a new session in it starts.
+            var start: FleetRow
             var rows: [FleetRow]
             var need: Int
             var sessions: Int
@@ -150,8 +153,10 @@ public struct ProjectList: Sendable, Equatable {
             let urgency = (
                 rank: best, deck: tier.map { place[$0.id] ?? Int.max }.min() ?? Int.max,
                 since: tier.map(\.lastActive.timeIntervalSinceReferenceDate).min() ?? .infinity)
+            let latest = { (rows: [FleetRow]) in rows.max { $0.lastActive < $1.lastActive } }
+            let start = computer.flatMap { id in latest(all.filter { $0.machineID == id }) } ?? latest(all)!
             built.append(Built(
-                key: key, first: all.first!, rows: rows, need: need, sessions: whole[key]!.sessions,
+                key: key, first: all.first!, start: start, rows: rows, need: need, sessions: whole[key]!.sessions,
                 earlier: earlier, hidden: isHidden, quiet: rows.isEmpty, urgency: urgency, latest: whole[key]!.latest))
         }
 
@@ -169,7 +174,7 @@ public struct ProjectList: Sendable, Equatable {
             Project(
                 id: entry.key, name: names[entry.key]!, needsYou: entry.need, sessions: entry.sessions,
                 rows: entry.rows, earlier: entry.earlier, pinned: pins[entry.key] != nil, hidden: entry.hidden,
-                machineID: entry.first.machineID, folder: Self.home(entry.first))
+                machineID: entry.start.machineID, folder: Self.home(entry.start))
         }
         if let held, let at = projects.firstIndex(where: { $0.rows.contains { $0.id == held.session } }) {
             let project = projects.remove(at: at)

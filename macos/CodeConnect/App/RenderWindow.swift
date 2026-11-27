@@ -216,8 +216,22 @@
             return try? JSONDecoder().decode(MachineStats.self, from: Data(arguments[flag + 1].utf8))
         }
 
-        /// `-CC_ONLY_THESE YES`: the list opens on only what needs the person.
-        static var layout: ListLayout { ListLayout(onlyNeedsYou: UserDefaults.standard.bool(forKey: "CC_ONLY_THESE")) }
+        /// The list as a launch opens it: a render's from its flags, with nothing pinned or hidden but what `-CC_HIDE
+        /// <name,…>` hides (by the names the list gives them); `-CC_ONLY_THESE YES` opens it on only what needs the person.
+        static var layout: ListLayout {
+            var layout = throwaway ? ListLayout() : .kept
+            layout.onlyNeedsYou = UserDefaults.standard.bool(forKey: "CC_ONLY_THESE")
+            return layout
+        }
+
+        /// `-CC_HIDE <name,…>`: those projects, by the names the list gives them, open hidden.
+        static var hides: Set<String> {
+            Set((UserDefaults.standard.string(forKey: "CC_HIDE") ?? "").split(separator: ",").map(String.init))
+        }
+
+        /// `-CC_PROJECT_MENU <name>`: that project's header menu opens a moment after launch, as a click on its "…"
+        /// opens it (its "…" drawn as under the pointer).
+        static var projectMenu: String? { UserDefaults.standard.string(forKey: "CC_PROJECT_MENU") }
 
         /// `-CC_FOLD <name,…>`: those projects, by the names the list gives them, open folded.
         static var folds: Set<String> {
@@ -361,7 +375,7 @@
         /// an ordinary launch.
         private(set) static var appData: URL?
         /// True when `appData` is this launch's own, removed when its render ends.
-        private static var throwaway = false
+        private(set) static var throwaway = false
 
         /// The keychain and the data folder a test launch uses, chosen before anything reads or writes
         /// either (`CodeConnectApp.init`), from the launch's arguments, never from saved defaults. Any
