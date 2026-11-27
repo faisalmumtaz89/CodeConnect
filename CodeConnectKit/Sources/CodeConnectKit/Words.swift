@@ -168,8 +168,8 @@ public enum SessionWords {
     public static let catchingUpMessage = "This run’s conversation appears here once it has arrived."
     /// In the reply box's place on a run that takes no reply (`SessionSummary.takesNoReply`).
     public static let runEnded = "This run has ended"
-    /// In the reply box's place on a run that takes no reply: that the person ended it (End Run), and, in a worktree
-    /// of its own, that its worktree and branch are kept; else `runEnded`.
+    /// The conversation's end of a run the person ended (End Run), and, in a worktree of its own, that its worktree
+    /// and branch are kept; else `runEnded`.
     public static func ended(byPerson: Bool, inWorktree: Bool) -> String {
         guard byPerson else { return runEnded }
         return inWorktree ? "You ended this run · its worktree and branch are kept" : "You ended this run"
