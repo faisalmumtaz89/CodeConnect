@@ -507,6 +507,16 @@ mod tests {
             }
             assert_eq!(end(stopped).get("failed"), None, "{reason:?}");
         }
+        let reply = map(
+            &session(),
+            None,
+            &json!({"type": "assistant", "uuid": "a1", "error": "server_error",
+                "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "API Error: 529"}]}}),
+        );
+        assert_eq!(
+            reply.events[0].payload["isApiErrorMessage"], true,
+            "the SDK names an API error's reply by its `error`"
+        );
         let ordinary = end(
             json!({"type": "result", "subtype": "success", "uuid": "r4", "is_error": false,
             "num_turns": 1, "result": "Done.", "terminal_reason": "completed"}),

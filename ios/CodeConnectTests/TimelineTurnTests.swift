@@ -9,17 +9,18 @@ import XCTest
 @MainActor
 final class TimelineTurnTests: XCTestCase {
 
-    private func event(_ seq: UInt64, _ kind: String, _ payload: String, source: String = "hook")
-        -> Event
-    {
+    private func event(
+        _ seq: UInt64, _ kind: String, _ payload: String, source: String = "hook", turn: String? = nil
+    ) -> Event {
+        let turnID = turn.map { #","turn_id":"\#($0)""# } ?? ""
         // swiftlint:disable:next force_try
-        try! JSONDecoder().decode(
+        return try! JSONDecoder().decode(
             Event.self,
             from: Data(
                 """
                 {"seq":\(seq),"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"cc-1",
                  "ts":"2026-08-02T10:00:\(String(format: "%02d", seq))Z","kind":"\(kind)",
-                 "payload":\(payload),"source":"\(source)"}
+                 "payload":\(payload),"source":"\(source)"\(turnID)}
                 """.utf8))
     }
 
@@ -117,19 +118,24 @@ final class TimelineTurnTests: XCTestCase {
     }
 
     /// Claude's own reply naming an API error (`isApiErrorMessage`), as the SDK gives it.
-    private func apiError(_ seq: UInt64) -> Event {
+    private func apiError(_ seq: UInt64, turn: String? = "t1") -> Event {
         event(
             seq, "agent_message",
             #"{"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: Repeated 529 Overloaded errors."}]},"isApiErrorMessage":true}"#,
-            source: "sdk")
+            source: "sdk", turn: turn)
     }
 
-    private func failedEnd(_ seq: UInt64, _ failed: String) -> Event {
-        event(seq, "turn_complete", #"{"subtype":"success","is_error":true,"num_turns":1,"failed":\#(failed)}"#, source: "sdk")
+    private func failedEnd(_ seq: UInt64, _ failed: String, turn: String = "t1") -> Event {
+        event(
+            seq, "turn_complete", #"{"subtype":"success","is_error":true,"num_turns":1,"failed":\#(failed)}"#,
+            source: "sdk", turn: turn)
     }
 
     private func lastNotice(_ items: [TimelineItem]) throws -> NoticeItem {
-        guard case .notice(let notice) = try XCTUnwrap(items.last).content else { throw XCTSkip("no notice") }
+        guard case .notice(let notice) = try XCTUnwrap(items.last).content else {
+            XCTFail("the last row is \(String(describing: items.last?.content))")
+            throw CancellationError()
+        }
         return notice
     }
 
@@ -161,6 +167,21 @@ final class TimelineTurnTests: XCTestCase {
         XCTAssertEqual(notice.detail, "It stopped at \(at). Nothing was lost; send a message to carry on.")
         let silent = try lastNotice(TimelineBuilder.build([user(1), failedEnd(2, #"{"message":null}"#)]))
         XCTAssertEqual(silent.title, "The run stopped")
+    }
+
+    /// Codex's and Antigravity's own error, filed beside a failed end in the same turn, after it or before it, is that
+    /// end's to say: one row, not two. An error of another turn is drawn as before.
+    func testAFailedTurnsOwnErrorIsItsEndsToSay() {
+        let codex = event(3, "error", #"{"message":"Model unavailable","codexErrorInfo":"other"}"#, source: "codex", turn: "t1")
+        let items = TimelineBuilder.build([user(1), failedEnd(2, #"{"message":"Model unavailable"}"#), codex])
+        XCTAssertEqual(shape(TimelineBuilder.drawn(items)), ["you", "notice:The run stopped: Model unavailable"])
+        let agy = event(2, "error", #"{"message":"Authentication required"}"#, source: "acp", turn: "t1")
+        let before = TimelineBuilder.build([user(1), agy, failedEnd(3, #"{"message":"Authentication required"}"#)])
+        XCTAssertEqual(shape(TimelineBuilder.drawn(before)), ["you", "notice:The run stopped: Authentication required"])
+        let other = event(2, "error", #"{"message":"An earlier error"}"#, source: "codex", turn: "t0")
+        let kept = TimelineBuilder.build([user(1), other, failedEnd(3, #"{"message":"Model unavailable"}"#)])
+        XCTAssertEqual(
+            shape(TimelineBuilder.drawn(kept)), ["you", "notice:Error", "notice:The run stopped: Model unavailable"])
     }
 
     /// An API error's reply on a turn whose end says nothing of a failure (a daemon before minor 70) is still drawn.
