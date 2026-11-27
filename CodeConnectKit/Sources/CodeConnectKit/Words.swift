@@ -149,7 +149,7 @@ public enum SessionWords {
     }
     public static let catchingUpMessage = "This run’s conversation appears here once it has arrived."
     /// In the reply box's place on a run that takes no reply (`SessionSummary.takesNoReply`).
-    public static let runEnded = "This run has ended. Its conversation stays here to read."
+    public static let runEnded = "This run has ended"
     /// A conversation with nothing in it: "yet" only while the run can still record something, not on one that has
     /// ended and takes no reply (`SessionSummary.takesNoReply`).
     public static func nothingRecorded(endedRun: Bool) -> String {
@@ -159,6 +159,10 @@ public enum SessionWords {
     public static let eventsAppearHere = "Events appear here as the agent works."
     /// Over an ended run's `SessionSummary.resumeCommand`.
     public static let pickUpAtComputer = "Pick this conversation up at the computer"
+    /// The reply line while the run's computer is offline: why a reply cannot go, and when it can.
+    public static func computerOffline(_ computer: String) -> String {
+        "\(computer) is offline. You can reply once it’s back."
+    }
 }
 
 /// A run's settings, as both apps name them.
@@ -221,6 +225,11 @@ public enum QuestionWords {
 /// what is said when there are none or they could not be read.
 public enum ChangesWords {
     public static func checked(since date: Date?, now: Date) -> String { "Checked \(Format.ago(since: date, now: now))" }
+    /// While the run's computer is offline: what the panel says, over the diff it last read, if any, and its age.
+    public static func cantReach(_ computer: String) -> String { "Can’t reach \(computer)" }
+    public static func lastSaid(since date: Date?, now: Date) -> String {
+        "Showing what it last said, \(Format.ago(since: date, now: now))"
+    }
     public static let checkAgain = "Check again"
     public static let reading = "Reading this run’s changes on its computer…"
     public static let stillReading = "Still reading this run’s changes…"

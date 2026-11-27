@@ -18,24 +18,42 @@ struct ChangesTab: View {
         _hunks = State(initialValue: HunkActions(model: model, key: key))
     }
 
+    /// The run's computer is offline: the panel keeps what it last read, says so and how old it is, and asks nothing
+    /// until the computer is back.
+    private var offline: Bool { model.linkHealth.level == .offline }
+    private var computer: String { model.machineName ?? "your computer" }
+
     var body: some View {
         let state = model.diffState(for: key)
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 if case .loaded(let raw, let parsed, let fetchedAt) = state {
-                    if !parsed.isEmpty { Summary(diff: parsed) }
+                    if !parsed.isEmpty && !offline { Summary(diff: parsed) }
                     let read = raw.capturedDate ?? fetchedAt
-                    AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
-                        .font(Theme.ui(12))
-                        .foregroundStyle(Theme.text3)
-                        .monospacedDigit()
-                        .accessibilityIdentifier("changes.age")
+                    if offline {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(ChangesWords.cantReach(computer)).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text2)
+                                .lineLimit(1).truncationMode(.tail)
+                            AgeText(since: read) { ChangesWords.lastSaid(since: read, now: $0) }
+                                .font(Theme.ui(12))
+                                .foregroundStyle(Theme.text3)
+                                .monospacedDigit()
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("changes.lastSaid")
+                    } else {
+                        AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
+                            .font(Theme.ui(12))
+                            .foregroundStyle(Theme.text3)
+                            .monospacedDigit()
+                            .accessibilityIdentifier("changes.age")
+                    }
                 }
                 Spacer(minLength: 0)
                 ActionButton(title: ChangesWords.checkAgain, key: nil, prominent: false, id: "changes.refresh") {
                     model.loadDiff(key: key, force: true)
                 }
-                .disabled(state.isLoading)
+                .disabled(state.isLoading || offline)
             }
             .padding(.horizontal, 28)
             .frame(height: 44)
@@ -44,7 +62,9 @@ struct ChangesTab: View {
             case .idle, .loading:
                 Message(id: "changes.loading", title: ChangesWords.reading)
             case .failed(.app(let reason)):
-                Message(id: "changes.offline", title: "The changes could not be read", sentence: reason)
+                Message(
+                    id: "changes.offline", title: offline ? ChangesWords.cantReach(computer) : "The changes could not be read",
+                    sentence: offline ? model.linkHealth.disabledReason ?? reason : reason)
             case .failed(.daemon(let reason)):
                 Message(
                     id: "changes.failed", title: ChangesWords.couldNotRead,
