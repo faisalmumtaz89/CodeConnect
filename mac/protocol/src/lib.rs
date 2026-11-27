@@ -1041,7 +1041,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     [`event::SessionSummary::repo`] ([`event::RepoFact`]): the repository's main checkout, its folder name, and its
 ///     `origin` on github.com as `github.com/<owner>/<name>`, read with the run's branch and kept for the run. A daemon
 ///     below 71 sends none, and an app groups such a run by its folder.
-pub const PROTOCOL_MINOR: u32 = 71;
+///   * `72` — **A run's changes from its base.**
+///
+///     [`ws::RunGit::from_base`] ([`ws::FromBase`]): the files against the merge-base of `HEAD` and the run's base,
+///     committed and uncommitted, counted as `changed` is, which keeps counting against `HEAD`.
+///     [`ws::ClientMessage::GetDiff`] with `from_base` answers the diff against that same merge-base. A daemon below
+///     72 sends no `from_base`, and a client asks for that diff only of one that did.
+pub const PROTOCOL_MINOR: u32 = 72;
 
 #[cfg(test)]
 mod ledger_tests {

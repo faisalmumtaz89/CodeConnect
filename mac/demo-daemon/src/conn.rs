@@ -434,7 +434,7 @@ where
             // waiter on the string it chose, uid or name.
             send(sink, &ServerMessage::SendTextResult { session_id, result }).await?;
         }
-        ClientMessage::GetDiff { session_id } => match fleet.resolve(&session_id) {
+        ClientMessage::GetDiff { session_id, .. } => match fleet.resolve(&session_id) {
             Some(_) => {
                 send(
                     sink,
