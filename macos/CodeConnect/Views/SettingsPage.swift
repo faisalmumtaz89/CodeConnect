@@ -732,11 +732,12 @@ private struct AccountRow: View {
     let remove: () -> Void
     /// Sign Out… of an agent's own sign-in: asks first, by its group's card.
     var signOut: () -> Void = {}
-    /// The columns' headings on the group's title line: "<length> used" over each.
+    /// The columns' headings on the group's title line: "<length> used" over each, the week's as "Weekly used" (the
+    /// Kit's shared caption is "Week").
     static func headings(_ columns: [String]) -> some View {
         HStack(spacing: 0) {
             ForEach(columns, id: \.self) { caption in
-                Text("\(caption) used").lineLimit(1).frame(width: column, alignment: .trailing)
+                Text("\(caption == AccountSwitchWords.caption(minutes: 10080) ? "Weekly" : caption) used").lineLimit(1).frame(width: column, alignment: .trailing)
             }
         }
         .font(Theme.ui(10.5)).foregroundStyle(Theme.text3)
