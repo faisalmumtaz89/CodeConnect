@@ -49,6 +49,10 @@ final class DiffCommentAnchorTests: XCTestCase {
             "what reaches the agent keeps its backticked anchor")
     }
 
+    func testTheCommentPromptNamesTheAgent() {
+        XCTAssertEqual(ChangesWords.commentPrompt("Codex"), "Comment to Codex about these lines")
+    }
+
     func testCopyHunkCopiesTheHeaderAndEveryLineUnderItsMark() {
         let lines = [
             UnifiedDiff.Line(id: 0, kind: .context, text: "a", oldNumber: 12, newNumber: 12),

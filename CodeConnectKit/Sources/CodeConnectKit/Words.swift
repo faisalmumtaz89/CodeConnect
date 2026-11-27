@@ -350,8 +350,8 @@ public enum ChangesWords {
     /// The folded stretch as a screen reader says it, and what opening it does.
     public static func foldedLinesSpoken(_ count: Int) -> String { "\(unchangedLines(count)) hidden" }
     public static let foldedLinesHint = "Shows them"
-    /// What a comment on a hunk asks for, in its empty field.
-    public static let commentPrompt = "What should the agent do here?"
+    /// What a comment on a hunk asks for, in its empty field: the run's agent by name.
+    public static func commentPrompt(_ agent: String) -> String { "Comment to \(agent) about these lines" }
     /// Under a hunk for a few seconds once its comment reached the agent, on the Mac, where the field closes.
     public static let commentSent = "Sent"
     /// Which file and lines a comment on a hunk is about, so the agent reads it against the code: the lowest and

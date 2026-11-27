@@ -151,7 +151,8 @@ struct HunkCommentField: View {
                 .font(Theme.mono(11)).foregroundStyle(Theme.text3)
                 .lineLimit(1).truncationMode(.middle)
             TextField(
-                "", text: $draft, prompt: Text(ChangesWords.commentPrompt).foregroundStyle(Theme.text3), axis: .vertical
+                "", text: $draft, prompt: Text(ChangesWords.commentPrompt(actions.agent)).foregroundStyle(Theme.text3),
+                axis: .vertical
             )
                 .textFieldStyle(.plain)
                 .font(Theme.ui(13))
@@ -161,7 +162,7 @@ struct HunkCommentField: View {
                 // It appears because Comment to <agent>… was just chosen: what is typed next is the comment.
                 .takesKeyboardWhenShown($focused)
                 .onExitCommand { actions.commenting = nil }
-                .accessibilityLabel(ChangesWords.commentPrompt)
+                .accessibilityLabel(ChangesWords.commentPrompt(actions.agent))
                 .accessibilityIdentifier("changes.comment.field")
                 .padding(10)
                 .background {
