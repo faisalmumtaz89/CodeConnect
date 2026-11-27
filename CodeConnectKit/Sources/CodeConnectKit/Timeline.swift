@@ -246,6 +246,10 @@ public enum TimelineBuilder {
         /// minute the reader took to answer.
         var questionToolUseIDs: Set<String> = []
         var lastTurnEndSeq: UInt64 = 0
+        // Claude's reply naming an API error, by seq, when its turn's end says the turn failed: that end's row says
+        // it (run state 04). One whose end says nothing is drawn as any reply.
+        var apiErrorReply: UInt64?
+        var failedTurnReplies: Set<UInt64> = []
         // The sends a Stop cancelled, by request_id: their person-message rows read
         // "Not sent: stopped" and the `send_not_sent` notice itself draws no row.
         var stoppedSends: Set<String> = []
@@ -256,6 +260,7 @@ public enum TimelineBuilder {
                 if let id = event.toolUseID { hookToolCallIDs.insert(id) }
             case .agentMessage:
                 for use in event.agentToolUses { transcriptToolUseSeqs[use.id] = event.seq }
+                if event.payload["isApiErrorMessage"]?.boolValue == true { apiErrorReply = event.seq }
             case .toolResult:
                 absorbResult(event, into: &resultsByToolUse)
             case .approvalResolved:
@@ -284,6 +289,8 @@ public enum TimelineBuilder {
                 // Both close a turn, which is what an unresolved tool call is
                 // measured against. Only one of them also ends the session.
                 lastTurnEndSeq = max(lastTurnEndSeq, event.seq)
+                if event.turnFailure != nil, let reply = apiErrorReply { failedTurnReplies.insert(reply) }
+                apiErrorReply = nil
             default:
                 break
             }
@@ -427,7 +434,7 @@ public enum TimelineBuilder {
             case .agentMessage:
                 // Claude's resume placeholder is not a reply: no row, and so
                 // no activity on the fleet.
-                if event.isClaudePlaceholderReply { break }
+                if event.isClaudePlaceholderReply || failedTurnReplies.contains(event.seq) { break }
                 if let text = event.agentText {
                     items.append(
                         event.item(.agentMessage(text, isInterrupted: event.isInterruptedItem)))
@@ -817,8 +824,16 @@ public enum TimelineBuilder {
 
     private static func endNotice(for event: Event) -> NoticeItem {
         if let failure = event.turnFailure {
+            // As artboard 04 says it: what stopped the run, then when, and that a message carries on.
+            let at = Format.clock(event.date, now: event.date)
+            let why = failure.status.map { "API Error \($0)" + ($0 == 529 ? " · overloaded" : "") }
+                ?? failure.message?.split(separator: "\n").first.map(String.init)
+            let carryOn = "Nothing was lost; send a message to carry on."
             return NoticeItem(
-                kind: .turnComplete, symbol: "warning-octagon", title: "Turn failed", detail: failure.message,
+                kind: .turnComplete, symbol: "warning-octagon",
+                title: why.map { "The run stopped: \($0)" } ?? "The run stopped",
+                detail: failure.status == 529
+                    ? "Anthropic’s API was overloaded at \(at). \(carryOn)" : "It stopped at \(at). \(carryOn)",
                 severity: .failure)
         }
         if event.isTurnComplete {
