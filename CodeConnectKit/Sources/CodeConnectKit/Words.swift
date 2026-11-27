@@ -222,6 +222,8 @@ public enum QuestionWords {
     public static func submitNeeds(questions: Int) -> String {
         questions == 1 ? "Choose an answer to submit." : "Answer every question to submit."
     }
+    /// Beside the Mac's Decline and Submit: how far the answers have come.
+    public static func answered(_ count: Int, of questions: Int) -> String { "\(count) of \(questions) answered" }
 }
 
 /// A run's Changes: when they were read, how they are asked for again, and

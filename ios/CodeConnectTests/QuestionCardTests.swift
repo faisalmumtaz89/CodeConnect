@@ -190,6 +190,18 @@ final class QuestionCardTests: XCTestCase {
         XCTAssertNil(draft.answer(for: 3, in: card)?.notes, "no notes typed, none sent")
     }
 
+    /// Beside Submit, how many questions have an answer: a blank "Other" is none.
+    func testTheCountOfAnsweredQuestions() throws {
+        let card = try XCTUnwrap(QuestionCard(card: try heldCard()))
+        var draft = QuestionDraft(card: card)
+        XCTAssertEqual(QuestionWords.answered(draft.answered(in: card), of: card.questions.count), "0 of 4 answered")
+        draft.tap(option: 0, of: 0, in: card)
+        draft.tapOther(of: 2, in: card)
+        XCTAssertEqual(QuestionWords.answered(draft.answered(in: card), of: card.questions.count), "1 of 4 answered")
+        draft.entries[2].otherText = "docs/plans"
+        XCTAssertEqual(QuestionWords.answered(draft.answered(in: card), of: card.questions.count), "2 of 4 answered")
+    }
+
     // MARK: The answer
 
     /// The same taps as the keyboard run produce the exact `decision` the

@@ -167,6 +167,11 @@ public struct QuestionDraft: Sendable, Hashable {
             notes: card.questions[question].takesNotes && !entry.notes.isEmpty ? entry.notes : nil)
     }
 
+    /// How many of the card's questions have an answer.
+    public func answered(in card: QuestionCard) -> Int {
+        card.questions.indices.filter { answer(for: $0, in: card) != nil }.count
+    }
+
     /// Every question's answer, in card order — or nil until all of them have
     /// one. Submit is offered on exactly this.
     public func answers(in card: QuestionCard) -> [QuestionAnswer]? {

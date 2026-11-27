@@ -177,14 +177,13 @@ struct QuestionBlock: View {
             .accessibilityIdentifier(id)
     }
 
-    /// Decline and Submit, with what Submit waits for beside them; `keys`: in the box, where ⌘D declines and ⌘↩
+    /// Decline and Submit, with how many questions are answered (or why the card can't be) beside them; `keys`: in the box, where ⌘D declines and ⌘↩
     /// submits.
     private func controls(keys: Bool) -> some View {
         let answers = draft.answers(in: questions)
         return HStack(spacing: 8) {
-            if let note = blocked ?? (answers == nil ? incompleteNote : nil) {
-                Text(note).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).accessibilityIdentifier("\(id).blocked")
-            }
+            Text(blocked ?? QuestionWords.answered(draft.answered(in: questions), of: questions.questions.count))
+                .font(Theme.ui(12)).foregroundStyle(Theme.text3).accessibilityIdentifier("\(id).blocked")
             Spacer(minLength: 8)
             ActionButton(title: QuestionWords.decline, key: keys ? "⌘D" : nil, prominent: false, id: "\(id).decline") {
                 send(.decline, from: "decline")
@@ -197,11 +196,6 @@ struct QuestionBlock: View {
             .disabled(blocked != nil || answers == nil)
             .answerKey(.return, .command, when: keys)
         }
-    }
-
-    /// What Submit waits for while the answers are incomplete: not a warning, an untouched form is not a fault.
-    private var incompleteNote: String {
-        QuestionWords.submitNeeds(questions: questions.questions.count)
     }
 
     /// One answer, as the decision card sends one: never while the card cannot be answered or one is on its way.
