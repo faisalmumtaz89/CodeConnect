@@ -927,6 +927,8 @@ private struct HistoryHead: View {
 /// goes to that machine.
 struct SessionDetailView: View {
     let route: SessionRoute
+    /// A new session with another agent's model, from this one's settings sheet (`HostedSettingsSheet.onStartNew`).
+    var onStartNew: (StartSeed) -> Void = { _ in }
 
     @Environment(AppModel.self) private var model
     @Environment(Machines.self) private var machines
@@ -1089,7 +1091,7 @@ struct SessionDetailView: View {
         // A new handshake is the link back: the unanswered send is asked again.
         .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
         .sheet(isPresented: $showHostedSettingsSheet) {
-            HostedSettingsSheet(sessionKey: key, onLanded: consumeDraft)
+            HostedSettingsSheet(sessionKey: key, onLanded: consumeDraft, onStartNew: onStartNew)
                 .environment(model)
                 .ccConfirmationHost()
                 .ccResizableSheet()

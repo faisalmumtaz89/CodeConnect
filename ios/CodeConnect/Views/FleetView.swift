@@ -345,7 +345,7 @@ struct FleetView: View {
             .environment(
                 machines.models.first { $0.starter.starts[requestID] != nil } ?? model)
         } else {
-            SessionDetailView(route: route)
+            SessionDetailView(route: route, onStartNew: startNew)
                 .environment(owner(route.key))
                 .id(route.key)
         }
@@ -1033,6 +1033,16 @@ struct FleetView: View {
 
     /// Ask every computer for its projects. The computer is chosen in the
     /// flow, by a tap, and held there.
+    /// A session's settings choosing another agent's model: the Start sheet, seeded with this computer, its folder,
+    /// that agent and model, over the session, once the settings sheet has gone.
+    private func startNew(_ seed: StartSeed) {
+        startSeed = seed
+        Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            startOpen = true
+        }
+    }
+
     private func loadStart() {
         for context in startContexts { context.load() }
     }

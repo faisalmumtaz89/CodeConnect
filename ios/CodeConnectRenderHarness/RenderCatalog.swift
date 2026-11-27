@@ -1019,14 +1019,14 @@ enum RenderCatalog {
         RenderScenario(
             name: "session-hosted-settings-sheet",
             purpose:
-                "the hosted run's unified model/effort/mode sheet, minor-39 menus in their worst shapes",
+                "the This session sheet, minor-39 menus in their worst shapes",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
                 try driver.require(
-                    driver.text(containing: "Permission mode", in: app), "the mode section")
+                    driver.text(containing: "Permission", in: app), "the mode section")
                 try driver.require(
                     driver.element(containing: "Extra high", in: app),
                     "the labelled efforts the hosted sheet draws")
@@ -1034,27 +1034,20 @@ enum RenderCatalog {
         RenderScenario(
             name: "session-hosted-settings-model",
             purpose:
-                "the hosted settings sheet at its top — the Model section, each model by its name with the agent's own "
-                + "description beside it, on one line",
+                "the This session sheet's Model section: each model by its name, the agent's own description under it",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                // One row holds the name and, beside it, the description as the agent sends it, price included.
-                let sonnet = driver.element(
-                    containing: "Sonnet, Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok", in: app)
-                try driver.require(sonnet, "the Sonnet row with its description beside its name")
-                // On one line: the row is no taller than a row with no description, as an effort's.
-                let effort = driver.element(containing: "Extra high", in: app)
-                try driver.require(effort, "an effort row to measure the Sonnet row against")
-                if sonnet.frame.height > effort.frame.height + 1 {
-                    throw RenderFailure.unreachable("the Sonnet row on one line")
-                }
+                // One row holds the name and, under it, the description as the agent sends it, price included.
+                try driver.require(
+                    driver.element(containing: "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok", in: app),
+                    "the Sonnet row with its description")
             }),
         RenderScenario(
             name: "session-hosted-settings-modes",
-            purpose: "the hosted settings sheet scrolled to Permission mode — Plan is the selected row",
+            purpose: "the This session sheet's Permission section — Plan is the selected row",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
             ],
@@ -1064,7 +1057,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-settings-claude-plan",
-            purpose: "the composer settings control — a hosted Claude run in Plan, the mode named beside the model",
+            purpose: "the reply box's model chip — a hosted Claude run in Plan: its mark and model",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
             reach: { app, driver in
                 try driver.require(
@@ -1072,7 +1065,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-settings-claude-bypass",
-            purpose: "the composer settings control — Claude in Bypass permissions, a confirm mode named in red",
+            purpose: "the reply box's model chip — Claude in Bypass permissions: the chip in red",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-2"],
             reach: { app, driver in
                 try driver.require(
@@ -1082,7 +1075,7 @@ enum RenderCatalog {
         // its account, the fullest full.
         RenderScenario(
             name: "session-usage-bypass-100",
-            purpose: "the settings line with the run's usage: context, two windows, the fullest at 100%",
+            purpose: "the reply box's figures: context and the ring of the window at its limit, at 100%",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-2",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 100),
@@ -1093,7 +1086,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-codex-figures",
-            purpose: "the settings line with the run's usage on a Codex run at its default: all the figures",
+            purpose: "the reply box's figures on a Codex run at its default: all the figures",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
@@ -1106,7 +1099,7 @@ enum RenderCatalog {
         // at three shares, so the percent's slot is seen holding its width.
         RenderScenario(
             name: "session-usage-ring-9",
-            purpose: "the settings line with the fullest window's ring alone, at 9%",
+            purpose: "the reply box\'s figures, the ring at 9%",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 9),
@@ -1117,7 +1110,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-ring-23",
-            purpose: "the settings line with the fullest window's ring alone, at 23%",
+            purpose: "the reply box\'s figures, the ring at 23%",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
@@ -1128,7 +1121,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-ring-100",
-            purpose: "the settings line with the fullest window's ring alone, at 100%",
+            purpose: "the reply box\'s figures, the ring at 100%",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 100),
@@ -1139,7 +1132,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-context-only",
-            purpose: "the settings line with the run's context and no account limits read",
+            purpose: "the reply box's figures with the context and no account limits read",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES",
@@ -1150,7 +1143,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-limits-only",
-            purpose: "the settings line with its account's limits and no context reported",
+            purpose: "the reply box's figures with the account's limits and no context reported",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "limits", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
@@ -1225,7 +1218,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-settings-codex-default",
-            purpose: "the composer settings control — a live Codex run at its default, the model named alone",
+            purpose: "the reply box's model chip — a live Codex run at its default: its mark and model",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1"],
             reach: { app, driver in
                 try driver.require(
@@ -1233,7 +1226,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-settings-codex-full",
-            purpose: "the composer settings control — Codex in Full Access, a confirm mode named in red",
+            purpose: "the reply box's model chip — Codex in Full Access: the chip in red",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-2"],
             reach: { app, driver in
                 try driver.require(
@@ -1247,7 +1240,7 @@ enum RenderCatalog {
                 try driver.require(
                     app.buttons["session.composer.settings"], "the composer settings control").tap()
                 try driver.require(
-                    driver.text(containing: "Permission mode", in: app),
+                    driver.text(containing: "Permission", in: app),
                     "the settings sheet, opened by the control")
             }),
         RenderScenario(
@@ -1258,20 +1251,20 @@ enum RenderCatalog {
                 try driver.require(
                     app.buttons["session.composer.settings"], "the composer settings control").tap()
                 try driver.require(
-                    driver.text(containing: "Permission mode", in: app),
+                    driver.text(containing: "Permission", in: app),
                     "the settings sheet, opened by the control")
             }),
         RenderScenario(
             name: "session-hosted-settings-codex-default-effort",
             purpose:
-                "a live Codex run that chose no effort: its model's own default, Low, marked with a Default note",
+                "a live Codex run that chose no effort: its model's own default, Low, the selected segment",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1"],
             reach: { app, driver in
                 try driver.require(
                     app.buttons["session.composer.settings"], "the composer settings control").tap()
                 try driver.require(
                     driver.element(containing: "Medium", in: app), "the Effort rows under the marked default",
-                    scrollingWithin: driver.list(holding: "Permission mode", in: app))
+                    scrollingWithin: driver.list(holding: "Permission", in: app))
                 // The list stops at its end, with the marked row under the sheet's bar: back a row's height.
                 app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.40))
                     .press(
