@@ -80,13 +80,6 @@ struct ReplyBoxBar<Leading: View, Trailing: View>: View {
 
     // MARK: The chip
 
-    /// The sheet's calls are refused while a card waits or the run is starting; the empty draft keeps a long Codex
-    /// draft's own ceiling — a send concern, not a settings one — out of this check. Files on their way, or one that
-    /// failed, hold the message, not the run: its settings stay open, as on the Mac.
-    static func isHeld(_ model: AppModel, _ key: String) -> Bool {
-        model.sendBlockedReason(for: key, draft: "", files: false) != nil
-    }
-
     /// The effort in use, by Kit's one rule.
     private var effort: String? { model.shownSummary(for: key).flatMap(RunSettings.effortName) }
 
@@ -97,10 +90,8 @@ struct ReplyBoxBar<Leading: View, Trailing: View>: View {
             mark(warn: false).frame(width: CC.size.hitTarget, height: CC.size.hitTarget)
         case .hostedReadOnly(let fact):
             chipLabel(name, model: fact.flatMap { $0.text.isEmpty ? nil : $0.text }, mono: fact?.reported == true,
-                      opens: false, warn: false)
+                      opens: false, warn: false, nameID: "session.composer.model")
                 .foregroundStyle(CC.text.secondary)
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("session.composer.model")
         case .hostedLive(let settings):
             let modelName = settings.modelDisplay.isEmpty ? "Model" : settings.modelDisplay
             let warn = settings.standingMode?.confirm == true
@@ -110,7 +101,7 @@ struct ReplyBoxBar<Leading: View, Trailing: View>: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(warn ? CC.color.danger : CC.text.secondary)
-            .disabled(Self.isHeld(model, key))
+            .disabled(model.settingsHeld(key))
             .accessibilityIdentifier("session.composer.settings")
             .accessibilityLabel(
                 [modelName, effort.map { "\($0) effort" }, settings.standingMode?.label]
@@ -119,7 +110,9 @@ struct ReplyBoxBar<Leading: View, Trailing: View>: View {
     }
 
     /// The mark, the name as `name` allows, and ▾ where the chip opens the sheet.
-    private func chipLabel(_ name: Name, model modelName: String?, mono: Bool, opens: Bool, warn: Bool) -> some View {
+    private func chipLabel(
+        _ name: Name, model modelName: String?, mono: Bool, opens: Bool, warn: Bool, nameID: String = ""
+    ) -> some View {
         HStack(spacing: 6) {
             mark(warn: warn)
             if name != .none, let modelName {
@@ -127,6 +120,7 @@ struct ReplyBoxBar<Leading: View, Trailing: View>: View {
                     .ccType(mono ? CC.type.footnote.monospaced() : CC.type.footnote)
                     .fontWeight(.medium)
                     .lineLimit(1)
+                    .accessibilityIdentifier(nameID)
                 if name == .whole {
                     text.fixedSize()
                 } else {
@@ -161,5 +155,15 @@ struct ReplyBoxBar<Leading: View, Trailing: View>: View {
         guard let bar = model.replyBar(for: key, now: Date()), bar.context != nil || bar.ring != nil
         else { return nil }
         return bar
+    }
+}
+
+extension AppModel {
+    /// A session's settings are held while a card waits or it is starting, as the sheet's calls are refused then; the
+    /// empty draft keeps a long Codex draft's own ceiling — a send concern, not a settings one — out of this check.
+    /// Files on their way, or one that failed, hold the message, not the session: its settings stay open, as on the
+    /// Mac.
+    func settingsHeld(_ key: String) -> Bool {
+        sendBlockedReason(for: key, draft: "", files: false) != nil
     }
 }

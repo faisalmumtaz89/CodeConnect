@@ -1035,13 +1035,10 @@ struct SessionDetailView: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
-                // A run that takes no reply has no reply box, as on the Mac:
-                // one quiet line in its place says it has ended. Over it, the
-                // settings line, read only (an ended run has no menus), names
-                // the model it ran on, which the Mac names in its pane heading.
+                // A session that takes no reply has no reply box, as on the Mac: one quiet line in its place says it
+                // has ended, and on what model, which the Mac names in its pane heading.
                 if summary?.takesNoReply == true {
-                    HostedSettingsBar(model: model, key: key, onOpen: { showHostedSettingsSheet = true })
-                    EndedLine()
+                    EndedLine(model: model, key: key)
                 } else {
                     if let palette = paletteContent {
                         CommandPalette(content: palette, onAction: route)
@@ -2155,8 +2152,10 @@ private struct SessionComposeBar: View {
         TextField(
             "", text: $text,
             // At a usage limit the box says when a message goes through.
+            // While its computer is offline the box says so, and when a reply can go.
             prompt: Text(
                 model.limitFoot(for: key, now: .now)?.prompt
+                    ?? model.offlineReply(for: key, draft: "")
                     ?? SessionWords.replyPrompt(summary?.agent.displayName ?? "the agent"))
                 .foregroundStyle(CC.text.placeholder),
             // `.vertical` keeps the system keyboard's dictation key available
@@ -2295,7 +2294,10 @@ private struct SessionComposeBar: View {
             composeNote(note)
         } else if case .failed(let reason, let needsSettings) = dictation.phase {
             micFailureNote(reason: reason, needsSettings: needsSettings)
-        } else if let note = model.standingNote(for: key, draft: text), note.text != filesReason {
+        } else if let note = model.standingNote(for: key, draft: text), note.text != filesReason,
+            !(text.isEmpty && note.text == model.offlineReply(for: key, draft: text))
+        {
+            // An offline computer is said once: in the empty box's placeholder, else here over the draft.
             composeNote(note)
         }
     }
@@ -2438,18 +2440,40 @@ private struct RunFacts: View {
 /// It keeps the room the box keeps above itself (`SessionComposeBar`), so the
 /// settings line over it stands as clear of it as of the box.
 private struct EndedLine: View {
+    let model: AppModel
+    let key: String
+
+    /// The model it ran on and its effort, as the chip named them: "Sonnet 5.5 · High".
+    private var ranOn: String? {
+        let name: String? = switch model.runSettings(for: key) {
+        case .hostedReadOnly(let fact): fact.flatMap { $0.text.isEmpty ? nil : $0.text }
+        case .hostedLive(let settings): settings.modelDisplay.isEmpty ? nil : settings.modelDisplay
+        case .deferToOtherPath: nil
+        }
+        let effort = model.shownSummary(for: key).flatMap(RunSettings.effortName)
+        return name.map { name in effort.map { "\(name) · \($0)" } ?? name }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             CCHairline()
             HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
-                CCIcon("check-circle", size: 14)
-                    .foregroundStyle(CC.text.tertiary)
-                    .ccMark(beside: CC.type.footnote)
-                    .accessibilityHidden(true)
+                if let agent = model.shownSummary(for: key)?.agent {
+                    CCAgentMark(agent: agent).alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+                }
                 Text(SessionWords.runEnded)
                     .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(CC.text.secondary)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                if let ranOn {
+                    Text(verbatim: "· \(ranOn)")
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.tertiary)
+                        .lineLimit(1).truncationMode(.tail)
+                        .accessibilityLabel(ranOn)
+                        .accessibilityIdentifier("session.composer.model")
+                }
             }
             .padding(.horizontal, CC.space.md)
             .padding(.vertical, CC.space.sm)
@@ -2457,7 +2481,7 @@ private struct EndedLine: View {
         }
         .padding(.top, CC.space.xs)
         .background(CC.color.bg)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session-ended-line")
     }
 }
