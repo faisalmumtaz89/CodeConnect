@@ -1,47 +1,46 @@
 import CodeConnectKit
 import SwiftUI
 
-/// Which runs the list shows: the ones still going, or the ones that have ended.
-enum FleetScope: String {
-    case active, finished
-
-    /// The scope by name: the ended runs carry their status's own word.
-    var title: String { self == .active ? "Active" : FleetStatus.ended.label }
-
-    func rows(_ fleet: [FleetRow]) -> [FleetRow] {
-        fleet.filter { ($0.status == .ended) == (self == .finished) }
-    }
+/// How the person has laid the list out: only what needs them, the projects folded, how many times each project's
+/// ended sessions were revealed. The app's, so a closed window opens on it again.
+struct ListLayout: Equatable {
+    var onlyNeedsYou = false
+    var folded: Set<String> = []
+    var revealed: [String: Int] = [:]
 }
 
-/// The window's run list, 256 pt down its leading side: in its head the computer it is narrowed to ("All ▾") and New
-/// Run (+); under it every run on every paired computer in three sections by what it needs (`RunList`), Needs you,
-/// Working and Done, Done ending with the way to the ended runs ("N ended ›"), which the list shows in their place
-/// with the way back ("‹ Active"); in its foot this Mac's Tailscale and Settings.
+/// The window's session list, 256 pt down its leading side: in its head the computer it is narrowed to ("All ▾") and
+/// New Session (+); under it, while anything needs the person on any computer, "N need you" with Only these; then every
+/// session on every paired computer under its project (`ProjectList`), each project under a header that folds it and
+/// sticks while its sessions scroll under it, its ended sessions revealed in place ("N earlier ›"); in its foot this
+/// Mac's Tailscale and Settings.
 struct FleetList: View {
     @Environment(Machines.self) private var machines
-    @Binding var scope: FleetScope
+    @Binding var layout: ListLayout
     /// The computer the list is narrowed to, if any; the Mac narrows by computer alone.
     @Binding var filter: FleetFilter?
-    /// The run open beside the list, if any.
+    /// The session open beside the list, if any.
     @Binding var opened: String?
     let newRun: () -> Void
     let addComputer: () -> Void
     let openSettings: () -> Void
     /// The row under the pointer, and the row whose "…" panel is open.
     @State private var hovered: String?
-    /// The window's one row menu, which a run's "…" or a right-click on its row opens.
+    /// The window's one row menu, which a session's "…" or a right-click on its row opens.
     @Environment(RowMenu.self) private var menu
     @Environment(\.headerClearance) private var headerClearance
     /// The list has the keyboard: one stop, taken by a click on a row and kept across an arrow's move.
     @FocusState private var listFocused: Bool
-    /// The run End Session… is asking about, and what its computer said when it did not end.
+    /// Where the open session stood when it was opened: it stays there while it is open.
+    @State private var held: ProjectList.Held?
+    /// The session End Session… is asking about, and what its computer said when it did not end.
     @State private var ending: FleetRow?
     @State private var endNote: String?
-    /// The run Remove… is asking about, and what its computer said when it was not removed.
+    /// The session Remove… is asking about, and what its computer said when it was not removed.
     @State private var removing: FleetRow?
     @State private var removeNote: String?
-    /// Choosing ended runs to remove together (the iPhone's Select): what is chosen, the batch asked about, whether it
-    /// is on its way, and what the last batch did not remove, by run, with the computer's reason.
+    /// Choosing ended sessions to remove together (⌘-click on one): what is chosen, the batch asked about, whether it
+    /// is on its way, and what the last batch did not remove, by session, with the computer's reason.
     @State private var selecting = false
     @State private var chosen: Set<String> = []
     @State private var removingMany: [String]?
@@ -54,15 +53,22 @@ struct FleetList: View {
         return nil
     }
 
+    /// The list as it stands, the open session held at `held`.
+    private func projects(held: ProjectList.Held?) -> ProjectList {
+        ProjectList(
+            machines.fleet, computer: computer, onlyNeedsYou: layout.onlyNeedsYou, revealed: layout.revealed,
+            deck: machines.deck.map(\.sessionKey), held: held)
+    }
+
     var body: some View {
-        let list = RunList(machines.fleet, computer: computer)
-        let rows = scope == .active ? list.needsYou + list.working + list.done : list.ended
-        let selectable = scope == .finished ? list.ended.filter(removable).map(\.id) : []
+        let list = projects(held: held)
+        // The sessions as the list shows them, for the arrows; a folded project's are not shown.
+        let rows = list.projects.filter { !layout.folded.contains($0.id) }.flatMap(\.rows)
+        let selectable = rows.filter(removable).map(\.id)
         let picked = selectable.filter(chosen.contains)
         VStack(spacing: 0) {
             // The head's controls stand at the end of the list's 256 pt, whatever the list's width, so the computer menu
-            // opens from the same place, over whatever is beside the list; it narrows the ended runs as it does the
-            // active ones.
+            // opens from the same place, over whatever is beside the list.
             HStack(spacing: 4) {
                 Spacer(minLength: 0)
                 ComputerFilter(filter: $filter, addComputer: addComputer)
@@ -97,27 +103,57 @@ struct FleetList: View {
                 .accessibilityIdentifier("fleet.batchNote")
             }
 
-            if scope == .active, machines.fleet.isEmpty {
+            if machines.fleet.isEmpty {
                 NoAgentsYet(newAgent: newRun)
                     .padding(18)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
+                if list.needsYou > 0 { needsYouRow(list) }
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        if scope == .active {
-                            activeSections(list)
-                        } else {
-                            endedSection(list.ended, selectable: selectable, picked: picked, narrowedTo: narrowedName)
+                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                        ForEach(list.projects) { project in
+                            let folded = layout.folded.contains(project.id)
+                            Section {
+                                if !folded {
+                                    ForEach(project.rows) { row in
+                                        // Narrowed, a session on another computer (one that needs you, or the open
+                                        // one) names that computer by its mark.
+                                        runRow(
+                                            row, elsewhere: computer != nil && row.machineID != computer,
+                                            choosable: selectable.contains(row.id))
+                                    }
+                                    earlier(project)
+                                }
+                                // 8 pt above the next header.
+                                Color.clear.frame(height: 8)
+                            } header: {
+                                ProjectHeader(project: project, folded: folded) {
+                                    if folded { layout.folded.remove(project.id) } else { layout.folded.insert(project.id) }
+                                }
+                            }
+                        }
+                        if list.onlyNeedsYou, !list.quiet.isEmpty {
+                            Text(RunListWords.quiet(list.quiet)).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                                .padding(.horizontal, 18)
+                                .padding(.top, 10)
+                                .accessibilityIdentifier("fleet.quiet")
+                        }
+                        if list.projects.isEmpty, let narrowedName {
+                            Text(RunListWords.noneOn(narrowedName)).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
+                                .padding(.horizontal, 18)
+                                .frame(height: 30)
+                                .accessibilityIdentifier("fleet.none")
                         }
                     }
-                    // Room below the last row.
+                    // 8 pt above the first header; room below the last row.
+                    .padding(.top, 8)
                     .padding(.bottom, 24)
                 }
                 #if DEBUG
                     .defaultScrollAnchor(RenderWindow.listAtEnd ? .bottom : nil)
                 #endif
-                // One stop for the keyboard: ↑ and ↓ move the open run through the runs as the list shows them, and
-                // the list keeps the keyboard as the run opens beside it.
+                // One stop for the keyboard: ↑ and ↓ move the open session through the sessions as the list shows
+                // them, and the list keeps the keyboard as the session opens beside it.
                 .focusable()
                 .focused($listFocused)
                 .focusEffectDisabled()
@@ -128,7 +164,7 @@ struct FleetList: View {
                 }
             }
 
-            // While choosing: every removable run at once, and what is chosen removed together.
+            // While choosing: every removable session at once, and what is chosen removed together.
             if selecting {
                 HStack(spacing: 8) {
                     let all = !selectable.isEmpty && chosen.isSuperset(of: selectable)
@@ -138,6 +174,12 @@ struct FleetList: View {
                     .keyboardShortcut("a", modifiers: .command)
                     .disabled(batchRunning)
                     Spacer(minLength: 0)
+                    // No Done while a batch runs: the batch holds the choice until it has answered. While the card
+                    // asks, Esc is the card's.
+                    if !batchRunning {
+                        ActionButton(title: "Done", key: nil, prominent: false, id: "fleet.selectDone") { endSelection() }
+                            .keyboardShortcut(removingMany == nil ? .cancelAction : nil)
+                    }
                     ActionButton(
                         title: batchRunning ? "Removing…" : "Remove \(picked.count)…", key: nil, prominent: false,
                         destructive: true, id: "fleet.removeChosen"
@@ -150,9 +192,12 @@ struct FleetList: View {
             ListFoot(openSettings: openSettings)
         }
         .background(Theme.sidebar)
-        // Leaving the ended runs leaves the choosing, and so does no removable run being left at all.
-        .onChange(of: scope) { endSelection() }
-        .onChange(of: list.ended.contains(where: removable)) { _, any in if !any { endSelection() } }
+        // The open session holds its place while it is open, its project unfolded.
+        .onChange(of: opened, initial: true) { _, key in hold(key) }
+        // Only these turns itself off once nothing needs the person.
+        .onChange(of: list.needsYou == 0) { _, none in if none { layout.onlyNeedsYou = false } }
+        // No removable session shown, no choosing.
+        .onChange(of: selectable.isEmpty) { _, none in if none { endSelection() } }
         #if DEBUG
             .task(id: rows.first?.id) {
                 guard let row = rows.first else { return }
@@ -173,8 +218,15 @@ struct FleetList: View {
                     }
                 }
             }
+            // `-CC_FOLD` and `-CC_REVEAL`, once the projects they name are listed.
+            .task(id: list.projects.map(\.name)) {
+                for project in list.projects {
+                    if RenderWindow.folds.contains(project.name) { layout.folded.insert(project.id) }
+                    if let reveals = RenderWindow.reveals[project.name] { layout.revealed[project.id] = reveals }
+                }
+            }
         #endif
-        // Ending a run cannot be undone: it asks once (the approved words), then says only what went wrong.
+        // Ending a session cannot be undone: it asks once (the approved words), then says only what went wrong.
         .confirmation($ending) { row in
             Confirmation(
                 FleetWords.endAsk(row.title, agent: row.summary.agent.displayName), cancelID: "endRun.cancel",
@@ -185,7 +237,7 @@ struct FleetList: View {
             Confirmation(
                 title: FleetWords.endFailedTitle, message: note, answers: [.init(title: "OK", kind: .ok, id: "endRun.ok")])
         }
-        // Removing forgets CodeConnect's own record of a run, never the agent's transcript: it asks once, in the
+        // Removing forgets CodeConnect's own record of a session, never the agent's transcript: it asks once, in the
         // iPhone's words, then says only what went wrong.
         .confirmation($removing) { row in
             Confirmation(
@@ -196,7 +248,7 @@ struct FleetList: View {
                     .init(title: "Remove", kind: .destructive, id: "remove.confirm") { remove(row) },
                 ])
         }
-        // One ask for the whole choice: for one run, its own words; for several, the iPhone's.
+        // One ask for the whole choice: for one session, its own words; for several, the iPhone's.
         .confirmation($removingMany) { keys in
             let one = keys.count == 1 ? rows.first { $0.id == keys[0] } : nil
             return Confirmation(
@@ -213,84 +265,81 @@ struct FleetList: View {
         }
     }
 
-    /// Needs you, Working and Done. Unnarrowed, a section with no runs is left out; narrowed, it says so, and Needs
-    /// you, which never narrows, says it holds every computer's. Done ends with the way to the ended runs, while any.
-    @ViewBuilder private func activeSections(_ list: RunList) -> some View {
-        let narrowedTo = narrowedName
-        let sections: [(id: String, title: String, rows: [FleetRow])] = [
-            ("needsYou", "Needs you", list.needsYou), ("working", "Working", list.working), ("done", "Done", list.done),
-        ]
-        ForEach(sections, id: \.id) { section in
-            let ended = section.id == "done" && !list.ended.isEmpty
-            if !section.rows.isEmpty || (computer != nil && section.id != "needsYou") || ended {
-                SectionLabel(title: section.title, id: section.id) {
-                    if section.id == "needsYou", computer != nil {
-                        Text(RunListWords.allComputers).font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                    } else if ended {
-                        Button { scope = .finished } label: {
-                            Text(RunListWords.ended(list.ended.count)).font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                        }
-                        .buttonStyle(.hover(radius: 5, id: "fleet.showFinished"))
-                        .focusable(false)
-                        .accessibilityIdentifier("fleet.showFinished")
+    /// "N need you", over the projects while anything needs the person on any computer: a click keeps only those
+    /// (Only these), the row lit amber and saying Show All; narrowed to a computer, it says it counts all of them.
+    private func needsYouRow(_ list: ProjectList) -> some View {
+        Button { layout.onlyNeedsYou.toggle() } label: {
+            HStack(spacing: 9) {
+                StateIcon(status: .blocked)
+                Text(RunListWords.needYou(list.needsYou)).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(
+                    list.onlyNeedsYou
+                        ? RunListWords.showAll : computer != nil ? RunListWords.allComputers : RunListWords.onlyThese
+                )
+                .font(Theme.ui(11.5)).foregroundStyle(Theme.text3).fixedSize()
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(list.onlyNeedsYou ? Theme.amber.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.hover(radius: 6, id: "fleet.needsYou"))
+        .focusable(false)
+        .padding(.horizontal, 8)
+        .padding(.bottom, 2)
+        .accessibilityIdentifier("fleet.needsYou")
+        .accessibilityAddTraits(list.onlyNeedsYou ? .isSelected : [])
+    }
+
+    /// Under a project's sessions: its ended ones not yet shown ("N earlier ›", 25 more a click), and once any were
+    /// revealed, Show fewer, which folds them back.
+    @ViewBuilder private func earlier(_ project: ProjectList.Project) -> some View {
+        let revealed = layout.revealed[project.id] ?? 0
+        if project.earlier > 0 || revealed > 0 {
+            HStack(spacing: 12) {
+                if project.earlier > 0 {
+                    quietButton(RunListWords.earlier(project.earlier), id: "fleet.project.\(project.name).earlier") {
+                        layout.revealed[project.id] = revealed + 1
                     }
                 }
-                if section.rows.isEmpty, let narrowedTo {
-                    Text(RunListWords.noneOn(narrowedTo)).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
-                        .padding(.horizontal, 18)
-                        .frame(height: 30)
-                        .accessibilityIdentifier("fleet.section.\(section.id).none")
-                }
-                ForEach(section.rows) { row in
-                    // In Needs you, narrowed, a run on another computer names that computer by its mark.
-                    let elsewhere = section.id == "needsYou" && computer != nil && row.machineID != computer
-                    // Known by its section too: a run that moves to another section (Idle while the launch catches
-                    // up, Done once it has) is drawn anew there, never a lazy row kept with its old mark.
-                    runRow(row, elsewhere: elsewhere, choosable: false).id(section.id + "/" + row.id)
+                if revealed > 0 {
+                    quietButton(RunListWords.showFewer, id: "fleet.project.\(project.name).fewer") {
+                        layout.revealed[project.id] = nil
+                    }
                 }
             }
+            .padding(.leading, 33)
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .padding(.bottom, 2)
         }
     }
 
-    /// The ended runs, on every computer, with the way back and, while any can be removed, Select; while choosing,
-    /// how many are chosen and Done.
+    /// A word that acts, quiet as the list's notes.
+    private func quietButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Text(title).font(Theme.ui(11.5)).foregroundStyle(Theme.text3) }
+            .buttonStyle(.hover(radius: 5, id: id))
+            .focusable(false)
+            .accessibilityIdentifier(id)
+    }
+
     /// The chosen computer's name, while the list is narrowed to one.
     private var narrowedName: String? {
         computer.flatMap { id in machines.models.first { $0.machineID == id }?.machineName }
     }
 
-    /// The ended runs, of the chosen computer while one is chosen; with none, the list says so, naming that computer.
-    @ViewBuilder private func endedSection(
-        _ ended: [FleetRow], selectable: [String], picked: [String], narrowedTo: String?
-    ) -> some View {
-        SectionLabel(title: selecting ? "\(picked.count) selected" : FleetScope.finished.title, id: "ended") {
-            if selecting {
-                // No Done while a batch runs: the batch holds the choice until it has answered. While the card asks,
-                // Esc is the card's.
-                if !batchRunning {
-                    labelButton("Done", id: "fleet.selectDone") { endSelection() }
-                        .keyboardShortcut(removingMany == nil ? .cancelAction : nil)
-                }
-            } else {
-                if !selectable.isEmpty { labelButton("Select", id: "fleet.select") { startSelection() } }
-                labelButton("‹ Active", id: "fleet.showActive") { scope = .active }
-            }
+    /// Holds the session just opened where the list shows it now, and unfolds its project; none open, none held.
+    private func hold(_ key: String?) {
+        held = nil
+        guard let key else { return }
+        for (index, project) in projects(held: nil).projects.enumerated() {
+            guard let at = project.rows.firstIndex(where: { $0.id == key }) else { continue }
+            held = .init(session: key, projectIndex: index, rowIndex: at, ended: project.rows[at].status == .ended)
+            layout.folded.remove(project.id)
+            return
         }
-        if ended.isEmpty {
-            Text(narrowedTo.map(RunListWords.noneOn) ?? FleetWords.noEndedRuns).font(Theme.ui(12.5))
-                .foregroundStyle(Theme.text3)
-                .padding(.horizontal, 18)
-                .frame(height: 30)
-        }
-        ForEach(ended) { row in runRow(row, elsewhere: false, choosable: selectable.contains(row.id)) }
-    }
-
-    /// A section label's word that acts: quiet, as the label's own words.
-    private func labelButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Text(title).font(Theme.ui(12)).foregroundStyle(Theme.text3) }
-            .buttonStyle(.hover(radius: 5, id: id))
-            .focusable(false)
-            .accessibilityIdentifier(id)
     }
 
     /// One run's row: a click opens it (or, while choosing, chooses it), its "…" on hover or a right-click holds what
@@ -416,7 +465,7 @@ struct FleetList: View {
             batchRunning = false
             batchRefused = refused
             if selecting { chosen = Set(refused.keys) }
-            if let note = batchNote(scope.rows(machines.fleet)) {
+            if let note = batchNote(machines.fleet) {
                 NSAccessibility.post(
                     element: NSApp.mainWindow as Any, notification: .announcementRequested,
                     userInfo: [.announcement: "\(note.title). \(note.reasons)", .priority: NSAccessibilityPriorityLevel.high])
@@ -432,23 +481,49 @@ struct FleetList: View {
     }
 }
 
-/// A section's label, 34 pt: its name, and at its end what the section adds (a note, or a way elsewhere).
-private struct SectionLabel<Trailing: View>: View {
-    let title: String
-    let id: String
-    @ViewBuilder let trailing: () -> Trailing
+/// A project's header, 30 pt: its disclosure, which folds and opens the project, its name,
+/// and at its end how many of its sessions need the person, in amber, or else how many sessions it has. It sticks to
+/// the list's top while its sessions scroll under it, opaque, with a hairline under it.
+private struct ProjectHeader: View {
+    let project: ProjectList.Project
+    let folded: Bool
+    let toggle: () -> Void
+    /// Stuck at the list's top, over its own sessions.
+    @State private var stuck = false
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text(title).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text3).lineLimit(1)
-                .accessibilityIdentifier("fleet.section.\(id)")
-            Spacer(minLength: 0)
-            trailing()
+        Button(action: toggle) {
+            HStack(spacing: 6) {
+                Image(systemName: folded ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 8, weight: .semibold)).foregroundStyle(Theme.text3)
+                    .frame(width: 9)
+                Text(project.name).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(project.needsYou > 0 ? RunListWords.needYou(project.needsYou) : "\(project.sessions)")
+                    .font(Theme.ui(11, project.needsYou > 0 ? .medium : .regular))
+                    .foregroundStyle(project.needsYou > 0 ? Theme.amber : Theme.text3)
+                    .monospacedDigit()
+                    .fixedSize()
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 6)
+            .frame(height: 30)
+            .background(stuck ? Theme.sheet : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .overlay(alignment: .bottom) { if stuck { Rectangle().fill(Theme.hairline).frame(height: 1) } }
+            .contentShape(Rectangle())
         }
-        .padding(.leading, 18)
-        .padding(.trailing, 14)
-        .frame(height: 34)
-        .padding(.top, 6)
+        .buttonStyle(.hover(radius: 6, id: "fleet.project.\(project.name)"))
+        .focusable(false)
+        .help(project.folder)
+        .accessibilityLabel(project.name)
+        .accessibilityValue(folded ? "folded" : "open")
+        .accessibilityIdentifier("fleet.project.\(project.name)")
+        .padding(.horizontal, 8)
+        .padding(.bottom, 2)
+        // Opaque, so the sessions it is stuck over do not show through it.
+        .background(Theme.sidebar)
+        .onGeometryChange(for: Bool.self) { $0.frame(in: .scrollView).minY <= 0 } action: { stuck = $0 }
     }
 }
 

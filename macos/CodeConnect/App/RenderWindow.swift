@@ -121,7 +121,7 @@
         /// `-CC_CONFIRM endRun|endNote|remove|removeNote|clear|mode|computer|device|batch|batchRun|signOut`: that ask or notice is up at launch,
         /// about the first run listed, the open run (`-CC_OPEN`), the last computer, or the first device Settings lists.
         static var confirm: String? { UserDefaults.standard.string(forKey: "CC_CONFIRM") }
-        /// `-CC_SELECT all|<n>`: the Ended runs open choosing, with all or the first `n` removable runs chosen; with
+        /// `-CC_SELECT all|<n>`: the list opens choosing, with all or the first `n` removable sessions shown chosen; with
         /// `-CC_CONFIRM batch` the one ask for them is up, with `-CC_CONFIRM batchRun` they are removed at once.
         static var select: Int?? {
             guard let value = UserDefaults.standard.string(forKey: "CC_SELECT") else { return nil }
@@ -216,9 +216,22 @@
             return try? JSONDecoder().decode(MachineStats.self, from: Data(arguments[flag + 1].utf8))
         }
 
-        /// `-CC_FLEET_SCOPE finished`: the list opens on the runs that have ended.
-        static var fleetScope: FleetScope {
-            FleetScope(rawValue: UserDefaults.standard.string(forKey: "CC_FLEET_SCOPE") ?? "") ?? .active
+        /// `-CC_ONLY_THESE YES`: the list opens on only what needs the person.
+        static var layout: ListLayout { ListLayout(onlyNeedsYou: UserDefaults.standard.bool(forKey: "CC_ONLY_THESE")) }
+
+        /// `-CC_FOLD <name,…>`: those projects, by the names the list gives them, open folded.
+        static var folds: Set<String> {
+            Set((UserDefaults.standard.string(forKey: "CC_FOLD") ?? "").split(separator: ",").map(String.init))
+        }
+
+        /// `-CC_REVEAL <name>=<n>,…`: those projects open with their ended sessions revealed `n` times.
+        static var reveals: [String: Int] {
+            var reveals: [String: Int] = [:]
+            for pair in (UserDefaults.standard.string(forKey: "CC_REVEAL") ?? "").split(separator: ",") {
+                let parts = pair.split(separator: "=", maxSplits: 1)
+                if parts.count == 2, let count = Int(parts[1]) { reveals[String(parts[0])] = count }
+            }
+            return reveals
         }
 
         /// `-CC_FILTER <name>`: the list opens narrowed to the computer of that name, as the iPhone's flag does.

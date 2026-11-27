@@ -16,8 +16,9 @@ struct MainWindow: View {
     let startDraft: StartDraft
     /// The address Add a computer starts with, when a refused computer asked to pair again.
     @State private var repairing: String?
-    /// The list, what it is narrowed to, and the run open beside it: the app's, so a closed window opens on them again.
-    @Binding var scope: FleetScope
+    /// The list's layout, what it is narrowed to, and the session open beside it: the app's, so a closed window opens
+    /// on them again.
+    @Binding var layout: ListLayout
     /// The computer the list is narrowed to, if any.
     @Binding var filter: FleetFilter?
     /// The run open beside the list, by its key; none, and the list fills the window.
@@ -46,12 +47,12 @@ struct MainWindow: View {
     @AppStorage(Panes.runHidden) private var runHidden = false
 
     init(
-        scope: Binding<FleetScope>, filter: Binding<FleetFilter?>, opened: Binding<String?>, pendingAdd: Binding<AddKind?>,
+        layout: Binding<ListLayout>, filter: Binding<FleetFilter?>, opened: Binding<String?>, pendingAdd: Binding<AddKind?>,
         settings: Binding<SettingsSection?>, startDraft: StartDraft
     ) {
         _settings = settings
         self.startDraft = startDraft
-        _scope = scope
+        _layout = layout
         _filter = filter
         _opened = opened
         _pendingAdd = pendingAdd
@@ -255,10 +256,10 @@ struct MainWindow: View {
         }
     }
 
-    /// The run just started is open, in the list of every active agent, unfiltered.
+    /// The session just started is open, in the list of every session, unfiltered.
     private func started(_ run: String) {
         startDraft.didOpen()
-        scope = .active
+        layout.onlyNeedsYou = false
         filter = nil
         opened = run
     }
@@ -275,7 +276,7 @@ struct MainWindow: View {
     /// its place. Only a plain Return: ⌘↩ is the open run's own (a card's Allow).
     private func runList(besideAPane: Bool) -> some View {
         FleetList(
-            scope: $scope, filter: $filter, opened: $opened, newRun: { adding = .agent },
+            layout: $layout, filter: $filter, opened: $opened, newRun: { adding = .agent },
             addComputer: { adding = .computer }, openSettings: { settings = .general }
         )
         .frame(width: besideAPane ? 256 : nil)

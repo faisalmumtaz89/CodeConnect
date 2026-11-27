@@ -56,7 +56,6 @@ public enum FleetWords {
     /// The Mac's run list with nothing in it: its title, then where runs come from.
     public static let noRunsYet = "No sessions yet"
     public static let runsComeFrom = "Start one here or from your iPhone. Sessions started at a computer appear on their own."
-    public static let noEndedRuns = "No ended sessions."
     public static let noComputersYet = "No computers yet"
 
     /// Ending run `name` (its whole `RunLabel.inline`, which tells it from another run in the same project), whose agent

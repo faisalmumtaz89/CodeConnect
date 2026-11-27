@@ -16,8 +16,8 @@ struct CodeConnectApp: App {
     @State private var settings: SettingsSection?
     /// Help › CodeConnect Support.
     private static let support = URL(string: "https://codeconnect.sh/support")!
-    /// Where the main window was, kept while it is closed: it opens again on the same list and run.
-    @State private var scope = FleetScope.active
+    /// Where the main window was, kept while it is closed: it opens again on the same list and session.
+    @State private var layout = ListLayout()
     @State private var filter: FleetFilter?
     @State private var opened: String?
     @State private var pendingAdd: AddKind?
@@ -32,7 +32,7 @@ struct CodeConnectApp: App {
         #if DEBUG
             RenderWindow.isolateTestLaunch()
             _settings = State(initialValue: RenderWindow.settingsSection)
-            _scope = State(initialValue: RenderWindow.fleetScope)
+            _layout = State(initialValue: RenderWindow.layout)
             _opened = State(initialValue: RenderWindow.opened)
         #endif
         let installer = Installer.forThisLaunch()
@@ -51,7 +51,7 @@ struct CodeConnectApp: App {
         // The app's one window: no New Window, and no window tabs.
         Window("CodeConnect", id: "main") {
             ThemeRoot(content: RootView(
-                scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd, settings: $settings,
+                layout: $layout, filter: $filter, opened: $opened, pendingAdd: $pendingAdd, settings: $settings,
                 startDraft: startDraft))
                 .environment(machines)
                 .environment(setup)
@@ -114,7 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct RootView: View {
     @Environment(Machines.self) private var machines
     @Environment(Setup.self) private var setup
-    @Binding var scope: FleetScope
+    @Binding var layout: ListLayout
     @Binding var filter: FleetFilter?
     @Binding var opened: String?
     @Binding var pendingAdd: AddKind?
@@ -123,7 +123,7 @@ struct RootView: View {
 
     var body: some View {
         MainWindow(
-            scope: $scope, filter: $filter, opened: $opened, pendingAdd: $pendingAdd, settings: $settings,
+            layout: $layout, filter: $filter, opened: $opened, pendingAdd: $pendingAdd, settings: $settings,
             startDraft: startDraft)
             .confirmationHost()
             .frame(minWidth: 960, minHeight: 520)

@@ -110,9 +110,6 @@ final class ProjectListTests: XCTestCase {
             ProjectList(rows, computer: "m3"), ProjectList(rows, onlyNeedsYou: true),
             ProjectList(rows, pinned: [ProjectList.key(rows[1])]), ProjectList(rows, hidden: [ProjectList.key(rows[0])]),
         ] { XCTAssertEqual(list.needsYou, 4) }
-        XCTAssertEqual(
-            RunList(rows.filter { !$0.summary.archived }, computer: nil).needsYou.count, 4,
-            "the list's sections count the same")
         XCTAssertFalse(plain.projects.flatMap(\.rows).contains { $0.id == "gone" })
     }
 

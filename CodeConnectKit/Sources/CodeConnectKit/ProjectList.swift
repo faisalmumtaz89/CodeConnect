@@ -57,8 +57,8 @@ public struct ProjectList: Sendable, Equatable {
     /// How many ended sessions a reveal adds.
     public static let page = 25
 
-    /// One rule for what needs the person, the same as the list's sections (`RunList`): a card or a question, a
-    /// failure, an idle session with no first message, a session at its usage limit.
+    /// One rule for what needs the person, for the count, Only these and a hidden project's return: a card or a
+    /// question, a failure, an idle session with no first message, a session at its usage limit.
     public static func needsYou(_ row: FleetRow) -> Bool {
         [.blocked, .failed, .idle].contains(row.status) || row.summary.atLimit
     }
