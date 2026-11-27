@@ -1121,6 +1121,11 @@ public final class AppModel {
             // which only a live pairing produces, so the word each refusal says could not be rendered.
             switch UserDefaults.standard.string(forKey: "CC_FIXTURE_LINK") {
             case "stale": return
+            // `-CC_FIXTURE_LINK offline`: the computer stopped answering, its runs still listed as it last said them.
+            case "offline":
+                connection.setPhaseForTesting(
+                    .waiting(until: Date().addingTimeInterval(60), reason: "The computer did not answer."))
+                return
             case "refused-version":
                 connection.setRefusedForTesting(
                     .differentVersion,
