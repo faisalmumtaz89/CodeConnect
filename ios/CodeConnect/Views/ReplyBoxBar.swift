@@ -119,6 +119,7 @@ struct ReplyBoxBar<Leading: View, Trailing: View>: View {
                 let text = Text(modelName)
                     .ccType(mono ? CC.type.footnote.monospaced() : CC.type.footnote)
                     .fontWeight(.medium)
+                    .foregroundStyle(warn ? CC.color.danger : CC.text.primary)
                     .lineLimit(1)
                     .accessibilityIdentifier(nameID)
                 if name == .whole {

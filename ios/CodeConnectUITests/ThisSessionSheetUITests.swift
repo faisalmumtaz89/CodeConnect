@@ -11,6 +11,26 @@ final class ThisSessionSheetUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    /// The sheet opens tall, its models in view as the board draws it, and the choices in force are drawn live: a
+    /// disabled button is faded by iOS, which drew the current effort, mode and model as the dimmest rows.
+    func testTheSheetOpensTallWithTheCurrentChoicesLive() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
+            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
+        ]
+        app.launch()
+        let chip = app.buttons["session.composer.settings"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 25), "the model chip")
+        chip.tap()
+        let sonnet = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Sonnet")).firstMatch
+        XCTAssertTrue(sonnet.waitForExistence(timeout: 10), "the model rows")
+        XCTAssertTrue(sonnet.isHittable, "the models in view without a drag")
+        let current = app.buttons.matching(NSPredicate(format: "isSelected == true")).allElementsBoundByIndex
+        XCTAssertGreaterThanOrEqual(current.count, 3, "the effort, the mode and the model in force")
+        for choice in current { XCTAssertTrue(choice.isEnabled, "\(choice.label) is drawn live") }
+    }
+
     func testAnotherAgentsModelOpensTheStartSheetOnIt() {
         let app = XCUIApplication()
         app.launchArguments = [

@@ -36,6 +36,7 @@ struct UsageFigures: View {
                     ZStack(alignment: .leading) {
                         Text(verbatim: "100%").hidden()
                         Text(verbatim: "\(ring.usedPercent)%")
+                            .foregroundStyle(atLimit ? CC.color.danger : CC.text.secondary)
                     }
                 }
             }

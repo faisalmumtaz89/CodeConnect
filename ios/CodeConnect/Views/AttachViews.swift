@@ -153,10 +153,12 @@ struct AttachmentTray: View {
             }
             if let reason {
                 Label {
-                    // One line: a file's own reason leads with its name, which gives way in its middle.
+                    // One line: a file's own reason leads with its name, which gives way in its middle, never past
+                    // a few letters either side of the "…".
                     if let name = files.first(where: { reason.hasPrefix($0.name) })?.name {
                         HStack(spacing: 0) {
                             Text(verbatim: name).lineLimit(1).truncationMode(.middle)
+                                .frame(minWidth: name.count > 8 ? 56 : nil, alignment: .leading)
                             Text(verbatim: String(reason.dropFirst(name.count))).lineLimit(1).layoutPriority(1)
                         }
                     } else {

@@ -8,6 +8,8 @@ struct LimitBand: View {
     let model: AppModel
     let key: String
 
+    @Environment(\.dynamicTypeSize) private var typeSize
+
     var body: some View {
         TimelineView(.everyMinute) { context in
             if let foot = model.limitFoot(for: key, now: context.date) {
@@ -17,10 +19,15 @@ struct LimitBand: View {
                         Text(foot.title).ccType(CC.type.footnote).fontWeight(.semibold)
                             .foregroundStyle(CC.text.primary)
                             .lineLimit(1).fixedSize()
-                        if let resets = foot.resets {
+                        if let resets = foot.resets, !typeSize.isAccessibilitySize {
                             Text(resets).ccType(CC.type.footnote).foregroundStyle(CC.text.secondary)
                                 .lineLimit(1).truncationMode(.tail)
                         }
+                    }
+                    // At accessibility sizes the title takes the line, so when it resets gets its own.
+                    if let resets = foot.resets, typeSize.isAccessibilitySize {
+                        Text(resets).ccType(CC.type.footnote).foregroundStyle(CC.text.secondary)
+                            .padding(.leading, 22)
                     }
                     if !foot.limits.isEmpty {
                         windows(foot)

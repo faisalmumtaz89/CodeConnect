@@ -135,6 +135,7 @@ struct HostedSettingsSheet: View {
             ForEach(live.efforts, id: \.value) { entry in
                 let isSelected = live.selectedEffort?.value == entry.value
                 Button {
+                    guard live.offers(entry) || !isSelected else { return }
                     run { await model.setEffort(for: sessionKey, effortValue: entry.value) }
                 } label: {
                     Text(entry.label)
@@ -148,7 +149,7 @@ struct HostedSettingsSheet: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(live.inFlight || !live.offers(entry) && isSelected)
+                .disabled(live.inFlight)
                 .accessibilityAddTraits(isSelected ? [.isSelected] : [])
                 .accessibilityValue(isSelected && live.effortIsDefault ? "Default" : "")
             }
@@ -233,13 +234,14 @@ struct HostedSettingsSheet: View {
 
     /// One selectable row: its label (in the alert's red for a mode that lets the agent work without asking), the
     /// agent's description beneath, a check at its end when it is the current value, and its tap — disabled while any
-    /// call is in flight (the menus are one unit) and on the row already in force (there is nothing to apply), unless
-    /// the row says it is still on offer (`offered`).
+    /// call is in flight (the menus are one unit), and doing nothing on the row already in force (there is nothing to
+    /// apply) unless the row says it is still on offer (`offered`). That row stays enabled: iOS fades a disabled one.
     private func choiceRow(
         title: String, detail: String? = nil, warn: Bool = false, isSelected: Bool, offered: Bool? = nil, isLast: Bool,
         disabled: Bool, apply: @escaping () async -> SettingResult?
     ) -> some View {
         Button {
+            guard offered ?? !isSelected else { return }
             run(apply)
         } label: {
             HStack(spacing: 10) {
@@ -264,7 +266,7 @@ struct HostedSettingsSheet: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(disabled || !(offered ?? !isSelected))
+        .disabled(disabled)
         .overlay(alignment: .bottom) {
             if !isLast { Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1).padding(.leading, 14) }
         }

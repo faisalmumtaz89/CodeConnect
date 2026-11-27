@@ -1090,7 +1090,7 @@ struct SessionDetailView: View {
             HostedSettingsSheet(sessionKey: key, onLanded: consumeDraft, onStartNew: onStartNew)
                 .environment(model)
                 .ccConfirmationHost()
-                .ccResizableSheet()
+                .ccTallSheet()
         }
         .sheet(isPresented: $showUsageSheet) {
             UsageSheet(sessionKey: key)
@@ -1204,6 +1204,8 @@ struct SessionDetailView: View {
             .foregroundStyle(CC.text.secondary)
         }
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        // From the back button, however short: the bar centres its title item.
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .onLongPressGesture {
             if let summary { CCPasteboard.copy(summary.cwd) }
@@ -1735,9 +1737,9 @@ private struct SessionTimeline: View {
 
                     // The scroll target for "go to the latest" — nothing but
                     // an identity; the at-the-tail verdict lives in
-                    // `TailObserver`, off the real scroll offset. The list's
-                    // bottom breathing room rides inside this child so the
-                    // target includes it.
+                    // `TailObserver`, off the real scroll offset. No breathing
+                    // room under it: the reply box keeps the last line 30 pt
+                    // from its rim.
                     //
                     // The probe rides this row because it must sit inside the
                     // collection view to walk up to it. A row exists only near
@@ -1749,7 +1751,6 @@ private struct SessionTimeline: View {
                     // which is the moment `TailObserver` re-pins it.
                     Color.clear
                         .frame(height: 1)
-                        .padding(.bottom, CC.space.lg)
                         .background(TailObserver(watch: tailWatch, anchor: pageAnchor))
                         .id(Self.tailAnchor)
                 }
@@ -2151,7 +2152,7 @@ private struct SessionComposeBar: View {
 
     /// The one circle: mic, Send, Stop, drawn 34 in a 44-pt target.
     private var circle: some View {
-        CCVoiceButton(phase: phase, blockedReason: blockedReason, disc: 34) { act() }
+        CCVoiceButton(phase: phase, blockedReason: blockedReason, disc: 34, quietMic: true) { act() }
             .accessibilityIdentifier(phase == .stopTurn ? "stop-\(key)" : "session.composer.send")
     }
 
