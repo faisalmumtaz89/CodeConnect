@@ -788,7 +788,7 @@ async fn existing_run(db: &crate::db::Db, request_id: &str) -> Option<StartSessi
         Ok(None) => None,
         Err(err) => Some(failed(
             StartFailure::LaunchFailed,
-            format!("could not read this computer's runs: {err:#}"),
+            format!("could not read this computer's sessions: {err:#}"),
         )),
     }
 }

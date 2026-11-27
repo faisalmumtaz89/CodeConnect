@@ -293,7 +293,7 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
   return {
     say(command: Say | Wake): void {
       if (ended) {
-        refuse(command.uuid, 'the run is not taking messages');
+        refuse(command.uuid, 'the session is not taking messages');
         return;
       }
       queued.push({ uuid: command.uuid, text: command.text });
@@ -338,7 +338,7 @@ export function runAcp(start: Start, send: (body: Unsequenced) => void, finish: 
                 ...(command.effort === undefined ? [] : [option('thought_level', command.effort)]),
               ];
         try {
-          if (ended || sessionId === undefined) throw new Error('the run is not taking settings');
+          if (ended || sessionId === undefined) throw new Error('the session is not taking settings');
           if (parts.length === 0) throw new Error('nothing to change');
           for (const [method, params] of parts) await set(method, params);
           send({ type: 'outcome', uuid: command.uuid, status: 'done' });

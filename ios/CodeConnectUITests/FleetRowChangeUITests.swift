@@ -75,7 +75,7 @@ final class FleetRowChangeUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(outcome.waitForExistence(timeout: 30), "the launch's refusal is in Stop's place")
         XCTAssertTrue(
-            outcome.label.contains("no connection to this run"), "and speaks the daemon's sentence: \(outcome.label)")
+            outcome.label.contains("no connection to this session"), "and speaks the daemon's sentence: \(outcome.label)")
 
         outcome.tap()
         XCTAssertTrue(again.waitForExistence(timeout: 10), "Stop is offered beside the sentence")

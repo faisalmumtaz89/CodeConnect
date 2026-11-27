@@ -15,7 +15,7 @@ again on the same thread with the new sign-in. If something is running (a turn, 
 started in its last turn, a message of yours it hasn't answered), that message goes on the old account and
 the session moves at the next one. A session that has started a subagent stays on its account until its
 app server ends. Its menus and settings stay as they are throughout. An app server
-that does not end within 5 seconds of being stopped for the move is ended as End Run ends one. A message
+that does not end within 5 seconds of being stopped for the move is ended as End Session ends one. A message
 queued in Codex itself (`codex queue`) is not kept across a move, and a process a session started
 outside Codex's own tracking (a background command from an earlier turn) ends when the session moves
 accounts. When the new account's

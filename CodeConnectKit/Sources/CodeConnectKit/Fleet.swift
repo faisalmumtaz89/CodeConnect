@@ -470,7 +470,7 @@ public enum FleetStatusRule {
             // opens and the "Observe only" verdict falls away. An End-run exit and a
             // failed start stay ended.
             if summary.relaunchesOnMessage { return .control }
-            return .observe(reason: "This run has ended.")
+            return .observe(reason: "This session has ended.")
         }
         guard capabilities.canApproveReliably else {
             return .observe(
@@ -484,7 +484,7 @@ public enum FleetStatusRule {
             return .control
         case .detached:
             return .observe(
-                reason: "\(HostDevice.current.computer("The computer")) has lost its link to this run. It can be answered again once the link is back."
+                reason: "\(HostDevice.current.computer("The computer")) has lost its link to this session. It can be answered again once the link is back."
             )
         }
     }

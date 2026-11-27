@@ -709,7 +709,7 @@ where
                     if device_id.is_none() {
                         send(&mut sink, &ServerMessage::Error {
                             code: "not_authorised".into(),
-                            message: "only a paired device may read a run's repository".into(),
+                            message: "only a paired device may read a session's repository".into(),
                         }).await?;
                         continue;
                     }
@@ -734,7 +734,7 @@ where
                     if device_id.is_none() {
                         send(&mut sink, &ServerMessage::Error {
                             code: "not_authorised".into(),
-                            message: "only a paired device may read a run's conflicts".into(),
+                            message: "only a paired device may read a session's conflicts".into(),
                         }).await?;
                         continue;
                     }
@@ -772,7 +772,7 @@ where
                     if device_id.is_none() {
                         send(&mut sink, &ServerMessage::Error {
                             code: "not_authorised".into(),
-                            message: "only a paired device may act on a run's repository".into(),
+                            message: "only a paired device may act on a session's repository".into(),
                         }).await?;
                         continue;
                     }

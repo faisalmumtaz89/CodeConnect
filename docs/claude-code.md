@@ -26,7 +26,7 @@ dev server, a watcher) stays on its account until the job ends; a finished job l
 next message. A session already running when CodeConnect was updated to this version stays on its
 account until its Claude Code ends, since what it started in the background before then was not
 recorded. Its menus and settings stay as they are. A session that does not end within 5 seconds of
-being stopped for its move is ended as End Run ends one. A process a
+being stopped for its move is ended as End Session ends one. A process a
 session started outside Claude Code's own tracking (a `cmd &`) ends when the session moves accounts.
 
 For each Claude Code account, and the Default, the Accounts page shows the email and plan it is

@@ -10,11 +10,11 @@ final class ModeConfirmationTests: XCTestCase {
         let w = ModeConfirmation.words(for: .claude)
         XCTAssertEqual(w.title, "Let Claude work without asking?")
         XCTAssertEqual(w.items.map(\.words), ["Runs commands and edits files without asking"])
-        XCTAssertEqual(w.note, "In this run, until you change the mode back.")
+        XCTAssertEqual(w.note, "In this session, until you change the mode back.")
         XCTAssertEqual(w.confirm, "Bypass Permissions")
         XCTAssertEqual(w.cancel, "Keep Asking")
         XCTAssertEqual(
-            w.message, "Runs commands and edits files without asking. In this run, until you change the mode back.")
+            w.message, "Runs commands and edits files without asking. In this session, until you change the mode back.")
     }
 
     func testCodexFullAccessWords() {
@@ -23,7 +23,7 @@ final class ModeConfirmationTests: XCTestCase {
         XCTAssertEqual(
             w.items.map(\.words),
             ["Runs commands and edits files without asking", "Works outside this project’s folder", "Uses the network"])
-        XCTAssertEqual(w.note, "In this run, until you change the mode back.")
+        XCTAssertEqual(w.note, "In this session, until you change the mode back.")
         XCTAssertEqual(w.confirm, "Give Full Access")
         XCTAssertEqual(w.cancel, "Keep Asking")
     }
@@ -33,7 +33,7 @@ final class ModeConfirmationTests: XCTestCase {
         for agent in [AgentKind.claude, .codex] {
             let w = ModeConfirmation.words(for: agent)
             XCTAssertFalse(w.message.lowercased().contains("safe"), w.message)
-            XCTAssertTrue(w.note.hasPrefix("In this run"), w.note)
+            XCTAssertTrue(w.note.hasPrefix("In this session"), w.note)
             XCTAssertTrue(w.note.contains("until you change the mode back"), w.note)
         }
     }

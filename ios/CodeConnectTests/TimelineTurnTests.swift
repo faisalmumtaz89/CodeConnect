@@ -147,7 +147,7 @@ final class TimelineTurnTests: XCTestCase {
         let items = TimelineBuilder.build([user(1), reply(2, "Checking the other sections next."), apiError(3), end])
         XCTAssertEqual(
             shape(TimelineBuilder.drawn(items)),
-            ["you", "reply:Checking the other sections next.", "notice:The run stopped: API Error 529 · overloaded"])
+            ["you", "reply:Checking the other sections next.", "notice:The session stopped: API Error 529 · overloaded"])
         let notice = try lastNotice(items)
         XCTAssertEqual(notice.kind, .turnComplete, "still the turn's boundary")
         XCTAssertEqual(notice.severity, .failure)
@@ -159,14 +159,14 @@ final class TimelineTurnTests: XCTestCase {
     /// Another failure names its status, or else its agent's first line, and says when the run stopped.
     func testAnotherFailedTurnNamesItsStatusOrItsAgentsWords() throws {
         let status = try lastNotice(TimelineBuilder.build([user(1), failedEnd(2, #"{"status":500,"message":"API Error: 500"}"#)]))
-        XCTAssertEqual(status.title, "The run stopped: API Error 500")
+        XCTAssertEqual(status.title, "The session stopped: API Error 500")
         let words = failedEnd(2, #"{"message":"Model unavailable\nfor this account"}"#)
         let notice = try lastNotice(TimelineBuilder.build([user(1), words]))
-        XCTAssertEqual(notice.title, "The run stopped: Model unavailable")
+        XCTAssertEqual(notice.title, "The session stopped: Model unavailable")
         let at = Format.clock(words.date, now: words.date)
         XCTAssertEqual(notice.detail, "It stopped at \(at). Nothing was lost; send a message to carry on.")
         let silent = try lastNotice(TimelineBuilder.build([user(1), failedEnd(2, #"{"message":null}"#)]))
-        XCTAssertEqual(silent.title, "The run stopped")
+        XCTAssertEqual(silent.title, "The session stopped")
     }
 
     /// Codex's and Antigravity's own error, filed beside a failed end in the same turn, after it or before it, is that
@@ -174,14 +174,14 @@ final class TimelineTurnTests: XCTestCase {
     func testAFailedTurnsOwnErrorIsItsEndsToSay() {
         let codex = event(3, "error", #"{"message":"Model unavailable","codexErrorInfo":"other"}"#, source: "codex", turn: "t1")
         let items = TimelineBuilder.build([user(1), failedEnd(2, #"{"message":"Model unavailable"}"#), codex])
-        XCTAssertEqual(shape(TimelineBuilder.drawn(items)), ["you", "notice:The run stopped: Model unavailable"])
+        XCTAssertEqual(shape(TimelineBuilder.drawn(items)), ["you", "notice:The session stopped: Model unavailable"])
         let agy = event(2, "error", #"{"message":"Authentication required"}"#, source: "acp", turn: "t1")
         let before = TimelineBuilder.build([user(1), agy, failedEnd(3, #"{"message":"Authentication required"}"#)])
-        XCTAssertEqual(shape(TimelineBuilder.drawn(before)), ["you", "notice:The run stopped: Authentication required"])
+        XCTAssertEqual(shape(TimelineBuilder.drawn(before)), ["you", "notice:The session stopped: Authentication required"])
         let other = event(2, "error", #"{"message":"An earlier error"}"#, source: "codex", turn: "t0")
         let kept = TimelineBuilder.build([user(1), other, failedEnd(3, #"{"message":"Model unavailable"}"#)])
         XCTAssertEqual(
-            shape(TimelineBuilder.drawn(kept)), ["you", "notice:Error", "notice:The run stopped: Model unavailable"])
+            shape(TimelineBuilder.drawn(kept)), ["you", "notice:Error", "notice:The session stopped: Model unavailable"])
     }
 
     /// An API error's reply on a turn whose end says nothing of a failure (a daemon before minor 70) is still drawn.
@@ -343,7 +343,7 @@ final class TimelineTurnTests: XCTestCase {
         ]
         let items = TimelineBuilder.build(events)
         XCTAssertEqual(
-            shape(items), ["you", "reply:Done.", "notice:Turn complete", "notice:Run resumed"])
+            shape(items), ["you", "reply:Done.", "notice:Turn complete", "notice:Session resumed"])
         guard case .notice(let notice)? = items.last?.content else { return XCTFail("\(shape(items))") }
         XCTAssertEqual(notice.detail, "claude-opus-5[1m]")
         let result = await status(events)
@@ -357,9 +357,9 @@ final class TimelineTurnTests: XCTestCase {
         let restart = event(44, "session_start", #"{"hook_event_name":"SessionStart","source":"startup"}"#)
         XCTAssertEqual(
             shape(TimelineBuilder.build([user(41), reply(42, "Done."), stop(43), restart])),
-            ["you", "reply:Done.", "notice:Turn complete", "notice:Run started"])
+            ["you", "reply:Done.", "notice:Turn complete", "notice:Session started"])
         XCTAssertEqual(
-            shape(TimelineBuilder.build([restart, user(45)])), ["notice:Run started", "you"])
+            shape(TimelineBuilder.build([restart, user(45)])), ["notice:Session started", "you"])
     }
 
     /// Whether a start is the session's own is decided by the events before
@@ -377,7 +377,7 @@ final class TimelineTurnTests: XCTestCase {
             4, "session_start", #"{"hook_event_name":"SessionStart","source":"resume"}"#)
         XCTAssertEqual(
             shape(TimelineBuilder.build([user(1), reply(2, "Done."), stop(3), late])),
-            ["you", "reply:Done.", "notice:Turn complete", "notice:Run resumed"])
+            ["you", "reply:Done.", "notice:Turn complete", "notice:Session resumed"])
     }
 
     /// Claude Code says what started it (2.1.289: startup, resume, clear,
@@ -397,8 +397,8 @@ final class TimelineTurnTests: XCTestCase {
         XCTAssertEqual(
             shape(items),
             [
-                "you", "notice:Conversation compacted", "notice:Run resumed",
-                "notice:Run started", "notice:Conversation cleared.",
+                "you", "notice:Conversation compacted", "notice:Session resumed",
+                "notice:Session started", "notice:Conversation cleared.",
             ])
     }
 

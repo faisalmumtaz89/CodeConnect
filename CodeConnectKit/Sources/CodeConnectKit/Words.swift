@@ -54,9 +54,9 @@ public enum FleetWords {
     }
     public static let agentsAppearHere = "Agents you start with CodeConnect appear here."
     /// The Mac's run list with nothing in it: its title, then where runs come from.
-    public static let noRunsYet = "No runs yet"
-    public static let runsComeFrom = "Start one here or from your iPhone. Runs started at a computer appear on their own."
-    public static let noEndedRuns = "No ended runs."
+    public static let noRunsYet = "No sessions yet"
+    public static let runsComeFrom = "Start one here or from your iPhone. Sessions started at a computer appear on their own."
+    public static let noEndedRuns = "No ended sessions."
     public static let noComputersYet = "No computers yet"
 
     /// Ending run `name` (its whole `RunLabel.inline`, which tells it from another run in the same project), whose agent
@@ -66,9 +66,9 @@ public enum FleetWords {
             title: "End “\(name)”?",
             items: [
                 .init(mark: "stop", words: "\(agent) stops"),
-                .init(mark: "arrow.right", words: "The run moves to \(FleetStatus.ended.label)"),
+                .init(mark: "arrow.right", words: "The session moves to \(FleetStatus.ended.label)"),
             ],
-            note: "Its folder stays as it is.", cancel: "Cancel", confirm: "End Run")
+            note: "Its folder stays as it is.", cancel: "Cancel", confirm: "End Session")
     }
 
     /// Archiving run `name` (artboard n-11): it removes the worktree, deletes the local branch and ends `agent`’s
@@ -82,19 +82,19 @@ public enum FleetWords {
                 .init(mark: "arrow.triangle.branch", words: "Deletes the local branch"),
                 .init(mark: "terminal", words: "Ends the \(agent) session"),
             ],
-            note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive Run")
+            note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive Session")
     }
     /// An archived run's conversation ends with this (its `archived` notice).
     public static let archived = "Archived · worktree and branch removed"
 
     public static func removeTitle(_ project: String) -> String { "Remove \(project)?" }
     public static func removeKeeps(_ agent: String) -> String { "\(agent)’s own transcript stays on the computer." }
-    public static func removeManyTitle(_ count: Int) -> String { "Remove \(count) runs?" }
+    public static func removeManyTitle(_ count: Int) -> String { "Remove \(count) sessions?" }
     public static let removeManyKeeps = "Their own transcripts stay on the computer."
 
     /// The notices after an end or a removal that did not happen: what happened, then why, in a sentence.
-    public static let endFailedTitle = "Couldn’t end the run"
-    public static let removeFailedTitle = "Couldn’t remove the run"
+    public static let endFailedTitle = "Couldn’t end the session"
+    public static let removeFailedTitle = "Couldn’t remove the session"
     /// An answer this build does not know: refused, with nothing quoted.
     public static var refusedPlainly: String { "\(HostDevice.current.computer("The computer")) refused." }
     /// Why a removal did not happen, for each answer ccd gives, or nil when it did (or the run was already gone).
@@ -103,7 +103,7 @@ public enum FleetWords {
         switch result {
         case .deleted, .notFound: return nil
         case .stillRunning: return "It’s still running. End it first, then remove it."
-        case .notExited: return "\(computer) doesn’t know whether it has stopped, so it keeps the run."
+        case .notExited: return "\(computer) doesn’t know whether it has stopped, so it keeps the session."
         case .failed: return "\(computer) couldn’t remove it."
         case .unknown: return refusedPlainly
         case .none: return "\(computer) didn’t answer."
@@ -154,26 +154,26 @@ public enum SessionWords {
     public static let jumpToLatest = "Jump to the latest event"
     public static let stopThisTurn = "Stop this turn"
     public static let stopping = "Stopping…"
-    public static let stopHelp = "Stop the turn this run is running"
+    public static let stopHelp = "Stop the turn this session is running"
     public static let tryAgainInAMoment = "Try again in a moment."
     /// A tool call or its result the computer cut whole before sending it.
     public static var cutShort: String {
         "Cut short by \(HostDevice.current.computer("your computer")). This is not the whole output."
     }
-    public static let nothingLiveYet = "Nothing live has arrived for this run yet."
+    public static let nothingLiveYet = "Nothing live has arrived for this session yet."
     /// In a run's place while a catch-up holds it: the computer's list names the run and its conversation has not
     /// arrived yet.
     public static func catchingUp(with computer: String?) -> String {
         "Catching up with \(computer ?? "your computer")…"
     }
-    public static let catchingUpMessage = "This run’s conversation appears here once it has arrived."
+    public static let catchingUpMessage = "This session’s conversation appears here once it has arrived."
     /// In the reply box's place on a run that takes no reply (`SessionSummary.takesNoReply`).
-    public static let runEnded = "This run has ended"
-    /// The conversation's end of a run the person ended (End Run), and, in a worktree of its own, that its worktree
+    public static let runEnded = "This session has ended"
+    /// The conversation's end of a run the person ended (End Session), and, in a worktree of its own, that its worktree
     /// and branch are kept; else `runEnded`.
     public static func ended(byPerson: Bool, inWorktree: Bool) -> String {
         guard byPerson else { return runEnded }
-        return inWorktree ? "You ended this run · its worktree and branch are kept" : "You ended this run"
+        return inWorktree ? "You ended this session · its worktree and branch are kept" : "You ended this session"
     }
     /// A conversation with nothing in it: "yet" only while the run can still record something, not on one that has
     /// ended and takes no reply (`SessionSummary.takesNoReply`).
@@ -258,12 +258,12 @@ public enum ChangesWords {
         "Showing what it last said, \(Format.ago(since: date, now: now))"
     }
     public static let checkAgain = "Check again"
-    public static let reading = "Reading this run’s changes on its computer…"
-    public static let stillReading = "Still reading this run’s changes…"
+    public static let reading = "Reading this session’s changes on its computer…"
+    public static let stillReading = "Still reading this session’s changes…"
     public static let couldNotRead = "Your computer could not read the changes"
     public static let itsReason = "Its reason, word for word:"
     public static let noUncommitted = "No uncommitted changes"
-    public static let clean = "This run’s folder was clean when it was read."
+    public static let clean = "This session’s folder was clean when it was read."
     public static let noDiff = "No diff to show"
     public static let computersReason = "Your computer’s reason, word for word:"
     public static func files(_ count: Int) -> String { count == 1 ? "1 file" : "\(count) files" }
@@ -273,7 +273,7 @@ public enum ChangesWords {
         "You committed \(files(count)) · \(sha.prefix(7))"
     }
     /// The Changes panel's line under its state while it can commit, or why it cannot yet.
-    public static let commitReady = "The run has stopped, so you can commit what it left"
+    public static let commitReady = "The session has stopped, so you can commit what it left"
     public static let commitWaitsWorking = "Agent is working · actions wait until it stops"
     public static let commitWaitsCard = "Waiting on you · actions wait until the agent stops"
     public static let commitWaitsMerge = "A merge has unresolved files · resolve them to commit"
@@ -289,11 +289,11 @@ public enum ChangesWords {
     public static func actionRefused(code: String, detail: String?, step: GitStep) -> String {
         let reason: String
         switch (code, step) {
-        case ("busy", .pullRequest): reason = "A run in this folder is working or waiting for you, so nothing was pushed."
+        case ("busy", .pullRequest): reason = "A session in this folder is working or waiting for you, so nothing was pushed."
         case ("unmerged", .pullRequest): reason = "A merge has unresolved files, so nothing was pushed."
         case ("git_failed", .pullRequest): reason = "Git could not push the branch, so no PR was opened."
         case ("timeout", .pullRequest): reason = "Git took too long; the branch may or may not have been pushed, and no PR was opened."
-        case ("busy", .merge): reason = "A run in this folder is working or waiting for you, so nothing was merged."
+        case ("busy", .merge): reason = "A session in this folder is working or waiting for you, so nothing was merged."
         case ("head_moved", .merge):
             reason = "The pull request or its commit changed since the panel showed it, so nothing was merged."
         case ("method_not_allowed", .merge):
@@ -304,15 +304,15 @@ public enum ChangesWords {
         case ("gh_missing", .merge): reason = "This computer has no gh, so nothing was merged."
         case ("gh_signed_out", .merge): reason = "This computer’s gh isn’t signed in to GitHub, so nothing was merged."
         case ("github_unavailable", .merge): reason = "GitHub could not be reached, so nothing was merged."
-        case ("busy", .archive): reason = "A run in this folder is working or waiting for you, so nothing was archived."
+        case ("busy", .archive): reason = "A session in this folder is working or waiting for you, so nothing was archived."
         case ("head_moved", .archive): reason = "The branch or its commit changed since the panel showed it, so nothing was archived."
         case ("on_base_branch", .archive): reason = "The branch checked out is the base branch itself, so nothing was archived."
         case ("base_unknown", .archive): reason = "No base branch is known for this repository, so nothing was archived."
         case ("github_unavailable", .archive): reason = "GitHub could not be reached to check the merge, so nothing was archived."
-        case ("timeout", .archive): reason = "Git took too long, so the run was not archived."
+        case ("timeout", .archive): reason = "Git took too long, so the session was not archived."
         // Its detail says how far it got ("ended, worktree removed; <branch> kept: …"), so it leads.
         case ("git_failed", .archive):
-            return detail.map { "Git did not finish archiving: \($0)" } ?? "Git did not archive the run."
+            return detail.map { "Git did not finish archiving: \($0)" } ?? "Git did not archive the session."
         default: return actionRefused(code: code, detail: detail)
         }
         guard let detail, !detail.isEmpty else { return reason }
@@ -323,12 +323,12 @@ public enum ChangesWords {
     static func actionRefused(code: String, detail: String?) -> String {
         let reason: String
         switch code {
-        case "busy": reason = "A run in this folder is working or waiting for you, so nothing was committed."
+        case "busy": reason = "A session in this folder is working or waiting for you, so nothing was committed."
         case "unmerged": reason = "A merge has unresolved files, so nothing was committed."
         case "nothing_to_commit": reason = "Nothing has changed since the last commit."
         case "detached": reason = "No branch is checked out, so nothing was done."
-        case "not_a_repository": reason = "This run’s folder is not in a git repository."
-        case "unknown_session": reason = "This run is no longer on its computer."
+        case "not_a_repository": reason = "This session’s folder is not in a git repository."
+        case "unknown_session": reason = "This session is no longer on its computer."
         case "bad_request": reason = "The computer could not take this request, so nothing was done."
         case "git_failed": reason = "Git did not commit."
         case "timeout": reason = "Git took too long, so nothing was committed."
@@ -340,14 +340,14 @@ public enum ChangesWords {
         case "base_unknown": reason = "No base branch is known for this repository, so nothing was pushed."
         case "nothing_to_propose": reason = "The branch has no commits its base lacks, so no PR was opened."
         case "create_failed": reason = "GitHub did not open the PR."
-        case "main_worktree": reason = "This run is in the repository’s main folder, not a worktree, so nothing was archived."
+        case "main_worktree": reason = "This session is in the repository’s main folder, not a worktree, so nothing was archived."
         case "shared_worktree":
-            reason = "Another run works in this worktree, or another worktree has its branch, so nothing was archived."
+            reason = "Another session works in this worktree, or another worktree has its branch, so nothing was archived."
         case "has_changes":
             reason = "The worktree has changes git may not show: uncommitted, untracked, or in files git is told not to check, so nothing was archived."
         case "branch_has_commits": reason = "The branch has commits that are not merged, so nothing was archived."
         case "locked": reason = "Git has this worktree locked, so nothing was archived."
-        case "still_running": reason = "The run did not end, so nothing was archived."
+        case "still_running": reason = "The session did not end, so nothing was archived."
         default: return actionUnknown
         }
         guard let detail, !detail.isEmpty else { return reason }
@@ -458,7 +458,7 @@ public enum ChangesWords {
         case .rebase: "Rebase and merge"
         }
     }
-    /// Whether Archive Run is offered (artboard 11), by the computer's own gate as the run's repository shows it: a run
+    /// Whether Archive Session is offered (artboard 11), by the computer's own gate as the run's repository shows it: a run
     /// in a worktree of its own, on a branch other than its base, nothing uncommitted, its commits on the base already
     /// or merged by its pull request at the commit checked out. What the panel can't see (a worktree another run
     /// shares, a lock) the computer refuses on the press.

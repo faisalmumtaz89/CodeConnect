@@ -730,7 +730,7 @@ final class CodexSendPathTests: XCTestCase {
         XCTAssertEqual(
             model.standingNote(for: key(), draft: "hello"),
             ComposeProse.Note(
-                text: "Observe only. The computer has lost its link to this run. It can be answered again once the link is back.",
+                text: "Observe only. The computer has lost its link to this session. It can be answered again once the link is back.",
                 tone: .neutral, icon: nil, offersWhy: true))
     }
 
@@ -745,7 +745,7 @@ final class CodexSendPathTests: XCTestCase {
         }
         XCTAssertEqual(
             note(Self.summary(uid: key(), agent: "codex", link: "subscribed", runLink: "detached")),
-            "Observe only. The computer has lost its link to this run. It can be answered again once the link is back.")
+            "Observe only. The computer has lost its link to this session. It can be answered again once the link is back.")
         model.connection.simulateCapabilitiesForTesting(
             Capabilities(
                 canApproveReliably: false, sendText: true,

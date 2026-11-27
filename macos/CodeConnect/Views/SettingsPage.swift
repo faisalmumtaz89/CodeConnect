@@ -666,7 +666,7 @@ private struct AgentAccounts: View {
         .confirmation(Binding(get: { removing }, set: { removing = $0 })) { account in
             Confirmation(
                 title: "Remove \(account.facts?.email ?? account.label)?",
-                message: "\(agent.displayName) signs it out of this Mac. New runs use another account.",
+                message: "\(agent.displayName) signs it out of this Mac. New sessions use another account.",
                 answers: [
                     .init(title: "Cancel", kind: .cancel, id: "settings.accounts.remove.cancel"),
                     .init(title: "Remove", kind: .destructive, id: "settings.accounts.remove.confirm") {

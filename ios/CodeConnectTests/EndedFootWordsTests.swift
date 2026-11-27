@@ -5,6 +5,6 @@ import XCTest
 /// An ended run's foot says only that it has ended: the conversation above it is plainly there to read.
 final class EndedFootWordsTests: XCTestCase {
     func testTheFootSaysOnlyThatTheRunHasEnded() {
-        XCTAssertEqual(SessionWords.runEnded, "This run has ended")
+        XCTAssertEqual(SessionWords.runEnded, "This session has ended")
     }
 }
