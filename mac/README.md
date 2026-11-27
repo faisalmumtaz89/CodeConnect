@@ -301,10 +301,10 @@ keeps filling, and nothing says so.
 
 The same two binaries, built static (musl) for x86_64 and aarch64, so one archive runs on any
 distribution; checked on Debian 12, Ubuntu 22.04 to 26.04, Fedora 44 and Alpine 3.22. The agent
-host beside them, which runs Claude Code for the app, is Bun's glibc build, built and tested on
-Ubuntu, so Claude Code runs started from the app need a glibc system. A musl system such as
-Alpine does not ship the glibc loader the host names, so the host cannot start there; the two
-binaries run there as above.
+host beside them, which runs Claude Code and Antigravity for the app, is Bun's glibc build, built
+and tested on Ubuntu, so Claude Code and Antigravity runs started from the app need a glibc
+system. A musl system such as Alpine does not ship the glibc loader the host names, so the host
+cannot start there; the two binaries run there as above.
 
 **Install.** The installer at codeconnect.sh downloads the release's
 `codeconnect-<version>-linux-<arch>.tar.gz`, its `.sha256`, and `.sha256.sig` — an Ed25519
