@@ -53,6 +53,9 @@ public enum FleetWords {
         computers.count == 1 ? "Connecting to \(computers[0])…" : "Connecting to your computers…"
     }
     public static let agentsAppearHere = "Agents you start with CodeConnect appear here."
+    /// The Mac's run list with nothing in it: its title, then where runs come from.
+    public static let noRunsYet = "No runs yet"
+    public static let runsComeFrom = "Start one here or from your iPhone. Runs started at a computer appear on their own."
     public static let noEndedRuns = "No ended runs."
     public static let noComputersYet = "No computers yet"
 
