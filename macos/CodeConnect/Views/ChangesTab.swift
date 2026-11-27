@@ -49,22 +49,26 @@ struct ChangesPanel: View {
                     host: git.ghHost ?? "github.com")
                 // The panel's one action: a commit while there are changes; once they are committed, a pull request
                 // into the repository the computer names, while the branch has none. The line under the state says
-                // whether it can be done now, and the action's row follows.
+                // whether it can be done now; Commit's row follows it, and Create PR stands at the state line's end.
                 let committable = !offline && model.commitsChanges && git.changed.files > 0
                 let target = git.ghRepo.map { ChangesWords.pullRequestTarget(repo: $0, base: git.base?.name) }
                 let proposable =
                     !offline && !committable && model.opensPullRequests && git.pullRequest == nil && opened == nil
                     && (git.ahead ?? 0) > 0 && git.branch != nil && target != nil
+                let line = StateLine(
+                    text: git.pullRequest == nil && opened != nil
+                        ? "PR #\(opened?.number ?? 0) · Open" : ChangesWords.state(git),
+                    delta: nil, read: ISO8601.parse(git.readAt), unreachable: offline ? computer : nil,
+                    note: committable
+                        ? commitWait(git) ?? ChangesWords.commitReady
+                        : proposable ? pullRequestWait(git) ?? target : nil)
                 VStack(alignment: .leading, spacing: 0) {
-                    StateLine(
-                        text: git.pullRequest == nil && opened != nil
-                            ? "PR #\(opened?.number ?? 0) · Open" : ChangesWords.state(git),
-                        delta: nil, read: ISO8601.parse(git.readAt), unreachable: offline ? computer : nil,
-                        note: committable
-                            ? commitWait(git) ?? ChangesWords.commitReady
-                            : proposable ? pullRequestWait(git) ?? target : nil)
-                    if committable { CommitRow(row: row, model: model, ready: commitWait(git) == nil) }
-                    if proposable { PullRequestRow(row: row, model: model, ready: pullRequestWait(git) == nil) }
+                    if proposable {
+                        PullRequestRow(row: row, model: model, ready: pullRequestWait(git) == nil, line: line)
+                    } else {
+                        line
+                        if committable { CommitRow(row: row, model: model, ready: commitWait(git) == nil) }
+                    }
                 }
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             } else if reply == nil, let branch = row.summary.gitBranch?.displaySafe {
@@ -331,24 +335,31 @@ private struct CommitRow: View {
     }
 }
 
-/// The pull request row: Create PR (⇧⌘P), which pushes the branch and opens its pull request where the line above says.
-/// Only while the run's agent is quiet; what the computer said when it did not open one stays under it.
+/// The pull request row: the state line, and at its end Create PR (⇧⌘P), which pushes the branch and opens its pull
+/// request where that line says. Only while the run's agent is quiet; what the computer said when it did not open one
+/// stays under it.
 private struct PullRequestRow: View {
     let row: FleetRow
     let model: AppModel
     /// The agent is quiet, so the pull request can be opened.
     let ready: Bool
+    /// The state line, with Create PR at its row's end.
+    let line: StateLine
     /// A confirmation or a sheet covers the window: ⇧⌘P must not act under it.
     @FocusedValue(\.windowCovered) private var covered
 
     var body: some View {
         let state = model.gitActionState(for: row.id)
-        VStack(alignment: .trailing, spacing: 6) {
-            ActionButton(title: "Create PR", key: "⇧⌘P", prominent: true, id: "changes.createPR") {
-                model.createPullRequest(key: row.id)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                line
+                ActionButton(title: "Create PR", key: "⇧⌘P", prominent: true, id: "changes.createPR") {
+                    model.createPullRequest(key: row.id)
+                }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+                .disabled(!ready || state == .working || covered == true)
+                .padding(.trailing, 20)
             }
-            .keyboardShortcut("p", modifiers: [.command, .shift])
-            .disabled(!ready || state == .working || covered == true)
             if case .refused(let why, .pullRequest) = state {
                 Text(why)
                     .font(Theme.ui(12))
@@ -356,12 +367,11 @@ private struct PullRequestRow: View {
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
                     .accessibilityIdentifier("changes.createPR.refused")
             }
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .padding(.horizontal, 20)
-        .padding(.bottom, 12)
     }
 }
 
