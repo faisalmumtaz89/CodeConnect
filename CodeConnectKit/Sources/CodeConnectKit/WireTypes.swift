@@ -665,6 +665,9 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// repository, before the first read, when there were more untracked files than the daemon lists at once, and
     /// from an older daemon.
     public let diffStat: DiffStat?
+    /// The run's title (minor 63): the first line of the first message the person sent it through CodeConnect. `nil`
+    /// for a run with none yet (one started at its computer) and from an older daemon; read through `FleetRow.title`.
+    public let title: String?
 
     enum CodingKeys: String, CodingKey {
         case sessionUID = "session_uid"
@@ -693,6 +696,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case switching
         case gitBranch = "git_branch"
         case diffStat = "diff_stat"
+        case title
     }
 
     public init(from decoder: Decoder) throws {
@@ -723,6 +727,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         switching = try c.decodeIfPresent(String.self, forKey: .switching).flatMap(RunSwitching.init(rawValue:))
         gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
         diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
     }
 
     /// Whether the Codex vocabulary applies here. The one place the question is

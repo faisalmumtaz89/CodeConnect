@@ -559,6 +559,12 @@ pub struct SessionSummary {
     /// started; absent on any other, and from a daemon below 48: absent is "not known", never Default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<RunAccount>,
+    /// The run's title (minor 63): the first line of the first message the person sent it through CodeConnect, its
+    /// start's prompt or a later send, that is neither a command to the agent nor a mail wake, at most 80
+    /// characters. Absent on a run with no such message yet (one started at its computer), and from an older daemon;
+    /// an app names such a run by its project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// The account a run runs on ([`SessionSummary::account`]).
@@ -836,6 +842,7 @@ mod tests {
             relaunchable: false,
             switching: None,
             account: None,
+            title: None,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);
@@ -844,6 +851,18 @@ mod tests {
         let encoded = serde_json::to_string(&live).unwrap();
         assert!(encoded.contains("session_uid"), "{encoded}");
         assert_eq!(live, serde_json::from_str(&encoded).unwrap());
+        // A run's title (minor 63) is sent only when it has one, and an older daemon's run, which has none, reads none.
+        assert!(!encoded.contains("\"title\""), "{encoded}");
+        let titled = SessionSummary {
+            title: Some("Retry the router on 5xx".into()),
+            ..live.clone()
+        };
+        let encoded = serde_json::to_string(&titled).unwrap();
+        assert!(
+            encoded.contains("\"title\":\"Retry the router on 5xx\""),
+            "{encoded}"
+        );
+        assert_eq!(titled, serde_json::from_str(&encoded).unwrap());
     }
 
     #[test]

@@ -3706,6 +3706,8 @@ impl Daemon {
                 self.db.max_seq(row.session_uid.clone()).await?,
             );
         }
+        // Every run's title, as kept.
+        let titles = self.db.run_titles().await?;
         // And the request event of every open card, one query per card on the
         // dedup index: the seq its pending ref names, and a Codex card's turn. The
         // cards are snapshotted first, so one raised after the snapshot is listed in
@@ -3840,8 +3842,15 @@ impl Daemon {
                 model_labels.insert(uid.clone(), entry.label.clone());
             }
         }
-        let mut sessions =
-            Self::assemble_sessions(&inner, rows, &last_seqs, &requests, &menus, &relaunchable);
+        let mut sessions = Self::assemble_sessions(
+            &inner,
+            rows,
+            &last_seqs,
+            &requests,
+            &menus,
+            &relaunchable,
+            &titles,
+        );
         for session in &mut sessions {
             if let (Some(fact), Some(id)) =
                 (session.model.as_mut(), model_ids.get(&session.session_uid))
@@ -4940,6 +4949,7 @@ impl Daemon {
         requests: &HashMap<ApprovalId, (u64, Option<String>)>,
         menus: &HashMap<String, protocol::event::RunMenus>,
         relaunchable: &HashSet<String>,
+        titles: &HashMap<String, String>,
     ) -> Vec<SessionSummary> {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -5047,6 +5057,7 @@ impl Daemon {
                 relaunchable: relaunchable.contains(&row.session_uid),
                 switching: None,
                 account: None,
+                title: titles.get(&row.session_uid).cloned(),
             });
         }
         out

@@ -990,7 +990,12 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     An open [`ws::PullRequest`] carries `checks` ([`ws::Check`]: name, state, start, end, log URL, and a failed check
 ///     run's first failure line) and `checks_complete`, read with it in one more GitHub request. A daemon below 62 sends
 ///     neither.
-pub const PROTOCOL_MINOR: u32 = 62;
+///   * `63` — **A run's title.**
+///
+///     [`event::SessionSummary::title`] names a run by the first line of the first message the person sent it through
+///     CodeConnect (not a command, not a mail wake). A run with none, and every run from a daemon below 63, has no
+///     `title`, and an app names it by its project.
+pub const PROTOCOL_MINOR: u32 = 63;
 
 #[cfg(test)]
 mod ledger_tests {

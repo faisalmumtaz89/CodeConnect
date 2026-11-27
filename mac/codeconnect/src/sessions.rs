@@ -253,6 +253,7 @@ mod tests {
             relaunchable: false,
             switching: None,
             account: None,
+            title: None,
         }
     }
 

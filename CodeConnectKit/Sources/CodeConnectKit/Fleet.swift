@@ -166,6 +166,10 @@ public struct FleetRow: Sendable, Identifiable, Hashable {
     public var machineID: String?
     public var machineName: String?
 
+    /// What the run is called on its row and in its header: its title, the first line of the first message the person
+    /// sent it (`SessionSummary.title`), else its label.
+    public var title: String { summary.title.map(\.displaySafe) ?? label.inline }
+
     /// The run, not the name: two rows can share `cc-1` and a `ForEach` that
     /// cannot tell them apart renders one of them. A run's uid is minted once,
     /// for it alone, so two machines' runs never share one either.

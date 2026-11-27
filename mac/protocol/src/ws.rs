@@ -2878,9 +2878,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 62,
             "a pull request's checks (`checks`, `checks_complete`) are minor 62"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 63,
+            "a run's title (`title`) is minor 63"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 62);
+        assert_eq!(crate::PROTOCOL_MINOR, 63);
     }
 
     /// **The tags, pinned on this side too.**
