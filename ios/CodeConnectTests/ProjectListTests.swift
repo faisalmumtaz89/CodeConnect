@@ -89,7 +89,9 @@ final class ProjectListTests: XCTestCase {
             ProjectList(rows, computer: "m3"), ProjectList(rows, onlyNeedsYou: true),
             ProjectList(rows, pinned: [ProjectList.key(rows[1])]), ProjectList(rows, hidden: [ProjectList.key(rows[0])]),
         ] { XCTAssertEqual(list.needsYou, 4) }
-        XCTAssertEqual(RunList(rows, computer: nil).needsYou.count, 4, "the list's sections count the same")
+        XCTAssertEqual(
+            RunList(rows.filter { !$0.summary.archived }, computer: nil).needsYou.count, 4,
+            "the list's sections count the same")
         XCTAssertFalse(plain.projects.flatMap(\.rows).contains { $0.id == "gone" })
     }
 
@@ -105,8 +107,8 @@ final class ProjectListTests: XCTestCase {
     /// itself off once nothing needs you.
     func testOnlyTheseKeepsWhatNeedsYouAndTurnsItselfOff() {
         let rows = [
-            row("card", .blocked), row("work", .running), row("zed", .done, cwd: "/work/zed"),
-            row("api", .done, cwd: "/work/api", minutes: 1),
+            row("card", .blocked), row("work", .running), row("zed", .done, cwd: "/work/zed", minutes: 1),
+            row("api", .done, cwd: "/work/api"),
         ]
         let only = ProjectList(rows, onlyNeedsYou: true)
         XCTAssertTrue(only.onlyNeedsYou)
@@ -147,6 +149,29 @@ final class ProjectListTests: XCTestCase {
         let pinned = ProjectList(rows, pinned: [ProjectList.key(rows[1])], deck: deck)
         XCTAssertEqual(names(pinned), ["busy", "old", "new", "idle", "quiet"])
         XCTAssertTrue(pinned.projects[0].pinned)
+        // Cards not yet in the Deck, and failures: the oldest first, counted within the most urgent rank alone.
+        let unranked = [
+            row("late-card", .blocked, cwd: "/q/late", minutes: 10), row("early-card", .blocked, cwd: "/q/early"),
+        ]
+        XCTAssertEqual(names(ProjectList(unranked)), ["early", "late"])
+        let failures = [
+            row("new-fail", .failed, cwd: "/f/new", minutes: 5), row("old-idle", .idle, cwd: "/f/new", minutes: -600),
+            row("old-fail", .failed, cwd: "/f/old"),
+        ]
+        XCTAssertEqual(names(ProjectList(failures)), ["old", "new"])
+    }
+
+    /// Narrowing to a computer changes what a project shows, not how big it is or where it stands.
+    func testTheComputerFilterMovesNoProject() {
+        let rows = [
+            row("a-idle", .idle, cwd: "/p/a", on: "m2"), row("a-work", .running, cwd: "/p/a", on: "m2", minutes: 120),
+            row("b-idle", .idle, cwd: "/p/b", on: "m1"), row("b-work", .running, cwd: "/p/b", on: "m1", minutes: 60),
+        ]
+        XCTAssertEqual(names(ProjectList(rows)), ["a", "b"])
+        let narrowed = ProjectList(rows, computer: "m1")
+        XCTAssertEqual(names(narrowed), ["a", "b"])
+        XCTAssertEqual(narrowed.projects[0].sessions, 2)
+        XCTAssertEqual(ids(narrowed.projects[0].rows), ["a-idle"])
     }
 
     /// Revealing a project's earlier sessions moves no project: activity counts every session, shown or not.
@@ -168,7 +193,7 @@ final class ProjectListTests: XCTestCase {
             row("other", .blocked, cwd: "/p/b"),
         ], computer: "m1", deck: ["card", "other"])
         XCTAssertEqual(names(before), ["a", "b"])
-        let held = ProjectList.Held(session: "card", project: before.projects[0].id, projectIndex: 0, rowIndex: 0)
+        let held = ProjectList.Held(session: "card", projectIndex: 0, rowIndex: 0)
         let answered = [
             row("card", .running, cwd: "/p/a", on: "m2", minutes: 1), row("work", .running, cwd: "/p/a", on: "m2", minutes: 5),
             row("other", .blocked, cwd: "/p/b"),
@@ -185,6 +210,14 @@ final class ProjectListTests: XCTestCase {
         XCTAssertEqual(ids(endedHeld.projects[0].rows), ["card", "work"])
         XCTAssertEqual(endedHeld.projects[0].earlier, 0)
         XCTAssertEqual(ProjectList(ends).projects.first { $0.name == "a" }!.earlier, 1, "not held, it is earlier")
+        // Held and ended beside 25 older ones: a reveal shows all 25, the held one taking no place in it.
+        let older = (0..<25).map { row("old\($0)", .ended, cwd: "/p/a", on: "m2", minutes: -Double($0), lifecycle: "exited") }
+        let page = ProjectList(ends + older, revealed: [ProjectList.key(ends[1]): 1], held: held)
+        XCTAssertEqual(page.projects[0].rows.count, 27)
+        XCTAssertEqual(page.projects[0].earlier, 0)
+        // Its session gone, a project is held no longer.
+        let gone = ProjectList([row("work", .running, cwd: "/p/a", on: "m2"), row("other", .blocked, cwd: "/p/b")], held: held)
+        XCTAssertEqual(names(gone), ["b", "a"])
     }
 
     // MARK: Ended sessions, Hide
@@ -217,7 +250,7 @@ final class ProjectListTests: XCTestCase {
         let needs = ProjectList(quiet + [row("card", .blocked, cwd: "/p/a")], hidden: [key])
         XCTAssertEqual(names(needs), ["a", "b"])
         XCTAssertTrue(needs.projects[0].hidden)
-        let held = ProjectList.Held(session: "done", project: key, projectIndex: 0, rowIndex: 0)
+        let held = ProjectList.Held(session: "done", projectIndex: 0, rowIndex: 0)
         let open = ProjectList(quiet, hidden: [key], held: held)
         XCTAssertEqual(ids(open.projects[0].rows), ["done"])
     }

@@ -11,13 +11,11 @@ public struct ProjectList: Sendable, Equatable {
     /// whatever its state becomes and whatever the list narrows to.
     public struct Held: Sendable, Equatable {
         public let session: String
-        public let project: String
         public let projectIndex: Int
         public let rowIndex: Int
 
-        public init(session: String, project: String, projectIndex: Int, rowIndex: Int) {
+        public init(session: String, projectIndex: Int, rowIndex: Int) {
             self.session = session
-            self.project = project
             self.projectIndex = projectIndex
             self.rowIndex = rowIndex
         }
@@ -78,6 +76,13 @@ public struct ProjectList: Sendable, Equatable {
         var place: [String: Int] = [:]
         for (index, key) in deck.enumerated() where place[key] == nil { place[key] = index }
 
+        // What a project is, whatever the list narrows to: every listed session counts towards its size and activity.
+        var whole: [String: (sessions: Int, latest: Date)] = [:]
+        for row in listed {
+            let entry = whole[Self.key(row), default: (0, .distantPast)]
+            whole[Self.key(row)] = (entry.sessions + 1, max(entry.latest, row.lastActive))
+        }
+
         var order: [String] = []
         var groups: [String: [FleetRow]] = [:]
         for row in shown {
@@ -97,8 +102,9 @@ public struct ProjectList: Sendable, Equatable {
             var earlier: Int
             var hidden: Bool
             var quiet: Bool
-            /// The most urgent rank among what needs you, and within it the Deck's place or the oldest activity.
-            var urgency: (rank: Int, wait: Double)
+            /// The most urgent rank among what needs you; within it a card's place in the Deck (cards not yet in it
+            /// after those that are), then the oldest activity.
+            var urgency: (rank: Int, deck: Int, since: Double)
             var latest: Date
         }
         var built: [Built] = []
@@ -114,28 +120,26 @@ public struct ProjectList: Sendable, Equatable {
             }
             let sorted = kept.sorted(by: Self.before)
             let live = sorted.filter { Self.rank($0) < Self.endedRank }
-            let ended = sorted.filter { Self.rank($0) == Self.endedRank }
+            // The open session, ended, stays shown and takes no place in a reveal.
+            let openEnded = sorted.first { $0.id == open && Self.rank($0) == Self.endedRank }
+            let ended = sorted.filter { Self.rank($0) == Self.endedRank && $0.id != open }
             let reveals = revealed[key] ?? 0
             let reveal = min(ended.count, (live.isEmpty ? 1 + reveals : reveals) * Self.page)
-            var rows = live + ended.prefix(reveal)
-            var earlier = ended.count - reveal
-            if let open, let row = sorted.first(where: { $0.id == open }), !rows.contains(where: { $0.id == open }) {
-                rows.append(row)
-                earlier -= 1
-            }
-            if let held, held.project == key, let at = rows.firstIndex(where: { $0.id == held.session }) {
+            var rows = live + ended.prefix(reveal) + (openEnded.map { [$0] } ?? [])
+            let earlier = ended.count - reveal
+            if let held, let at = rows.firstIndex(where: { $0.id == held.session }) {
                 let row = rows.remove(at: at)
                 rows.insert(row, at: min(held.rowIndex, rows.count))
             }
             let waiting = all.filter(Self.needsYou)
             let best = waiting.map(Self.rank).min() ?? Int.max
-            let wait = waiting.filter { Self.rank($0) == best }.map { row -> Double in
-                best == 0 ? Double(place[row.id] ?? Int.max) : row.lastActive.timeIntervalSinceReferenceDate
-            }.min() ?? .infinity
+            let tier = waiting.filter { Self.rank($0) == best }
+            let urgency = (
+                rank: best, deck: tier.map { place[$0.id] ?? Int.max }.min() ?? Int.max,
+                since: tier.map(\.lastActive.timeIntervalSinceReferenceDate).min() ?? .infinity)
             built.append(Built(
-                key: key, first: all.first!, rows: rows, need: need, sessions: all.count, earlier: earlier,
-                hidden: isHidden, quiet: rows.isEmpty, urgency: (best, wait),
-                latest: all.map(\.lastActive).max() ?? .distantPast))
+                key: key, first: all.first!, rows: rows, need: need, sessions: whole[key]!.sessions,
+                earlier: earlier, hidden: isHidden, quiet: rows.isEmpty, urgency: urgency, latest: whole[key]!.latest))
         }
 
         let names = Self.names(built.map { ($0.key, $0.first) })
@@ -154,7 +158,7 @@ public struct ProjectList: Sendable, Equatable {
                 rows: entry.rows, earlier: entry.earlier, pinned: pins[entry.key] != nil, hidden: entry.hidden,
                 machineID: entry.first.machineID, folder: Self.folder(entry.first.summary.cwd))
         }
-        if let held, let at = projects.firstIndex(where: { $0.id == held.project }) {
+        if let held, let at = projects.firstIndex(where: { $0.rows.contains { $0.id == held.session } }) {
             let project = projects.remove(at: at)
             projects.insert(project, at: min(held.projectIndex, projects.count))
         }
