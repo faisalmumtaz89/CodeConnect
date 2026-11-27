@@ -26,6 +26,9 @@ public struct ReplyBar: Equatable, Sendable {
     public let limits: [Limit]
     /// In the limits' place, the Accounts page's words when the account's agent says no plan limits apply.
     public let limitsNote: String?
+    /// The window the box's figures draw a ring for: at a usage limit (`SessionSummary.atLimit`), the window of that
+    /// limit's length; else the shortest the account reports (its 5-hour, else the next). Nil with no windows.
+    public let ring: Limit?
     /// The account by the Kit's name rule: its email as the account book knows it, else its label; nil when the run
     /// names no account.
     public let account: String?
@@ -47,12 +50,15 @@ public struct ReplyBar: Equatable, Sendable {
             return Context(used: tokens(used), window: tokens(window))
         }.first
         guard let account = summary.account, let agent = StartAgent(rawValue: summary.agent.rawValue) else {
-            return ReplyBar(context: context, limits: [], limitsNote: nil, account: nil)
+            return ReplyBar(context: context, limits: [], limitsNote: nil, ring: nil, account: nil)
         }
         let facts = book?.facts(for: agent, accountID: account.id)
+        let limits = limits(facts, now: now)
+        let full = summary.atLimit ? summary.limit?.which.windowMinutes.map(AccountSwitchWords.caption(minutes:)) : nil
         return ReplyBar(
-            context: context, limits: limits(facts, now: now),
+            context: context, limits: limits,
             limitsNote: facts?.limitsAvailable == false ? AccountSwitchWords.noPlanLimits : nil,
+            ring: limits.first { $0.caption == full } ?? limits.first,
             account: facts?.email ?? account.label)
     }
 

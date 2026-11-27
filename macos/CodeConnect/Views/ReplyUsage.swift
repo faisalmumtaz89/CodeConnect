@@ -2,8 +2,8 @@ import CodeConnectKit
 import SwiftUI
 
 /// What a run's reply bar shows before Send (`ReplyBar`): the conversation's size against its model's window in
-/// figures, a hairline, and a small ring per usage window of the account with its share; hovered, a card with the
-/// details. Each part is drawn only where the Kit holds it. It asks the computer nothing: it draws what the app holds,
+/// figures, a hairline, and one small ring with its share (`ReplyBar.ring`: the window at the run's usage limit, else
+/// the account's shortest), 8 pt apart; hovered, a card with every window and the details. Each part is drawn only where the Kit holds it. It asks the computer nothing: it draws what the app holds,
 /// again each minute while shown, so a reset's countdown stays current.
 struct ReplyUsage: View {
     let model: AppModel
@@ -13,7 +13,7 @@ struct ReplyUsage: View {
 
     var body: some View {
         TimelineView(.everyMinute) { _ in
-            if let bar = model.replyBar(for: key, now: .now), bar.context != nil || !bar.limits.isEmpty {
+            if let bar = model.replyBar(for: key, now: .now), bar.context != nil || bar.ring != nil {
                 // Never cut: the figures keep their width, and the bar's words give way.
                 figures(bar)
                     .fixedSize()
@@ -39,20 +39,18 @@ struct ReplyUsage: View {
     }
 
     private func figures(_ bar: ReplyBar) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             if let context = bar.context {
                 let window = Text(" / \(context.window)").foregroundStyle(Theme.text3)
                 Text("\(Text(context.used).foregroundStyle(Theme.text2))\(window)").font(Theme.mono(11))
             }
-            if bar.context != nil && !bar.limits.isEmpty {
+            if bar.context != nil && bar.ring != nil {
                 Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 14)
             }
-            ForEach(bar.limits, id: \.caption) { limit in
-                HStack(spacing: 5) {
-                    UsageRing(percent: limit.usedPercent, red: limit.usedPercent >= 100)
-                    Text("\(limit.usedPercent)%").font(Theme.mono(11))
-                        .foregroundStyle(limit.usedPercent >= 100 ? Theme.red : Theme.text2)
-                }
+            if let ring = bar.ring {
+                UsageRing(percent: ring.usedPercent, red: ring.usedPercent >= 100)
+                Text("\(ring.usedPercent)%").font(Theme.mono(11))
+                    .foregroundStyle(ring.usedPercent >= 100 ? Theme.red : Theme.text2)
             }
         }
         .frame(height: Self.figuresHeight)
@@ -106,6 +104,6 @@ struct UsageRing: View {
                 .stroke(red ? Theme.red : Color(themeHex: 0xD4D4D8), style: StrokeStyle(lineWidth: 2.4, lineCap: .round))
                 .rotationEffect(.degrees(-90))
         }
-        .frame(width: 16, height: 16)
+        .frame(width: 14, height: 14)
     }
 }

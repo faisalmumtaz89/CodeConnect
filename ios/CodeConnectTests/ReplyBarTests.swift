@@ -100,6 +100,23 @@ final class ReplyBarTests: XCTestCase {
 
     // MARK: Context
 
+    /// The box's figures draw one ring: the shortest window the account reports, its 5-hour at 12% before its week at
+    /// 42% (artboard 27); at a weekly limit, the week (artboard 20), and once that run has ended, the shortest again;
+    /// none when no window is held.
+    func testTheFiguresRingIsTheShortestWindowOrTheOneAtItsLimit() throws {
+        let book = try book()
+        let (d, run) = try on("D", in: book)
+        let ring = { (summary: SessionSummary) in ReplyBar.of(events: [], summary: summary, book: book, now: self.now).ring }
+        XCTAssertEqual(ring(run)?.caption, "5-hour")
+        XCTAssertEqual(ring(run)?.usedPercent, 12)
+        let onD: JSONValue = .object(["id": .string(d.id), "label": .string("D")])
+        XCTAssertEqual(ring(try summary(.claude, account: onD, limit: "weekly"))?.usedPercent, 42, "the week")
+        XCTAssertEqual(ring(try summary(.claude, account: onD, limit: "five_hour"))?.usedPercent, 12, "the 5-hour")
+        XCTAssertEqual(
+            ring(try summary(.claude, account: onD, limit: "weekly", lifecycle: "exited"))?.usedPercent, 12, "ended")
+        XCTAssertNil(ring(try summary(.claude, account: nil)))
+    }
+
     func testTheContextIsTheNewestUsageThatNamesBothFigures() throws {
         let run = try summary(.claude, account: nil)
         XCTAssertEqual(
