@@ -2241,6 +2241,9 @@ public struct RunGit: Decodable, Sendable, Hashable {
     /// The repository a pull request from this branch goes into, `owner/name` (minor 61): the state line names it
     /// before Create PR is pressed.
     public let ghRepo: String?
+    /// What the branch changed from its base (minor 72), committed or not; `changed` keeps counting against the head,
+    /// what a commit would take. Nil from an older daemon, and without a head, a base or a merge-base.
+    public let fromBase: FromBase?
 
     public enum GhState: String, Decodable, Sendable, Hashable {
         case signedIn = "signed_in"
@@ -2370,6 +2373,17 @@ public struct RunGit: Decodable, Sendable, Hashable {
         public let complete: Bool
     }
 
+    /// The files against the merge-base of the head and the base, counted as `changed` is.
+    public struct FromBase: Decodable, Sendable, Hashable {
+        public let mergeBase: String
+        public let changed: Changed
+
+        private enum CodingKeys: String, CodingKey {
+            case changed
+            case mergeBase = "merge_base"
+        }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case branch, base, changed, ahead, pushed, unmerged, gh
         case headOID = "head_oid"
@@ -2378,6 +2392,7 @@ public struct RunGit: Decodable, Sendable, Hashable {
         case pullRequest = "pr"
         case ghReadAt = "gh_read_at"
         case ghRepo = "gh_repo"
+        case fromBase = "from_base"
     }
 }
 
@@ -2524,7 +2539,9 @@ public enum ClientMessage: Sendable {
     case sendText(
         session: String, text: String, submit: Bool, requestID: String?, payloadHash: String?,
         attachments: [String] = [])
-    case getDiff(session: String)
+    /// `fromBase`: against the merge-base with the run's base (minor 72), asked only of a daemon whose `RunGit` carried
+    /// `fromBase`.
+    case getDiff(session: String, fromBase: Bool = false)
     /// A run's repository for its Changes panel (minor 58, `changes`), answered with `runGit`.
     case getRunGit(session: String)
     /// A run's conflicts with its base (minor 66, `conflicts`), answered with `conflicts`.
@@ -2700,6 +2717,7 @@ extension ClientMessage: Encodable {
         case takeover
         case bytes
         case headOID = "head_oid"
+        case fromBase = "from_base"
         case baseOID = "base_oid"
     }
 
@@ -2728,9 +2746,10 @@ extension ClientMessage: Encodable {
             try c.encodeIfPresent(clientID, forKey: .clientID)
             try c.encodeIfPresent(clientName, forKey: .clientName)
             try c.encodeIfPresent(deviceName, forKey: .deviceName)
-        case .getDiff(let session):
+        case .getDiff(let session, let fromBase):
             try c.encode("get_diff", forKey: .type)
             try c.encode(session, forKey: .sessionID)
+            if fromBase { try c.encode(true, forKey: .fromBase) }
         case .getRunGit(let session):
             try c.encode("get_run_git", forKey: .type)
             try c.encode(session, forKey: .sessionID)

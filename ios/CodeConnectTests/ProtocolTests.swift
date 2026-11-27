@@ -165,6 +165,9 @@ final class ProtocolTests: XCTestCase {
         let fields = try encodeClient(.getDiff(session: "cc-2"))
         XCTAssertEqual(fields["type"]?.stringValue, "get_diff")
         XCTAssertEqual(fields["session_id"]?.stringValue, "cc-2")
+        XCTAssertNil(fields["from_base"], "a diff against the head says nothing, as an older daemon expects")
+        let fromBase = try encodeClient(.getDiff(session: "cc-2", fromBase: true))
+        XCTAssertEqual(fromBase["from_base"], .bool(true), "minor 72: against the merge-base with the run's base")
     }
 
     // MARK: run_git
@@ -193,6 +196,24 @@ final class ProtocolTests: XCTestCase {
         XCTAssertFalse(git.pushed)
         XCTAssertNil(git.gh, "a minor-57 daemon sends no GitHub state")
         XCTAssertNil(git.pullRequest)
+        XCTAssertNil(git.fromBase, "a daemon below 72 sends no changes from the base")
+
+        let committed = try decodeServer(
+            """
+            {"type":"run_git","session_id":"cc-1",
+             "git":{"branch":"feat/x","head_oid":"abc",
+                    "base":{"name":"main","remote":"origin","ref":"refs/remotes/origin/main"},
+                    "changed":{"files":0,"added":0,"removed":0,"complete":true},
+                    "ahead":1,"pushed":true,"unmerged":false,"read_at":"t",
+                    "from_base":{"merge_base":"def","changed":{"files":1,"added":3,"removed":1,"complete":true}}}}
+            """)
+        guard case .runGit(let all) = committed, let fromBase = all.git?.fromBase else {
+            return XCTFail("no from_base")
+        }
+        XCTAssertEqual(all.git?.changed.files, 0, "nothing uncommitted: Commit stays off")
+        XCTAssertEqual(fromBase.mergeBase, "def")
+        XCTAssertEqual(fromBase.changed.files, 1, "minor 72: the branch's committed file, from its base")
+        XCTAssertEqual(fromBase.changed.added, 3)
 
         let github = try decodeServer(
             """
