@@ -71,15 +71,16 @@ public enum FleetWords {
             note: "Its folder stays as it is.", cancel: "Cancel", confirm: "End Session")
     }
 
-    /// Archiving run `name` (artboard n-11): it removes the worktree, deletes the local branch and ends the session, and
-    /// says first that files git ignores there go too, so a person keeping secrets in it is told before pressing.
-    public static func archiveAsk(_ name: String) -> AskWords {
+    /// Archiving run `name` (artboard n-11): it removes the worktree, deletes the local branch and ends `agent`’s
+    /// session, and says first that files git ignores there go too, so a person keeping secrets in it is told before
+    /// pressing.
+    public static func archiveAsk(_ name: String, agent: String) -> AskWords {
         AskWords(
             title: "Archive “\(name)”?",
             items: [
                 .init(mark: "folder", words: "Removes the worktree"),
-                .init(mark: "trash", words: "Deletes the local branch"),
-                .init(mark: "stop", words: "Ends the session"),
+                .init(mark: "arrow.triangle.branch", words: "Deletes the local branch"),
+                .init(mark: "terminal", words: "Ends the \(agent) session"),
             ],
             note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive Run")
     }
@@ -496,8 +497,10 @@ public enum ChangesWords {
         if !failed.isEmpty { parts.append("\(failed.joined(separator: ", ")) failed") }
         let running = checks.filter { $0.state == .pending }.count
         if running > 0 { parts.append("\(running) running") }
-        // A comparison of this very commit that merges cleanly says so (artboard 10).
-        if let conflicts, conflicts.clean, conflicts.headOID == git.headOID { parts.append("no conflicts") }
+        // A comparison of this very commit that merges cleanly says so (artboard 10), unless a check failed (07).
+        if failed.isEmpty, let conflicts, conflicts.clean, conflicts.headOID == git.headOID {
+            parts.append("no conflicts")
+        }
         return parts.joined(separator: " · ")
     }
     /// The Checks tab's label: how many of the checks passed, of how many.

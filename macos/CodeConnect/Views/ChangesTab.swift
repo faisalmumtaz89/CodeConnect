@@ -331,7 +331,8 @@ private struct StateLine: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("changes.lastSaid")
             } else if let note {
-                Text(note).font(Theme.ui(12)).foregroundStyle(Theme.text3).accessibilityIdentifier("changes.note.action")
+                Text(note).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.tail)
+                    .accessibilityIdentifier("changes.note.action")
             } else {
                 AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
                     .font(Theme.ui(12))
@@ -565,8 +566,8 @@ private struct ArchiveRow: View {
         }
         .confirmation($asking) { asked in
             Confirmation(
-                FleetWords.archiveAsk(asked.title), cancelID: "changes.archive.cancel",
-                confirmID: "changes.archive.confirm"
+                FleetWords.archiveAsk(asked.title, agent: asked.summary.agent.displayName),
+                cancelID: "changes.archive.cancel", confirmID: "changes.archive.confirm"
             ) { model.archiveRun(key: asked.id, branch: branch, headOID: headOID) }
         }
     }
@@ -617,7 +618,8 @@ private struct MergeRow: View {
                         .frame(height: 26)
                         .background(Theme.text, in: UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 6))
                     }
-                    .buttonStyle(.hover(over: true, id: "changes.merge"))
+                    // Only the pair's own 0.5 dims it, so both halves read as one button.
+                    .buttonStyle(.hover(over: true, fades: false, id: "changes.merge"))
                     .keyboardShortcut("m", modifiers: [.command, .shift])
                     .disabled(!ready)
                     .accessibilityIdentifier("changes.merge")

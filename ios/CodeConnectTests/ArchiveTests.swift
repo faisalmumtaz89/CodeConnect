@@ -66,10 +66,11 @@ final class ArchiveTests: XCTestCase {
 
     /// The card says what goes, and that files git ignores go too, before Archive Run is pressed.
     func testTheArchiveCardSaysIgnoredFilesGoToo() {
-        let ask = FleetWords.archiveAsk("fix the tests")
+        let ask = FleetWords.archiveAsk("fix the tests", agent: "Codex")
         XCTAssertEqual(ask.title, "Archive “fix the tests”?")
         XCTAssertEqual(
-            ask.items.map(\.words), ["Removes the worktree", "Deletes the local branch", "Ends the session"])
+            ask.items.map(\.words), ["Removes the worktree", "Deletes the local branch", "Ends the Codex session"])
+        XCTAssertEqual(ask.items.map(\.mark), ["folder", "arrow.triangle.branch", "terminal"])
         XCTAssertEqual(ask.note, "Files git ignores in it, like .env, are deleted too.")
         XCTAssertEqual(ask.confirm, "Archive Run")
     }
