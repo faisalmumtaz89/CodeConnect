@@ -228,7 +228,9 @@ public enum TimelineBuilder {
 
     /// `accountName` names an account by its id (nil: the agent's Default) as this app's account book knows it, or nil
     /// when it does not; a failed switch's row reads it, else the label its event carries.
-    static func build(_ events: [Event], accountName: (String?) -> String? = { _ in nil }) -> [TimelineItem] {
+    static func build(
+        _ events: [Event], accountName: (String?) -> String? = { _ in nil }, keepsWorktree: Bool = false
+    ) -> [TimelineItem] {
         guard !events.isEmpty else { return [] }
 
         var resultsByToolUse: [String: ToolOutcome] = [:]
