@@ -578,27 +578,31 @@ private struct ComputerChoice: View {
         let load = load
         Group {
             if let second {
-                MenuRow(chosen: chosen) { name } second: { Text(second) } trailing: { meters(load) }
+                MenuRow(chosen: chosen) { name } second: { Text(second) } trailing: { trailing(load) }
             } else {
-                MenuRow(chosen: chosen) { name } trailing: { meters(load) }
+                MenuRow(chosen: chosen) { name } trailing: { trailing(load) }
             }
         }
         .help([computer.machineSystem, load?.line].compactMap { $0 }.joined(separator: " · "))
         .task { await computer.keepMachineStatsFresh() }
     }
 
+    /// Its mark and name, greyed while it is offline; a link reached but not working says its own word after the name
+    /// ("· Pair again", "· Blocked").
     @ViewBuilder private var name: some View {
-        ComputerMark(os: computer.machineOS).foregroundStyle(Theme.text2)
+        ComputerMark(os: computer.machineOS).foregroundStyle(live ? Theme.text2 : Theme.text3)
         Text(computer.machineName ?? "Unknown computer").font(Theme.ui(12.5))
             .foregroundStyle(live ? Theme.text : Theme.text3).lineLimit(1)
-        // A link that is not working says so in its own word ("· Pair again", "· Blocked"), offline in the list's.
-        if let word = computer.linkHealth.machineWord {
-            Text(live ? "· \(word)" : RunListWords.offline).font(Theme.ui(12.5)).foregroundStyle(Theme.text3).fixedSize()
+        if live, let word = computer.linkHealth.machineWord {
+            Text("· \(word)").font(Theme.ui(12.5)).foregroundStyle(Theme.text3).fixedSize()
         }
     }
 
-    @ViewBuilder private func meters(_ load: MachineLoad?) -> some View {
-        if let load {
+    /// At the row's end: its load while it is reached, "Offline" while it is not (artboard 01).
+    @ViewBuilder private func trailing(_ load: MachineLoad?) -> some View {
+        if !live {
+            Text(computer.linkHealth.word).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).fixedSize()
+        } else if let load {
             HStack(spacing: 10) {
                 if let cpu = load.cpu { LoadMeter(label: "CPU", used: cpu) }
                 if let memory = load.memory { LoadMeter(label: "RAM", used: memory) }
