@@ -442,59 +442,62 @@ private struct Document: View {
     var body: some View {
         ScrollViewReader { reader in
             ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(files) { file in
-                        FileRow(file: file) { block in
-                            folded.remove(block)
-                            withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo("block:\(block)", anchor: .top) }
+                // One column: the list, its rule, then the diffs. A scroll view's views are not stacked by it.
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(files) { file in
+                            FileRow(file: file) { block in
+                                folded.remove(block)
+                                withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo("block:\(block)", anchor: .top) }
+                            }
                         }
                     }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 8)
-                Rectangle().fill(Theme.hairline).frame(height: 1)
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    if let note = raw.note {
-                        Text(verbatim: note)
-                            .font(Theme.mono(11.5))
-                            .foregroundStyle(Theme.text2)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityIdentifier("changes.note")
-                    }
-                    ForEach(ChangedFile.blocks(diff).compactMap(\.diff)) { fileDiff in
-                        FileBlock(
-                            file: fileDiff,
-                            expanded: Binding(
-                                get: { !folded.contains(fileDiff.id) },
-                                set: { open in if open { folded.remove(fileDiff.id) } else { folded.insert(fileDiff.id) } })
-                        )
-                        .id("block:\(fileDiff.id)")
-                    }
-                    let extra = raw.files == nil ? (diff.preamble + diff.trailing).filter { !$0.allSatisfy(\.isWhitespace) } : []
-                    if !extra.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Also reported").font(Theme.ui(12, .medium)).foregroundStyle(Theme.text2)
-                            // Not selectable: a selectable text is dropped from the combined element, so the names would
-                            // be drawn but never read.
-                            // Each as a file header names its file: the path, then its kind in a word.
-                            ForEach(Array(UnifiedDiff.reported(extra).enumerated()), id: \.offset) { _, reported in
-                                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                    Text(verbatim: reported.text.displaySafe).font(Theme.mono(11.5)).foregroundStyle(Theme.text2)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                    if let label = reported.label {
-                                        Text(label).font(Theme.ui(11)).foregroundStyle(Theme.text3)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 8)
+                    Rectangle().fill(Theme.hairline).frame(height: 1)
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if let note = raw.note {
+                            Text(verbatim: note)
+                                .font(Theme.mono(11.5))
+                                .foregroundStyle(Theme.text2)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("changes.note")
+                        }
+                        ForEach(ChangedFile.blocks(diff).compactMap(\.diff)) { fileDiff in
+                            FileBlock(
+                                file: fileDiff,
+                                expanded: Binding(
+                                    get: { !folded.contains(fileDiff.id) },
+                                    set: { open in if open { folded.remove(fileDiff.id) } else { folded.insert(fileDiff.id) } })
+                            )
+                            .id("block:\(fileDiff.id)")
+                        }
+                        let extra = raw.files == nil ? (diff.preamble + diff.trailing).filter { !$0.allSatisfy(\.isWhitespace) } : []
+                        if !extra.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Also reported").font(Theme.ui(12, .medium)).foregroundStyle(Theme.text2)
+                                // Not selectable: a selectable text is dropped from the combined element, so the names would
+                                // be drawn but never read.
+                                // Each as a file header names its file: the path, then its kind in a word.
+                                ForEach(Array(UnifiedDiff.reported(extra).enumerated()), id: \.offset) { _, reported in
+                                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                        Text(verbatim: reported.text.displaySafe).font(Theme.mono(11.5)).foregroundStyle(Theme.text2)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        if let label = reported.label {
+                                            Text(label).font(Theme.ui(11)).foregroundStyle(Theme.text3)
+                                        }
                                     }
                                 }
                             }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("changes.extra")
                         }
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier("changes.extra")
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .defaultScrollAnchor(.top)
         }
