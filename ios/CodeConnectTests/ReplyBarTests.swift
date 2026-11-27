@@ -57,7 +57,7 @@ final class ReplyBarTests: XCTestCase {
     /// A recorded live summary of `agent`, on the account `account` names (`nil`: none named).
     private func summary(
         _ agent: StartAgent, account: JSONValue?, limit: String? = nil, at: String = "2026-11-28T18:56:40Z",
-        lifecycle: String? = nil
+        lifecycle: String? = nil, switching: String? = nil
     ) throws -> SessionSummary {
         let (name, key) =
             agent == .claude ? ("minor-46-wire", "session_hosted_live") : ("codex-settings-wire", "session_codex_live")
@@ -65,6 +65,7 @@ final class ReplyBarTests: XCTestCase {
         run["account"] = account
         if let limit { run["limit"] = .object(["which": .string(limit), "at": .string(at)]) }
         if let lifecycle { run["lifecycle"] = .string(lifecycle) }
+        if let switching { run["switching"] = .string(switching) }
         return try decode(SessionSummary.self, .object(run))
     }
 
@@ -243,6 +244,20 @@ final class ReplyBarTests: XCTestCase {
         XCTAssertEqual(foot.limits, ReplyBar.limits(d.facts, now: now), "the bar's windows")
         XCTAssertEqual(foot.full, "5-hour")
         XCTAssertEqual(foot.account, "\(try XCTUnwrap(d.facts?.email)) · Max")
+        XCTAssertEqual(foot.prompt, LimitFoot.replyPrompt)
+    }
+
+    /// A run at its limit that its next message moves to another account: the band still says the limit it is at,
+    /// but the box asks for no wait, since that message goes through on the new account.
+    func testARunDueToMoveAsksForNoWait() throws {
+        let book = try book()
+        let (d, _) = try on("D", in: book)
+        let run = try summary(
+            .claude, account: .object(["id": .string(d.id), "label": .string("D")]), limit: "five_hour",
+            switching: "waiting")
+        let foot = try XCTUnwrap(LimitFoot.of(summary: run, book: book, now: now, timeZone: .gmt))
+        XCTAssertEqual(foot.title, "5-hour limit reached")
+        XCTAssertNil(foot.prompt)
     }
 
     /// A reset on another day names the day and the date before the time, and no countdown.

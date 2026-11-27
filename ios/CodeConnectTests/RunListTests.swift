@@ -95,6 +95,7 @@ final class RunListTests: XCTestCase {
         XCTAssertEqual(ids(RunList(fleet + [capped], computer: "m2").done), ["unseen"])
         XCTAssertEqual(ids(list.ended), ["over", "over-too", "capped-over"])
         XCTAssertEqual(RunList.activeCount(fleet + [capped, over, stopped], on: "m2"), 6)
+        XCTAssertEqual(RunList.activeCount(fleet + [capped, over, stopped], on: nil), 10, "every computer's")
     }
 
     /// The head's menu counts a computer's runs that have not ended, the ones the list shows of it.
