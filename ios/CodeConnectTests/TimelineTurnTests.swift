@@ -116,21 +116,58 @@ final class TimelineTurnTests: XCTestCase {
             shape(TimelineBuilder.drawn(items)), ["you", "tool:Bash", "notice:Turn complete"])
     }
 
-    /// Run state 04: a turn that failed ends on a "Turn failed" row in its agent's words, drawn even after a reply,
-    /// since that reply is the error's own text and no end of its own.
-    func testAFailedTurnEndsOnATurnFailedRowEvenAfterAReply() throws {
-        let failed = event(
-            3, "turn_complete",
-            #"{"subtype":"success","is_error":true,"num_turns":1,"failed":{"status":529,"message":"API Error: Repeated 529 Overloaded errors."}}"#,
+    /// Claude's own reply naming an API error (`isApiErrorMessage`), as the SDK gives it.
+    private func apiError(_ seq: UInt64) -> Event {
+        event(
+            seq, "agent_message",
+            #"{"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: Repeated 529 Overloaded errors."}]},"isApiErrorMessage":true}"#,
             source: "sdk")
-        let items = TimelineBuilder.build([user(1), reply(2, "API Error: Repeated 529 Overloaded errors."), failed])
+    }
+
+    private func failedEnd(_ seq: UInt64, _ failed: String) -> Event {
+        event(seq, "turn_complete", #"{"subtype":"success","is_error":true,"num_turns":1,"failed":\#(failed)}"#, source: "sdk")
+    }
+
+    private func lastNotice(_ items: [TimelineItem]) throws -> NoticeItem {
+        guard case .notice(let notice) = try XCTUnwrap(items.last).content else { throw XCTSkip("no notice") }
+        return notice
+    }
+
+    /// Run state 04 (artboard 04): a turn that failed ends on its own row, drawn even after a reply, saying the run
+    /// stopped and why, when, that nothing was lost and that a message carries on; Claude's reply naming the API error
+    /// is that row's, not a reply of its own. A 529 is overloaded, on Anthropic's API.
+    func testAFailedTurnEndsOnARowSayingTheRunStoppedAndWhy() throws {
+        let end = failedEnd(4, #"{"status":529,"message":"API Error: Repeated 529 Overloaded errors."}"#)
+        let items = TimelineBuilder.build([user(1), reply(2, "Checking the other sections next."), apiError(3), end])
         XCTAssertEqual(
             shape(TimelineBuilder.drawn(items)),
-            ["you", "reply:API Error: Repeated 529 Overloaded errors.", "notice:Turn failed"])
-        guard case .notice(let notice) = try XCTUnwrap(items.last).content else { return XCTFail("a notice") }
+            ["you", "reply:Checking the other sections next.", "notice:The run stopped: API Error 529 · overloaded"])
+        let notice = try lastNotice(items)
         XCTAssertEqual(notice.kind, .turnComplete, "still the turn's boundary")
         XCTAssertEqual(notice.severity, .failure)
-        XCTAssertEqual(notice.detail, "API Error: Repeated 529 Overloaded errors.")
+        let at = Format.clock(end.date, now: end.date)
+        XCTAssertEqual(
+            notice.detail, "Anthropic’s API was overloaded at \(at). Nothing was lost; send a message to carry on.")
+    }
+
+    /// Another failure names its status, or else its agent's first line, and says when the run stopped.
+    func testAnotherFailedTurnNamesItsStatusOrItsAgentsWords() throws {
+        let status = try lastNotice(TimelineBuilder.build([user(1), failedEnd(2, #"{"status":500,"message":"API Error: 500"}"#)]))
+        XCTAssertEqual(status.title, "The run stopped: API Error 500")
+        let words = failedEnd(2, #"{"message":"Model unavailable\nfor this account"}"#)
+        let notice = try lastNotice(TimelineBuilder.build([user(1), words]))
+        XCTAssertEqual(notice.title, "The run stopped: Model unavailable")
+        let at = Format.clock(words.date, now: words.date)
+        XCTAssertEqual(notice.detail, "It stopped at \(at). Nothing was lost; send a message to carry on.")
+        let silent = try lastNotice(TimelineBuilder.build([user(1), failedEnd(2, #"{"message":null}"#)]))
+        XCTAssertEqual(silent.title, "The run stopped")
+    }
+
+    /// An API error's reply on a turn whose end says nothing of a failure (a daemon before minor 70) is still drawn.
+    func testAnAPIErrorReplyStaysWhenItsTurnsEndSaysNothing() {
+        let items = TimelineBuilder.build([user(1), apiError(2), stop(3)])
+        XCTAssertEqual(
+            shape(TimelineBuilder.drawn(items)), ["you", "reply:API Error: Repeated 529 Overloaded errors."])
     }
 
     func testATurnWithNothingAfterThePromptKeepsItsTurnCompleteRow() {
