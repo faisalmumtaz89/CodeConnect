@@ -510,10 +510,10 @@ final class AccountsWireTests: XCTestCase {
         XCTAssertNil(words(-60), "past it")
     }
 
-    /// A window's caption is its own length, as the service names it: never a guess at "5-hour" or "Week".
+    /// A window's caption is its own length, as the service names it: never a guess at "5-hour" or "Weekly".
     func testAWindowIsCaptionedByItsOwnLength() {
         XCTAssertEqual(AccountSwitchWords.caption(minutes: 300), "5-hour")
-        XCTAssertEqual(AccountSwitchWords.caption(minutes: 10080), "Week")
+        XCTAssertEqual(AccountSwitchWords.caption(minutes: 10080), "Weekly")
         XCTAssertEqual(AccountSwitchWords.caption(minutes: 1440), "1-day")
         XCTAssertEqual(AccountSwitchWords.caption(minutes: 120), "2-hour")
     }

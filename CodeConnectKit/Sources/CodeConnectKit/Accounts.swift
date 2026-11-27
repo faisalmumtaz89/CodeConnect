@@ -236,7 +236,7 @@ public enum AccountSwitchWords {
     public static func caption(minutes: Int) -> String {
         switch minutes {
         case 300: "5-hour"
-        case 10080: "Week"
+        case 10080: "Weekly"
         case let m where m % 1440 == 0: "\(m / 1440)-day"
         case let m where m % 60 == 0: "\(m / 60)-hour"
         default: "\(minutes)-minute"
