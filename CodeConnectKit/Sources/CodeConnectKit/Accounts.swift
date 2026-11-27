@@ -248,14 +248,19 @@ public enum AccountSwitchWords {
     /// nil once the time has come, until the computer reads the window again.
     public static func resets(_ window: UsageWindow, now: Date) -> String? {
         if window.resetsAt == 0 { return "not started" }
+        return countdown(window, now: now).map { "resets \($0)" }
+    }
+
+    /// How long until a window resets, as `resets` says it after "resets ": "in 2h 10m"; nil once it has.
+    public static func countdown(_ window: UsageWindow, now: Date) -> String? {
         let left = window.resetsAt - Int(now.timeIntervalSince1970.rounded(.down))
         guard left > 0 else { return nil }
-        if left >= 2 * 86400 { return "resets in \(left / 86400) days" }
+        if left >= 2 * 86400 { return "in \(left / 86400) days" }
         if left >= 3600 {
             let minutes = left % 3600 / 60
-            return "resets in \(left / 3600)h" + (minutes > 0 ? " \(minutes)m" : "")
+            return "in \(left / 3600)h" + (minutes > 0 ? " \(minutes)m" : "")
         }
-        return "resets in \(max(1, left / 60)) min"
+        return "in \(max(1, left / 60)) min"
     }
 
     /// In a row's figures' place: its agent says the plan has no limits.

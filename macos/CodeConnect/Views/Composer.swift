@@ -298,6 +298,11 @@ private struct Composer: View {
 
     // MARK: The box
 
+    /// The reply field's prompt: at a usage limit, when a message goes through again.
+    private func prompt(_ agent: String) -> String {
+        model.limitFoot(for: key, now: .now)?.prompt ?? SessionWords.replyPrompt(agent)
+    }
+
     private var box: some View {
         let agent = summary?.agent.displayName ?? "the agent"
         return InputBox(barHeight: 46) {
@@ -310,14 +315,14 @@ private struct Composer: View {
                 }
                 TextField(
                     "", text: $kept.reply, selection: $selection,
-                    prompt: Text(SessionWords.replyPrompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
+                    prompt: Text(prompt(agent)).foregroundStyle(Theme.text3), axis: .vertical
                 )
                     .textFieldStyle(.plain)
                     .font(Theme.ui(15))
                     .lineSpacing(InputBoxLayout.lineSpacing)
                     .foregroundStyle(Theme.text)
                     .lineLimit(1...5)
-                    .accessibilityLabel(SessionWords.replyPrompt(agent))
+                    .accessibilityLabel(prompt(agent))
                     .accessibilityIdentifier("session.composer.field")
                     // Inside `sendsOnReturn`: over the palette, ↑ ↓ move its light and Return runs the lit row; anything
                     // the palette leaves (⇧/⌥Return, no palette) goes on to the box. ⌘ and ⌃ Return are never the palette's.

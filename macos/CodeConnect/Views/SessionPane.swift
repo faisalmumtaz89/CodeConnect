@@ -13,6 +13,9 @@ struct SessionPane: View {
     @State private var boxTaken = false
     /// How tall the reply box stands (none while a request holds its place): a request shares the half pane with it.
     @State private var replyHeight: CGFloat = 0
+    /// How tall the limit band stands over the box (none while the run is at no limit): a request shares the half pane
+    /// with it too.
+    @State private var limitHeight: CGFloat = 0
     /// The reply field (or its command list) holds the keyboard.
     @FocusedValue(\.composerHoldsEscape) private var composerHolds
     @FocusedValue(\.changesFieldFocused) private var changesFieldFocused
@@ -64,15 +67,17 @@ struct SessionPane: View {
         .onChange(of: agentsShown) { _, shown in if shown { model.markReviewed(row.id) } }
     }
 
-    /// What waits on you and the reply box, under the conversation.
+    /// The limit band, what waits on you and the reply box, under the conversation.
     @ViewBuilder private var foot: some View {
+        LimitBand(model: model, key: row.id)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { limitHeight = $0 }
         // What waits on you sits at the foot, outside the conversation's scroll, in at most half the pane with
         // the reply box when that shows, so the window holds them both at its smallest; its answers take the
         // reply box's place. Not while the reply field holds the keyboard: the box stays the writer's until it
         // lets go (a hunk's comment field, which holds Esc too, is not the reply's). Once a request has the box,
         // the field can't take the keyboard back, so what holds it then is the request's own field.
         PendingRequests(
-            model: model, key: row.id, maxHeight: max(0, size.height / 2 - replyHeight),
+            model: model, key: row.id, maxHeight: max(0, size.height / 2 - replyHeight - limitHeight),
             held: composerHolds == true && changesFieldFocused != true && !boxTaken,
             keysElsewhere: adding.map { $0.wrappedValue != nil } ?? false || setup.shown || changesFieldFocused == true)
         // Standing aside, the reply box stays mounted: its words, its last outcome and a send on its way are

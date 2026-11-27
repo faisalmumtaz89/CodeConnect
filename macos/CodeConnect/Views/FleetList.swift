@@ -313,7 +313,7 @@ struct FleetList: View {
                 row: row, selected: selected, roomForMore: more && !selecting,
                 elsewhere: elsewhere ? model?.machineOS ?? "" : nil, offline: offline,
                 chosen: selecting && choosable ? chosen.contains(row.id) : nil,
-                refusal: batchRefused[row.id])
+                refusal: batchRefused[row.id], resets: model?.limitFoot(for: row.id, now: .now)?.resetsAt)
         }
         .buttonStyle(.hover(radius: 6, id: "fleet.row.\(row.id)"))
         .focusable(false)
@@ -487,7 +487,7 @@ private struct ComputerFilter: View {
     private var menu: some View {
         let computers = machines.models.filter(\.showsFleet)
         let fleet = machines.fleet
-        let all = fleet.count { $0.status != .ended }
+        let all = RunList.activeCount(fleet, on: nil)
         return VStack(alignment: .leading, spacing: 0) {
             choice(0, id: "fleet.computers.all", chosen: filter == nil, to: nil) {
                 MenuRow(chosen: filter == nil) {
@@ -733,6 +733,8 @@ private struct FleetLine: View {
     var chosen: Bool? = nil
     /// Why the last batch did not remove it, in place of its age.
     var refusal: String? = nil
+    /// When the usage limit the run is at resets, in place of its age; nil when that is not known.
+    var resets: Date? = nil
     @State private var lastTick = Date()
 
     private var since: Date { row.lastActive }
@@ -742,7 +744,7 @@ private struct FleetLine: View {
             if let chosen {
                 ChooseBox(on: chosen).accessibilityIdentifier("fleet.row.\(row.id).chosen")
             } else {
-                StateIcon(status: row.status, offline: offline)
+                StateIcon(status: row.status, offline: offline, limited: row.summary.atLimit)
                     .accessibilityIdentifier("fleet.row.\(row.id).status")
             }
             Text(row.label.inline)
@@ -757,7 +759,7 @@ private struct FleetLine: View {
             if let elsewhere {
                 ComputerMark(os: elsewhere, size: 10).foregroundStyle(Theme.text3)
             }
-            Text(Format.age(since: since, now: AgeTick.renderTime(lastTick: lastTick)))
+            Text(time(now: AgeTick.renderTime(lastTick: lastTick)))
                 .font(Theme.ui(11.5))
                 .foregroundStyle(Theme.text3)
                 .monospacedDigit()
@@ -772,6 +774,12 @@ private struct FleetLine: View {
         .task(id: AgeClock(since: since, scale: .age)) {
             await AgeTick.follow(AgeClock(since: since, scale: .age)) { lastTick = $0 }
         }
+    }
+
+    /// At a usage limit, when it resets ("6:00 PM", "Mon"); else how long since the run last did anything.
+    private func time(now: Date) -> String {
+        guard row.summary.atLimit, let resets else { return Format.age(since: since, now: now) }
+        return Format.clock(resets, now: now)
     }
 }
 
@@ -871,13 +879,32 @@ private struct ChooseBox: View {
     }
 }
 
-/// A run's state as the fleet orders it (`FleetStatus`), drawn small: amber when it waits on you.
+/// A run's state as the fleet orders it (`FleetStatus`), drawn small: amber when it waits on you; a red ring when the
+/// run is at its usage limit, whatever its last turn's state.
 struct StateIcon: View {
     let status: FleetStatus
     /// Its computer is not reached: drawn in its stopping form, dim, as nothing of it can move; read as its status.
     var offline = false
+    var limited = false
 
     var body: some View {
+        ZStack {
+            if limited {
+                Circle().strokeBorder(Theme.red, lineWidth: 1.5)
+            } else {
+                mark
+            }
+        }
+        .frame(width: 13, height: 13)
+        .help(label)
+        // One element, read as the word it stands for: its marks alone read as symbol names ("Selected").
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+    }
+
+    private var label: String { limited ? "Usage limit reached" : status.label }
+
+    @ViewBuilder private var mark: some View {
         ZStack {
             switch offline && status != .ended ? .stopping : status {
             case .blocked:
@@ -905,11 +932,6 @@ struct StateIcon: View {
                 Image(systemName: "checkmark").font(.system(size: 6.5, weight: .heavy)).foregroundStyle(Theme.window)
             }
         }
-        .frame(width: 13, height: 13)
-        .help(status.label)
-        // One element, read as the word it stands for: its marks alone read as symbol names ("Selected").
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(status.label)
     }
 }
 

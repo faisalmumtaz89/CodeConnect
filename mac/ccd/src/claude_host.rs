@@ -656,6 +656,50 @@ fn next_mark(last: i64, now: i64) -> i64 {
     now.max(last + 1)
 }
 
+/// The usage limit Claude Code's `rate_limit_info` says a request was refused at, if it says one was: its
+/// `errorCode`, else its `rateLimitType`. A window refused while extra usage is allowed refused nothing: the request
+/// goes on extra usage.
+fn claude_limit(info: &serde_json::Value) -> Option<protocol::event::LimitKind> {
+    use protocol::event::LimitKind;
+    if info["status"] != "rejected"
+        || matches!(
+            info["overageStatus"].as_str(),
+            Some("allowed" | "allowed_warning")
+        )
+    {
+        return None;
+    }
+    if info["errorCode"] == "credits_required" {
+        return Some(LimitKind::Credits);
+    }
+    Some(match info["rateLimitType"].as_str() {
+        Some("five_hour") => LimitKind::FiveHour,
+        Some("seven_day" | "seven_day_overage_included") => LimitKind::Weekly,
+        Some("seven_day_opus") => LimitKind::WeeklyOpus,
+        Some("seven_day_sonnet") => LimitKind::WeeklySonnet,
+        Some("overage") => LimitKind::ExtraUsage,
+        _ => LimitKind::Unknown,
+    })
+}
+
+/// The run `uid` stopped at the usage limit `which`, now ([`protocol::event::SessionSummary::limit`]).
+pub(crate) async fn set_limit(daemon: &Daemon, uid: &str, which: protocol::event::LimitKind) {
+    let limit = protocol::event::RunLimit {
+        which,
+        at: protocol::time::now_rfc3339(),
+    };
+    if let Err(err) = daemon.db.set_run_limit(uid.to_string(), Some(limit)).await {
+        crate::log_error!("{uid}: could not keep its usage limit: {err:#}");
+    }
+}
+
+/// The run `uid`'s turn started, so it is at no usage limit now.
+pub(crate) async fn clear_limit(daemon: &Daemon, uid: &str) {
+    if let Err(err) = daemon.db.set_run_limit(uid.to_string(), None).await {
+        crate::log_error!("{uid}: could not clear its usage limit: {err:#}");
+    }
+}
+
 /// Map one SDK message of a live run and file it with its cursor, then acknowledge it.
 /// `turns.init` is the uuid of the run's latest `system/init`: an init sets it before it is
 /// mapped, so the init's own events carry their turn. The run's turns are marked for the
@@ -684,6 +728,9 @@ async fn apply_sdk(
     // however many runs and turns), and pushed. The event's own figures are not read: their units are not part of
     // the SDK's word.
     if text("type") == Some("rate_limit_event") {
+        if let Some(which) = claude_limit(&message["rate_limit_info"]) {
+            set_limit(daemon, uid, which).await;
+        }
         let daemon = Arc::clone(daemon);
         tokio::spawn(async move { crate::start_session::refresh_facts(&daemon).await });
     }
@@ -802,6 +849,7 @@ async fn mark_turn(
 ) {
     if started {
         daemon.note_turn_running(uid);
+        clear_limit(daemon, uid).await;
     }
     if ended && turns.replayed {
         if let Some(end) = events
@@ -8502,6 +8550,210 @@ mod tests {
             seq += 2;
         }
         stop(&played.dir);
+    }
+
+    /// **A run claude says a request of was refused at a usage limit says which (minor 65), until its next turn**: a
+    /// `rate_limit_event` `rejected` names it by its `rateLimitType` (`seven_day_opus`: the weekly Opus), or credits by
+    /// its `errorCode`; an `allowed` one names none, nor a `rejected` one whose extra usage is allowed; the next turn's
+    /// init clears it.
+    #[tokio::test]
+    async fn a_refused_rate_limit_event_marks_the_run_at_its_limit_until_its_next_turn() {
+        use protocol::event::LimitKind;
+        async fn limit_is(
+            daemon: &Daemon,
+            uid: &str,
+            want: Option<protocol::event::LimitKind>,
+            why: &str,
+        ) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let sessions = daemon.sessions().await.unwrap();
+                let run = sessions.iter().find(|run| run.session_uid == uid).unwrap();
+                let which = run.limit.as_ref().map(|limit| limit.which);
+                if which == want {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "{why}: {which:?}");
+                tokio::time::sleep(POLL).await;
+            }
+        }
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        async fn say_sdk(played: &mut Played, seq: &mut u64, message: serde_json::Value) {
+            sdk(&mut played.write, *seq, message).await;
+            assert_eq!(
+                next(&mut played.lines).await,
+                Some(ToHost::Ack { seq: *seq })
+            );
+            *seq += 1;
+        }
+        let mut seq = 3;
+        let event = |info: serde_json::Value| {
+            serde_json::json!({"type": "rate_limit_event", "uuid": "9d1f0000-0000-4000-8000-0000000003a1",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001", "rate_limit_info": info})
+        };
+        let init = |uuid: &str| {
+            let mut init = init_in(&rig.root);
+            init["uuid"] = uuid.into();
+            init
+        };
+        say_sdk(
+            &mut played,
+            &mut seq,
+            init("9d1f0000-0000-4000-8000-0000000003b1"),
+        )
+        .await;
+        say_sdk(
+            &mut played,
+            &mut seq,
+            event(serde_json::json!({"status": "allowed", "rateLimitType": "five_hour"})),
+        )
+        .await;
+        limit_is(&rig.daemon, &uid, None, "an allowed request names no limit").await;
+        say_sdk(
+            &mut played,
+            &mut seq,
+            event(
+                serde_json::json!({"status": "rejected", "rateLimitType": "five_hour",
+                "overageStatus": "allowed", "isUsingOverage": true}),
+            ),
+        )
+        .await;
+        limit_is(
+            &rig.daemon,
+            &uid,
+            None,
+            "a window refused but extra usage allowed: the run goes on",
+        )
+        .await;
+        say_sdk(
+            &mut played,
+            &mut seq,
+            event(
+                serde_json::json!({"status": "rejected", "rateLimitType": "five_hour",
+            "resetsAt": 1795928400}),
+            ),
+        )
+        .await;
+        limit_is(
+            &rig.daemon,
+            &uid,
+            Some(LimitKind::FiveHour),
+            "refused at the 5-hour",
+        )
+        .await;
+        say_sdk(
+            &mut played,
+            &mut seq,
+            init("9d1f0000-0000-4000-8000-0000000003b2"),
+        )
+        .await;
+        limit_is(&rig.daemon, &uid, None, "the next turn clears it").await;
+        say_sdk(
+            &mut played,
+            &mut seq,
+            event(
+                serde_json::json!({"status": "rejected", "rateLimitType": "seven_day",
+            "errorCode": "credits_required"}),
+            ),
+        )
+        .await;
+        limit_is(
+            &rig.daemon,
+            &uid,
+            Some(LimitKind::Credits),
+            "credits, by its errorCode",
+        )
+        .await;
+        say_sdk(
+            &mut played,
+            &mut seq,
+            event(serde_json::json!({"status": "rejected", "rateLimitType": "seven_day_opus"})),
+        )
+        .await;
+        limit_is(
+            &rig.daemon,
+            &uid,
+            Some(LimitKind::WeeklyOpus),
+            "the weekly Opus",
+        )
+        .await;
+        stop(&played.dir);
+    }
+
+    /// **A hosted Claude run at its 5-hour limit, as an app is sent it** (minor 65). `fixtures/claude/run-limit-wire.json`
+    /// is emitted by this build; a copy of it under `ios/` is kept byte-identical by
+    /// `fixtures/check-duplicated-fixtures.sh`.
+    #[tokio::test]
+    async fn the_run_limit_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/run-limit-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_run_limit_wire().await,
+            committed,
+            "the committed run-limit wire no longer matches what this build emits. Regenerate it with cargo test -p \
+             ccd --bin ccd -- --ignored regenerate_the_run_limit_wire_fixture, and copy it to \
+             ios/CodeConnectTests/Resources/"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/run-limit-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_run_limit_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_run_limit_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/run-limit-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// A live hosted run whose claude said a request was refused at the 5-hour window: the `sessions` frame an app is
+    /// sent for it, with the run's names, folder and clock reads pinned.
+    async fn derived_run_limit_wire() -> serde_json::Value {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let uid = played.uid.clone();
+        sdk(&mut played.write, 3, init_in(&rig.root)).await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        sdk(
+            &mut played.write,
+            4,
+            serde_json::json!({"type": "rate_limit_event", "uuid": "9d1f0000-0000-4000-8000-0000000003a1",
+                "session_id": "5f0c1e2a-0000-4000-8000-000000000001",
+                "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour"}}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 4 }));
+        let mut summary = serde_json::to_value(summary(&rig.daemon, &uid).await).unwrap();
+        stop(&played.dir);
+        let pinned = "01K1B3XQ8ZC0DE5FGH7L1M1T00";
+        for (key, value) in [
+            ("session_uid", pinned),
+            ("session_id", pinned),
+            ("cwd", "/Users/person/project"),
+            ("project_label", "project"),
+            ("created_at", "2026-11-26T10:00:00.000Z"),
+            ("updated_at", "2026-11-26T10:05:00.000Z"),
+        ] {
+            summary[key] = value.into();
+        }
+        if summary["transcript_path"].is_string() {
+            summary["transcript_path"] =
+                "/Users/person/.claude/projects/project/session.jsonl".into();
+        }
+        summary["limit"]["at"] = "2026-11-26T10:05:00.000Z".into();
+        serde_json::to_value(protocol::ws::ServerMessage::Sessions {
+            sessions: vec![serde_json::from_value(summary).unwrap()],
+        })
+        .unwrap()
     }
 
     /// **claude's word that its plan's limits changed reads the run's account at most once a [`FACTS_FRESH`]**

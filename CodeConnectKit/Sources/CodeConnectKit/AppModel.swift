@@ -1242,6 +1242,12 @@ public final class AppModel {
         return ReplyBar.of(events: states[key]?.events ?? [], summary: summary, book: accountBook, now: now)
     }
 
+    /// The band over run `key`'s reply box while it is at a usage limit (`LimitFoot`); nil when it is not, or for a run
+    /// this app does not list.
+    public func limitFoot(for key: String, now: Date) -> LimitFoot? {
+        summary(for: key).flatMap { LimitFoot.of(summary: $0, book: accountBook, now: now) }
+    }
+
     /// An account's email as this computer's account book knows it, for a switch's rows on run `key`: by its id (nil:
     /// the agent's Default), under the run's agent. Nil while the book is not in, or for an account it no longer lists.
     private func accountEmail(run key: String, id: String?) -> String? {
