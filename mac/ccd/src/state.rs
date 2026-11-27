@@ -5772,7 +5772,13 @@ impl Daemon {
         {
             return ActionOutcome::Refused(code::SHARED_WORKTREE, None);
         }
-        if let Some(reason) = &entry.locked {
+        // Claude Code's own lock on a worktree it made goes once that claude is gone (read again below);
+        // any other lock is the person's, and stays.
+        if let Some(reason) = entry
+            .locked
+            .as_ref()
+            .filter(|reason| crate::git::claude_lock_pid(reason, &top).is_none())
+        {
             return ActionOutcome::Refused(
                 code::LOCKED,
                 Some(reason.clone()).filter(|r| !r.is_empty()),
@@ -5877,6 +5883,25 @@ impl Daemon {
                 ),
                 other => other,
             };
+        }
+        let lock = crate::git::worktrees(&top, git_bin, timeout)
+            .await
+            .and_then(|now| now.into_iter().find(|entry| entry.path == top))
+            .and_then(|entry| entry.locked);
+        if let Some(reason) = lock {
+            match crate::git::claude_lock_pid(&reason, &top) {
+                Some(pid) if !crate::git::pid_alive(pid) => {
+                    if let Err(line) = crate::git::unlock_worktree(&main, git_bin, &top).await {
+                        return ActionOutcome::Refused(code::GIT_FAILED, Some(line));
+                    }
+                }
+                _ => {
+                    return ActionOutcome::Refused(
+                        code::LOCKED,
+                        Some(reason).filter(|r| !r.is_empty()),
+                    )
+                }
+            }
         }
         if let Err(line) = crate::git::remove_worktree(&main, git_bin, &top).await {
             return ActionOutcome::Refused(code::GIT_FAILED, Some(format!("ended; {line}")));
@@ -9825,6 +9850,81 @@ mod tests {
         for path in [main, gh.parent().unwrap().to_path_buf()] {
             let _ = std::fs::remove_dir_all(path);
         }
+    }
+
+    /// **A worktree its Claude left locked is archived once that Claude is gone**: Claude Code locks
+    /// a `--worktree` it makes ("claude session <name> (pid N)") and a stopped claude leaves the lock;
+    /// with pid N gone it is unlocked and archived. The same lock with N alive, or naming another
+    /// worktree, stays refused and locked.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_worktree_its_claude_left_locked_is_archived_once_that_claude_is_gone() {
+        use protocol::ws::git_refusal as code;
+        let _env = crate::ProcessEnvRead::take();
+        let daemon = daemon_on(shared_store(), Config::default());
+        let mut gone = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        let locked = |uid: &str, reason: String| {
+            let (main, worktree) = archivable_run(&daemon, uid, "worktree-x", Lifecycle::Exited);
+            git_in(
+                &main,
+                &[
+                    "worktree",
+                    "lock",
+                    "--reason",
+                    &reason,
+                    worktree.to_str().unwrap(),
+                ],
+            );
+            let head = git_in(&worktree, &["rev-parse", "HEAD"]).trim().to_string();
+            (main, worktree, head)
+        };
+
+        let stale = "01K1B3XQ8ZC0DE5FGH7JKMNA80";
+        let (main, worktree, head) = locked(stale, format!("claude session x (pid {dead})"));
+        assert_eq!(
+            daemon
+                .git_action(stale, "l-1", &archive("worktree-x", &head))
+                .await,
+            protocol::ws::GitActionResult::Done {
+                sha: None,
+                pr: None
+            }
+        );
+        assert!(!worktree.exists());
+        let _ = std::fs::remove_dir_all(main);
+
+        let alive = "01K1B3XQ8ZC0DE5FGH7JKMNA81";
+        let reason = format!("claude session x (pid {})", std::process::id());
+        let (main, worktree, head) = locked(alive, reason.clone());
+        assert_eq!(
+            refused_as(
+                &daemon
+                    .git_action(alive, "l-2", &archive("worktree-x", &head))
+                    .await
+            ),
+            (code::LOCKED.to_string(), Some(reason))
+        );
+        assert!(worktree.exists());
+        assert!(
+            git_in(&main, &["worktree", "list", "--porcelain"]).contains("locked claude session x")
+        );
+        let _ = std::fs::remove_dir_all(main);
+
+        let other = "01K1B3XQ8ZC0DE5FGH7JKMNA82";
+        let (main, worktree, head) = locked(other, format!("claude session y (pid {dead})"));
+        assert_eq!(
+            refused_as(
+                &daemon
+                    .git_action(other, "l-3", &archive("worktree-x", &head))
+                    .await
+            )
+            .0,
+            code::LOCKED
+        );
+        assert!(worktree.exists());
+        let _ = std::fs::remove_dir_all(main);
     }
 
     /// **Archive refuses before changing anything**: not the branch or commit shown, the main
