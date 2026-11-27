@@ -14,7 +14,7 @@ public struct RunList: Sendable, Equatable {
     /// `rows`, in the fleet's order, narrowed to `computer` (a machine id) where one is chosen.
     public init(_ rows: [FleetRow], computer: String?) {
         let shown = { (row: FleetRow) in computer == nil || row.machineID == computer }
-        needsYou = rows.filter { [.blocked, .failed, .idle].contains($0.status) || $0.summary.atLimit }
+        needsYou = rows.filter(ProjectList.needsYou)
         working = rows.filter { shown($0) && !$0.summary.atLimit && [.running, .stopping].contains($0.status) }
         done = rows.filter { shown($0) && !$0.summary.atLimit && [.doneUnreviewed, .done].contains($0.status) }
         ended = rows.filter { shown($0) && $0.status == .ended && !$0.summary.atLimit }
