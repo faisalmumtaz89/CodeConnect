@@ -2116,28 +2116,39 @@ private struct SessionComposeBar: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
-            ReplyBoxBar(
-                model: model, key: key, agent: summary?.agent, onSettings: onSettings, onUsage: onUsage
-            ) {
-                if model.canUpload(key) {
-                    AttachMenu(room: Attachment.maxCount - files.count) { name, size, read in
-                        model.attach(name: name, size: size, to: key, read: read)
-                    }
-                }
-            } trailing: {
-                // While the mic is hot the box carries no meters or clocks: the live transcript is proof the mic hears
-                // you, and the button's stop face is the recording state. Chrome that restates both was removed at
-                // the owner's call.
-                if dictation.isRecording {
+            if dictation.isRecording {
+                // While the mic is hot the bar is × and Stop, nothing else: no meters or clocks, as the live
+                // transcript is proof the mic hears you, and the button's stop face is the recording state.
+                HStack(spacing: 0) {
                     cancelButton
+                    Spacer(minLength: 0)
+                    circle
                 }
-                CCVoiceButton(phase: phase, blockedReason: blockedReason, disc: 34) { act() }
-                    .accessibilityIdentifier(phase == .stopTurn ? "stop-\(key)" : "session.composer.send")
+                .frame(height: 48)
+                .padding(.horizontal, 2)
+            } else {
+                ReplyBoxBar(
+                    model: model, key: key, agent: summary?.agent, onSettings: onSettings, onUsage: onUsage
+                ) {
+                    if model.canUpload(key) {
+                        AttachMenu(room: Attachment.maxCount - files.count) { name, size, read in
+                            model.attach(name: name, size: size, to: key, read: read)
+                        }
+                    }
+                } trailing: {
+                    circle
+                }
             }
         }
         .background { CCBoxSurface() }
         .accessibilityElement(children: .contain)
         .ccAnimation(CC.motion.small, value: dictation.isRecording)
+    }
+
+    /// The one circle: mic, Send, Stop, drawn 34 in a 44-pt target.
+    private var circle: some View {
+        CCVoiceButton(phase: phase, blockedReason: blockedReason, disc: 34) { act() }
+            .accessibilityIdentifier(phase == .stopTurn ? "stop-\(key)" : "session.composer.send")
     }
 
     private var field: some View {
@@ -2241,8 +2252,8 @@ private struct SessionComposeBar: View {
         }
     }
 
-    /// Discards the recording *and* the transcript. Ghost weight — the circle
-    /// beside it keeps the decision.
+    /// Discards the recording *and* the transcript. A bare ×, at the bar's leading edge — the circle at its other end
+    /// keeps the decision.
     private var cancelButton: some View {
         Button {
             // Silent, like every dismissal: buzzing on a discard trains the
@@ -2256,12 +2267,10 @@ private struct SessionComposeBar: View {
                 maxSize: CC.size.controlSm / 2
             )
             .foregroundStyle(CC.text.secondary)
-                .frame(width: CC.size.controlSm, height: CC.size.controlSm)
-                .background {
-                    Circle().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline)
-                }
+            .frame(width: CC.size.hitTarget, height: CC.size.hitTarget)
+            .contentShape(Rectangle())
         }
-        .ccHitTarget()
+        .buttonStyle(.plain)
         .accessibilityLabel("Cancel dictation")
         .accessibilityHint("Discards the transcript")
     }
