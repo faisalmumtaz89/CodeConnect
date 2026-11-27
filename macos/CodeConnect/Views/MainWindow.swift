@@ -245,6 +245,10 @@ struct MainWindow: View {
                 }
             }
         #endif
+        // Only these turns itself off once nothing needs the person, the list shown or not.
+        .onChange(of: !machines.fleet.contains { !$0.summary.archived && ProjectList.needsYou($0) }) { _, none in
+            if none { layout.onlyNeedsYou = false }
+        }
         .sheet(item: $adding, onDismiss: { repairing = nil }) { _ in
             AddSheet(address: $repairing)
             // A sheet stands in the middle of the window: clear of the 52-point header above it, so as far from the

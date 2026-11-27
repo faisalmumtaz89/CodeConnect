@@ -2,11 +2,13 @@ import CodeConnectKit
 import SwiftUI
 
 /// How the person has laid the list out: only what needs them, the projects folded, how many times each project's
-/// ended sessions were revealed. The app's, so a closed window opens on it again.
+/// ended sessions were revealed, and where the open session stood when it was opened, which it keeps while it is
+/// open. The app's, so a hidden list or a closed window comes back to it.
 struct ListLayout: Equatable {
     var onlyNeedsYou = false
     var folded: Set<String> = []
     var revealed: [String: Int] = [:]
+    var held: ProjectList.Held?
 }
 
 /// The window's session list, 256 pt down its leading side: in its head the computer it is narrowed to ("All ▾") and
@@ -31,8 +33,6 @@ struct FleetList: View {
     @Environment(\.headerClearance) private var headerClearance
     /// The list has the keyboard: one stop, taken by a click on a row and kept across an arrow's move.
     @FocusState private var listFocused: Bool
-    /// Where the open session stood when it was opened: it stays there while it is open.
-    @State private var held: ProjectList.Held?
     /// The session End Session… is asking about, and what its computer said when it did not end.
     @State private var ending: FleetRow?
     @State private var endNote: String?
@@ -61,7 +61,7 @@ struct FleetList: View {
     }
 
     var body: some View {
-        let list = projects(held: held)
+        let list = projects(held: layout.held)
         // The sessions as the list shows them, for the arrows; a folded project's are not shown.
         let rows = list.projects.filter { !layout.folded.contains($0.id) }.flatMap(\.rows)
         let selectable = rows.filter(removable).map(\.id)
@@ -103,7 +103,7 @@ struct FleetList: View {
                 .accessibilityIdentifier("fleet.batchNote")
             }
 
-            if machines.fleet.isEmpty {
+            if machines.fleet.allSatisfy(\.summary.archived) {
                 NoAgentsYet(newAgent: newRun)
                     .padding(18)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -164,8 +164,23 @@ struct FleetList: View {
                 }
             }
 
-            // While choosing: every removable session at once, and what is chosen removed together.
+            // While choosing: how many are chosen and Done; every removable session at once, and what is chosen
+            // removed together.
             if selecting {
+                HStack(spacing: 8) {
+                    Text("\(picked.count) selected").font(Theme.ui(12, .medium)).foregroundStyle(Theme.text3)
+                        .accessibilityIdentifier("fleet.selected")
+                    Spacer(minLength: 0)
+                    // No Done while a batch runs: the batch holds the choice until it has answered. While the card
+                    // asks, Esc is the card's.
+                    if !batchRunning {
+                        quietButton("Done", id: "fleet.selectDone") { endSelection() }
+                            .keyboardShortcut(removingMany == nil ? .cancelAction : nil)
+                    }
+                }
+                .padding(.leading, 18)
+                .padding(.trailing, 14)
+                .frame(height: 30)
                 HStack(spacing: 8) {
                     let all = !selectable.isEmpty && chosen.isSuperset(of: selectable)
                     ActionButton(title: all ? "Deselect All" : "Select All", key: nil, prominent: false, id: "fleet.selectAll") {
@@ -174,12 +189,6 @@ struct FleetList: View {
                     .keyboardShortcut("a", modifiers: .command)
                     .disabled(batchRunning)
                     Spacer(minLength: 0)
-                    // No Done while a batch runs: the batch holds the choice until it has answered. While the card
-                    // asks, Esc is the card's.
-                    if !batchRunning {
-                        ActionButton(title: "Done", key: nil, prominent: false, id: "fleet.selectDone") { endSelection() }
-                            .keyboardShortcut(removingMany == nil ? .cancelAction : nil)
-                    }
                     ActionButton(
                         title: batchRunning ? "Removing…" : "Remove \(picked.count)…", key: nil, prominent: false,
                         destructive: true, id: "fleet.removeChosen"
@@ -192,10 +201,11 @@ struct FleetList: View {
             ListFoot(openSettings: openSettings)
         }
         .background(Theme.sidebar)
-        // The open session holds its place while it is open, its project unfolded.
-        .onChange(of: opened, initial: true) { _, key in hold(key) }
-        // Only these turns itself off once nothing needs the person.
-        .onChange(of: list.needsYou == 0) { _, none in if none { layout.onlyNeedsYou = false } }
+        // The open session holds its place while it is open, its project unfolded, from when the list has it: a
+        // session just started is open before its row arrives.
+        .onChange(of: opened.flatMap { key in machines.fleet.contains { $0.id == key } ? key : nil }, initial: true) {
+            _, key in hold(key)
+        }
         // No removable session shown, no choosing.
         .onChange(of: selectable.isEmpty) { _, none in if none { endSelection() } }
         #if DEBUG
@@ -297,14 +307,16 @@ struct FleetList: View {
     /// revealed, Show fewer, which folds them back.
     @ViewBuilder private func earlier(_ project: ProjectList.Project) -> some View {
         let revealed = layout.revealed[project.id] ?? 0
-        if project.earlier > 0 || revealed > 0 {
+        // Show fewer while it has something to fold: an ended session revealed in the list.
+        let fewer = revealed > 0 && project.rows.contains { $0.status == .ended && !$0.summary.atLimit }
+        if project.earlier > 0 || fewer {
             HStack(spacing: 12) {
                 if project.earlier > 0 {
                     quietButton(RunListWords.earlier(project.earlier), id: "fleet.project.\(project.name).earlier") {
                         layout.revealed[project.id] = revealed + 1
                     }
                 }
-                if revealed > 0 {
+                if fewer {
                     quietButton(RunListWords.showFewer, id: "fleet.project.\(project.name).fewer") {
                         layout.revealed[project.id] = nil
                     }
@@ -330,13 +342,16 @@ struct FleetList: View {
         computer.flatMap { id in machines.models.first { $0.machineID == id }?.machineName }
     }
 
-    /// Holds the session just opened where the list shows it now, and unfolds its project; none open, none held.
+    /// Holds the session just opened where the list draws it now, and unfolds its project; none open, none held. The
+    /// session already held stays where it is held.
     private func hold(_ key: String?) {
-        held = nil
+        guard layout.held?.session != key else { return }
+        let drawn = projects(held: layout.held)
+        layout.held = nil
         guard let key else { return }
-        for (index, project) in projects(held: nil).projects.enumerated() {
+        for (index, project) in drawn.projects.enumerated() {
             guard let at = project.rows.firstIndex(where: { $0.id == key }) else { continue }
-            held = .init(session: key, projectIndex: index, rowIndex: at, ended: project.rows[at].status == .ended)
+            layout.held = .init(session: key, projectIndex: index, rowIndex: at, ended: project.rows[at].status == .ended)
             layout.folded.remove(project.id)
             return
         }
@@ -440,7 +455,7 @@ struct FleetList: View {
 
     /// Ended, on a computer that removes runs.
     private func removable(_ row: FleetRow) -> Bool {
-        row.status == .ended && row.summary.isRemovable
+        row.status == .ended && !row.summary.atLimit && row.summary.isRemovable
             && machines.model(for: row.machineID)?.daemonProfile.removesSessions == true
     }
 
@@ -488,8 +503,6 @@ private struct ProjectHeader: View {
     let project: ProjectList.Project
     let folded: Bool
     let toggle: () -> Void
-    /// Stuck at the list's top, over its own sessions.
-    @State private var stuck = false
 
     var body: some View {
         Button(action: toggle) {
@@ -509,21 +522,28 @@ private struct ProjectHeader: View {
             .padding(.leading, 8)
             .padding(.trailing, 6)
             .frame(height: 30)
-            .background(stuck ? Theme.sheet : .clear, in: RoundedRectangle(cornerRadius: 6))
-            .overlay(alignment: .bottom) { if stuck { Rectangle().fill(Theme.hairline).frame(height: 1) } }
+            // Its fill and hairline once it is stuck at the list's top, read from where it is drawn, frame by frame.
+            .background {
+                ZStack(alignment: .bottom) {
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.sheet)
+                    Rectangle().fill(Theme.hairline).frame(height: 1)
+                }
+                .visualEffect { content, proxy in content.opacity(proxy.frame(in: .scrollView).minY <= 0 ? 1 : 0) }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.hover(radius: 6, id: "fleet.project.\(project.name)"))
         .focusable(false)
         .help(project.folder)
         .accessibilityLabel(project.name)
-        .accessibilityValue(folded ? "folded" : "open")
+        .accessibilityValue(
+            "\(folded ? "folded" : "open"), "
+                + (project.needsYou > 0 ? RunListWords.needYou(project.needsYou) : RunListWords.runs(project.sessions)))
         .accessibilityIdentifier("fleet.project.\(project.name)")
         .padding(.horizontal, 8)
         .padding(.bottom, 2)
         // Opaque, so the sessions it is stuck over do not show through it.
         .background(Theme.sidebar)
-        .onGeometryChange(for: Bool.self) { $0.frame(in: .scrollView).minY <= 0 } action: { stuck = $0 }
     }
 }
 
