@@ -217,6 +217,32 @@ final class HostedRunRowsTests: XCTestCase {
             shape(TimelineBuilder.drawn(shown.timeline).filter { (3...7).contains($0.seq) }), ["notice:Conversation cleared."])
     }
 
+    /// A commit made from the Changes panel draws the computer's note of it (`committed`, minor 59): how many files and
+    /// the commit, as the panel's words say it. One the computer filed without them draws as any other notice.
+    func testACommitFromThePanelDrawsItsFilesAndCommit() async throws {
+        let wire = try events("hosted-clear-wire")
+        let cleared = try XCTUnwrap(wire.first { $0.seq == 4 })
+        func notice(_ payload: [String: JSONValue]) throws -> Event {
+            var event = try XCTUnwrap(
+                try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(cleared)).objectValue)
+            event["payload"] = .object(payload)
+            event["source"] = .string("daemon")
+            return try JSONDecoder().decode(Event.self, from: Data(JSONValue.object(event).canonicalJSONString.utf8))
+        }
+        let committed = try notice([
+            "notification_type": .string("committed"), "oid": .string("9f2c41e0d1a2b3c4d5e6f708192a3b4c5d6e7f80"),
+            "files": .int(2), "message": .string("Add a and b"),
+        ])
+        let shown = await state(wire.filter { $0.seq < 4 } + [committed])
+        XCTAssertEqual(
+            shape(TimelineBuilder.drawn(shown.timeline).filter { $0.seq == 4 }), ["notice:You committed 2 files · 9f2c41e"])
+        let bare = try notice(["notification_type": .string("committed"), "message": .string("Add a and b")])
+        let plain = await state(wire.filter { $0.seq < 4 } + [bare])
+        XCTAssertEqual(
+            shape(TimelineBuilder.drawn(plain.timeline).filter { $0.seq == 4 }), ["notice:Committed"],
+            "the generic row, never a commit of no files")
+    }
+
     /// Any other command an app sends draws as a terminal run's invocation does, a command row, and starts its turn:
     /// sent after a finished turn, the run reads Running until the command's own end (the test above). It was the
     /// person's row.

@@ -107,9 +107,8 @@ struct SessionPane: View {
                     .frame(height: 38)
                     .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
                 }
-                ChangesTab(model: model, key: row.id)
-                // The run's shell at the panel's foot, sized by itself: its bar closed, its screen open.
-                TerminalFoot(row: row, model: model)
+                // The panel ends with the run's shell at its foot, sized by itself: its bar closed, its screen open.
+                ChangesPanel(row: row, model: model)
             }
             .frame(width: inPlace ? nil : Self.panelWidth)
         }
