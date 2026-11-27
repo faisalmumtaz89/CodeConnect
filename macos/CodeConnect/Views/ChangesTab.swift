@@ -618,7 +618,8 @@ private struct MergeRow: View {
                         .frame(height: 26)
                         .background(Theme.text, in: UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 6))
                     }
-                    .buttonStyle(.hover(over: true, id: "changes.merge"))
+                    // Only the pair's own 0.5 dims it, so both halves read as one button.
+                    .buttonStyle(.hover(over: true, fades: false, id: "changes.merge"))
                     .keyboardShortcut("m", modifiers: [.command, .shift])
                     .disabled(!ready)
                     .accessibilityIdentifier("changes.merge")
