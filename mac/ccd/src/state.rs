@@ -1138,7 +1138,15 @@ impl Daemon {
         for pending in &mut pendings {
             self.truncate_payload(pending);
         }
-        let moved = notes.cwd.is_some();
+        // Claude names its folder on every init; only a folder other than the run's is a move.
+        let moved = match &notes.cwd {
+            Some(cwd) => self
+                .db
+                .get_session(session_uid.to_string())
+                .await?
+                .is_some_and(|row| row.cwd != *cwd),
+            None => false,
+        };
         let gate = self.publish_gate(session_uid).await;
         let events = {
             // Held across the commit and the broadcast, as in `ingest`.
@@ -6193,7 +6201,7 @@ impl Daemon {
     /// Read a run's branch, line counts and repository from git into the session list, on a
     /// task of its own so no caller waits on git; the repository is kept in the store. A run
     /// whose row is gone is left alone.
-    fn refresh_tree(&self, session_uid: &str) {
+    pub(crate) fn refresh_tree(&self, session_uid: &str) {
         let db = self.db.clone();
         let inner = Arc::clone(&self.inner);
         let git_bin = self.config.git_bin.clone();
@@ -8624,10 +8632,14 @@ mod tests {
         };
         let (app, next, plain) = (root.join("app"), root.join("next"), root.join("plain"));
         git(&app, &["init", "-q", "-b", "main"]);
-        git(&app, &["remote", "add", "origin", "git@github.com:Faisal/App.git"]);
+        git(
+            &app,
+            &["remote", "add", "origin", "git@github.com:Faisal/App.git"],
+        );
         git(&next, &["init", "-q", "-b", "main"]);
         std::fs::create_dir_all(&plain).unwrap();
-        let real = |dir: &std::path::Path| dir.canonicalize().unwrap().to_str().unwrap().to_string();
+        let real =
+            |dir: &std::path::Path| dir.canonicalize().unwrap().to_str().unwrap().to_string();
         let app_repo = protocol::event::RepoFact {
             name: "app".into(),
             remote: Some("github.com/faisal/app".into()),
@@ -8649,7 +8661,11 @@ mod tests {
                 panic!("the repository was not read as {want:?} within 10 s");
             }
         };
-        assert_eq!(summary_of(&daemon, TEST_UID).await.repo, None, "before any read");
+        assert_eq!(
+            summary_of(&daemon, TEST_UID).await.repo,
+            None,
+            "before any read"
+        );
         daemon
             .ingest(
                 PendingEvent::new(
@@ -8665,7 +8681,15 @@ mod tests {
             .expect("a new turn end");
         repo_becomes(&daemon, Some(app_repo.clone())).await;
 
-        git(&app, &["remote", "set-url", "origin", "https://github.com/other/app"]);
+        git(
+            &app,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/other/app",
+            ],
+        );
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(
             summary_of(&daemon, TEST_UID).await.repo,
@@ -8712,7 +8736,21 @@ mod tests {
             }),
         )
         .await;
-        moved(2, &plain).await;
+        git(
+            &next,
+            &["remote", "add", "origin", "https://github.com/faisal/next"],
+        );
+        moved(2, &next).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            summary_of(&restarted, TEST_UID)
+                .await
+                .repo
+                .and_then(|repo| repo.remote),
+            None,
+            "an init naming the folder it is already in reads no git"
+        );
+        moved(3, &plain).await;
         repo_becomes(&restarted, None).await;
         let _ = std::fs::remove_dir_all(&root);
     }

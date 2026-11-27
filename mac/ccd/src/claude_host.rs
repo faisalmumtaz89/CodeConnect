@@ -231,7 +231,8 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         .await
     {
         Ok(Some(existing)) => return answer_for(existing),
-        Ok(None) => {}
+        // Its branch and repository, read on a task of its own while it comes up.
+        Ok(None) => daemon.refresh_tree(&uid),
         Err(err) => return failed(format!("could not record the run: {err:#}")),
     }
     let deadline = Instant::now() + timeout;

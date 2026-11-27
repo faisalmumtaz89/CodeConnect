@@ -193,10 +193,7 @@ pub async fn repo_fact(
     )
     .await
     .ok()?;
-    let remote = origin
-        .ok
-        .then(|| remote_key(&origin.stdout))
-        .flatten();
+    let remote = origin.ok.then(|| remote_key(&origin.stdout)).flatten();
     Some(protocol::event::RepoFact {
         name: Path::new(&main_path).file_name()?.to_str()?.to_string(),
         remote,
@@ -4082,17 +4079,40 @@ lint-only-in-bashrc
     #[tokio::test]
     async fn a_run_is_read_into_its_repository() {
         let one = committable("repo-one");
-        git_sync(&one, &["remote", "add", "origin", "https://github.com/Faisal/App.git"]);
+        git_sync(
+            &one,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Faisal/App.git",
+            ],
+        );
         let two = committable("repo-two");
-        git_sync(&two, &["remote", "add", "origin", "git@github.com:faisal/app"]);
+        git_sync(
+            &two,
+            &["remote", "add", "origin", "git@github.com:faisal/app"],
+        );
         let fork = committable("repo-fork");
-        git_sync(&fork, &["remote", "add", "origin", "https://github.com/someone/app"]);
-        git_sync(&fork, &["remote", "add", "upstream", "https://github.com/faisal/app"]);
+        git_sync(
+            &fork,
+            &["remote", "add", "origin", "https://github.com/someone/app"],
+        );
+        git_sync(
+            &fork,
+            &["remote", "add", "upstream", "https://github.com/faisal/app"],
+        );
         let local = committable("repo-local");
         let other = committable("repo-other");
-        git_sync(&other, &["remote", "add", "upstream", "https://github.com/faisal/app"]);
+        git_sync(
+            &other,
+            &["remote", "add", "upstream", "https://github.com/faisal/app"],
+        );
         let hosted = committable("repo-hosted");
-        git_sync(&hosted, &["remote", "add", "origin", "https://gitlab.com/faisal/app"]);
+        git_sync(
+            &hosted,
+            &["remote", "add", "origin", "https://gitlab.com/faisal/app"],
+        );
 
         let fact = repo_of(&one).await.expect("a repository");
         assert_eq!(fact.main_path, real(&one));
@@ -4123,12 +4143,26 @@ lint-only-in-bashrc
         std::fs::create_dir_all(main.join("src/deep")).unwrap();
         git_sync(
             &main,
-            &["worktree", "add", "-q", "-b", "worktree-x", ".claude/worktrees/x"],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "worktree-x",
+                ".claude/worktrees/x",
+            ],
         );
         let elsewhere = temp_dir("repo-elsewhere").join("wt");
         git_sync(
             &main,
-            &["worktree", "add", "-q", "-b", "far", elsewhere.to_str().unwrap()],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "far",
+                elsewhere.to_str().unwrap(),
+            ],
         );
         for dir in [
             main.join("src/deep"),

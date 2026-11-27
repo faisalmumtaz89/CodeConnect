@@ -1803,8 +1803,8 @@ impl Store {
         &self,
     ) -> Result<std::collections::HashMap<String, (String, protocol::event::RepoFact)>> {
         let conn = self.read();
-        let mut stmt = conn
-            .prepare_cached("SELECT session_uid, cwd, name, remote, main_path FROM run_repos")?;
+        let mut stmt =
+            conn.prepare_cached("SELECT session_uid, cwd, name, remote, main_path FROM run_repos")?;
         let repos = stmt
             .query_map([], |row| {
                 Ok((
