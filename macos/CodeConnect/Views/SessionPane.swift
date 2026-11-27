@@ -204,8 +204,7 @@ private struct PanelToggle: View {
         let changed = diff.flatMap { $0.added + $0.removed > 0 ? $0 : nil }
         Button { open.toggle() } label: {
             HStack(spacing: 6) {
-                // Not the run's own toggle's sidebar beside it: what this one shows is lines changed.
-                Image(systemName: "plus.forwardslash.minus").font(.system(size: 10))
+                Image(systemName: "sidebar.right").font(.system(size: 12))
                 if let changed { LineDelta(added: changed.added, removed: changed.removed) }
             }
             .foregroundStyle(Theme.text)
