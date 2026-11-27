@@ -708,7 +708,7 @@ private struct AgentAccounts: View {
 }
 
 /// One account's row, the whole of it the choice: the email (else its name) and its plan, "Signed out" in amber, or
-/// its quiet note beneath; its figures under the group's columns, right-aligned, an empty cell where it names no such
+/// its quiet note beneath; the Default titled "Default", its email · plan beneath; its figures under the group's columns, right-aligned, an empty cell where it names no such
 /// window. In use: the Settings selection fill and a leading check; a sign-in waiting on the browser: a spinner there.
 /// Under the pointer: the lighter hover fill, the pointing hand, and, for a row with acts, a "…" at the trailing edge
 /// opening the window's row menu (`RowMenu`), as a run's does (`RunMore`); a right-click on the row opens the same menu
@@ -798,7 +798,7 @@ private struct AccountRow: View {
                         }
                         .hidden()
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(facts?.email ?? label).font(Theme.ui(13)).foregroundStyle(Theme.text)
+                            Text(id == nil ? label : facts?.email ?? label).font(Theme.ui(13)).foregroundStyle(Theme.text)
                                 .lineLimit(1).truncationMode(.middle)
                                 .accessibilityIdentifier("\(rowID).email")
                             if !secondLine.isEmpty {
@@ -877,14 +877,16 @@ private struct AccountRow: View {
         }
     }
 
-    /// The plan in the agent's own word, capitalized; "Signed out"; or the row's note; "As set up on this Mac" for a
-    /// Default whose agent hasn't said.
+    /// The plan in the agent's own word, capitalized, after the Default's email ("email · Plan"); "Signed out"; or the
+    /// row's note; "As set up on this Mac" for a Default whose agent hasn't said.
     private var secondLine: String {
         if signedOut { return "Signed out" }
         if let note { return note }
         if signingIn { return AccountSwitchWords.signingIn }
-        if let plan = facts?.plan { return plan.prefix(1).uppercased() + plan.dropFirst() }
-        return id == nil ? "As set up on this Mac" : ""
+        let plan = facts?.plan.map { $0.prefix(1).uppercased() + $0.dropFirst() }
+        guard id == nil else { return plan ?? "" }
+        let said = [facts?.email, plan].compactMap { $0 }.joined(separator: " · ")
+        return said.isEmpty ? "As set up on this Mac" : said
     }
 
     /// The row's "…", the app's row-menu button (`RunMore`'s size, hover and open state): it opens the menu below itself.
