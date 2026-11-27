@@ -879,6 +879,10 @@ private struct RowMenuHost: ViewModifier {
                         let corner = place(shown, in: bounds)
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(Array(shown.items.enumerated()), id: \.element.id) { index, item in
+                                // The red item stands apart from what comes before it.
+                                if item.destructive, index > 0, !shown.items[index - 1].destructive {
+                                    MenuDivider().padding(.vertical, 4)
+                                }
                                 PanelItem(
                                     index: index, title: item.title, symbol: item.symbol, destructive: item.destructive,
                                     id: item.id
