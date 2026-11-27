@@ -22,7 +22,8 @@ struct ReplyUsage: View {
                     // Above the figures, its trailing edge on theirs, clear of them by the panels' one gap: its foot on
                     // theirs, then raised by their height and the gap.
                     .overlay(alignment: .bottomTrailing) {
-                        if hovered {
+                        // Or as if, for a test launch's `-CC_HOVER session.composer.usage`.
+                        if hovered || HoverButtonStyle.forced("session.composer.usage") {
                             card(bar)
                                 .fixedSize()
                                 .offset(y: -(Self.figuresHeight + Theme.panelGap))
