@@ -217,10 +217,12 @@
         }
 
         /// The list as a launch opens it: a render's from its flags, with nothing pinned or hidden but what `-CC_HIDE
-        /// <name,…>` hides (by the names the list gives them); `-CC_ONLY_THESE YES` opens it on only what needs the person.
+        /// <name,…>` hides (by the names the list gives them); `-CC_ONLY_THESE YES` opens it on only what needs the person,
+        /// `-CC_SEARCH <words>` searching for them.
         static var layout: ListLayout {
             var layout = throwaway ? ListLayout() : .kept
             layout.onlyNeedsYou = UserDefaults.standard.bool(forKey: "CC_ONLY_THESE")
+            layout.search = UserDefaults.standard.string(forKey: "CC_SEARCH")
             return layout
         }
 

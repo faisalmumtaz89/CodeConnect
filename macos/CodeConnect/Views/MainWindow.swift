@@ -206,7 +206,7 @@ struct MainWindow: View {
                     .opacity(0)
                     .allowsHitTesting(false)
             } else if let opened, changesInPlace, adding == nil, composerHoldsEscape != true, !Shells.shared.holdsKeys,
-                !asks.isAsking
+                !asks.isAsking, layout.search == nil
             {
                 Button("Conversation") { changesOpen.remove(opened) }
                     .keyboardShortcut(.cancelAction)
@@ -214,7 +214,7 @@ struct MainWindow: View {
                     .opacity(0)
                     .allowsHitTesting(false)
             } else if opened != nil, adding == nil, composerHoldsEscape != true, !Shells.shared.holdsKeys,
-                !asks.isAsking
+                !asks.isAsking, layout.search == nil
             {
                 Button("Close") { opened = nil }
                     .keyboardShortcut(.cancelAction)

@@ -54,6 +54,8 @@ public struct ProjectList: Sendable, Equatable {
     public let projects: [Project]
     /// The projects "Only these" leaves out, by name, in name order.
     public let quiet: [String]
+    /// While searching, how many sessions match: "N found".
+    public let found: Int?
 
     /// How many ended sessions a reveal adds.
     public static let page = 25
@@ -67,24 +69,34 @@ public struct ProjectList: Sendable, Equatable {
     /// `rows` narrowed to `computer` (a machine id) where one is chosen, except what needs the person; with
     /// `onlyNeedsYou`, only that. `pinned` (keys, first first) lead; a `hidden` key stays out unless it needs the
     /// person; `revealed` is how many reveals each project has had; `deck` the waiting sessions' keys in the Deck's
-    /// order (`Deck.sort`: most urgent card, then oldest); `held` the open session's place.
+    /// order (`Deck.sort`: most urgent card, then oldest); `held` the open session's place. A `search` (trimmed, not
+    /// empty) lists instead every session on `computer`, or on every computer, archived ones too, whose shown title holds
+    /// it in any case or accent, each project with all its matches, whatever Only these, Hide and reveals say.
     public init(
         _ rows: [FleetRow], computer: String? = nil, onlyNeedsYou: Bool = false, pinned: [String] = [],
-        hidden: Set<String> = [], revealed: [String: Int] = [:], deck: [String] = [], held: Held? = nil
+        hidden: Set<String> = [], revealed: [String: Int] = [:], deck: [String] = [], held: Held? = nil,
+        search: String = ""
     ) {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        let searching = !query.isEmpty
+        // Search keeps no session's place: its results stand in their own order.
+        let held = searching ? nil : held
         let listed = rows.filter { !$0.summary.archived }
         needsYou = listed.count(where: Self.needsYou)
-        self.onlyNeedsYou = onlyNeedsYou && needsYou > 0
+        self.onlyNeedsYou = onlyNeedsYou && needsYou > 0 && !searching
         let only = self.onlyNeedsYou
         let open = held?.session
-        let project = Self.keys(listed)
-        let shown = listed.filter { Self.needsYou($0) || computer == nil || $0.machineID == computer || $0.id == open }
+        let project = Self.keys(searching ? rows : listed)
+        let shown = searching
+            ? rows.filter { (computer == nil || $0.machineID == computer) && $0.title.localizedStandardContains(query) }
+            : listed.filter { Self.needsYou($0) || computer == nil || $0.machineID == computer || $0.id == open }
+        found = searching ? shown.count : nil
         var place: [String: Int] = [:]
         for (index, key) in deck.enumerated() where place[key] == nil { place[key] = index }
 
         // What a project is, whatever the list narrows to: every listed session counts towards its size and activity.
         var whole: [String: (sessions: Int, latest: Date)] = [:]
-        for row in listed {
+        for row in searching ? shown : listed {
             let entry = whole[project[row.id]!, default: (0, .distantPast)]
             whole[project[row.id]!] = (entry.sessions + 1, max(entry.latest, row.lastActive))
         }
@@ -119,7 +131,7 @@ public struct ProjectList: Sendable, Equatable {
         for key in order {
             let all = groups[key]!
             let need = all.count(where: Self.needsYou)
-            let isHidden = hidden.contains(key)
+            let isHidden = hidden.contains(key) && !searching
             let holds = all.contains { $0.id == open }
             if isHidden && need == 0 && !holds { continue }
             // A hidden project shown only for its open session shows that session alone.
@@ -130,7 +142,7 @@ public struct ProjectList: Sendable, Equatable {
             let live = sorted.filter { Self.rank($0) < Self.endedRank }
             let ended = sorted.filter { Self.rank($0) == Self.endedRank }
             let reveals = revealed[key] ?? 0
-            let reveal = min(ended.count, (live.isEmpty ? 1 + reveals : reveals) * Self.page)
+            let reveal = searching ? ended.count : min(ended.count, (live.isEmpty ? 1 + reveals : reveals) * Self.page)
             var rows = live + ended.prefix(reveal)
             var earlier = ended.count - reveal
             // A session that ended while it was open stays shown, after what is revealed, and takes no place in a reveal;

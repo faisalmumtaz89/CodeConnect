@@ -12,10 +12,11 @@ final class ProjectListTests: XCTestCase {
     private func row(
         _ id: String, _ status: FleetStatus, cwd: String = "/work/web", on machine: String = "m1", minutes: Double = 0,
         lifecycle: String = "running", limited: Bool = false, archived: Bool = false, name: String? = nil,
-        repo: String? = nil
+        repo: String? = nil, title: String? = nil
     ) -> FleetRow {
         let extra = (limited ? #","limit":{"which":"five_hour","at":"2026-07-31T09:14:00.000Z"}"# : "")
             + (archived ? #","archived":true"# : "") + (repo.map { #","repo":"# + $0 } ?? "")
+            + (title.map { #","title":""# + $0 + #"""# } ?? "")
         let json = """
             {"session_uid":"\(id)","session_id":"\(id)","cwd":"\(cwd)","lifecycle":"\(lifecycle)","link":"attached",\
             "last_seq":3,"created_at":"2026-07-31T09:14:00.000Z","updated_at":"2026-07-31T09:14:00.000Z"\(extra)}
@@ -305,5 +306,30 @@ final class ProjectListTests: XCTestCase {
         let held = ProjectList.Held(session: "done", projectIndex: 0, rowIndex: 0)
         let open = ProjectList(quiet, hidden: [key], held: held)
         XCTAssertEqual(ids(open.projects[0].rows), ["done"])
+    }
+
+    /// Search matches the title each row shows (its own, or the label drawn when it has none), in any case and
+    /// accent, over every session: folded, hidden, unrevealed and archived ones too, Only these aside; the computer
+    /// filter still narrows it. Each project shows its matches, and the list says how many there are.
+    func testSearchFindsShownTitlesEverywhereButOffTheChosenComputer() {
+        func titledRow(_ id: String, _ title: String, on machine: String = "m1", archived: Bool = false,
+                       cwd: String = "/work/web") -> FleetRow {
+            row(id, .ended, cwd: cwd, on: machine, lifecycle: "exited", archived: archived, title: title)
+        }
+        let rows = [
+            row("wait", .blocked, cwd: "/work/api"),
+            titledRow("a", "Usage reset countdown"),
+            titledRow("b", "Red ring at the USAGE limit", archived: true),
+            titledRow("c", "Usäge per model", cwd: "/work/api"),
+            titledRow("d", "Usage on the other computer", on: "m2"),
+            titledRow("e", "Nothing to see"),
+        ]
+        let found = ProjectList(rows, onlyNeedsYou: true, hidden: [ProjectList.key(rows[1])], search: "usage")
+        XCTAssertEqual(Set(found.projects.map { ids($0.rows).sorted() }), [["a", "b"], ["c"], ["d"]])
+        XCTAssertEqual(found.projects.map(\.sessions).reduce(0, +), 4)
+        XCTAssertEqual(found.found, 4)
+        let narrowed = ProjectList(rows, computer: "m1", search: "  usage ")
+        XCTAssertEqual(narrowed.projects.flatMap { ids($0.rows) }.sorted(), ["a", "b", "c"])
+        XCTAssertNil(ProjectList(rows, search: " ").found)
     }
 }

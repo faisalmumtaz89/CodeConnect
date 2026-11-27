@@ -37,6 +37,10 @@ public enum RunListWords {
     public static func hide(_ hidden: Bool) -> String { hidden ? "Unhide Project" : "Hide Project" }
     public static let hiddenProjects = "Hidden Projects"
 
+    /// Search's field and its count.
+    public static let search = "Search"
+    public static func found(_ count: Int) -> String { "\(count) found" }
+
     /// The list with nothing in it while it is narrowed to one computer.
     public static func noneOn(_ computer: String) -> String { "None on \(computer)" }
 
