@@ -747,12 +747,13 @@ private struct FleetLine: View {
                 StateIcon(status: row.status, offline: offline, limited: row.summary.atLimit)
                     .accessibilityIdentifier("fleet.row.\(row.id).status")
             }
+            // The name fills the row up to its time: no spacer of its own, which would cost the row's gap twice.
             Text(row.title)
                 .font(Theme.ui(13, row.status == .blocked ? .medium : .regular))
                 .foregroundStyle(row.status == .ended ? Theme.text2 : Theme.text)
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Spacer(minLength: 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
             if let refusal {
                 Text(refusal).font(Theme.ui(11.5)).foregroundStyle(Theme.amber).lineLimit(1)
             }
