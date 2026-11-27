@@ -496,8 +496,10 @@ public enum ChangesWords {
         if !failed.isEmpty { parts.append("\(failed.joined(separator: ", ")) failed") }
         let running = checks.filter { $0.state == .pending }.count
         if running > 0 { parts.append("\(running) running") }
-        // A comparison of this very commit that merges cleanly says so (artboard 10).
-        if let conflicts, conflicts.clean, conflicts.headOID == git.headOID { parts.append("no conflicts") }
+        // A comparison of this very commit that merges cleanly says so (artboard 10), unless a check failed (07).
+        if failed.isEmpty, let conflicts, conflicts.clean, conflicts.headOID == git.headOID {
+            parts.append("no conflicts")
+        }
         return parts.joined(separator: " · ")
     }
     /// The Checks tab's label: how many of the checks passed, of how many.

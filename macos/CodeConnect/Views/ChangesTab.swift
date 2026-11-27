@@ -331,7 +331,8 @@ private struct StateLine: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("changes.lastSaid")
             } else if let note {
-                Text(note).font(Theme.ui(12)).foregroundStyle(Theme.text3).accessibilityIdentifier("changes.note.action")
+                Text(note).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.tail)
+                    .accessibilityIdentifier("changes.note.action")
             } else {
                 AgeText(since: read) { ChangesWords.checked(since: read, now: $0) }
                     .font(Theme.ui(12))

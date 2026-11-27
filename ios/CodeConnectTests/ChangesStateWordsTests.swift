@@ -211,7 +211,7 @@ final class ChangesStateWordsTests: XCTestCase {
 
     /// A run's conflicts with its base, as the computer compared them (artboard 17), lead its line after a queue and
     /// its checks: "Conflicts with main", the files they're in under it, and the merge button withheld. A clean
-    /// comparison adds "no conflicts" after the checks (artboard 10).
+    /// comparison adds "no conflicts" after the checks (artboard 10), but not beside a failed one (07).
     func testConflictsWithTheBaseLeadTheLineAndHoldTheMerge() throws {
         func compared(clean: Bool, files: [String] = [], complete: Bool = true) throws -> RunConflicts {
             let list = files.map { #""\#($0)""# }.joined(separator: ",")
@@ -238,6 +238,12 @@ final class ChangesStateWordsTests: XCTestCase {
         XCTAssertEqual(ChangesWords.state(git, conflicts: clean), "PR #412 · Ready to merge")
         XCTAssertNil(ChangesWords.conflictsNote(clean))
         XCTAssertEqual(ChangesWords.checksNote(git, conflicts: clean), "1 of 1 checks passed · no conflicts", "10")
+        let failing = try self.git(
+            ahead: 1, pushed: true,
+            pr: pr.replacingOccurrences(of: #""state":"pass""#, with: #""state":"fail""#))
+        XCTAssertEqual(
+            ChangesWords.checksNote(failing, conflicts: clean), "0 of 1 checks passed · kit failed",
+            "07: a failed check leaves out no conflicts")
         XCTAssertTrue(ChangesWords.mergeable(git.pullRequest!, conflicts: clean))
         XCTAssertEqual(ChangesWords.state(try self.git(ahead: 2, pushed: true), conflicts: two),
             "Conflicts with main · 2 commits · pushed", "a branch with no pull request yet")
