@@ -346,7 +346,8 @@
     "diff": true,
     "git_actions": [
       "commit",
-      "create_pr"
+      "create_pr",
+      "merge"
     ],
     "history_pages": true,
     "hook_only_approvals": true,

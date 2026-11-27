@@ -1501,6 +1501,43 @@ pub struct PullRequest {
     /// `checks` is empty).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks_complete: Option<bool>,
+    /// An open one's merge state as GitHub reports it (minor 64); `unknown` while GitHub is still
+    /// working it out, as it is just after a push. Absent when not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_state: Option<MergeState>,
+    /// The merge methods the repository allows, in this order: merge, squash, rebase (minor 64).
+    /// Absent when not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_methods: Option<Vec<MergeMethod>>,
+    /// An open one waits to be merged: a merge queue holds it, or GitHub's auto-merge will
+    /// queue it, as a merge on a branch whose queue is required does (minor 64). Absent when not
+    /// read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_queued: Option<bool>,
+}
+
+/// A [`PullRequest`]'s merge state: GitHub's `mergeStateStatus`, `draft` from `isDraft`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeState {
+    Clean,
+    Blocked,
+    Behind,
+    Dirty,
+    Unstable,
+    Draft,
+    HasHooks,
+    /// GitHub has not worked it out yet, or a state this daemon does not name.
+    Unknown,
+}
+
+/// A way to merge a [`PullRequest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
 }
 
 /// One of a [`PullRequest`]'s checks: a check run, or a commit status.
@@ -1559,6 +1596,16 @@ pub enum GitAction {
     /// [`RunGit::gh_repo`], titled and described by gh from its commits (minor 61). An open one
     /// from the branch already there is the answer, and nothing is pushed.
     CreatePr,
+    /// The run's open pull request merged by `method` on GitHub, only while its head is
+    /// `head_oid`, the commit the panel showed, when GitHub accepts the merge (minor 64). On a
+    /// branch whose merge queue is required that is when it is queued: a later push to the queued
+    /// pull request can change what lands. Nothing local changes, and no branch is deleted.
+    Merge {
+        method: MergeMethod,
+        head_oid: String,
+        /// The pull request the panel showed: another one from the branch is not merged.
+        number: u64,
+    },
 }
 
 /// Ceiling on a [`GitAction::Commit`]'s message, the same as a typed message's.
@@ -1634,6 +1681,15 @@ pub mod git_refusal {
     /// gh refused to open the pull request; `detail` is its line, after "pushed; " when the
     /// branch was pushed first.
     pub const CREATE_FAILED: &str = "create_failed";
+    /// No open pull request from the run's branch.
+    pub const NO_PULL_REQUEST: &str = "no_pull_request";
+    /// The repository does not allow that merge method.
+    pub const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
+    /// The pull request is not the one the panel showed, or its head is not the commit the panel
+    /// showed: nothing was merged.
+    pub const HEAD_MOVED: &str = "head_moved";
+    /// GitHub refused the merge; `detail` is gh's line (a rule, a review, a conflict).
+    pub const MERGE_FAILED: &str = "merge_failed";
 }
 
 /// A [`RunGit`]'s base branch.
@@ -2882,9 +2938,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 63,
             "a run's title (`title`) is minor 63"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 64,
+            "merging a pull request (`merge`, `merge_state`, `merge_methods`) is minor 64"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 63);
+        assert_eq!(crate::PROTOCOL_MINOR, 64);
     }
 
     /// **The tags, pinned on this side too.**
@@ -3598,7 +3658,7 @@ mod tests {
             uploads: true,
             run_terminal: true,
             changes: true,
-            git_actions: vec!["commit".into(), "create_pr".into()],
+            git_actions: vec!["commit".into(), "create_pr".into(), "merge".into()],
         }
     }
 
@@ -4825,6 +4885,15 @@ mod tests {
             serde_json::to_value(&committed).unwrap(),
             serde_json::json!({"status": "done", "sha": "abc"})
         );
+        let merge: ClientMessage = serde_json::from_str(
+            r#"{"type":"git_action","request_id":"m-1","session_uid":"u","action":{"kind":"merge","method":"squash","head_oid":"abc","number":7}}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(merge, ClientMessage::GitAction { ref action, .. }
+                if *action == GitAction::Merge { method: MergeMethod::Squash, head_oid: "abc".into(), number: 7 }),
+            "{merge:?}"
+        );
         for done in [opened, committed] {
             let back: GitActionResult =
                 serde_json::from_value(serde_json::to_value(&done).unwrap()).unwrap();
@@ -4878,6 +4947,9 @@ mod tests {
                         failure_line: Some("expected 2, got 3".into()),
                     }]),
                     checks_complete: Some(true),
+                    merge_state: Some(MergeState::Blocked),
+                    merge_methods: Some(vec![MergeMethod::Squash]),
+                    merge_queued: Some(false),
                 }),
                 gh_read_at: Some("u".into()),
                 gh_repo: Some("o/r".into()),
@@ -4898,7 +4970,8 @@ mod tests {
                     "pr": {"number": 7, "url": "https://github.com/o/r/pull/7", "state": "open",
                            "base": "main", "head_oid": "abc", "checks_complete": true,
                            "checks": [{"name": "test", "state": "fail", "started_at": "s", "url": "l",
-                                       "failure_line": "expected 2, got 3"}]},
+                                       "failure_line": "expected 2, got 3"}],
+                           "merge_state": "blocked", "merge_methods": ["squash"], "merge_queued": false},
                 },
             })
         );

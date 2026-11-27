@@ -1109,6 +1109,11 @@ public struct Capabilities: Codable, Sendable, Hashable {
     public var opensPullRequests: Bool {
         advertised["git_actions"]?.arrayValue?.contains { $0.stringValue == "create_pr" } == true
     }
+    /// This daemon merges a run's pull request for this paired device (`git_actions` naming `merge`, minor 64). An older
+    /// one answers `git_action` with `bad_request`, so nothing is sent unless this is set.
+    public var mergesPullRequests: Bool {
+        advertised["git_actions"]?.arrayValue?.contains { $0.stringValue == "merge" } == true
+    }
     /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
     /// 21): its question cards carry `question_hold` and it takes the
     /// `answers` and `decline` decisions. Absent is false — an older daemon
@@ -1592,6 +1597,24 @@ public enum PutFileResult: Decodable, Sendable, Hashable {
         default: self = .refused("The computer answered “\(status)”.")
         }
     }
+}
+
+/// The `merge` action as the wire carries it.
+private struct MergeAction: Encodable {
+    let kind = "merge"
+    let method: MergeMethod
+    let headOID: String
+    let number: UInt64
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, method, number
+        case headOID = "head_oid"
+    }
+}
+
+/// A way to merge a pull request (minor 64).
+public enum MergeMethod: String, Codable, Sendable, Hashable, CaseIterable {
+    case merge, squash, rebase
 }
 
 /// What became of an action on a run's repository (`git_action`, minor 59).
@@ -2105,6 +2128,27 @@ public struct RunGit: Decodable, Sendable, Hashable {
         public let checks: [Check]?
         /// False when there were more than 100, or the head moved while they were read.
         public let checksComplete: Bool?
+        /// An open one's merge state as GitHub reports it (minor 64); nil when not read.
+        public let mergeState: MergeState?
+        /// The merge methods the repository allows (minor 64), in the order merge, squash, rebase; nil when not read.
+        /// A method this build does not name is left out.
+        public var mergeMethods: [MergeMethod]? { mergeMethodNames?.compactMap(MergeMethod.init(rawValue:)) }
+        private let mergeMethodNames: [String]?
+        /// An open one waits to be merged: a merge queue holds it, or GitHub's auto-merge will queue it (minor 64), as
+        /// a merge on a branch whose queue is required leaves it. Nil when not read.
+        public let mergeQueued: Bool?
+
+        public enum MergeState: String, Decodable, Sendable, Hashable {
+            case clean, blocked, behind, dirty, unstable, draft
+            case hasHooks = "has_hooks"
+            /// GitHub is still working it out, or a state this build does not name.
+            case unknown
+
+            public init(from decoder: Decoder) throws {
+                let raw = try decoder.singleValueContainer().decode(String.self)
+                self = MergeState(rawValue: raw) ?? .unknown
+            }
+        }
 
         public struct Check: Decodable, Sendable, Hashable {
             /// A check run's name, or a status's context.
@@ -2154,6 +2198,9 @@ public struct RunGit: Decodable, Sendable, Hashable {
             case mergedAt = "merged_at"
             case checks
             case checksComplete = "checks_complete"
+            case mergeState = "merge_state"
+            case mergeMethodNames = "merge_methods"
+            case mergeQueued = "merge_queued"
         }
     }
 
@@ -2365,6 +2412,9 @@ public enum ClientMessage: Sendable {
     case commit(requestID: String, sessionUID: String, message: String)
     /// A pull request from the run's branch (`create_pr`, minor 61).
     case createPullRequest(requestID: String, sessionUID: String)
+    /// The run's open pull request `number` merged by `method`, only while its head is `headOID`: the pull request and
+    /// commit the panel showed (`merge`, minor 64).
+    case mergePullRequest(requestID: String, sessionUID: String, number: UInt64, method: MergeMethod, headOID: String)
     /// **Say something to a Codex session.** Minor 18, and the one message an
     /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
     case compose(
@@ -2607,6 +2657,11 @@ extension ClientMessage: Encodable {
             try c.encode(requestID, forKey: .requestID)
             try c.encode(sessionUID, forKey: .sessionUID)
             try c.encode(["kind": "create_pr"], forKey: .action)
+        case .mergePullRequest(let requestID, let sessionUID, let number, let method, let headOID):
+            try c.encode("git_action", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(sessionUID, forKey: .sessionUID)
+            try c.encode(MergeAction(method: method, headOID: headOID, number: number), forKey: .action)
         case .compose(let session, let requestID, let text, let payloadHash, let attachments):
             try c.encode("compose", forKey: .type)
             try c.encode(session, forKey: .sessionID)

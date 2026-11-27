@@ -1359,7 +1359,12 @@ to probe credentials.
   commit, in the same workflow and for the same event, is listed once, as the
   run started last; statuses are never merged. The query reads each check run's
   workflow, so a token without `Actions: read` (a GitHub App's, say) gets the
-  pull request with no `checks`. `failure_line` is, among a
+  pull request with no `checks`. From `>= 64` an open `pr` also carries `merge_state`
+  (`clean|blocked|behind|dirty|unstable|draft|has_hooks|unknown`: GitHub's
+  `mergeStateStatus`, `draft` from `isDraft`, `unknown` while GitHub works it
+  out, as just after a push) and `merge_methods` (what the repository allows, in
+  the order merge, squash, rebase) and `merge_queued` (a merge queue holds it, or
+  GitHub's auto-merge will queue it), from the same request. `failure_line` is, among a
   failed check run's first 10 annotations, the first at failure level that says
   more than the runner's "Process completed with exit code N.", its first line. A branch whose remote is a URL (as `gh pr checkout` sets for a
   fork's PR) is read from that URL.
@@ -1400,8 +1405,8 @@ to probe credentials.
   refs/heads/<b>:refs/heads/<b>`, no force, through the login shell with the
   repository's `pre-push` hook, 120 s; nothing when the remote has `HEAD`, refused
   when the branch there moved on) and opened, in the run's folder, with `gh pr create --repo
-  <gh_repo> --head <[owner:]b> --base <base> --fill` (title and body from the
-  commits, 30 s). If gh refuses or gives no answer, GitHub is asked once more, and
+  <gh_repo> --head <[owner:]b> --base <base> --fill`, with `--title=<title>` when
+  the run has a `title` (else the title, and always the body, from the commits, 30 s). If gh refuses or gives no answer, GitHub is asked once more, and
   a pull request found there is the answer, so one is never opened twice; else
   `create_failed{"pushed; " + gh's line}`, or `indeterminate` when gh gave no
   answer or GitHub could not be asked again. Refused before anything is sent on a detached head, while unmerged, with
@@ -1412,6 +1417,28 @@ to probe credentials.
   gh is missing, signed out, or GitHub cannot be reached (`gh_missing`,
   `gh_signed_out`, `github_unavailable`); a refused push is `git_failed` with
   git's (or the hook's) line. The branch's GitHub read is asked again after it.
+  From `>= 64` `action` may be `{kind: "merge", method: "merge"|"squash"|"rebase",
+  head_oid, number}`, answered `done{pr}`: the open pull request from the run's branch
+  (asked of GitHub now) merged by `gh pr merge <n> --repo <gh_repo> --<method>
+  --match-head-commit <head_oid>` (30 s), never with `--delete-branch`, `--auto`
+  or `--admin`, and nothing local changes (no checkout, pull or branch deleted).
+  GitHub is then asked again: merged is `done`, and so is a pull request a merge
+  queue holds open. On a branch whose merge queue is required, gh enqueues it
+  (GitHub's auto-merge), and the queue merges it later by the method the queue is
+  set to, which may not be `method`; the head is checked when GitHub accepts it, so
+  a later push to the queued pull request can change what lands. `done` carries no state: the panel's next
+  `get_run_git` reads it open with `merge_queued`, or merged when the commit
+  checked out is its head (with newer local commits it reads no pull request, as
+  for any branch with new work). Refused, with nothing merged, when
+  there is no open pull request (`no_pull_request`), it is not pull request
+  `number` or its head is not `head_oid` (`head_moved`, also when GitHub says so as
+  it merges), or the repository does not
+  allow `method` (`method_not_allowed`); GitHub's refusal is `merge_failed{gh's
+  line}`; an answer gh never gave, or a refusal after which GitHub could not be
+  read, is `indeterminate` unless GitHub then reads it merged. Also refused on a detached head, with no github.com remote (`no_github_remote`),
+  and when gh is missing, signed out, or GitHub cannot be reached (`gh_missing`,
+  `gh_signed_out`, `github_unavailable`). The branch's GitHub read is asked again
+  after it.
 * **`EventKind::TurnComplete`** marks the end of a turn. For Claude it is filed
   from the SDK's `result`, which the run's agent host relays as each turn ends.
   `SessionEnd` now means only what it says: the run ended.

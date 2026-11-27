@@ -995,7 +995,12 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     [`event::SessionSummary::title`] names a run by the first line of the first message the person sent it through
 ///     CodeConnect (not a command, not a mail wake). A run with none, and every run from a daemon below 63, has no
 ///     `title`, and an app names it by its project.
-pub const PROTOCOL_MINOR: u32 = 63;
+///   * `64` — **Merging a pull request from the Changes panel.**
+///
+///     An open [`ws::PullRequest`] carries `merge_state` ([`ws::MergeState`]) and `merge_methods` ([`ws::MergeMethod`]),
+///     read with its checks in the same request; [`ws::GitAction::Merge`] merges it by a method the repository allows, only
+///     at the head the panel showed. `git_actions` names `merge`; a daemon below 64 does not.
+pub const PROTOCOL_MINOR: u32 = 64;
 
 #[cfg(test)]
 mod ledger_tests {
