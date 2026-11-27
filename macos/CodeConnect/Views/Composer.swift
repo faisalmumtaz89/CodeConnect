@@ -197,10 +197,11 @@ private struct Composer: View {
                 box
             }
         }
-        // Docked under the conversation, on its column's 28 pt sides and 20 pt above the pane's foot; 16 pt under the
-        // conversation's last line at its end (its row's 7 pt inset and the column's 1 pt end, then these 8).
+        // Docked under the conversation, on its column's 28 pt sides and 20 pt above the pane's foot; 30 pt from the
+        // conversation's last line at its end to the box's rim (its row's 7 pt inset and the column's 1 pt end, then
+        // the rest).
         .padding(.horizontal, 28)
-        .padding(.top, 8)
+        .padding(.top, InputBoxLayout.above - 8)
         .padding(.bottom, 20)
         .onChange(of: kept.reply) { old, new in
             // If the draft has moved off the words it held — the same normalisation the send's mutation key uses, so a
@@ -692,7 +693,7 @@ private struct CompactCard: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: InputBoxLayout.above) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Image(systemName: PanelSymbol.compact).font(.system(size: 12)).foregroundStyle(Theme.text2)

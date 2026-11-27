@@ -101,7 +101,8 @@ struct SessionPane: View {
             ChangesPanel(row: row, model: model, back: inPlace ? { changesOpen = false } : nil)
                 .frame(width: inPlace ? nil : Self.panelWidth)
         }
-        .background(Theme.window)
+        // Not up into the window's toolbar band: the run's header stands there.
+        .background(Theme.window, ignoresSafeAreaEdges: [])
     }
 
     /// The changes panel's width, beside the conversation.
@@ -203,8 +204,7 @@ private struct PanelToggle: View {
         let changed = diff.flatMap { $0.added + $0.removed > 0 ? $0 : nil }
         Button { open.toggle() } label: {
             HStack(spacing: 6) {
-                // Not the run's own toggle's sidebar beside it: what this one shows is lines changed.
-                Image(systemName: "plus.forwardslash.minus").font(.system(size: 10))
+                Image(systemName: "sidebar.right").font(.system(size: 12))
                 if let changed { LineDelta(added: changed.added, removed: changed.removed) }
             }
             .foregroundStyle(Theme.text)

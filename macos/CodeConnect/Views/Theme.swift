@@ -128,6 +128,10 @@ struct WindowChrome: NSViewRepresentable {
             window.titleVisibility = .hidden
             window.styleMask.insert(.fullSizeContentView)
             window.titlebarSeparatorStyle = .none
+            // An empty unified toolbar: macOS then draws the window's buttons centred on the 52 pt band at the top, the
+            // line the list head's and the run header's controls are centred on.
+            if window.toolbar == nil { window.toolbar = NSToolbar(identifier: "main") }
+            window.toolbarStyle = .unified
             window.backgroundColor = NSColor(Theme.window)
         }
         return view

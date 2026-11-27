@@ -72,9 +72,10 @@ struct ReplyBoxFrame<Field: View, Note: View, Answers: View>: View {
         } trailing: {
             answers
         }
-        // Where the reply box it stands in for stands: on the pane's content column, 20 pt above the pane's foot.
+        // Where the reply box it stands in for stands: on the pane's content column, 20 pt above the pane's foot, and
+        // 30 pt from the card's last line to its rim (what the card asks ends 14 pt above this).
         .padding(.horizontal, 28)
-        .padding(.top, 8)
+        .padding(.top, InputBoxLayout.above - 14)
         .padding(.bottom, 20)
     }
 }
