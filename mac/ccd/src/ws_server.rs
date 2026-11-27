@@ -4479,6 +4479,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_ack_names_this_computers_home_folder() {
+        // `HOME` is read here and again by the daemon's hello: no other test may change it in between.
+        let _env = crate::ProcessEnvRead::take();
         let home = std::env::var("HOME").unwrap();
         let (server, _) = live_server(protocol::config::Config::default()).await;
         let (_socket, reply) = server.hello(protocol::PROTOCOL_VERSION, None).await;

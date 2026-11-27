@@ -3158,7 +3158,8 @@ done
             std::time::Duration::from_secs(20),
         )
         .await;
-        while read("kid").is_none() {
+        // The stand-in writes `pid` after `kid`: once it is there, so is the login's child.
+        while read("pid").is_none() {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         let removed = super::remove_with(
