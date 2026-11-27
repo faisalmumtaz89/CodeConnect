@@ -54,10 +54,12 @@ struct DevicesPane: View {
     var body: some View {
         Group {
             VStack(alignment: .leading, spacing: 18) {
+                // The title as every section's, 24 pt above the first card.
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(DeviceGroup.title).font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
+                    Text(DeviceGroup.title).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
                     Text(DeviceGroup.intro).font(Theme.ui(13)).foregroundStyle(Theme.text2)
                 }
+                .padding(.bottom, 6)
                 if let devices {
                     let (allowed, blocked) = DeviceGroup.groups(devices)
                     if allowed.isEmpty, blocked.isEmpty { note(DeviceGroup.empty) }

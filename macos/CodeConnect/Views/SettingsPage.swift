@@ -114,7 +114,7 @@ struct SettingsList: View {
                 Image(systemName: each.symbol).font(.system(size: 11.5)).foregroundStyle(Theme.text2)
                     .frame(width: 16)
                     .accessibilityHidden(true)
-                Text(each.title).font(Theme.ui(12.5)).foregroundStyle(Theme.text)
+                Text(each.title).font(Theme.ui(12.5)).foregroundStyle(selected ? Theme.text : Theme.text2)
                 Spacer()
             }
             .padding(.horizontal, 10)
@@ -150,16 +150,17 @@ struct SettingsPage: View {
             }
             .frame(maxWidth: 640, alignment: .leading)
             .padding(.horizontal, 32)
-            .padding(.top, 52)
+            .padding(.top, 60)
             .padding(.bottom, 32)
             .frame(maxWidth: .infinity)
         }
         .background(Theme.window)
     }
 
+    /// The section's title, 15 pt semibold, 24 pt above its first card.
     private func titled<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text(title).font(Theme.ui(19, .semibold)).foregroundStyle(Theme.text)
+        VStack(alignment: .leading, spacing: 24) {
+            Text(title).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
                 .accessibilityAddTraits(.isHeader)
             content()
         }
