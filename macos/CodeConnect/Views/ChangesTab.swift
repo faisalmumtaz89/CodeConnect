@@ -14,6 +14,8 @@ struct ChangesPanel: View {
     @State private var hunks: HunkActions
     /// The diff last read, kept on screen while it is read again, so a reread loses no place, fold or comment.
     @State private var shown: (raw: SessionDiff, parsed: UnifiedDiff, fetchedAt: Date)?
+    /// Changes or Checks, while the run's open pull request has checks to show.
+    @State private var tab = PanelTab.changes
 
     init(row: FleetRow, model: AppModel) {
         self.row = row
@@ -61,7 +63,7 @@ struct ChangesPanel: View {
                     delta: nil, read: ISO8601.parse(git.readAt), unreachable: offline ? computer : nil,
                     note: committable
                         ? commitWait(git) ?? ChangesWords.commitReady
-                        : proposable ? pullRequestWait(git) ?? target : nil)
+                        : proposable ? pullRequestWait(git) ?? target : ChangesWords.checksNote(git))
                 VStack(alignment: .leading, spacing: 0) {
                     if proposable {
                         PullRequestRow(row: row, model: model, ready: pullRequestWait(git) == nil, line: line)
@@ -74,10 +76,20 @@ struct ChangesPanel: View {
             } else if reply == nil, let branch = row.summary.gitBranch?.displaySafe {
                 BranchLine(branch: branch, base: nil, pullRequest: nil, host: "")
             }
-            // One branch draws a read diff, the one on hand or, while it is read again, the last one, so a reread keeps
-            // the same views and their folds, scroll and unsent comment.
-            if let diff = onHand(state) ?? (state.isLoading ? shown : nil) {
-                loaded(diff.raw, diff.parsed, diff.fetchedAt, counted: git == nil)
+            // An open pull request's checks take a tab beside its changes (artboards 00, 07); the tabs stand where the
+            // changes' band stood.
+            let checks = git.flatMap(Self.checks)
+            let diff = onHand(state) ?? (state.isLoading ? shown : nil)
+            if let checks {
+                PanelTabs(
+                    tab: $tab, checks: checks, cut: diff.map { $0.raw.truncated || $0.raw.filesTruncated } ?? false)
+            }
+            if let checks, tab == .checks {
+                ChecksList(checks: checks, complete: git?.pullRequest?.checksComplete != false)
+            } else if let diff {
+                // One branch draws a read diff, the one on hand or, while it is read again, the last one, so a reread
+                // keeps the same views and their folds, scroll and unsent comment.
+                loaded(diff.raw, diff.parsed, diff.fetchedAt, counted: git == nil, banded: checks == nil)
             } else {
                 unread(state)
             }
@@ -120,6 +132,12 @@ struct ChangesPanel: View {
         if git.unmerged { return ChangesWords.commitWaitsMerge }
         if git.branch == nil { return ChangesWords.commitWaitsBranch }
         return nil
+    }
+
+    /// The run's open pull request's checks, when the computer read some; nil for none, or a pull request not open.
+    private static func checks(_ git: RunGit) -> [RunGit.PullRequest.Check]? {
+        guard let pr = git.pullRequest, pr.state == .open, let checks = pr.checks, !checks.isEmpty else { return nil }
+        return checks
     }
 
     /// Why Create PR cannot be pressed yet: what holds a commit back, then what the computer would refuse it for (the
@@ -176,7 +194,9 @@ struct ChangesPanel: View {
     /// A diff the computer read: clean when it changed nothing and said nothing, its note when it said why it is
     /// empty, else the band and the document, under the diff's own count where the repository gave none (`counted`).
     @ViewBuilder
-    private func loaded(_ raw: SessionDiff, _ parsed: UnifiedDiff, _ fetchedAt: Date, counted: Bool) -> some View {
+    private func loaded(
+        _ raw: SessionDiff, _ parsed: UnifiedDiff, _ fetchedAt: Date, counted: Bool, banded: Bool
+    ) -> some View {
         if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil {
             Message(id: "changes.clean", title: ChangesWords.noUncommitted, sentence: ChangesWords.clean)
         } else if parsed.isEmpty && raw.files?.isEmpty != false {
@@ -192,7 +212,7 @@ struct ChangesPanel: View {
                     read: raw.capturedDate ?? fetchedAt, unreachable: offline ? computer : nil, note: nil)
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             }
-            Band(count: files.count, cut: raw.truncated || raw.filesTruncated)
+            if banded { Band(count: files.count, cut: raw.truncated || raw.filesTruncated) }
             Document(raw: raw, diff: parsed, files: files).environment(hunks)
         }
     }
@@ -371,6 +391,132 @@ private struct PullRequestRow: View {
                     .padding(.bottom, 12)
                     .accessibilityIdentifier("changes.createPR.refused")
             }
+        }
+    }
+}
+
+/// The panel's two tabs once its open pull request has checks: Changes, and Checks with how many passed. Where the
+/// band said the diff was cut short, so does this row while Changes is chosen.
+enum PanelTab: Hashable { case changes, checks }
+
+private struct PanelTabs: View {
+    @Binding var tab: PanelTab
+    let checks: [RunGit.PullRequest.Check]
+    let cut: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            SegmentedTrack(
+                options: [PanelTab.changes, .checks], chosen: tab, fill: Theme.window,
+                id: { $0 == .changes ? "changes.tab.changes" : "changes.tab.checks" }, choose: { tab = $0 }
+            ) { option, chosen in
+                Text(option == .changes ? "Changes" : ChangesWords.checksTab(checks))
+                    .font(Theme.ui(12, chosen ? .medium : .regular))
+                    .foregroundStyle(chosen ? Theme.text : Theme.text3)
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+            }
+            .fixedSize()
+            if cut && tab == .changes {
+                Text("Cut short by your computer").font(Theme.ui(12)).foregroundStyle(Theme.amber)
+                    .accessibilityIdentifier("changes.truncated")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 38)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+    }
+}
+
+/// An open pull request's checks, in the computer's order (a failure first), as artboard 07 lists them: each one's
+/// mark, name and duration, and a failure open in place with its first failure line and its log.
+private struct ChecksList: View {
+    let checks: [RunGit.PullRequest.Check]
+    /// False when there were more than the computer reads, or its head moved while they were read.
+    let complete: Bool
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(checks.enumerated()), id: \.offset) { _, check in
+                    CheckRow(check: check)
+                }
+                if !complete {
+                    Text(ChangesWords.checksNotAll).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier("changes.checks.notAll")
+                }
+            }
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("changes.checks")
+    }
+}
+
+/// One check: its state's mark, its name, its duration ("running" while it runs), and, failed, its first failure line
+/// and a link to its log, open in place.
+private struct CheckRow: View {
+    let check: RunGit.PullRequest.Check
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 9) {
+                Image(systemName: mark.symbol).font(.system(size: 12)).foregroundStyle(mark.tint)
+                    .accessibilityLabel(mark.spoken)
+                Text(verbatim: check.name.displaySafe).font(Theme.ui(12)).foregroundStyle(Theme.text)
+                    .lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 8)
+                let duration: String? =
+                    check.state == .pending ? ChangesWords.checkRunning : ChangesWords.checkDuration(check, now: .now)
+                if let duration {
+                    Text(verbatim: duration).font(Theme.mono(10.5)).foregroundStyle(Theme.text3)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 30)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("changes.check.\(check.name)")
+            if check.state == .fail, check.failureLine != nil || check.url != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let line = check.failureLine {
+                        Text(verbatim: line.displaySafe).font(Theme.mono(11.5)).foregroundStyle(Theme.text2)
+                            .lineSpacing(4)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("changes.check.failure")
+                    }
+                    if let url = check.url.flatMap(URL.init(string:)) {
+                        Link(destination: url) { Text(verbatim: "Log ↗") }
+                            .font(Theme.ui(11.5))
+                            .foregroundStyle(Theme.text3)
+                            .accessibilityIdentifier("changes.check.log")
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.red.opacity(0.18)))
+                .padding(.leading, 35)
+                .padding(.trailing, 14)
+                .padding(.top, 2)
+                .padding(.bottom, 10)
+            }
+        }
+    }
+
+    /// The mark for the check's state, its color, and what a screen reader says for it.
+    private var mark: (symbol: String, tint: Color, spoken: String) {
+        switch check.state {
+        case .pass: ("checkmark.circle", Theme.green, "Passed")
+        case .fail: ("xmark.circle", Theme.red, "Failed")
+        case .pending: ("clock", Theme.amber, "Running")
+        case .cancelled: ("minus.circle", Theme.text3, "Cancelled")
+        case .skipped: ("arrow.right.circle", Theme.text3, "Skipped")
+        case .unknown: ("questionmark.circle", Theme.text3, "Unknown")
         }
     }
 }

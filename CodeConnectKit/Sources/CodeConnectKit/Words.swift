@@ -355,7 +355,7 @@ public enum ChangesWords {
         // A branch's pull request speaks for its commits and its push.
         if let pr = git.pullRequest {
             switch pr.state {
-            case .open: parts.append("PR #\(pr.number) · Open")
+            case .open: parts.append("PR #\(pr.number) · \(checksLead(pr) ?? "Open")")
             case .merged: parts.append("PR #\(pr.number) · Merged into \(pr.base)")
             case .closed: parts.append("PR #\(pr.number) · Closed")
             case .unknown: parts.append("PR #\(pr.number)")
@@ -383,6 +383,51 @@ public enum ChangesWords {
         // Clean, with no base to count commits against: nothing more is known than that nothing is uncommitted.
         if parts.isEmpty { return git.ahead == nil && git.headOID != nil ? "No uncommitted changes" : "No changes" }
         return parts.joined(separator: " · ")
+    }
+    /// What an open pull request's checks lead its state line with: a failure, else what still runs; nil when every
+    /// check passed or none was read, and the line says Open.
+    private static func checksLead(_ pr: RunGit.PullRequest) -> String? {
+        guard let checks = pr.checks else { return nil }
+        let failed = checks.filter { $0.state == .fail }.count
+        if failed > 0 { return failed == 1 ? "1 check failed" : "\(failed) checks failed" }
+        let running = checks.filter { $0.state == .pending }.count
+        if running > 0 { return running == 1 ? "1 check running" : "\(running) checks running" }
+        return nil
+    }
+    /// The line under an open pull request's state (artboard 07): how many of its checks passed, a skipped one with
+    /// them, then which failed and how many still run. Nil when it has none read, or is not open.
+    public static func checksNote(_ git: RunGit) -> String? {
+        guard let pr = git.pullRequest, pr.state == .open, let checks = pr.checks, !checks.isEmpty else { return nil }
+        var parts = ["\(passed(checks)) of \(checks.count) checks passed"]
+        let failed = checks.filter { $0.state == .fail }.map(\.name.displaySafe)
+        if !failed.isEmpty { parts.append("\(failed.joined(separator: ", ")) failed") }
+        let running = checks.filter { $0.state == .pending }.count
+        if running > 0 { parts.append("\(running) running") }
+        return parts.joined(separator: " · ")
+    }
+    /// The Checks tab's label: how many of the checks passed, of how many.
+    public static func checksTab(_ checks: [RunGit.PullRequest.Check]) -> String {
+        "Checks \(passed(checks))/\(checks.count)"
+    }
+    private static func passed(_ checks: [RunGit.PullRequest.Check]) -> Int {
+        checks.filter { $0.state == .pass || $0.state == .skipped }.count
+    }
+    /// Where a running check's duration goes.
+    public static let checkRunning = "running"
+    /// Under the checks when the computer could not read them all (more than it reads, or the head moved meanwhile).
+    public static let checksNotAll = "Not every check is shown"
+    /// How long a check ran (artboard 07): "22s", "4m 12s", "5m 03s", "1h 02m".
+    public static func checkDuration(_ seconds: Int) -> String {
+        let seconds = max(0, seconds)
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60)m \(String(format: "%02d", seconds % 60))s" }
+        return "\(seconds / 3600)h \(String(format: "%02d", seconds % 3600 / 60))m"
+    }
+    /// A check's duration from its start to its end, or to `now` while it runs; nil for one with no start (a status).
+    public static func checkDuration(_ check: RunGit.PullRequest.Check, now: Date) -> String? {
+        guard let start = check.startedAt.flatMap(ISO8601.parse) else { return nil }
+        let end = check.completedAt.flatMap(ISO8601.parse) ?? now
+        return checkDuration(Int(end.timeIntervalSince(start)))
     }
     public static func showMoreLines(_ count: Int) -> String { "Show \(count) more line\(count == 1 ? "" : "s")" }
     public static func unchangedLines(_ count: Int) -> String {

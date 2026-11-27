@@ -79,6 +79,51 @@ final class ChangesStateWordsTests: XCTestCase {
             "commits made since the PR was opened")
     }
 
+    /// An open pull request's checks lead its line as artboard 07 draws them: a failure first, then what still runs;
+    /// the line under it counts what passed and names what failed; and the Checks tab counts them. A closed or merged
+    /// one's checks, and checks not read, change nothing.
+    func testAnOpenPullRequestsChecksLeadItsLine() throws {
+        func check(_ name: String, _ state: String) -> String { #"{"name":"\#(name)","state":"\#(state)"}"# }
+        func pr(_ state: String = "open", checks: [String]?) -> String {
+            let list = checks.map { #","checks":[\#($0.joined(separator: ","))]"# } ?? ""
+            return #"{"number":412,"url":"https://github.com/acme/app/pull/412","state":"\#(state)","base":"main","#
+                + #""head_oid":"1234567"\#(list)}"#
+        }
+        let passed = ["build-mac", "build-ios", "kit", "ccd", "lint", "control-names"].map { check($0, "pass") }
+        let failing = try git(ahead: 1, pushed: true, pr: pr(checks: passed + [check("ui-tests", "fail")]))
+        XCTAssertEqual(ChangesWords.state(failing), "PR #412 · 1 check failed", "07")
+        XCTAssertEqual(ChangesWords.checksNote(failing), "6 of 7 checks passed · ui-tests failed", "07")
+        XCTAssertEqual(ChangesWords.checksTab(failing.pullRequest!.checks!), "Checks 6/7", "07")
+        let five = Array(passed.dropLast())
+        let two = try git(ahead: 1, pushed: true, pr: pr(checks: five + [check("lint2", "fail"), check("ui", "fail")]))
+        XCTAssertEqual(ChangesWords.state(two), "PR #412 · 2 checks failed")
+        XCTAssertEqual(ChangesWords.checksNote(two), "5 of 7 checks passed · lint2, ui failed")
+        let running = try git(
+            ahead: 1, pushed: true, pr: pr(checks: five + [check("a", "pending"), check("b", "pending")]))
+        XCTAssertEqual(ChangesWords.state(running), "PR #412 · 2 checks running")
+        XCTAssertEqual(ChangesWords.checksNote(running), "5 of 7 checks passed · 2 running")
+        let green = try git(ahead: 1, pushed: true, pr: pr(checks: passed + [check("skip", "skipped")]))
+        XCTAssertEqual(ChangesWords.state(green), "PR #412 · Open", "all passed: nothing more to lead with")
+        XCTAssertEqual(ChangesWords.checksNote(green), "7 of 7 checks passed", "a skipped check counts as passed")
+        let unread = try git(ahead: 1, pushed: true, pr: pr(checks: nil))
+        XCTAssertEqual(ChangesWords.state(unread), "PR #412 · Open")
+        XCTAssertNil(ChangesWords.checksNote(unread), "no checks read: no line about them")
+        let merged = try git(ahead: 0, pr: pr("merged", checks: passed + [check("ui-tests", "fail")]))
+        XCTAssertEqual(ChangesWords.state(merged), "PR #412 · Merged into main")
+        XCTAssertNil(ChangesWords.checksNote(merged), "a merged one's checks are not its state")
+    }
+
+    /// A check's duration as artboard 07 writes it: seconds alone under a minute, minutes and two-digit seconds under
+    /// an hour, then hours and two-digit minutes.
+    func testACheckDurationIsWrittenAsTheDesignWritesIt() {
+        XCTAssertEqual(ChangesWords.checkDuration(22), "22s")
+        XCTAssertEqual(ChangesWords.checkDuration(252), "4m 12s")
+        XCTAssertEqual(ChangesWords.checkDuration(303), "5m 03s")
+        XCTAssertEqual(ChangesWords.checkDuration(3720), "1h 02m")
+        XCTAssertEqual(ChangesWords.checkDuration(0), "0s")
+        XCTAssertEqual(ChangesWords.checkDuration(-5), "0s", "a clock behind its start says nothing negative")
+    }
+
     /// Before Create PR is pressed, the line names where the pull request goes: the base branch on the repository the
     /// computer will open it in (a fork's parent when it has one), so a pull request into another repository is never a
     /// surprise.
