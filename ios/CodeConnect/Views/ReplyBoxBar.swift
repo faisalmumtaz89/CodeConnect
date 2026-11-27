@@ -63,7 +63,7 @@ struct ReplyBoxBar<Leading: View, Trailing: View>: View {
             if name != .cut { Spacer(minLength: 0) }
             if let figures, let bar = usage {
                 Button(action: onUsage) {
-                    UsageFigures(bar: bar, form: figures)
+                    UsageFigures(bar: bar, form: figures, atLimit: model.shownSummary(for: key)?.atLimit == true)
                         .padding(.horizontal, 6)
                         .frame(minHeight: CC.size.hitTarget)
                         .contentShape(Rectangle())

@@ -2078,6 +2078,8 @@ private struct SessionComposeBar: View {
                     onRemove: { model.removeFile($0, from: key) },
                     onRetry: { model.retryFile($0, in: key) })
             }
+            // At a usage limit, the Mac's band over the box: which limit, when it resets, the windows.
+            LimitBand(model: model, key: key)
             composer
         }
         // 12 pt in from the screen's edges; 30 pt from the conversation's last line to the box's rim, which stands 4 pt
@@ -2138,7 +2140,10 @@ private struct SessionComposeBar: View {
     private var field: some View {
         TextField(
             "", text: $text,
-            prompt: Text(SessionWords.replyPrompt(summary?.agent.displayName ?? "the agent"))
+            // At a usage limit the box says when a message goes through.
+            prompt: Text(
+                model.limitFoot(for: key, now: .now)?.prompt
+                    ?? SessionWords.replyPrompt(summary?.agent.displayName ?? "the agent"))
                 .foregroundStyle(CC.text.placeholder),
             // `.vertical` keeps the system keyboard's dictation key available
             // too — the mic in the circle is the first-class door, not the

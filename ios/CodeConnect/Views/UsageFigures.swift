@@ -18,6 +18,8 @@ struct UsageFigures: View {
 
     let bar: ReplyBar
     var form: Form = .full
+    /// The session is at a usage limit: its ring is in the alert's red.
+    var atLimit = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -28,7 +30,7 @@ struct UsageFigures: View {
                 }
             }
             if let ring = bar.ring {
-                UsageRing(percent: ring.usedPercent)
+                UsageRing(percent: ring.usedPercent, red: atLimit)
                 if form != .ring {
                     // As wide as "100%", so which form fits never changes with the value; the value starts at the ring.
                     ZStack(alignment: .leading) {
@@ -48,12 +50,14 @@ struct UsageFigures: View {
 /// A usage window's share as a small ring: a dark track, filled clockwise from the top, as the Mac draws it.
 struct UsageRing: View {
     let percent: Int
+    /// At a usage limit: in the alert's red.
+    var red = false
 
     var body: some View {
         ZStack {
             Circle().stroke(Color.white.opacity(0.1), lineWidth: 2.4)
             Circle().trim(from: 0, to: CGFloat(min(percent, 100)) / 100)
-                .stroke(CC.text.secondary, style: StrokeStyle(lineWidth: 2.4))
+                .stroke(red ? CC.color.danger : CC.text.secondary, style: StrokeStyle(lineWidth: 2.4))
                 .rotationEffect(.degrees(-90))
         }
         .padding(1.2)
