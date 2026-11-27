@@ -847,9 +847,11 @@ private struct AccountRow: View {
     /// Its share used of each column's window, right-aligned, on the name's line, and beneath it, on the plan's, how long
     /// until that window resets (`AccountSwitchWords.resets`, kept current each minute while the page is shown); an
     /// empty cell where it names no such window. Or, in their place, "No plan limits" where its agent says none apply
-    /// (`limitsAvailable` false), else "Not reported yet".
+    /// (`limitsAvailable` false), else "Not reported yet"; nothing for a signed-out row.
     @ViewBuilder private var figures: some View {
-        if let facts, !ReplyBar.limits(facts, now: .now).isEmpty {
+        if signedOut {
+            EmptyView()
+        } else if let facts, !ReplyBar.limits(facts, now: .now).isEmpty {
             // Redrawn each minute while shown; each countdown is from the time of that drawing, since the schedule's own
             // date is the minute's start, up to 59 s earlier. The figures are the reply bar's (`ReplyBar.limits`).
             TimelineView(.everyMinute) { _ in
