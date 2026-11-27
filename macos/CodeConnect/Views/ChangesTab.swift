@@ -489,7 +489,10 @@ private struct ConflictBlock: View {
                 .padding(.leading, 13)
                 .padding(.top, 3)
                 .padding(.bottom, 1)
-            ForEach(Array(text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) {
+            // A side's text ends its last line with a newline, which is not a line of its own.
+            let lines = (text.hasSuffix("\n") ? String(text.dropLast()) : text)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+            ForEach(Array(lines.enumerated()), id: \.offset) {
                 _, line in
                 HStack(spacing: 0) {
                     Rectangle().fill(Theme.amber).frame(width: 3)
