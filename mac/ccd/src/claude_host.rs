@@ -293,7 +293,9 @@ async fn bring_up(
     let log = if relaunch {
         match std::fs::remove_file(dir.join("host.json")) {
             Err(err) if err.kind() != io::ErrorKind::NotFound => {
-                return Err(format!("could not remove the session's old host.json: {err}"))
+                return Err(format!(
+                    "could not remove the session's old host.json: {err}"
+                ))
             }
             _ => {}
         }
@@ -302,8 +304,12 @@ async fn bring_up(
             .open(dir.join("host.log"))
             .map_err(|err| format!("could not open the session's host.log: {err}"))?
     } else {
-        crate::start_session::make_run_dir(run.root, &dir)
-            .map_err(|err| format!("could not make the session's folder {}: {err}", dir.display()))?
+        crate::start_session::make_run_dir(run.root, &dir).map_err(|err| {
+            format!(
+                "could not make the session's folder {}: {err}",
+                dir.display()
+            )
+        })?
     };
     // What the log held before this launch, so a failure reads only this launch's words.
     let since = log.metadata().map(|meta| meta.len()).unwrap_or(0);
@@ -1071,7 +1077,9 @@ async fn link(
                 match daemon.db.commit_cursor(uid.clone(), host, seq).await {
                     Ok(true) => {}
                     Ok(false) => {
-                        break format!("message {seq} is not past the session's cursor for this host")
+                        break format!(
+                            "message {seq} is not past the session's cursor for this host"
+                        )
                     }
                     Err(err) => break format!("{err:#}"),
                 }
@@ -1226,7 +1234,9 @@ async fn link(
                         }
                     }
                     Ok(false) => {
-                        break format!("message {seq} is not past the session's cursor for this host")
+                        break format!(
+                            "message {seq} is not past the session's cursor for this host"
+                        )
                     }
                     Err(err) => break format!("{err:#}"),
                 }
@@ -1363,7 +1373,9 @@ async fn link(
                         }
                     }
                     Ok(false) => {
-                        break format!("message {seq} is not past the session's cursor for this host")
+                        break format!(
+                            "message {seq} is not past the session's cursor for this host"
+                        )
                     }
                     Err(err) => break format!("{err:#}"),
                 }
@@ -1381,7 +1393,9 @@ async fn link(
                         }
                     }
                     Ok(false) => {
-                        break format!("message {seq} is not past the session's cursor for this host")
+                        break format!(
+                            "message {seq} is not past the session's cursor for this host"
+                        )
                     }
                     Err(err) => break format!("{err:#}"),
                 }
@@ -1397,7 +1411,9 @@ async fn link(
                         }
                     }
                     Ok(false) => {
-                        break format!("message {seq} is not past the session's cursor for this host")
+                        break format!(
+                            "message {seq} is not past the session's cursor for this host"
+                        )
                     }
                     Err(err) => break format!("{err:#}"),
                 }

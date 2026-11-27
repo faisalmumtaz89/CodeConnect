@@ -2258,7 +2258,11 @@ async fn new_thread(
                 run.thread
             ))
         }
-        Err(err) => return Err(format!("could not record the session's new thread: {err:#}")),
+        Err(err) => {
+            return Err(format!(
+                "could not record the session's new thread: {err:#}"
+            ))
+        }
     }
     crate::log_info!(
         "{uid}: thread {} had no message, so no rollout; thread {thread} started in its place",

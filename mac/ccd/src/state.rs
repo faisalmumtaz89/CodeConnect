@@ -3405,7 +3405,8 @@ impl Daemon {
                 .await
             }
             Ok(None) => AnswerResult::Rejected {
-                reason: "Only a session CodeConnect started takes answers; nothing was sent.".into(),
+                reason: "Only a session CodeConnect started takes answers; nothing was sent."
+                    .into(),
             },
             Err(err) => {
                 crate::log_error!(
@@ -3532,7 +3533,8 @@ impl Daemon {
                 .await
             }
             Ok(None) => SendTextResult::Refused {
-                reason: "Only a session CodeConnect started takes messages; nothing was sent.".into(),
+                reason: "Only a session CodeConnect started takes messages; nothing was sent."
+                    .into(),
             },
             Err(err) => {
                 crate::log_error!("send_text for {session_uid}: could not read its run: {err:#}");
