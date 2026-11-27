@@ -428,6 +428,51 @@ mod tests {
         assert_eq!(named.len(), 17);
     }
 
+    /// **A turn that failed says so on its end (run state 04).** An API error's result names its HTTP status and
+    /// claude's words; an error end with no result names its errors. A turn the person stopped, an error end that
+    /// names no reason (it may be a stop), and an ordinary end carry no `failed`; nor does any end of the recorded
+    /// session, whose two error ends are stops.
+    #[test]
+    fn a_failed_turn_says_so_on_its_end() {
+        let end = |result: Value| {
+            map(&session(), None, &result)
+                .events
+                .into_iter()
+                .find(|event| event.kind == EventKind::TurnComplete)
+                .expect("its end")
+                .payload
+        };
+        let overloaded = end(json!({"type": "result", "subtype": "success", "uuid": "r1", "is_error": true,
+            "api_error_status": 529, "num_turns": 1, "terminal_reason": "api_error",
+            "result": "API Error: Repeated 529 Overloaded errors."}));
+        assert_eq!(
+            overloaded["failed"],
+            json!({"status": 529, "message": "API Error: Repeated 529 Overloaded errors."})
+        );
+        let turns = end(json!({"type": "result", "subtype": "error_max_turns", "uuid": "r2", "is_error": true,
+            "num_turns": 9, "errors": ["Reached maximum number of turns (9)"]}));
+        assert_eq!(
+            turns["failed"],
+            json!({"message": "Reached maximum number of turns (9)"})
+        );
+        for reason in [Some("aborted_streaming"), Some("aborted_tools"), None] {
+            let mut stopped = json!({"type": "result", "subtype": "error_during_execution", "uuid": "r3",
+                "is_error": true, "num_turns": 1, "errors": []});
+            if let Some(reason) = reason {
+                stopped["terminal_reason"] = json!(reason);
+            }
+            assert_eq!(end(stopped).get("failed"), None, "{reason:?}");
+        }
+        let ordinary = end(json!({"type": "result", "subtype": "success", "uuid": "r4", "is_error": false,
+            "num_turns": 1, "result": "Done.", "terminal_reason": "completed"}));
+        assert_eq!(ordinary.get("failed"), None);
+        assert!(mapped()
+            .0
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnComplete)
+            .all(|event| event.payload.get("failed").is_none()));
+    }
+
     /// Every event has its own id, so the store keeps each, and mapping the same
     /// messages again gives the same ids, so a replay files none twice.
     #[test]

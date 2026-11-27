@@ -2923,6 +2923,25 @@ mod tests {
         assert_eq!(of_kind(&seeded, &EventKind::UserMessage).len(), 1);
     }
 
+    /// **A failed turn says so on its end (run state 04)**, in Codex's words; a turn the person stopped does not.
+    #[test]
+    fn a_failed_turn_says_so_on_its_end() {
+        let end = |fixture: &str| {
+            let live = live_facts(&captured(fixture)["live"]);
+            let end = of_kind(&live, &EventKind::TurnComplete);
+            serde_json::from_str::<Value>(&end.last().expect("its end").2).expect("a payload")
+        };
+        let failed = end(include_str!("../../../fixtures/codex/resume-failed-turn-0.164.0.json"));
+        assert_eq!(
+            failed["failed"],
+            json!({"message": failed["error"]["message"].clone()})
+        );
+        assert!(failed["failed"]["message"].is_string());
+        let stopped = end(include_str!("../../../fixtures/codex/resume-interrupted-turn-0.164.0.json"));
+        assert_eq!(stopped["status"], "interrupted");
+        assert_eq!(stopped.get("failed"), None);
+    }
+
     /// **A stop the link missed is applied as finished, not as running.** One adapter
     /// watches a turn start a command and holds its token usage, then its connection drops
     /// and the turn is stopped; the answer the link reads on reconnecting reports the turn

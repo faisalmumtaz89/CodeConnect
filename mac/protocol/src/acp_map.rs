@@ -430,6 +430,12 @@ mod tests {
             json!({"message": "Authentication required"})
         );
         assert_eq!(filed[1].kind, EventKind::TurnComplete);
+        assert_eq!(
+            filed[1].payload["failed"],
+            json!({"message": "Authentication required"}),
+            "the refused turn's end says it failed (run state 04)"
+        );
+        assert_eq!(filed[0].payload.get("failed"), None);
     }
 
     /// agy's settings as its `configOptions` give them (agy 1.5.15's shape, values cut down): the model family, the
