@@ -4680,6 +4680,16 @@ mod tests {
         let folder = Path::new(&main).join(".claude/worktrees/fix+login");
         assert!(reached(&result), "{result:?}");
         assert_eq!(rig.run_cwd("new").await, folder.display().to_string());
+        // The listing says the run is in a worktree of its own (its folder and branch kept when it ends).
+        let listed = serde_json::to_value(rig.daemon.sessions().await.unwrap()).unwrap();
+        let run = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|run| run["cwd"] == folder.display().to_string())
+            .cloned()
+            .unwrap();
+        assert_eq!(run["in_worktree"], true, "{run}");
         assert_eq!(
             git(&folder, &["symbolic-ref", "--short", "HEAD"]),
             "fix/login"
