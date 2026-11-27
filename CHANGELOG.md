@@ -5,6 +5,17 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.33
 
+- On the Mac, the Changes panel shows an open pull request's checks: they lead its state line, and a Checks tab lists
+  each with its time, a failed one with its first failure line and its log.
+- An open pull request is merged from the Changes panel, by squash, merge commit or rebase as its menu chose and the
+  repository allows, and its merge state (ready, behind, blocked, queued) leads the state line.
+- A finished run in a worktree of its own is archived from the Changes panel: the card says the worktree, the local
+  branch and the agent's session go, with the files git ignores there.
+- A run's conflicts with its base lead the state line, hold the merge, and show each file's conflicting lines, this
+  branch's above the base's.
+- A comment on a hunk is sent with the hunk itself, so the agent reads it against the lines it's about.
+- A Claude worktree inside the run's folder is no longer counted among its changes, or committed with them.
+
 ## CodeConnect 0.19.32
 
 - A turn that fails ends on a "Turn failed" row in its agent's own words, with its API error's reply, and the run
