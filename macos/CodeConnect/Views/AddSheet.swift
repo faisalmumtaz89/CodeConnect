@@ -73,6 +73,8 @@ struct SheetBar<Leading: View>: View {
     var cancelTitle = "Cancel"
     /// The action answers ⌘↩; not where another bar beside it already does.
     var keyed = true
+    /// The action answers Return alone ("↩") and Cancel shows its Esc: a form of one-line fields, which take no Return.
+    var returnAlone = false
     @ViewBuilder let leading: Leading
     /// The sheet's questions, where it has them: while one is up, Esc and ⌘↩ are its, not the bar's.
     @Environment(ConfirmationQueue.self) private var asks: ConfirmationQueue?
@@ -87,12 +89,13 @@ struct SheetBar<Leading: View>: View {
                 // The secondary answer in the app's one footer style, Set Up's: a bordered
                 // button beside the filled one, the same height and corners.
                 if let cancel {
-                    ActionButton(title: cancelTitle, key: nil, prominent: false, id: cancelID, action: cancel)
+                    ActionButton(title: cancelTitle, key: returnAlone ? "Esc" : nil, prominent: false, id: cancelID, action: cancel)
                         .keyboardShortcut(asking ? nil : .cancelAction)
                 }
                 if let action {
-                    ActionButton(title: action, key: keyed ? "⌘↩" : nil, prominent: true, id: actionID, action: perform)
-                        .keyboardShortcut(asking || !keyed ? nil : KeyboardShortcut(.return, modifiers: .command))
+                    ActionButton(title: action, key: keyed ? (returnAlone ? "↩" : "⌘↩") : nil, prominent: true, id: actionID, action: perform)
+                        .keyboardShortcut(
+                            asking || !keyed ? nil : returnAlone ? .defaultAction : KeyboardShortcut(.return, modifiers: .command))
                         .disabled(blocked)
                 }
             }
@@ -223,7 +226,8 @@ private struct ComputerForm: View {
                     machines.cancelPairing()
                     dismiss()
                 },
-                cancelID: "computer.cancel"
+                cancelID: "computer.cancel",
+                returnAlone: true
             ) {
                 if usesCode {
                     Text(PairingWords.codeWorksOnce)
@@ -346,7 +350,7 @@ private struct IPhoneSide: View {
                 }
             }
             Spacer(minLength: 18)
-            // Beside the computer's bar, whose Cancel and Esc close the sheet and whose Connect answers ⌘↩: Done alone,
+            // Beside the computer's bar, whose Cancel and Esc close the sheet and whose Connect answers Return: Done alone,
             // lit once an iPhone has paired, answering a click.
             SheetBar(
                 action: "Done", actionID: "iphone.done", blocked: !added, perform: { dismiss() },
