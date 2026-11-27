@@ -82,4 +82,16 @@ final class PairedDeviceTests: XCTestCase {
             blocked.first?.blockedLine(),
             "Blocked by an older CodeConnect. While it’s listed, any new device needs a code to join.")
     }
+
+    /// An entry is the kind of device its newest marked pairing says, none before any hello named an app; and it reads
+    /// as connected while it was seen in the last 30 seconds (the apps ping every 10), as last seen once longer.
+    func testAnEntrySaysItsKindAndWhetherItIsConnected() throws {
+        let (allowed, blocked) = DeviceGroup.groups(try listed())
+        XCTAssertEqual(allowed.map(\.kind), [.mac, .iphone, nil])
+        XCTAssertEqual(blocked.map(\.kind), [nil, .iphone])
+        let phone = try XCTUnwrap(allowed.first { $0.name == "Jordan’s iPhone" })
+        let seen = try XCTUnwrap(phone.lastSeen)
+        XCTAssertEqual(phone.seenLine(now: seen.addingTimeInterval(29)), "Connected")
+        XCTAssertTrue(phone.seenLine(now: seen.addingTimeInterval(30)).hasPrefix("Last seen "))
+    }
 }

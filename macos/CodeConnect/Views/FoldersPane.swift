@@ -77,7 +77,7 @@ struct FoldersPane: View {
         return HStack(spacing: 10) {
             Image(systemName: "folder").font(.system(size: 12)).foregroundStyle(Theme.text2)
                 .accessibilityHidden(true)
-            Text(answer.path).font(Theme.mono(12.5)).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.head)
+            Text(context.shown(answer.path)).font(Theme.mono(12.5)).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.head)
             Spacer(minLength: 8)
             SegmentedTrack(
                 options: [FolderTrust.trusted, .notTrusted], chosen: answer.trust, fill: Theme.window,

@@ -112,6 +112,22 @@ final class FolderTrustWireTests: XCTestCase {
         XCTAssertEqual(folders, [FolderAnswer(path: Self.folder, trust: .notTrusted, answeredAt: answeredAt)])
     }
 
+    /// A folder under the home its computer named in the hello (minor 68) reads from "~"; any other folder, another
+    /// user's among them, and every folder before the computer has named its home, reads whole.
+    func testAFolderIsShownFromTildeUnderTheHomeItsComputerNamed() throws {
+        let (model, _) = try model()
+        let context = StartContext(model: model)
+        XCTAssertEqual(context.shown("/Users/jordan/code"), "/Users/jordan/code", "no home named yet")
+        let ack = try JSONDecoder().decode(
+            ServerMessage.self,
+            from: Data(#"{"type":"hello_ack","protocol_version":2,"protocol_minor":68,"machine_home":"/Users/jordan"}"#.utf8))
+        model.connection.injectForTesting(ack)
+        XCTAssertEqual(context.shown("/Users/jordan/code/app"), "~/code/app")
+        XCTAssertEqual(context.shown("/Users/jordan"), "~")
+        XCTAssertEqual(context.shown("/Users/sam/code"), "/Users/sam/code", "another user's folder stays whole")
+        XCTAssertEqual(context.shown("/tmp/scratch"), "/tmp/scratch")
+    }
+
     func testTheFolderFramesAreSentAsTheDaemonReadsThem() throws {
         let wire = try wire()
         XCTAssertEqual(try encoded(.listFolderTrust(requestID: "t1")), wire["list_folder_trust_request"])

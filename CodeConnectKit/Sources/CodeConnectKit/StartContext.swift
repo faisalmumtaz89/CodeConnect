@@ -16,6 +16,10 @@ public struct StartContext {
     public var machineName: String { model.machineName ?? "this computer" }
     /// The system the computer's daemon names ("macos", "linux"), by the same rule as its name; nil before it says.
     public var machineOS: String? { model.daemonProfile.machineOS ?? model.machine?.os }
+    /// A folder as this computer's shell prints it: under the home it named (minor 68) from "~"; else whole.
+    public func shown(_ path: String) -> String {
+        model.connection.helloAck?.machineHome.map { StartProject.shown(path, home: $0) } ?? path
+    }
     public var projects: [StartProject] { (starter.projects ?? []).filter(\.exists) }
 
     public var id: String { model.machineID ?? "" }

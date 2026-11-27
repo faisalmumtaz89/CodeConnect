@@ -95,6 +95,11 @@ struct DevicesPane: View {
         // By the device Block and Allow Again act on.
         let id = "settings.device.\(group.devices[0].deviceID)"
         return HStack(alignment: .center, spacing: 12) {
+            // A Mac or an iPhone; the place kept, empty, until a hello has said which.
+            Image(systemName: group.kind == .iphone ? "iphone" : "desktopcomputer")
+                .font(.system(size: 12)).foregroundStyle(Theme.text2).frame(width: 16)
+                .opacity(group.kind == nil ? 0 : 1)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 // The app's own entry is "This Mac", its name under it.
                 Text(isThisMac ? DeviceGroup.thisDevice : group.name).font(Theme.ui(13)).foregroundStyle(Theme.text)

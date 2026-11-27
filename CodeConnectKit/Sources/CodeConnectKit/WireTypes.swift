@@ -2977,12 +2977,15 @@ public struct HelloAck: Sendable, Hashable {
     /// Which daemon this is, the same whatever address reached it. Minor 26;
     /// absent from an older daemon, which is told apart by address instead.
     public var machineID: String?
+    /// The computer's home folder, the one `list_folder` opens on. Minor 68; absent from an older daemon, and then
+    /// a folder is shown whole.
+    public var machineHome: String?
 
     public init(
         protocolVersion: UInt32, protocolMinor: UInt32, serverTime: String, capabilities: Capabilities,
         deviceToken: String? = nil, deviceID: String? = nil, deviceName: String? = nil,
         pushEnvironment: String? = nil, machineName: String? = nil, machineOS: String? = nil,
-        machineID: String? = nil
+        machineID: String? = nil, machineHome: String? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.protocolMinor = protocolMinor
@@ -2995,6 +2998,7 @@ public struct HelloAck: Sendable, Hashable {
         self.machineName = machineName
         self.machineOS = machineOS
         self.machineID = machineID
+        self.machineHome = machineHome
     }
 }
 
@@ -3252,6 +3256,7 @@ extension ServerMessage: Decodable {
         case machineName = "machine_name"
         case machineOS = "machine_os"
         case machineID = "machine_id"
+        case machineHome = "machine_home"
         case sessions
         case event
         case requestID = "request_id"
@@ -3306,7 +3311,8 @@ extension ServerMessage: Decodable {
                     pushEnvironment: try c.decodeIfPresent(String.self, forKey: .pushEnvironment),
                     machineName: try c.decodeIfPresent(String.self, forKey: .machineName),
                     machineOS: try c.decodeIfPresent(String.self, forKey: .machineOS),
-                    machineID: try c.decodeIfPresent(String.self, forKey: .machineID)))
+                    machineID: try c.decodeIfPresent(String.self, forKey: .machineID),
+                    machineHome: try c.decodeIfPresent(String.self, forKey: .machineHome)))
         case "diff":
             self = .diff(try SessionDiff(from: decoder))
         case "run_git":

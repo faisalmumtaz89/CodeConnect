@@ -16,6 +16,8 @@ public struct PairedDevice: Decodable, Hashable, Sendable, Identifiable {
     public let tailnetNode: String?
     /// Paired before the daemon recorded Tailscale devices.
     public let pairedBeforeNodes: Bool
+    /// The kind of device, by the app its last hello named; nil until one has, and from a daemon below minor 68.
+    public let kind: AnsweredOn?
 
     public var id: String { deviceID }
     public var isBlocked: Bool { revokedAt != nil }
@@ -30,6 +32,7 @@ public struct PairedDevice: Decodable, Hashable, Sendable, Identifiable {
         case revokedAt = "revoked_at"
         case tailnetNode = "tailnet_node"
         case pairedBeforeNodes = "paired_before_nodes"
+        case kind
     }
 
     public init(from decoder: Decoder) throws {
@@ -42,6 +45,7 @@ public struct PairedDevice: Decodable, Hashable, Sendable, Identifiable {
         tailnetNode = try c.decodeIfPresent(String.self, forKey: .tailnetNode)
         // Sent only when true.
         pairedBeforeNodes = try c.decodeIfPresent(Bool.self, forKey: .pairedBeforeNodes) ?? false
+        kind = try c.decodeIfPresent(AnsweredOn.self, forKey: .kind)
     }
 }
 
@@ -55,6 +59,8 @@ public struct DeviceGroup: Hashable, Sendable, Identifiable {
     public var name: String { devices[0].name }
     public var isBlocked: Bool { devices[0].isBlocked }
     public var holdsNewDevices: Bool { devices.contains(where: \.holdsNewDevices) }
+    /// A Mac or an iPhone, by its newest pairing that a hello marked; nil while none has been.
+    public var kind: AnsweredOn? { devices.lazy.compactMap(\.kind).first }
 
     /// When this phone or computer last reached the computer.
     public var lastSeen: Date? { devices.compactMap { $0.lastSeenAt.flatMap(ISO8601.parse) }.max() }
@@ -103,9 +109,11 @@ public struct DeviceGroup: Hashable, Sendable, Identifiable {
     public static let blockAction = "Block"
     public static let allowAction = "Allow Again"
 
-    /// Under an allowed device: when it last reached this computer, as of `now`.
+    /// Under an allowed device, as of `now`: connected while it was seen in the last 30 seconds (a connected app pings
+    /// every 10), else when it last reached this computer.
     public func seenLine(now: Date = Date()) -> String {
         guard let lastSeen else { return "Not seen yet" }
+        if now.timeIntervalSince(lastSeen) < 30 { return "Connected" }
         return "Last seen \(Format.age(since: lastSeen, now: now)) ago"
     }
 
