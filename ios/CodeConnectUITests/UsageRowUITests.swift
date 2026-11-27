@@ -43,4 +43,18 @@ final class UsageRowUITests: XCTestCase {
         XCTAssertTrue(value.contains("; Weekly 41%"), value)
         XCTAssertTrue(value.hasSuffix("; Account you@example.com · Plus"), value)
     }
+
+    /// The figures open the session's usage: its limits, and the account by its whole email and plan.
+    func testTheFiguresOpenTheUsageSheet() {
+        let app = launch(usage: true)
+        let usage = app.buttons["session.composer.usage"]
+        XCTAssertTrue(usage.waitForExistence(timeout: 5), "the figures")
+        usage.tap()
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label ==[c] %@", "Limits")).firstMatch
+                .waitForExistence(timeout: 5), "the Usage sheet")
+        XCTAssertTrue(
+            app.staticTexts.matching(identifier: "usage.account").firstMatch.label.hasPrefix("you@example.com"),
+            "the account, by its email")
+    }
 }

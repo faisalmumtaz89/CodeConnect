@@ -1172,46 +1172,36 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-sheet-claude",
-            purpose: "the settings sheet's Usage section for a Claude run: first as a tap opens it, last at AX5",
+            purpose: "the Usage sheet for a Claude run, as the figures open it",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
             ],
             reach: { app, driver in
-                try driver.require(
-                    app.buttons["session.composer.settings"], "the composer settings control").tap()
-                // As it opens where Usage stands first (scrolled not at all); at accessibility sizes, where it stands
-                // last, scrolled down to it.
-                try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
-                try driver.require(driver.text(containing: "Usage", in: app), "the sheet's Usage section")
+                try driver.require(app.buttons["session.composer.usage"], "the reply box's figures").tap()
+                try driver.require(driver.text(containing: "Limits", in: app), "the Usage sheet")
             }),
         RenderScenario(
             name: "session-usage-sheet-no-plan-limits",
-            purpose: "the settings sheet's Usage section for an account its agent says has no plan limits",
+            purpose: "the Usage sheet for an account its agent says has no plan limits",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", noPlanLimitsAccounts,
             ],
             reach: { app, driver in
-                try driver.require(
-                    app.buttons["session.composer.settings"], "the composer settings control").tap()
-                try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
+                try driver.require(app.buttons["session.composer.usage"], "the reply box's figures").tap()
                 try driver.require(driver.text(containing: "No plan limits", in: app), "the no-limits row")
             }),
         RenderScenario(
             name: "session-usage-sheet-codex",
-            purpose: "the settings sheet's Usage section for a Codex run: first as a tap opens it, last at AX5",
+            purpose: "the Usage sheet for a Codex run, as the figures open it",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
             ],
             reach: { app, driver in
-                try driver.require(
-                    app.buttons["session.composer.settings"], "the composer settings control").tap()
-                // As it opens where Usage stands first (scrolled not at all); at accessibility sizes, where it stands
-                // last, scrolled down to it.
-                try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
-                try driver.require(driver.text(containing: "Usage", in: app), "the sheet's Usage section")
+                try driver.require(app.buttons["session.composer.usage"], "the reply box's figures").tap()
+                try driver.require(driver.text(containing: "Limits", in: app), "the Usage sheet")
             }),
         RenderScenario(
             name: "session-settings-over-a-long-reply",

@@ -957,6 +957,7 @@ struct SessionDetailView: View {
     }
     @State private var askingAgain = false
     @State private var showHostedSettingsSheet = false
+    @State private var showUsageSheet = false
     @State private var showCompactSheet = false
     @State private var compactSheetPrefill = ""
     @State private var showClearConfirm = false
@@ -1056,7 +1057,7 @@ struct SessionDetailView: View {
                             onWhy: { showLinkDetail = true },
                             onSend: send,
                             onSettings: { showHostedSettingsSheet = true },
-                            onUsage: { showHostedSettingsSheet = true },
+                            onUsage: { showUsageSheet = true },
                             focused: $composerFocused)
                     }
                 }
@@ -1091,6 +1092,11 @@ struct SessionDetailView: View {
             HostedSettingsSheet(sessionKey: key, onLanded: consumeDraft)
                 .environment(model)
                 .ccConfirmationHost()
+                .ccResizableSheet()
+        }
+        .sheet(isPresented: $showUsageSheet) {
+            UsageSheet(sessionKey: key)
+                .environment(model)
                 .ccResizableSheet()
         }
         .sheet(isPresented: $showCompactSheet) {
