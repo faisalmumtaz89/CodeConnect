@@ -1218,7 +1218,14 @@ for `get_diff`; a binary file and a file git does not track add nothing; from
 `>= 53` it is the sum of `get_diff`'s `files`, untracked files' lines included). They are read when a turn ends
 and when the daemon starts, never on a `sessions` request, and
 omitted outside a repository, before the first read, and on a detached head
-(the branch). It also answers `get_machine_stats` (the `machine_stats`
+(the branch). `>= 71` adds `repo {name, remote?, main_path}`: the repository's
+main checkout (the folder holding the `.git` its worktrees share; a submodule's
+own folder), its last folder name, and its `origin` on github.com as
+`github.com/<owner>/<name>` in lower case (absent with no `origin` or on another
+host). It is read with the branch, also when a run starts and when its agent
+moves it to another folder, and kept in the store with the folder it was read
+in, so an ended run keeps it across a restart; a run is listed with it only
+while it is still in that folder. It also answers `get_machine_stats` (the `machine_stats`
 capability, offered to every connection) with one `machine_stats {cpu?,
 memory_used?, memory_total?, disk_used?, disk_total?, captured_at}`, taken when
 asked and never stored: `cpu` is the share of all cores busy over half a
