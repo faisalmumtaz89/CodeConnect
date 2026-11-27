@@ -1045,8 +1045,10 @@ public final class AppModel {
             if let usage = UserDefaults.standard.string(forKey: "CC_FIXTURE_USAGE") {
                 frames = Fixtures.withUsage(frames, context: usage != "limits")
             }
-            if let failed = UserDefaults.standard.string(forKey: "CC_FIXTURE_FAILED") {
-                frames = Fixtures.withFailedTurn(frames, failed: failed)
+            // Read from the arguments as given: defaults would take its JSON for a property list.
+            let arguments = ProcessInfo.processInfo.arguments
+            if let flag = arguments.firstIndex(of: "-CC_FIXTURE_FAILED"), flag + 1 < arguments.count {
+                frames = Fixtures.withFailedTurn(frames, failed: arguments[flag + 1])
             }
             if fixtureAccountBook != nil { Task { await loadAccounts() } }
             // **`-CC_FIXTURE_LATE_EVENTS <n>` is events arriving while the
