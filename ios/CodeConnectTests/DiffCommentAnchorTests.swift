@@ -34,6 +34,21 @@ final class DiffCommentAnchorTests: XCTestCase {
         XCTAssertEqual(ChangesWords.comment("why?", file: file, hunk: hunk(lines)), "In `a/b.swift`: why?")
     }
 
+    func testTheCommentFieldShowsItsPlaceAsPathAndLines() {
+        let several = [
+            UnifiedDiff.Line(id: 0, kind: .context, text: "a", oldNumber: 12, newNumber: 12),
+            UnifiedDiff.Line(id: 1, kind: .addition, text: "b", newNumber: 13),
+        ]
+        XCTAssertEqual(ChangesWords.commentPlace(file: file, hunk: hunk(several)), "a/b.swift · lines 12–13")
+        let one = [UnifiedDiff.Line(id: 0, kind: .addition, text: "x", newNumber: 7)]
+        XCTAssertEqual(ChangesWords.commentPlace(file: file, hunk: hunk(one)), "a/b.swift · line 7")
+        let none = [UnifiedDiff.Line(id: 0, kind: .note, text: "\\ No newline at end of file")]
+        XCTAssertEqual(ChangesWords.commentPlace(file: file, hunk: hunk(none)), "a/b.swift")
+        XCTAssertEqual(
+            ChangesWords.comment("fix", file: file, hunk: hunk(several)), "In `a/b.swift` lines 12–13: fix",
+            "what reaches the agent keeps its backticked anchor")
+    }
+
     func testCopyHunkCopiesTheHeaderAndEveryLineUnderItsMark() {
         let lines = [
             UnifiedDiff.Line(id: 0, kind: .context, text: "a", oldNumber: 12, newNumber: 12),

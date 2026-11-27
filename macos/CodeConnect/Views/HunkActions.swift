@@ -147,7 +147,7 @@ struct HunkCommentField: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(ChangesWords.commentAnchor(file: file, hunk: hunk).displaySafe)
+            Text(ChangesWords.commentPlace(file: file, hunk: hunk).displaySafe)
                 .font(Theme.mono(11)).foregroundStyle(Theme.text3)
                 .lineLimit(1).truncationMode(.middle)
             TextField(
