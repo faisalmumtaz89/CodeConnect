@@ -405,7 +405,10 @@ final class ConversationColumn: NSObject, NSTableViewDataSource, NSTableViewDele
     func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        row < layout.rows.count ? layout.rows[row].height : 1
+        guard row < layout.rows.count else { return 1 }
+        // A conversation shorter than the pane sits at its foot, just above the reply box: the first row (the place
+        // earlier events load into) takes the room above it, so the column fits the pane exactly and nothing scrolls.
+        return layout.rows[row].height + (row == 0 ? max(0, layout.pane - layout.height) : 0)
     }
 
     /// A row the table draws or prepares to, or one within a pane of the screen, gets its view; a row asked for anywhere
