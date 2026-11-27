@@ -81,14 +81,14 @@ struct ReplyUsage: View {
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Card.border))
     }
 
-    /// A card row, 12 pt throughout: its label muted at the leading side; at least 24 pt on, its value bright in Menlo,
-    /// then the rest muted.
+    /// A card row: its label muted in a 62 pt column, its value bright in Menlo beside it, then the rest muted at the
+    /// trailing side.
     private func row(_ label: String, value: String? = nil, rest: String? = nil) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(label).font(Theme.ui(12)).foregroundStyle(Card.muted)
-            Spacer(minLength: 24)
-            if let value { Text(value).font(Theme.mono(12)).foregroundStyle(Theme.text) }
-            if let rest { Text(rest).font(Theme.ui(12)).foregroundStyle(Card.muted) }
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label).font(Theme.ui(12)).foregroundStyle(Card.muted).frame(width: 62, alignment: .leading)
+            if let value { Text(value).font(Theme.mono(11.5)).foregroundStyle(Theme.text) }
+            Spacer(minLength: 8)
+            if let rest { Text(rest).font(Theme.ui(11.5)).foregroundStyle(Card.muted).lineLimit(1) }
         }
         .padding(.vertical, 4)
     }

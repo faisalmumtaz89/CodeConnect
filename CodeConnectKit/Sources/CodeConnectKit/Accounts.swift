@@ -243,8 +243,8 @@ public enum AccountSwitchWords {
         }
     }
 
-    /// Beneath a window's figure, how long until it resets: "resets in N days" from two days on (whole days, rounded
-    /// down), "resets in Nh Mm" from an hour ("resets in 5h" on the hour), "resets in N min" under an hour (at least 1);
+    /// Beneath a window's figure, how long until it resets: "resets in Nd Hh" from two days on (whole hours, rounded
+    /// down; "resets in 3d" on the day), "resets in Nh Mm" from an hour ("resets in 5h" on the hour), "resets in N min" under an hour (at least 1);
     /// nil once the time has come, until the computer reads the window again.
     public static func resets(_ window: UsageWindow, now: Date) -> String? {
         if window.resetsAt == 0 { return "not started" }
@@ -255,7 +255,10 @@ public enum AccountSwitchWords {
     public static func countdown(_ window: UsageWindow, now: Date) -> String? {
         let left = window.resetsAt - Int(now.timeIntervalSince1970.rounded(.down))
         guard left > 0 else { return nil }
-        if left >= 2 * 86400 { return "in \(left / 86400) days" }
+        if left >= 2 * 86400 {
+            let hours = left % 86400 / 3600
+            return "in \(left / 86400)d" + (hours > 0 ? " \(hours)h" : "")
+        }
         if left >= 3600 {
             let minutes = left % 3600 / 60
             return "in \(left / 3600)h" + (minutes > 0 ? " \(minutes)m" : "")

@@ -244,7 +244,7 @@ final class AntigravityKitTests: XCTestCase {
         let limits = ReplyBar.limits(facts, now: now)
         XCTAssertEqual(limits.map(\.caption), ["Week"])
         XCTAssertEqual(limits.map(\.usedPercent), [20])
-        XCTAssertEqual(limits.first?.resets, "resets in 6 days")
+        XCTAssertEqual(limits.first?.resets, "resets in 6d 22h")
         let older = try JSONDecoder().decode(
             AccountFacts.self,
             from: Data(
