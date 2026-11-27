@@ -6314,6 +6314,7 @@ mod tests {
             limit: None,
             archived: false,
             in_worktree: false,
+            repo: None,
         };
         serde_json::json!({
             "hello_ack_capabilities": ack["capabilities"],
@@ -6385,6 +6386,7 @@ mod tests {
                 limit: None,
                 archived: false,
                 in_worktree: false,
+                repo: None,
             }
         };
         serde_json::json!({

@@ -170,7 +170,8 @@ pub(crate) const INTERRUPT_ID_REUSED_ON_LINK: &str =
     "this request id has already been used for a different stop on this \
     session, so nothing was sent; ask again under a new one";
 
-pub(crate) const INTERRUPT_RUN_IS_GONE: &str = "this session is gone, so its turn cannot be stopped";
+pub(crate) const INTERRUPT_RUN_IS_GONE: &str =
+    "this session is gone, so its turn cannot be stopped";
 
 /// [`COMPOSE_CLAIM_UNRECORDED`]'s twin, and a const for the same reason: the claim
 /// failed on this Mac's own disk, and the words the disk used are this Mac's to read.
