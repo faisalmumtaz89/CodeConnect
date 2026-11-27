@@ -347,8 +347,9 @@ pub enum Created {
     Unknown,
 }
 
-/// `gh pr create` from `branch` of `head` into `target` onto `base`, its title and body gh's
-/// own from the branch's commits, which it reads with git in `cwd`, the run's folder.
+/// `gh pr create` from `branch` of `head` into `target` onto `base`, titled `title` when given, its
+/// body (and else its title) gh's own from the branch's commits, which it reads with git in `cwd`,
+/// the run's folder.
 pub async fn create_pr(
     cwd: &str,
     gh_bin: Option<&str>,
@@ -356,6 +357,7 @@ pub async fn create_pr(
     target: &Repo,
     branch: &str,
     base: &str,
+    title: Option<&str>,
 ) -> Created {
     let environment = &crate::start_session::phone_environment();
     let Some(gh) = crate::start_session::gh_path(environment, gh_bin).await else {
@@ -369,7 +371,8 @@ pub async fn create_pr(
     } else {
         format!("{}:{branch}", head.owner)
     };
-    let args = [
+    let titled = title.map(|title| format!("--title={title}"));
+    let mut args = vec![
         "pr",
         "create",
         "--repo",
@@ -380,6 +383,7 @@ pub async fn create_pr(
         base,
         "--fill",
     ];
+    args.extend(titled.as_deref());
     let mut command = gh_command(&gh, environment, &args);
     command.current_dir(cwd);
     match crate::git::run_program(command, &args, CREATE_TIMEOUT, CREATE_CAP).await {

@@ -1405,8 +1405,8 @@ to probe credentials.
   refs/heads/<b>:refs/heads/<b>`, no force, through the login shell with the
   repository's `pre-push` hook, 120 s; nothing when the remote has `HEAD`, refused
   when the branch there moved on) and opened, in the run's folder, with `gh pr create --repo
-  <gh_repo> --head <[owner:]b> --base <base> --fill` (title and body from the
-  commits, 30 s). If gh refuses or gives no answer, GitHub is asked once more, and
+  <gh_repo> --head <[owner:]b> --base <base> --fill`, with `--title=<title>` when
+  the run has a `title` (else the title, and always the body, from the commits, 30 s). If gh refuses or gives no answer, GitHub is asked once more, and
   a pull request found there is the answer, so one is never opened twice; else
   `create_failed{"pushed; " + gh's line}`, or `indeterminate` when gh gave no
   answer or GitHub could not be asked again. Refused before anything is sent on a detached head, while unmerged, with

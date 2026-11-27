@@ -5722,8 +5722,23 @@ impl Daemon {
                     break 'outcome ActionOutcome::Refused(code::TIMEOUT, Some("push".into()))
                 }
             }
-            let created =
-                crate::github::create_pr(&row.cwd, gh_bin, &head, &target, &branch, base).await;
+            // Titled by the run when it has a title; else gh's own title from the commits.
+            let title = self
+                .db
+                .run_titles()
+                .await
+                .ok()
+                .and_then(|titles| titles.get(&row.session_uid).cloned());
+            let created = crate::github::create_pr(
+                &row.cwd,
+                gh_bin,
+                &head,
+                &target,
+                &branch,
+                base,
+                title.as_deref(),
+            )
+            .await;
             if let Created::Opened(pr) = created {
                 break 'outcome done(pr);
             }
@@ -9174,6 +9189,56 @@ mod tests {
         }
     }
 
+    /// **A pull request is titled by its run**: a run with a title opens its pull request with it,
+    /// the body still gh's own from the branch's commits.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pull_request_is_titled_by_its_run() {
+        let _env = crate::ProcessEnvRead::take();
+        let gh = stand_in_gh();
+        std::fs::write(
+            gh.with_file_name("create.out"),
+            "https://github.com/cli/cli/pull/15210\n",
+        )
+        .unwrap();
+        let daemon = daemon_on(
+            shared_store(),
+            Config {
+                gh_bin: Some(gh.to_str().unwrap().into()),
+                ..Config::default()
+            },
+        );
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP3T";
+        let (dir, bare) = run_pushing_to_a_bare(&daemon, uid, "w2-titled");
+        daemon
+            .store
+            .append_event(&crate::claude_host::person_row(
+                uid,
+                "u-1",
+                "Retry the router on 5xx\nand keep the tests green",
+                None,
+                None,
+            ))
+            .unwrap();
+        assert_eq!(
+            daemon
+                .git_action(uid, "p-1", &protocol::ws::GitAction::CreatePr)
+                .await,
+            pr(15210)
+        );
+        let calls = gh_calls(&gh);
+        assert!(
+            calls.iter().any(|call| call.ends_with(
+                "pr create --repo cli/cli --head w2-titled --base main --fill --title=Retry the router on 5xx"
+            )),
+            "{calls:?}"
+        );
+        for path in [dir.clone(), bare, gh.parent().unwrap().to_path_buf()] {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        let _ = std::fs::remove_file(dir.with_extension("ssh"));
+    }
+
     /// **A pull request is opened once, and never twice**: pushed then opened with gh (and the
     /// same request answered again without a call), an open one returned without pushing, gh's
     /// refusal after the push, a lost "already exists" race answered from the lookup, signed out
@@ -9245,7 +9310,7 @@ mod tests {
         );
         assert!(
             calls[read + 1]
-                .contains("pr create --repo cli/cli --head w2-feature --base main --fill"),
+                .ends_with("pr create --repo cli/cli --head w2-feature --base main --fill"),
             "{calls:?}"
         );
         assert_eq!(
