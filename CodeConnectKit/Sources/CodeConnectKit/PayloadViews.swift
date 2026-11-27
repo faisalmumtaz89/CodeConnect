@@ -228,6 +228,12 @@ extension Event {
     /// The end of a turn, which has its own kind; the session lives on.
     public var isTurnComplete: Bool { kind == .turnComplete }
 
+    /// How a turn that failed, and that the person did not stop, failed (`failed`, minor 70); nil on any other end.
+    public var turnFailure: TurnFailure? {
+        guard kind == .turnComplete, let failed = payload["failed"], failed.objectValue != nil else { return nil }
+        return TurnFailure(status: failed["status"]?.intValue, message: failed["message"]?.stringValue)
+    }
+
     /// The command whose own turn this turn end closes, on a Claude run CodeConnect started (`local_command`, claude's
     /// own field, minor 40): `/clear`, `/compact`, `/effort low`. Nil on an agent turn's end.
     public var endedCommand: String? {
@@ -657,4 +663,10 @@ public enum RiskClass: Int, Sendable, Hashable, Comparable {
         case .high: return "HIGH"
         }
     }
+}
+
+/// How a turn failed (`Event.turnFailure`): its HTTP status, when its agent gave one, and its agent's words.
+public struct TurnFailure: Equatable, Sendable {
+    public let status: Int?
+    public let message: String?
 }

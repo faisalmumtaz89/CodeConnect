@@ -995,10 +995,10 @@ struct NoticeRow: View {
     let date: Date
 
     var body: some View {
-        if notice.kind == .turnComplete {
+        if notice.kind == .turnComplete, notice.severity != .failure {
             // Drawn only where nothing else ends the turn
             // (`TimelineBuilder.drawn`), so it is one quiet line on the reading
-            // lane rather than a success mark.
+            // lane rather than a success mark. A turn that failed is marked, with its agent's words.
             Text(notice.title)
                 .ccType(CC.type.reading)
                 .foregroundStyle(CC.text.tertiary)

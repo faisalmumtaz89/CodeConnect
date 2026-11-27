@@ -206,11 +206,12 @@ public enum TimelineBuilder {
     /// command's own turn end (`/clear`, `/compact`, `/effort low` on a run
     /// CodeConnect started) draws none either, as a terminal run files none. One
     /// that ends on a tool call, a card or nothing at all has no other end on
-    /// screen, so its line stays. Only the row goes: the item stays in the timeline, where fleet
+    /// screen, so its line stays, as does a turn's that failed, which a reply never ends. Only the row goes: the item stays in the timeline, where fleet
     /// status reads it.
     public static func drawn(_ items: [TimelineItem]) -> [TimelineItem] {
         items.enumerated().compactMap { index, item in
-            guard case .notice(let notice) = item.content, notice.kind == .turnComplete else { return item }
+            guard case .notice(let notice) = item.content, notice.kind == .turnComplete, notice.severity != .failure
+            else { return item }
             if notice.endsCommand { return nil }
             guard index > 0 else { return item }
             switch items[index - 1].content {
@@ -815,6 +816,11 @@ public enum TimelineBuilder {
     }
 
     private static func endNotice(for event: Event) -> NoticeItem {
+        if let failure = event.turnFailure {
+            return NoticeItem(
+                kind: .turnComplete, symbol: "warning-octagon", title: "Turn failed", detail: failure.message,
+                severity: .failure)
+        }
         if event.isTurnComplete {
             return NoticeItem(
                 kind: .turnComplete,

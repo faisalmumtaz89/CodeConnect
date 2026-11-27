@@ -371,6 +371,10 @@ public enum FleetStatusRule {
             return prompt > 0 ? .running : .idle
         }
         if isTurnBoundary(last), prompt < last.seq {
+            // Its last turn failed (run state 04): it waits on the person, seen or not, until a prompt starts another.
+            if case .notice(let notice) = last.content, notice.kind == .turnComplete, notice.severity == .failure {
+                return .failed
+            }
             // **The boundary's own seq, not the tail of the stream.** `lastSeq` is
             // the highest seq of any raw event, including `usage`, `reasoning` and
             // link chatter that produce no timeline item at all. Compared against
