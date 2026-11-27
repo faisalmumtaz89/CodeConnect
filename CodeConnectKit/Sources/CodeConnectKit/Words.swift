@@ -262,6 +262,9 @@ public enum ChangesWords {
     public static let couldNotRead = "Your computer could not read the changes"
     public static let itsReason = "Its reason, word for word:"
     public static let noUncommitted = "No uncommitted changes"
+    /// A session whose diff is against its base (`RunGit.fromBase`) and is empty: nothing, committed or not, since
+    /// `base`.
+    public static func noChanges(from base: String) -> String { "No changes from \(base)" }
     public static let clean = "This session’s folder was clean when it was read."
     public static let noDiff = "No diff to show"
     public static let computersReason = "Your computer’s reason, word for word:"

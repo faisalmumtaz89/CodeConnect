@@ -262,6 +262,11 @@ pub enum ClientMessage {
     /// and the working tree is the only thing that knows the net result.
     GetDiff {
         session_id: String,
+        /// Against the merge-base of `HEAD` and the run's base (minor 72), as
+        /// [`RunGit::from_base`] counts: what the branch changed, committed or not. A client asks
+        /// so only of a daemon whose [`RunGit`] carried `from_base`. False: against `HEAD`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        from_base: bool,
     },
     /// **A run's repository as its Changes panel shows it** (minor 58, `changes`), answered
     /// with one [`ServerMessage::RunGit`]: branch, head, base, the changed files' lines, how
@@ -1509,6 +1514,19 @@ pub struct RunGit {
     /// (minor 61). Absent when no remote names a github.com repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_repo: Option<String>,
+    /// What the branch changed from its base (minor 72): the files against the merge-base of
+    /// `HEAD` and [`RunGitBase::reference`], committed and uncommitted, untracked ones
+    /// included, counted as `changed` is. Absent without a head, a base, or a merge-base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_base: Option<Box<FromBase>>,
+}
+
+/// A [`RunGit`]'s files against its base ([`RunGit::from_base`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FromBase {
+    /// The commit compared with: the merge-base of `HEAD` and the base.
+    pub merge_base: String,
+    pub changed: ChangedFiles,
 }
 
 /// Whether `gh` can read a [`RunGit`]'s repository on GitHub.
@@ -3075,9 +3093,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 71,
             "the repository a run works in (`repo` on a session) is minor 71"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 72,
+            "a run's changes from its base (`from_base` on `run_git` and `get_diff`) are minor 72"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 71);
+        assert_eq!(crate::PROTOCOL_MINOR, 72);
     }
 
     /// **The tags, pinned on this side too.**
@@ -4917,7 +4939,10 @@ mod tests {
         let request: ClientMessage =
             serde_json::from_str(r#"{"type":"get_diff","session_id":"cc-1"}"#).unwrap();
         match request {
-            ClientMessage::GetDiff { session_id } => assert_eq!(session_id, "cc-1"),
+            ClientMessage::GetDiff {
+                session_id,
+                from_base,
+            } => assert_eq!((session_id.as_str(), from_base), ("cc-1", false)),
             other => panic!("wrong message: {other:?}"),
         }
 
@@ -5092,6 +5117,7 @@ mod tests {
                 }),
                 gh_read_at: Some("u".into()),
                 gh_repo: Some("o/r".into()),
+                from_base: None,
             }),
             note: None,
         };

@@ -757,11 +757,11 @@ where
 
                 // Off the loop: a run's diff waits its turn at the folder's git gate, behind a
                 // commit whose hooks may take minutes.
-                if let ClientMessage::GetDiff { session_id } = parsed {
+                if let ClientMessage::GetDiff { session_id, from_base } = parsed {
                     let daemon = daemon.clone();
                     let replies = replies_tx.clone();
                     tokio::spawn(async move {
-                        let _ = replies.send(diff_reply(&daemon, session_id).await);
+                        let _ = replies.send(diff_reply(&daemon, session_id, from_base).await);
                     });
                     continue;
                 }
@@ -2534,9 +2534,9 @@ async fn conflict_reply(
 /// The answer to a `get_diff`: the run's diff fitted to one frame. Everything git could
 /// not do, and an unknown run, is the diff's `note`, so the reply always names the run it
 /// answers.
-async fn diff_reply(daemon: &Arc<Daemon>, session_id: String) -> ServerMessage {
+async fn diff_reply(daemon: &Arc<Daemon>, session_id: String, from_base: bool) -> ServerMessage {
     let diff = daemon
-        .diff(&session_id)
+        .diff(&session_id, from_base)
         .await
         .unwrap_or_else(|err| crate::git::Diff {
             unified: String::new(),

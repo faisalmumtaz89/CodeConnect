@@ -282,6 +282,8 @@ public final class AppModel {
     public private(set) var now = Date()
     /// One diff per session, keyed like `states`, fetched only when asked for.
     private(set) var diffs: [String: DiffState] = [:]
+    /// Whether each run's diff on hand is against its base (`RunGit.fromBase`) rather than its head.
+    private var diffsFromBase: [String: Bool] = [:]
     /// Each run's repository as its computer last read it (`runGit(for:)`), and the runs a read is on its way for.
     private(set) var runGits: [String: RunGitReply] = [:]
     private var runGitsReading: Set<String> = []
@@ -3158,6 +3160,7 @@ public final class AppModel {
         shownSessions[key] = nil
         if departedMarks.remove(key) != nil { ReviewMarks.forget(sessionKey: key) }
         diffs[key] = nil
+        diffsFromBase[key] = nil
         runGits[key] = nil
         runConflicts[key] = nil
         conflictHunks[key] = nil
@@ -4481,6 +4484,7 @@ public final class AppModel {
             defer { self.runGitsReading.remove(key) }
             guard let reply = try? await self.connection.runGit(session: key) else { return }
             self.runGits[key] = reply
+            self.followBase(key: key)
             if let git = reply.git { self.loadConflicts(key: key, git: git) }
             // A clean repository ends what a refused commit said: the next changes are another commit.
             // What the panel holds has passed once the repository shows it: a whole clean repository ends a commit's
@@ -4522,13 +4526,17 @@ public final class AppModel {
             return
         }
         diffs[key] = .loading
+        // Against the base once the computer has said it compares with one, so a branch's commits stay in its list.
+        let fromBase = runGits[key]?.git?.fromBase != nil
         let askedAt = Date()
         Task { [weak self] in
             guard let self else { return }
             do {
-                let diff = try await self.connection.diff(session: key)
+                let diff = try await self.connection.diff(session: key, fromBase: fromBase)
                 self.diffs[key] = .loaded(
                     diff, parsed: UnifiedDiff.parse(diff.unified), fetchedAt: Date())
+                self.diffsFromBase[key] = fromBase
+                self.followBase(key: key)
             } catch {
                 // A daemon that does not know `get_diff` never answers it. If it
                 // complained *on the wire* while we were waiting, quote the
@@ -4554,6 +4562,18 @@ public final class AppModel {
     }
 
     public func clearDiff(key: String) { diffs[key] = nil }
+
+    /// Whether the run's diff on hand is against its base, so it lists committed work too.
+    public func diffIsFromBase(key: String) -> Bool { diffsFromBase[key] ?? false }
+
+    /// Reads a shown diff again when the repository's read and the diff's disagree on whether there is a base to
+    /// compare with: the first read of a panel asks for both at once.
+    private func followBase(key: String) {
+        guard let state = diffs[key], !state.isLoading,
+            (runGits[key]?.git?.fromBase != nil) != (diffsFromBase[key] ?? false)
+        else { return }
+        loadDiff(key: key, force: true)
+    }
 
     /// The daemon reports refusals in prose; these are the two that mean
     /// something specific to the user rather than "try again".

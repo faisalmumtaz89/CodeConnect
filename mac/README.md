@@ -1299,7 +1299,7 @@ to probe credentials.
   `SendTextResult` gains `duplicate` and `indeterminate`, neither of which can
   reach a client that did not send a `request_id`.
 
-* **`get_diff{session_id}`** → `diff{session_id, unified, truncated, captured_at, note, files?, files_truncated?}`.
+* **`get_diff{session_id, from_base?}`** → `diff{session_id, unified, truncated, captured_at, note, files?, files_truncated?}`.
   `git -C <session cwd> diff HEAD` plus a listing of untracked file names, capped
   at 512KB. From `>= 53`, `files` lists every changed file from the repository's
   top, with its status and lines (an untracked file's from the file itself, regular
@@ -1307,7 +1307,11 @@ to probe credentials.
   at most 1000 and 256KB of the frame, `files_truncated` when there were more. The client names a session, never a path. A non-git directory returns
   an empty diff *with a `note`* — an empty diff and "this was never a repository"
   must not look the same on screen. An unknown run is answered the same way, its
-  `note` saying so.
+  `note` saying so. From `>= 72`, `from_base: true` compares with the merge-base
+  of `HEAD` and the run's base (as `get_run_git`'s `base` names it, read again
+  for the request) instead of `HEAD`, so a branch's committed work is in the diff
+  and `files` too; with no base or merge-base it compares with `HEAD` and `note`
+  says so. A client sends it only to a daemon whose `run_git` carried `from_base`.
 
   The cap is applied **at the read**, not after it. `Command::output()` reads a
   child to EOF into memory and only then lets the caller trim, so the cap bounded
@@ -1375,6 +1379,11 @@ to probe credentials.
   failed check run's first 10 annotations, the first at failure level that says
   more than the runner's "Process completed with exit code N.", its first line. A branch whose remote is a URL (as `gh pr checkout` sets for a
   fork's PR) is read from that URL.
+  From `>= 72`, `git` carries `from_base{merge_base, changed}`: the files against
+  the merge-base of `HEAD` and `base` (`git merge-base`), committed and
+  uncommitted, untracked ones included, counted as `changed` is, which still
+  counts against `HEAD` (what a commit would take). Absent without a head, a
+  base or a merge-base.
 * **`get_conflicts{session_id}`** (`>= 66`, `conflicts`, paired devices only) →
   `conflicts{session_id, conflicts?, note?}`: the commit checked out and `run_git`'s
   `base` (both read first, so a commit made meanwhile is not what is compared), the
