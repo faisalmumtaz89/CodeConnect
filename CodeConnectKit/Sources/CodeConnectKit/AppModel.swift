@@ -126,6 +126,7 @@ public enum GitActionState: Sendable, Equatable {
 public enum GitStep: Sendable, Equatable {
     case commit
     case pullRequest
+    case archive
 }
 
 /// The state of one session's on-demand diff.

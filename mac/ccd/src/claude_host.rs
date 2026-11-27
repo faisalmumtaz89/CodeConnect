@@ -5923,6 +5923,125 @@ mod tests {
             .unwrap();
     }
 
+    /// `git args` in `dir`, as a test's identity; its output.
+    fn git_at(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new(crate::git::git_bin(None).unwrap())
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    /// The run `uid` moved into a linked worktree on `worktree-x`, level with its repository's
+    /// `origin/main`; the main checkout, the worktree and its commit.
+    fn in_an_archivable_worktree(rig: &Rig, uid: &str) -> (PathBuf, PathBuf, String) {
+        let main = rig.root.join("repo");
+        std::fs::create_dir(&main).unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["commit", "-q", "--allow-empty", "-m", "first"],
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "worktree-x",
+                ".claude/worktrees/x",
+            ],
+        ] {
+            git_at(&main, args);
+        }
+        let worktree = main.canonicalize().unwrap().join(".claude/worktrees/x");
+        let head = git_at(&worktree, &["rev-parse", "HEAD"]);
+        rusqlite::Connection::open(rig.root.join("events.db"))
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET cwd = ?2 WHERE session_uid = ?1",
+                rusqlite::params![uid, worktree.to_str().unwrap()],
+            )
+            .unwrap();
+        (main, worktree, head)
+    }
+
+    fn archive_worktree_x(head: String) -> protocol::ws::GitAction {
+        protocol::ws::GitAction::Archive {
+            branch: "worktree-x".into(),
+            head_oid: head,
+        }
+    }
+
+    /// **Archive ends a live run before it removes anything**: its host is sent `stop`, the
+    /// worktree is still there until the run has exited, and then the worktree and its branch go.
+    #[tokio::test]
+    async fn archive_ends_a_live_run_before_removing_its_worktree() {
+        let rig = rig();
+        let mut played = live_run(&rig).await;
+        let (main, worktree, head) = in_an_archivable_worktree(&rig, &played.uid);
+        let daemon = Arc::clone(&rig.daemon);
+        let uid = played.uid.clone();
+        let archiving = tokio::spawn(async move {
+            daemon
+                .git_action(&uid, "a-1", &archive_worktree_x(head))
+                .await
+        });
+        assert!(matches!(
+            next(&mut played.lines).await,
+            Some(ToHost::Stop { .. })
+        ));
+        assert!(worktree.exists(), "nothing goes before the run has ended");
+        say(
+            &mut played.write,
+            serde_json::json!({"type": "exited", "seq": 3, "code": 1}),
+        )
+        .await;
+        assert_eq!(next(&mut played.lines).await, Some(ToHost::Ack { seq: 3 }));
+        assert_eq!(
+            archiving.await.unwrap(),
+            protocol::ws::GitActionResult::Done {
+                sha: None,
+                pr: None
+            }
+        );
+        assert!(!worktree.exists());
+        assert!(git_at(&main, &["branch", "--list", "worktree-x"]).is_empty());
+        stop(&played.dir);
+    }
+
+    /// **An archived run is never relaunched**: a run whose claude ended on its own is one a
+    /// message relaunches, until it is archived.
+    #[tokio::test]
+    async fn an_archived_run_is_never_relaunched() {
+        let _env = crate::ProcessEnvRead::take();
+        let rig = relaunch_rig();
+        let ended = ended_on_its_own(&rig).await;
+        assert!(summary(&rig.daemon, &ended.uid).await.relaunchable);
+        let (_, worktree, head) = in_an_archivable_worktree(&rig, &ended.uid);
+        assert_eq!(
+            rig.daemon
+                .git_action(&ended.uid, "a-1", &archive_worktree_x(head))
+                .await,
+            protocol::ws::GitActionResult::Done {
+                sha: None,
+                pr: None
+            }
+        );
+        assert!(!worktree.exists());
+        assert_eq!(rig.daemon.store.claude_relaunch(&ended.uid).unwrap(), None);
+        let after = summary(&rig.daemon, &ended.uid).await;
+        assert!(after.archived && !after.relaunchable);
+        stop(&ended.dir);
+    }
+
     /// **B7 G1: End run.** A live run asked to end is `stopping` and its host is sent
     /// `stop`; claude's end, mid-turn code 1, ends it "Stopped", with no exit code for an app
     /// to read as a failure. Asked again, it has already ended, and nothing more is sent.

@@ -207,6 +207,27 @@ pub async fn open_pr(
     }
 }
 
+/// Whether `branch` of `head` has a pull request into `target` merged with `head_oid` as its head,
+/// asked of GitHub now (no cache): none open from the branch, and its newest closed one, taken only
+/// when its head is that commit ([`pull_request`]), merged.
+pub async fn merged_at(
+    gh_bin: Option<&str>,
+    head: &Repo,
+    target: &Repo,
+    branch: &str,
+    head_oid: &str,
+) -> Result<bool, Unavailable> {
+    let environment = &crate::start_session::phone_environment();
+    let Some(gh) = crate::start_session::gh_path(environment, gh_bin).await else {
+        return Err(Unavailable::Missing);
+    };
+    match pull_request(&gh, environment, head, target, branch, Some(head_oid)).await {
+        Ok(pr) => Ok(pr.is_some_and(|pr| pr.state == protocol::ws::PrState::Merged)),
+        Err(Failed::NoAccount | Failed::TokenRefused) => Err(Unavailable::SignedOut),
+        Err(Failed::RateLimited | Failed::Other) => Err(Unavailable::Down),
+    }
+}
+
 /// The pull request `number` of `target` as GitHub has it now (no cache).
 pub async fn pull_by_number(
     gh_bin: Option<&str>,

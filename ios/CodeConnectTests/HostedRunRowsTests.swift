@@ -243,6 +243,25 @@ final class HostedRunRowsTests: XCTestCase {
             "the generic row, never a commit of no files")
     }
 
+    /// An archived run's conversation ends with the computer's note of it (`archived`, minor 67), in the words artboard
+    /// n-11 gives it.
+    func testAnArchivedRunDrawsItsArchivedNotice() async throws {
+        let wire = try events("hosted-clear-wire")
+        var event = try XCTUnwrap(
+            try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(XCTUnwrap(wire.first { $0.seq == 4 })))
+                .objectValue)
+        event["payload"] = .object([
+            "notification_type": .string("archived"), "worktree": .string("/r/app/.claude/worktrees/x"),
+            "branch": .string("worktree-x"),
+        ])
+        event["source"] = .string("daemon")
+        let archived = try JSONDecoder().decode(Event.self, from: Data(JSONValue.object(event).canonicalJSONString.utf8))
+        let shown = await state(wire.filter { $0.seq < 4 } + [archived])
+        XCTAssertEqual(
+            shape(TimelineBuilder.drawn(shown.timeline).filter { $0.seq == 4 }),
+            ["notice:Archived · worktree and branch removed"])
+    }
+
     /// Any other command an app sends draws as a terminal run's invocation does, a command row, and starts its turn:
     /// sent after a finished turn, the run reads Running until the command's own end (the test above). It was the
     /// person's row.

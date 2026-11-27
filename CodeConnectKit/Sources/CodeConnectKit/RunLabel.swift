@@ -110,12 +110,12 @@ extension SessionSummary {
     public var shownCwd: String { cwd.displaySafe }
 
     /// The command that picks an ended run's conversation up at the computer, or nil where there is none
-    /// (`resumeSessionID`, and a folder to run it from). Quoted, because a person copies and runs it: the folder
+    /// (`resumeSessionID`, and a folder to run it from; an archived run has no folder left). Quoted, because a person copies and runs it: the folder
     /// and the id are whatever the run and a hook reported, and a space would cd or resume the wrong thing while
     /// anything shell-special would run as syntax. `cd` first because Claude Code keeps a session's record under
     /// its project folder, so `--resume` is run from there.
     public var resumeCommand: String? {
-        guard let id = resumeSessionID, !shownCwd.isEmpty else { return nil }
+        guard !archived, let id = resumeSessionID, !shownCwd.isEmpty else { return nil }
         return "cd \(Shell.quoted(shownCwd)) && claude --resume \(Shell.quoted(id))"
     }
 }

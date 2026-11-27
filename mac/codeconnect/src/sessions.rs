@@ -255,6 +255,7 @@ mod tests {
             account: None,
             title: None,
             limit: None,
+            archived: false,
         }
     }
 

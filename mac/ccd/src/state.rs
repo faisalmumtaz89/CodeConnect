@@ -3733,6 +3733,7 @@ impl Daemon {
         }
         // Every run's title, as kept.
         let titles = self.db.run_titles().await?;
+        let archived = self.db.archived_runs().await?;
         // And the request event of every open card, one query per card on the
         // dedup index: the seq its pending ref names, and a Codex card's turn. The
         // cards are snapshotted first, so one raised after the snapshot is listed in
@@ -3875,6 +3876,7 @@ impl Daemon {
             &menus,
             &relaunchable,
             &titles,
+            &archived,
         );
         for session in &mut sessions {
             if let (Some(fact), Some(id)) =
@@ -4968,6 +4970,7 @@ impl Daemon {
     /// Split out so the read above is plainly *all* database work and this is plainly
     /// *no* database work — the property the lock ordering cares about, made structural
     /// rather than something the loop has to keep remembering.
+    #[allow(clippy::too_many_arguments)]
     fn assemble_sessions(
         inner: &Inner,
         rows: Vec<SessionRow>,
@@ -4976,6 +4979,7 @@ impl Daemon {
         menus: &HashMap<String, protocol::event::RunMenus>,
         relaunchable: &HashSet<String>,
         titles: &HashMap<String, String>,
+        archived: &HashSet<String>,
     ) -> Vec<SessionSummary> {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -5085,6 +5089,7 @@ impl Daemon {
                 account: None,
                 title: titles.get(&row.session_uid).cloned(),
                 limit: None,
+                archived: archived.contains(&row.session_uid),
             });
         }
         out
@@ -5422,7 +5427,7 @@ impl Daemon {
     /// ([`protocol::ws::ClientMessage::GitAction`]). The claim is taken under the folder's
     /// git gate, so a retry arriving while the first try runs waits and replays its answer.
     pub async fn git_action(
-        &self,
+        self: &Arc<Self>,
         session_uid: &str,
         request_id: &str,
         action: &protocol::ws::GitAction,
@@ -5461,6 +5466,19 @@ impl Daemon {
                 (
                     "merge",
                     format!("codeconnect.git_action.merge.v1\n{method:?}\n{head_oid}\n{number}"),
+                )
+            }
+            GitAction::Archive { branch, head_oid } => {
+                if branch.is_empty()
+                    || branch.contains('\0')
+                    || head_oid.is_empty()
+                    || !head_oid.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    return refused(code::BAD_REQUEST, None);
+                }
+                (
+                    "archive",
+                    format!("codeconnect.git_action.archive.v1\n{branch}\n{head_oid}"),
                 )
             }
         };
@@ -5542,6 +5560,9 @@ impl Daemon {
                     head_oid,
                     number,
                 } => self.merge(&row, *method, head_oid, *number).await,
+                GitAction::Archive { branch, head_oid } => {
+                    self.archive(request_id, &row, branch, head_oid).await
+                }
             }
         };
         let result = match outcome {
@@ -5696,6 +5717,222 @@ impl Daemon {
     /// `head_oid`, or when its repository does not allow `method`; then `gh pr merge`, and GitHub
     /// asked again for what became of it. Nothing local changes. The branch's GitHub read is
     /// asked again next time.
+    /// [`protocol::ws::GitAction::Archive`]: everything that could stop it is checked first and nothing is changed
+    /// until it all holds; then the run is ended, the same facts checked again, its worktree removed and its branch
+    /// deleted. A run archived already answers done again, with no second notice.
+    async fn archive(
+        self: &Arc<Self>,
+        request_id: &str,
+        row: &crate::store::SessionRow,
+        branch: &str,
+        head_oid: &str,
+    ) -> ActionOutcome {
+        use protocol::ws::git_refusal as code;
+        let done = |notice| ActionOutcome::Done {
+            what: format!("archived {branch}"),
+            result: protocol::ws::GitActionResult::Done {
+                sha: None,
+                pr: None,
+            },
+            notice,
+        };
+        match self.db.archived_runs().await {
+            Ok(archived) if archived.contains(&row.session_uid) => return done(None),
+            Ok(_) => {}
+            Err(err) => return ActionOutcome::Refused(code::GIT_FAILED, Some(format!("{err:#}"))),
+        }
+        let timeout = Duration::from_millis(self.config.diff_timeout_ms);
+        let git_bin = self.config.git_bin.as_deref();
+        let Some(top) = crate::git::toplevel(&row.cwd, git_bin, timeout).await else {
+            return ActionOutcome::Refused(code::NOT_A_REPOSITORY, None);
+        };
+        let top = top.to_string_lossy().into_owned();
+        let Some(entries) = crate::git::worktrees(&top, git_bin, timeout).await else {
+            return ActionOutcome::Refused(
+                code::GIT_FAILED,
+                Some("git listed no worktrees".into()),
+            );
+        };
+        let Some(main) = entries.first().map(|entry| entry.path.clone()) else {
+            return ActionOutcome::Refused(
+                code::GIT_FAILED,
+                Some("git listed no worktrees".into()),
+            );
+        };
+        let Some(entry) = entries.iter().skip(1).find(|entry| entry.path == top) else {
+            return ActionOutcome::Refused(code::MAIN_WORKTREE, None);
+        };
+        // The branch checked out in another worktree too (`worktree add -f`): it could not be deleted.
+        if entries
+            .iter()
+            .any(|other| other.path != top && other.branch.as_deref() == Some(branch))
+        {
+            return ActionOutcome::Refused(code::SHARED_WORKTREE, None);
+        }
+        if let Some(reason) = &entry.locked {
+            return ActionOutcome::Refused(
+                code::LOCKED,
+                Some(reason.clone()).filter(|r| !r.is_empty()),
+            );
+        }
+        // What can change while the run ends is read again after it.
+        let still = |this: &Arc<Self>| {
+            let this = Arc::clone(this);
+            let top = top.clone();
+            let uid = row.session_uid.clone();
+            async move {
+                let git_bin = this.config.git_bin.as_deref();
+                let now = crate::git::worktrees(&top, git_bin, timeout).await;
+                match now
+                    .as_ref()
+                    .and_then(|now| now.iter().find(|entry| entry.path == top))
+                {
+                    Some(entry) if entry.branch.as_deref() == Some(branch) => {}
+                    Some(entry) if entry.branch.is_none() => {
+                        return Err(ActionOutcome::Refused(code::DETACHED, None))
+                    }
+                    _ => return Err(ActionOutcome::Refused(code::HEAD_MOVED, None)),
+                }
+                if crate::git::ref_oid(&top, git_bin, "HEAD", timeout)
+                    .await
+                    .as_deref()
+                    != Some(head_oid)
+                {
+                    return Err(ActionOutcome::Refused(code::HEAD_MOVED, None));
+                }
+                if this.shares_worktree(&uid, &top).await {
+                    return Err(ActionOutcome::Refused(code::SHARED_WORKTREE, None));
+                }
+                match crate::git::archive_dirty(&top, git_bin, timeout).await {
+                    Ok(false) => Ok(()),
+                    Ok(true) => Err(ActionOutcome::Refused(code::HAS_CHANGES, None)),
+                    Err(why) => Err(ActionOutcome::Refused(code::GIT_FAILED, Some(why))),
+                }
+            }
+        };
+        if let Err(refused) = still(self).await {
+            return refused;
+        }
+        let ends = match crate::git::conflict_ends(&top, git_bin, timeout).await {
+            Ok(ends) => ends,
+            Err(_) => return ActionOutcome::Refused(code::BASE_UNKNOWN, None),
+        };
+        if ends.base.name == branch {
+            return ActionOutcome::Refused(code::ON_BASE_BRANCH, None);
+        }
+        // The branch may go: already on the base, or merged by its pull request at this commit.
+        let on_base =
+            crate::git::on_reference(&top, git_bin, head_oid, &ends.base.reference, timeout).await;
+        if on_base != Some(true) {
+            let (_, head, target) = match self.pr_repositories(row, branch).await {
+                Ok(repositories) => repositories,
+                Err(_) => return ActionOutcome::Refused(code::BRANCH_HAS_COMMITS, None),
+            };
+            match crate::github::merged_at(
+                self.config.gh_bin.as_deref(),
+                &head,
+                &target,
+                branch,
+                head_oid,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => return ActionOutcome::Refused(code::BRANCH_HAS_COMMITS, None),
+                Err(why) => return unavailable(why),
+            }
+        }
+        if matches!(
+            row.lifecycle,
+            Lifecycle::Starting | Lifecycle::Live | Lifecycle::Stopping
+        ) {
+            match self.stop_run(&row.session_uid).await {
+                protocol::ws::StopRunResult::Stopping
+                | protocol::ws::StopRunResult::AlreadyEnded => {}
+                protocol::ws::StopRunResult::Refused { reason } => {
+                    return ActionOutcome::Refused(code::STILL_RUNNING, Some(reason))
+                }
+            }
+            if !self.ended_within(&row.session_uid, RUN_END_WAIT).await {
+                return ActionOutcome::Refused(code::STILL_RUNNING, None);
+            }
+        }
+        // A message may have relaunched it meanwhile, from another device.
+        match self.db.get_session(row.session_uid.clone()).await {
+            Ok(Some(now)) if matches!(now.lifecycle, Lifecycle::Exited | Lifecycle::Failed) => {}
+            _ => return ActionOutcome::Refused(code::STILL_RUNNING, None),
+        }
+        if let Err(refused) = still(self).await {
+            return match refused {
+                ActionOutcome::Refused(code, detail) => ActionOutcome::Refused(
+                    code,
+                    Some(
+                        format!("ended; {}", detail.unwrap_or_default())
+                            .trim_end_matches("; ")
+                            .to_string(),
+                    ),
+                ),
+                other => other,
+            };
+        }
+        if let Err(line) = crate::git::remove_worktree(&main, git_bin, &top).await {
+            return ActionOutcome::Refused(code::GIT_FAILED, Some(format!("ended; {line}")));
+        }
+        if let Err(line) =
+            crate::git::delete_branch(&main, git_bin, branch, head_oid, timeout).await
+        {
+            return ActionOutcome::Refused(
+                code::GIT_FAILED,
+                Some(format!("ended, worktree removed; {branch} kept: {line}")),
+            );
+        }
+        let notice = PendingEvent::new(
+            &SessionKey::new(&row.session_uid, &row.session_id),
+            EventKind::Notification,
+            serde_json::json!({
+                "notification_type": protocol::event::notice::ARCHIVED,
+                "worktree": top,
+                "branch": branch,
+            }),
+            Source::Daemon,
+        )
+        .with_source_event_id(format!("git_archive:{request_id}"));
+        done(Some(Box::new(notice)))
+    }
+
+    /// Whether a run other than `session_uid` that is starting, live or stopping works in the
+    /// worktree `top` or a folder in it; a registry that cannot be read counts as one.
+    async fn shares_worktree(&self, session_uid: &str, top: &str) -> bool {
+        let Ok(rows) = self.db.list_sessions().await else {
+            return true;
+        };
+        let inside = std::path::Path::new(top);
+        rows.iter().any(|other| {
+            other.session_uid != session_uid
+                && matches!(
+                    other.lifecycle,
+                    Lifecycle::Starting | Lifecycle::Live | Lifecycle::Stopping
+                )
+                && std::fs::canonicalize(&other.cwd).is_ok_and(|cwd| cwd.starts_with(inside))
+        })
+    }
+
+    /// Whether the run `session_uid` reads ended (`exited`, or `failed`) within `wait`.
+    async fn ended_within(&self, session_uid: &str, wait: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            if let Ok(Some(row)) = self.db.get_session(session_uid.to_string()).await {
+                if matches!(row.lifecycle, Lifecycle::Exited | Lifecycle::Failed) {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     async fn merge(
         &self,
         row: &crate::store::SessionRow,
@@ -6867,6 +7104,9 @@ async fn git_gate_in(gates: &Mutex<HashMap<String, Arc<Mutex<()>>>>, cwd: &str) 
     gates.retain(|_, gate| Arc::strong_count(gate) > 1);
     Arc::clone(gates.entry(cwd.to_string()).or_default())
 }
+
+/// How long Archive waits for the run it ended to read `exited`.
+const RUN_END_WAIT: Duration = Duration::from_secs(30);
 
 /// How often a base is fetched for a conflicts read, at most: a read inside the window compares
 /// with that fetch, whether it worked or not.
@@ -9353,6 +9593,445 @@ mod tests {
                 (code.clone(), detail.clone())
             }
             done => panic!("not refused: {done:?}"),
+        }
+    }
+
+    /// A repository whose `origin` names `cli/cli` on github.com, its `origin/HEAD` at `main`,
+    /// with a linked worktree on `branch` at `.claude/worktrees/x` and the run `uid` in it, in
+    /// `lifecycle`; the main checkout and the worktree.
+    fn archivable_run(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        branch: &str,
+        lifecycle: Lifecycle,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let main = std::env::temp_dir().join(format!(
+            "ccd-archive-{uid}-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&main).unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "t"],
+            &["config", "user.email", "t@example.com"],
+            &["commit", "-q", "--allow-empty", "-m", "first"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "ssh://git@github.com/cli/cli.git",
+            ],
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+            &["worktree", "add", "-q", "-b", branch, ".claude/worktrees/x"],
+        ] {
+            git_in(&main, args);
+        }
+        let main = main.canonicalize().unwrap();
+        let worktree = main.join(".claude/worktrees/x");
+        seed_run_in(
+            daemon,
+            uid,
+            &worktree,
+            protocol::agent::AgentKind::Claude,
+            lifecycle,
+        );
+        (main, worktree)
+    }
+
+    fn archive(branch: &str, head_oid: &str) -> protocol::ws::GitAction {
+        protocol::ws::GitAction::Archive {
+            branch: branch.into(),
+            head_oid: head_oid.into(),
+        }
+    }
+
+    fn archived_notices(daemon: &Arc<Daemon>, uid: &str) -> usize {
+        daemon
+            .store
+            .events_after(uid, 0, 1000)
+            .unwrap()
+            .iter()
+            .filter(|event| event.payload["notification_type"] == protocol::event::notice::ARCHIVED)
+            .count()
+    }
+
+    /// **An ended run is archived when its branch has nothing to keep, and only once**: the
+    /// worktree and the local branch go, ignored files with them, the remote is left, the run
+    /// reads archived with one notice naming what went; Archive again answers done with no
+    /// second notice, and the run is never offered to relaunch.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_ended_run_with_nothing_to_keep_is_archived_once() {
+        let _env = crate::ProcessEnvRead::take();
+        let daemon = daemon_on(shared_store(), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNA70";
+        let (main, worktree) = archivable_run(&daemon, uid, "worktree-x", Lifecycle::Exited);
+        std::fs::write(main.join(".git/info/exclude"), ".env\n").unwrap();
+        std::fs::write(worktree.join(".env"), "SECRET=1\n").unwrap();
+        let head = git_in(&worktree, &["rev-parse", "HEAD"]).trim().to_string();
+
+        assert_eq!(
+            daemon
+                .git_action(uid, "a-1", &archive("worktree-x", &head))
+                .await,
+            protocol::ws::GitActionResult::Done {
+                sha: None,
+                pr: None
+            }
+        );
+        assert!(!worktree.exists(), "the worktree, its ignored .env with it");
+        assert!(git_in(&main, &["branch", "--list", "worktree-x"])
+            .trim()
+            .is_empty());
+        assert_eq!(
+            git_in(&main, &["worktree", "list", "--porcelain"])
+                .matches("worktree ")
+                .count(),
+            1
+        );
+        assert_eq!(archived_notices(&daemon, uid), 1);
+        let listed = daemon.sessions().await.unwrap();
+        let run = listed.iter().find(|run| run.session_uid == uid).unwrap();
+        assert!(run.archived && !run.relaunchable);
+
+        assert_eq!(
+            daemon
+                .git_action(uid, "a-2", &archive("worktree-x", &head))
+                .await,
+            protocol::ws::GitActionResult::Done {
+                sha: None,
+                pr: None
+            },
+            "archived already"
+        );
+        assert_eq!(archived_notices(&daemon, uid), 1, "no second notice");
+        let _ = std::fs::remove_dir_all(main);
+    }
+
+    /// **A large worktree is archived, and no fsmonitor of the person's is run**: a clean
+    /// worktree whose file listing is over a megabyte goes as a small one does, and a configured
+    /// fsmonitor program is never started by Archive's reads.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_large_worktree_is_archived_without_running_its_fsmonitor() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::ProcessEnvRead::take();
+        let daemon = daemon_on(shared_store(), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNA77";
+        let (main, worktree) = archivable_run(&daemon, uid, "worktree-x", Lifecycle::Exited);
+        let deep = format!("{}/", "d".repeat(100));
+        std::fs::create_dir_all(main.join(&deep)).unwrap();
+        for n in 0..12_000 {
+            std::fs::write(main.join(format!("{deep}{n:0>80}")), "").unwrap();
+        }
+        git_in(&main, &["add", "."]);
+        git_in(&main, &["commit", "-q", "-m", "many"]);
+        git_in(&main, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git_in(&worktree, &["merge", "-q", "--ff-only", "main"]);
+        let listed = git_in(&worktree, &["ls-files", "-v"]).len();
+        assert!(listed > 1024 * 1024, "{listed}");
+        let ran = main.join(".fsmonitor-ran");
+        let hook = main.join(".fsmonitor-hook");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\necho ran >> '{}'\nexit 1\n", ran.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git_in(&main, &["config", "core.fsmonitor", hook.to_str().unwrap()]);
+        let head = git_in(&worktree, &["rev-parse", "HEAD"]).trim().to_string();
+
+        assert_eq!(
+            daemon
+                .git_action(uid, "big-1", &archive("worktree-x", &head))
+                .await,
+            protocol::ws::GitActionResult::Done {
+                sha: None,
+                pr: None
+            }
+        );
+        assert!(!worktree.exists());
+        assert!(!ran.exists(), "the person's fsmonitor ran");
+        let _ = std::fs::remove_dir_all(main);
+    }
+
+    /// **A branch with commits is archived only when its pull request merged them at this
+    /// commit**: GitHub's merged pull request whose head is the commit shown lets it go; with
+    /// none, nothing is touched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_branch_with_commits_is_archived_only_once_merged_at_its_commit() {
+        let _env = crate::ProcessEnvRead::take();
+        let gh = stand_in_gh();
+        let daemon = daemon_on(
+            shared_store(),
+            Config {
+                gh_bin: Some(gh.to_str().unwrap().into()),
+                ..Config::default()
+            },
+        );
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNA71";
+        let (main, worktree) = archivable_run(&daemon, uid, "worktree-x", Lifecycle::Exited);
+        git_in(&worktree, &["commit", "-q", "--allow-empty", "-m", "feat"]);
+        let head = git_in(&worktree, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(gh.with_file_name("open.json"), "[]").unwrap();
+        let merged = |sha: &str| {
+            let mut closed: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(github_fixtures().join("pulls-closed.json")).unwrap(),
+            )
+            .unwrap();
+            closed[0]["head"]["ref"] = "worktree-x".into();
+            closed[0]["head"]["repo"]["full_name"] = "cli/cli".into();
+            closed[0]["head"]["sha"] = sha.into();
+            std::fs::write(gh.with_file_name("closed.json"), closed.to_string()).unwrap();
+        };
+
+        merged(&"0".repeat(40));
+        assert_eq!(
+            refused_as(
+                &daemon
+                    .git_action(uid, "m-1", &archive("worktree-x", &head))
+                    .await
+            )
+            .0,
+            protocol::ws::git_refusal::BRANCH_HAS_COMMITS
+        );
+        assert!(worktree.exists());
+        merged(&head);
+        assert_eq!(
+            daemon
+                .git_action(uid, "m-2", &archive("worktree-x", &head))
+                .await,
+            protocol::ws::GitActionResult::Done {
+                sha: None,
+                pr: None
+            }
+        );
+        assert!(!worktree.exists());
+        assert!(git_in(&main, &["branch", "--list", "worktree-x"])
+            .trim()
+            .is_empty());
+        for path in [main, gh.parent().unwrap().to_path_buf()] {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    /// **Archive refuses before changing anything**: not the branch or commit shown, the main
+    /// checkout, the base branch itself, a locked worktree, another run still in it, a run that
+    /// does not end, and an untracked file a person's `status.showUntrackedFiles=no` hides from
+    /// git's own check; each leaves the worktree and the branch as they were.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn archive_refuses_before_changing_anything() {
+        use protocol::ws::git_refusal as code;
+        let _env = crate::ProcessEnvRead::take();
+        let daemon = daemon_on(shared_store(), Config::default());
+        let refusal = |result: protocol::ws::GitActionResult| refused_as(&result);
+        let kept = |main: &std::path::Path, worktree: &std::path::Path| {
+            assert!(worktree.exists(), "the worktree is kept");
+            assert!(!git_in(main, &["branch", "--list", "worktree-x"])
+                .trim()
+                .is_empty());
+        };
+
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNA72";
+        let (main, worktree) = archivable_run(&daemon, uid, "worktree-x", Lifecycle::Exited);
+        let head = git_in(&worktree, &["rev-parse", "HEAD"]).trim().to_string();
+        let mut n = 0;
+        let mut ask = |action: protocol::ws::GitAction| {
+            n += 1;
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.git_action(uid, &format!("r-{n}"), &action).await }
+        };
+        assert_eq!(
+            refusal(ask(archive("worktree-x", &"0".repeat(40))).await).0,
+            code::HEAD_MOVED
+        );
+        assert_eq!(
+            refusal(ask(archive("other", &head)).await).0,
+            code::HEAD_MOVED
+        );
+        kept(&main, &worktree);
+
+        git_in(&main, &["config", "status.showUntrackedFiles", "no"]);
+        std::fs::write(worktree.join("notes.txt"), "keep me\n").unwrap();
+        assert_eq!(
+            refusal(ask(archive("worktree-x", &head)).await).0,
+            code::HAS_CHANGES
+        );
+        assert!(worktree.join("notes.txt").exists());
+        std::fs::remove_file(worktree.join("notes.txt")).unwrap();
+
+        // A folder git cannot open: status exits 0 and only warns, so its files cannot be counted.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let closed = worktree.join("data");
+            std::fs::create_dir(&closed).unwrap();
+            std::fs::write(closed.join("notes.txt"), "keep me\n").unwrap();
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let answer = refusal(ask(archive("worktree-x", &head)).await);
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(answer.0, code::GIT_FAILED, "{answer:?}");
+            assert!(
+                !answer.1.as_deref().unwrap_or_default().starts_with("ended"),
+                "refused before anything was removed: {answer:?}"
+            );
+            assert!(closed.join("notes.txt").exists());
+            std::fs::remove_dir_all(&closed).unwrap();
+        }
+        kept(&main, &worktree);
+        assert!(git_in(&main, &["worktree", "list", "--porcelain"]).contains(".claude/worktrees/x"));
+
+        // A tracked file git is told to assume unchanged, edited: status reads clean, and git's
+        // own remove would delete the edit.
+        std::fs::write(worktree.join("config.toml"), "v1\n").unwrap();
+        git_in(&worktree, &["add", "config.toml"]);
+        git_in(&worktree, &["commit", "-q", "-m", "config"]);
+        let configured = git_in(&worktree, &["rev-parse", "HEAD"]).trim().to_string();
+        git_in(
+            &worktree,
+            &["update-index", "--assume-unchanged", "config.toml"],
+        );
+        std::fs::write(worktree.join("config.toml"), "local edit\n").unwrap();
+        assert_eq!(
+            refusal(ask(archive("worktree-x", &configured)).await).0,
+            code::HAS_CHANGES
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("config.toml")).unwrap(),
+            "local edit\n"
+        );
+        git_in(
+            &worktree,
+            &["update-index", "--no-assume-unchanged", "config.toml"],
+        );
+        git_in(&worktree, &["reset", "-q", "--hard", &head]);
+
+        // The branch checked out in a second worktree too (`worktree add -f`): refused before the
+        // run is touched, not found when its branch will not delete.
+        git_in(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-f",
+                ".claude/worktrees/y",
+                "worktree-x",
+            ],
+        );
+        assert_eq!(
+            refusal(ask(archive("worktree-x", &head)).await).0,
+            code::SHARED_WORKTREE
+        );
+        kept(&main, &worktree);
+        git_in(
+            &main,
+            &["worktree", "remove", "--force", ".claude/worktrees/y"],
+        );
+
+        git_in(
+            &main,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "claude agent",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            refusal(ask(archive("worktree-x", &head)).await),
+            (code::LOCKED.to_string(), Some("claude agent".to_string()))
+        );
+        git_in(&main, &["worktree", "unlock", worktree.to_str().unwrap()]);
+
+        let other = "01K1B3XQ8ZC0DE5FGH7JKMNA73";
+        seed_run_in(
+            &daemon,
+            other,
+            &worktree.join("sub"),
+            protocol::agent::AgentKind::Codex,
+            Lifecycle::Live,
+        );
+        std::fs::create_dir_all(worktree.join("sub")).unwrap();
+        assert_eq!(
+            refusal(ask(archive("worktree-x", &head)).await).0,
+            code::SHARED_WORKTREE
+        );
+        kept(&main, &worktree);
+
+        // A live run that does not read exited within 30 s of End Run (its host here is a record
+        // with no process): nothing more goes.
+        let live = "01K1B3XQ8ZC0DE5FGH7JKMNA74";
+        let (live_main, live_tree) = archivable_run(&daemon, live, "worktree-x", Lifecycle::Live);
+        let live_head = git_in(&live_tree, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        assert_eq!(
+            refused_as(
+                &daemon
+                    .git_action(live, "l-1", &archive("worktree-x", &live_head))
+                    .await
+            )
+            .0,
+            code::STILL_RUNNING
+        );
+        kept(&live_main, &live_tree);
+
+        // The run in the main checkout, and a worktree on the base branch itself.
+        let at_main = "01K1B3XQ8ZC0DE5FGH7JKMNA75";
+        seed_run_in(
+            &daemon,
+            at_main,
+            &main,
+            protocol::agent::AgentKind::Claude,
+            Lifecycle::Exited,
+        );
+        assert_eq!(
+            refused_as(
+                &daemon
+                    .git_action(at_main, "t-1", &archive("main", &head))
+                    .await
+            )
+            .0,
+            code::MAIN_WORKTREE
+        );
+        git_in(&live_main, &["switch", "-q", "--detach"]);
+        git_in(
+            &live_main,
+            &["worktree", "add", "-q", ".claude/worktrees/m", "main"],
+        );
+        let on_base = "01K1B3XQ8ZC0DE5FGH7JKMNA76";
+        let base_tree = live_main.join(".claude/worktrees/m");
+        seed_run_in(
+            &daemon,
+            on_base,
+            &base_tree,
+            protocol::agent::AgentKind::Claude,
+            Lifecycle::Exited,
+        );
+        let base_head = git_in(&base_tree, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        assert_eq!(
+            refused_as(
+                &daemon
+                    .git_action(on_base, "b-1", &archive("main", &base_head))
+                    .await
+            )
+            .0,
+            code::ON_BASE_BRANCH
+        );
+        assert!(base_tree.exists());
+        for path in [main, live_main] {
+            let _ = std::fs::remove_dir_all(path);
         }
     }
 

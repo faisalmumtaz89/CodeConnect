@@ -1256,6 +1256,24 @@ public final class DaemonConnection {
             timeout: Self.commitTimeout)
     }
 
+    /// Archive the run `sessionUID`: end it, remove its worktree and delete its local `branch`, only while `branch` is
+    /// checked out there at `headOID`, the branch and commit the panel showed. `requestID` is its identity: a retry
+    /// reuses it and the computer replays its answer.
+    public func archiveRun(sessionUID: String, branch: String, headOID: String, requestID: String) async throws
+        -> GitActionResult
+    {
+        guard capabilities?.archivesRuns == true else {
+            throw ConnectionError.incompatible(
+                "\(HostDevice.current.computer("This computer", named: helloAck?.machineName)) can’t archive a run on this connection."
+            )
+        }
+        return try await request(
+            key: requestID,
+            store: \.gitActionWaiters,
+            send: .archiveRun(requestID: requestID, sessionUID: sessionUID, branch: branch, headOID: headOID),
+            timeout: Self.commitTimeout)
+    }
+
     /// A run's repository for its Changes panel (`get_run_git`), correlated by the reference as `diff` is.
     public func runGit(session: String) async throws -> RunGitReply {
         guard capabilities?.readsRunGit == true else {

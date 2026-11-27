@@ -348,7 +348,8 @@
     "git_actions": [
       "commit",
       "create_pr",
-      "merge"
+      "merge",
+      "archive"
     ],
     "history_pages": true,
     "hook_only_approvals": true,

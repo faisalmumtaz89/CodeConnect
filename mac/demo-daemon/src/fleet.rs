@@ -683,6 +683,7 @@ impl Run {
             account: None,
             title: None,
             limit: None,
+            archived: false,
         }
     }
 

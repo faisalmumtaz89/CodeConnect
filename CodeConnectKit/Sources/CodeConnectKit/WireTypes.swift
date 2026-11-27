@@ -91,6 +91,8 @@ public enum EngineNotice {
     public static let switchFailed = "switch_failed"
     /// A commit made from the run's Changes panel (minor 59): its `files` and `oid`.
     public static let committed = "committed"
+    /// A run archived from its Changes panel (minor 67): its `worktree` removed and its local `branch` deleted.
+    public static let archived = "archived"
     /// A run moved onto an account whose plan lacks its model, going on with that plan's default (`{from_model,
     /// from_label, to_model, to_label, account}`, minor 48).
     public static let modelUnavailable = "model_unavailable"
@@ -673,6 +675,9 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// The run's title (minor 63): the first line of the first message the person sent it through CodeConnect. `nil`
     /// for a run with none yet (one started at its computer) and from an older daemon; read through `FleetRow.title`.
     public let title: String?
+    /// The run was archived (minor 67): it ended, and its worktree and local branch are gone, so it has no folder to
+    /// pick up again. False from an older daemon.
+    public let archived: Bool
 
     enum CodingKeys: String, CodingKey {
         case sessionUID = "session_uid"
@@ -703,6 +708,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case gitBranch = "git_branch"
         case diffStat = "diff_stat"
         case title
+        case archived
     }
 
     public init(from decoder: Decoder) throws {
@@ -735,6 +741,7 @@ public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
         diffStat = try c.decodeIfPresent(DiffStat.self, forKey: .diffStat)
         title = try c.decodeIfPresent(String.self, forKey: .title)
+        archived = try c.decodeIfPresent(Bool.self, forKey: .archived) ?? false
     }
 
     /// Whether the Codex vocabulary applies here. The one place the question is
@@ -1156,6 +1163,11 @@ public struct Capabilities: Codable, Sendable, Hashable {
     /// one answers `git_action` with `bad_request`, so nothing is sent unless this is set.
     public var mergesPullRequests: Bool {
         advertised["git_actions"]?.arrayValue?.contains { $0.stringValue == "merge" } == true
+    }
+    /// This daemon archives a run for this paired device (`git_actions` naming `archive`, minor 67). An older one
+    /// answers `git_action` with `bad_request`, so nothing is sent unless this is set.
+    public var archivesRuns: Bool {
+        advertised["git_actions"]?.arrayValue?.contains { $0.stringValue == "archive" } == true
     }
     /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
     /// 21): its question cards carry `question_hold` and it takes the
@@ -1655,6 +1667,18 @@ private struct MergeAction: Encodable {
     }
 }
 
+/// The `archive` action as the wire carries it.
+private struct ArchiveAction: Encodable {
+    let kind = "archive"
+    let branch: String
+    let headOID: String
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, branch
+        case headOID = "head_oid"
+    }
+}
+
 /// A way to merge a pull request (minor 64).
 public enum MergeMethod: String, Codable, Sendable, Hashable, CaseIterable {
     case merge, squash, rebase
@@ -1662,8 +1686,8 @@ public enum MergeMethod: String, Codable, Sendable, Hashable, CaseIterable {
 
 /// What became of an action on a run's repository (`git_action`, minor 59).
 public enum GitActionResult: Decodable, Sendable, Hashable {
-    /// Done; for a commit, the commit it made.
-    case done(sha: String)
+    /// Done; for a commit, the commit it made; for an archive (minor 67), none.
+    case done(sha: String?)
     /// Done; for a pull request (`create_pr`, minor 61), the one opened, or the open one already there.
     case pullRequest(number: UInt64, url: String)
     /// Not done: `code` is one of the computer's codes (`busy`, `unmerged`, `nothing_to_commit`, `git_failed`,
@@ -1689,7 +1713,7 @@ public enum GitActionResult: Decodable, Sendable, Hashable {
             if let pr = try c.decodeIfPresent(PullRequestLink.self, forKey: .pr) {
                 self = .pullRequest(number: pr.number, url: pr.url)
             } else {
-                self = .done(sha: try c.decode(String.self, forKey: .sha))
+                self = .done(sha: try c.decodeIfPresent(String.self, forKey: .sha))
             }
         case "refused":
             self = .refused(
@@ -2512,6 +2536,9 @@ public enum ClientMessage: Sendable {
     /// The run's open pull request `number` merged by `method`, only while its head is `headOID`: the pull request and
     /// commit the panel showed (`merge`, minor 64).
     case mergePullRequest(requestID: String, sessionUID: String, number: UInt64, method: MergeMethod, headOID: String)
+    /// The run ended, its worktree removed and its local `branch` deleted, only while `branch` is checked out there at
+    /// `headOID` (`archive`, minor 67).
+    case archiveRun(requestID: String, sessionUID: String, branch: String, headOID: String)
     /// **Say something to a Codex session.** Minor 18, and the one message an
     /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
     case compose(
@@ -2770,6 +2797,11 @@ extension ClientMessage: Encodable {
             try c.encode(requestID, forKey: .requestID)
             try c.encode(sessionUID, forKey: .sessionUID)
             try c.encode(MergeAction(method: method, headOID: headOID, number: number), forKey: .action)
+        case .archiveRun(let requestID, let sessionUID, let branch, let headOID):
+            try c.encode("git_action", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(sessionUID, forKey: .sessionUID)
+            try c.encode(ArchiveAction(branch: branch, headOID: headOID), forKey: .action)
         case .compose(let session, let requestID, let text, let payloadHash, let attachments):
             try c.encode("compose", forKey: .type)
             try c.encode(session, forKey: .sessionID)

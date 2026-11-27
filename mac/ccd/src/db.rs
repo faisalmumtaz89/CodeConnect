@@ -112,6 +112,8 @@ db_ops! {
     fn commits_told(session_uid: String, request_id: String, through: u64) -> ();
     /// Each run's title ([`Store::run_titles`]).
     fn run_titles() -> std::collections::HashMap<String, String>;
+    /// The archived runs ([`Store::archived_runs`]).
+    fn archived_runs() -> std::collections::HashSet<String>;
     fn filed_event(session_uid: String, source: Source, source_event_id: String) -> Option<(u64, Option<String>)>;
     fn session_facts(session_uid: String) -> protocol::facts::SessionFacts;
     /// The settings Codex last named for a Codex run's thread, as filed.

@@ -791,6 +791,10 @@ public enum TimelineBuilder {
                 title: ChangesWords.committed(
                     files: event.payload["files"]?.intValue ?? 0, sha: event.payload["oid"]?.stringValue ?? ""),
                 detail: nil, severity: .info)
+        // The computer's note that the run was archived: its worktree and local branch are gone.
+        case EngineNotice.archived:
+            return NoticeItem(
+                kind: .other, symbol: "check-circle", title: FleetWords.archived, detail: nil, severity: .info)
         case EngineNotice.mailNudge:
             // ccd's own notice that it woke a Claude run for its mail; its message is the wake line, which is ccd's
             // words to the agent, not the reader's, so the row is the one a Codex wake draws.
