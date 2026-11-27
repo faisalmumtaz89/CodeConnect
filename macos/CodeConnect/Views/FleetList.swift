@@ -504,6 +504,12 @@ private struct ProjectHeader: View {
     let folded: Bool
     let toggle: () -> Void
 
+    /// What VoiceOver reads after its name: folded or open, then its count as drawn.
+    private var spoken: String {
+        let count = project.needsYou > 0 ? RunListWords.needYou(project.needsYou) : RunListWords.runs(project.sessions)
+        return "\(folded ? "folded" : "open"), \(count)"
+    }
+
     var body: some View {
         Button(action: toggle) {
             HStack(spacing: 6) {
@@ -536,9 +542,7 @@ private struct ProjectHeader: View {
         .focusable(false)
         .help(project.folder)
         .accessibilityLabel(project.name)
-        .accessibilityValue(
-            "\(folded ? "folded" : "open"), "
-                + (project.needsYou > 0 ? RunListWords.needYou(project.needsYou) : RunListWords.runs(project.sessions)))
+        .accessibilityValue(spoken)
         .accessibilityIdentifier("fleet.project.\(project.name)")
         .padding(.horizontal, 8)
         .padding(.bottom, 2)
