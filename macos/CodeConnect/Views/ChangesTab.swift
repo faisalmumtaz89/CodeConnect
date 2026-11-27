@@ -566,8 +566,8 @@ private struct ArchiveRow: View {
         }
         .confirmation($asking) { asked in
             Confirmation(
-                FleetWords.archiveAsk(asked.title), cancelID: "changes.archive.cancel",
-                confirmID: "changes.archive.confirm"
+                FleetWords.archiveAsk(asked.title, agent: asked.summary.agent.displayName),
+                cancelID: "changes.archive.cancel", confirmID: "changes.archive.confirm"
             ) { model.archiveRun(key: asked.id, branch: branch, headOID: headOID) }
         }
     }

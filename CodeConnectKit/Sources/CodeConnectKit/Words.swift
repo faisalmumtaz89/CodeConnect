@@ -71,15 +71,16 @@ public enum FleetWords {
             note: "Its folder stays as it is.", cancel: "Cancel", confirm: "End Run")
     }
 
-    /// Archiving run `name` (artboard n-11): it removes the worktree, deletes the local branch and ends the session, and
-    /// says first that files git ignores there go too, so a person keeping secrets in it is told before pressing.
-    public static func archiveAsk(_ name: String) -> AskWords {
+    /// Archiving run `name` (artboard n-11): it removes the worktree, deletes the local branch and ends `agent`’s
+    /// session, and says first that files git ignores there go too, so a person keeping secrets in it is told before
+    /// pressing.
+    public static func archiveAsk(_ name: String, agent: String) -> AskWords {
         AskWords(
             title: "Archive “\(name)”?",
             items: [
                 .init(mark: "folder", words: "Removes the worktree"),
-                .init(mark: "trash", words: "Deletes the local branch"),
-                .init(mark: "stop", words: "Ends the session"),
+                .init(mark: "arrow.triangle.branch", words: "Deletes the local branch"),
+                .init(mark: "terminal", words: "Ends the \(agent) session"),
             ],
             note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive Run")
     }
