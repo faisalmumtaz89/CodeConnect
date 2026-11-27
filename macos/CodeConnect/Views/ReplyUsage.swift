@@ -99,8 +99,9 @@ struct UsageRing: View {
 
     var body: some View {
         ZStack {
-            Circle().stroke(Color(themeHex: 0x2C2C33), lineWidth: 2.4)
-            Circle().trim(from: 0, to: CGFloat(percent) / 100)
+            // Inside its frame: the track's border and the share's arc stand within the 14 pt, never across its edge.
+            Circle().strokeBorder(Color(themeHex: 0x2C2C33), lineWidth: 2.4)
+            Circle().inset(by: 1.2).trim(from: 0, to: CGFloat(percent) / 100)
                 .stroke(red ? Theme.red : Color(themeHex: 0xD4D4D8), style: StrokeStyle(lineWidth: 2.4, lineCap: .round))
                 .rotationEffect(.degrees(-90))
         }
