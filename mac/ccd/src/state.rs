@@ -3692,9 +3692,27 @@ impl Daemon {
     /// before. This is a *display*: it is re-read continuously, it resolves itself on the
     /// next listing, and nothing is actuated from it.
     pub async fn sessions(&self) -> Result<Vec<SessionSummary>> {
+        // A move can end while a listing is read (its run live again, its mark changed, its gate let go, in that
+        // order): a listing whose marks changed meanwhile is read again, so none lists a moving run as it stood half
+        // moved. Each read again follows a mark a move changed.
+        loop {
+            let (sessions, switching) = self.listing().await?;
+            if self.switch_marks().await? == switching {
+                return Ok(sessions);
+            }
+        }
+    }
+
+    /// The runs' switch marks ([`crate::store::Store::SWITCH_WAITING`] and on), by run.
+    async fn switch_marks(&self) -> Result<HashMap<String, i64>> {
+        Ok(self.db.switching_runs().await?.into_iter().collect())
+    }
+
+    /// [`Daemon::sessions`] as read once, with the switch marks it was read with.
+    async fn listing(&self) -> Result<(Vec<SessionSummary>, HashMap<String, i64>)> {
         // A run moving to another account reads live throughout (306 Slice E, S1). Its mark is read before its row:
         // the mark goes only once the run is live again, so a row read after it is never an earlier one unmarked.
-        let switching: HashMap<String, i64> = self.db.switching_runs().await?.into_iter().collect();
+        let switching = self.switch_marks().await?;
         let accounts: HashMap<String, crate::store::RecordedAccount> =
             self.db.run_accounts().await?.into_iter().collect();
         let mut limits: HashMap<String, protocol::event::RunLimit> =
@@ -3894,7 +3912,7 @@ impl Daemon {
                 None => {}
             }
         }
-        Ok(sessions)
+        Ok((sessions, switching))
     }
 
     /// The run `session_uid`'s agent host or app-server is attached, by `link`. Then, with the
@@ -10458,6 +10476,52 @@ mod tests {
             None
         );
         daemon.store.record_host(uid, &HOST, None).unwrap();
+    }
+
+    /// **A listing built while a message moves a run offers its settings, however the move goes on meanwhile** (306,
+    /// gate 7): the run its switch ended, the message moving it holding its gate, is listed while the move ends (the
+    /// run live again, its mark gone, the gate let go) before the listing is built; it reads with its menus.
+    #[tokio::test]
+    async fn a_listing_built_across_a_moves_end_offers_its_settings() {
+        let daemon = test_daemon();
+        hosted_run(&daemon, TEST_UID, "/tmp");
+        daemon
+            .store
+            .keep_hosted_models(
+                TEST_UID,
+                &serde_json::json!({"models": [
+                    {"value": "default", "displayName": "Default", "description": "Opus"}
+                ]}),
+            )
+            .unwrap();
+        let moving = daemon.move_gate(TEST_UID).await.lock_owned().await;
+        daemon
+            .store
+            .set_switch_state(TEST_UID, Some(crate::store::Store::SWITCH_MOVED))
+            .unwrap();
+        daemon
+            .store
+            .set_lifecycle(TEST_UID, Lifecycle::Exited)
+            .unwrap();
+        let held = daemon.inner.lock().await;
+        let listing = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.sessions().await.unwrap() }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        daemon
+            .store
+            .set_lifecycle(TEST_UID, Lifecycle::Live)
+            .unwrap();
+        daemon.store.set_switch_state(TEST_UID, None).unwrap();
+        drop(moving);
+        drop(held);
+        let listed = listing.await.unwrap();
+        let run = listed
+            .iter()
+            .find(|run| run.session_uid == TEST_UID)
+            .unwrap();
+        assert!(run.menus.is_some(), "its settings offered: {run:?}");
     }
 
     /// The hosted Claude run `uid` asking `tool_name` with `input` through its agent host,
