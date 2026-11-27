@@ -60,6 +60,8 @@ struct HoverButtonStyle: ButtonStyle {
     /// The sides of a bare label that sit on its column's edge: there its fill ends on the label, bleeding only
     /// inward, so no fill crosses the edge the column's fields and text keep.
     var flush: Edge.Set = []
+    /// Fades while disabled; a label that draws its own off face (the input box's send) keeps it as drawn.
+    var fades = true
     var id: String?
 
     /// A test launch's `-CC_HOVER` names `id`: what has it draws as if the pointer were on it, a row's "…" included.
@@ -76,7 +78,7 @@ struct HoverButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         Hovered(configuration: configuration, radius: radius, over: over, lift: lift,
-                bleed: bare ? Self.bareBleed : .zero, flush: flush, id: id)
+                bleed: bare ? Self.bareBleed : .zero, flush: flush, fades: fades, id: id)
     }
 
     private struct Hovered: View {
@@ -86,6 +88,7 @@ struct HoverButtonStyle: ButtonStyle {
         let lift: Double
         let bleed: CGSize
         let flush: Edge.Set
+        let fades: Bool
         let id: String?
         @State private var hovering = false
         @Environment(\.isEnabled) private var enabled
@@ -97,7 +100,7 @@ struct HoverButtonStyle: ButtonStyle {
                 .disabled(forcedState("disabled"))
                 .background(lit && !over ? Theme.hover : .clear, in: plate)
                 .brightness(lit && over ? lift : 0)
-                .opacity(off ? Theme.disabledOpacity : configuration.isPressed || forcedState("pressed") ? 0.7 : 1)
+                .opacity(off && fades ? Theme.disabledOpacity : configuration.isPressed || forcedState("pressed") ? 0.7 : 1)
                 // What lights is what a click takes: the button's whole frame, its rounded-off corners included, so a
                 // corner that lit never leaves a click to whatever lies under it. A bare label's fill reaches past its
                 // frame, which takes no click, so it does not light there either.
@@ -143,9 +146,9 @@ extension ButtonStyle where Self == HoverButtonStyle {
     /// `HoverButtonStyle`.
     static func hover(
         radius: CGFloat = 6, over: Bool = false, lift: Double = Theme.hoverLift, bare: Bool = false,
-        flush: Edge.Set = [], id: String? = nil
+        flush: Edge.Set = [], fades: Bool = true, id: String? = nil
     ) -> HoverButtonStyle {
-        HoverButtonStyle(radius: radius, over: over, lift: lift, bare: bare, flush: flush, id: id)
+        HoverButtonStyle(radius: radius, over: over, lift: lift, bare: bare, flush: flush, fades: fades, id: id)
     }
 }
 
@@ -879,6 +882,10 @@ private struct RowMenuHost: ViewModifier {
                         let corner = place(shown, in: bounds)
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(Array(shown.items.enumerated()), id: \.element.id) { index, item in
+                                // The red item stands apart from what comes before it.
+                                if item.destructive, index > 0, !shown.items[index - 1].destructive {
+                                    MenuDivider().padding(.vertical, 4)
+                                }
                                 PanelItem(
                                     index: index, title: item.title, symbol: item.symbol, destructive: item.destructive,
                                     id: item.id

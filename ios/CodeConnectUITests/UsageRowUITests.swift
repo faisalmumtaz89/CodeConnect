@@ -39,7 +39,7 @@ final class UsageRowUITests: XCTestCase {
         XCTAssertEqual(line.label, plain, "the label reads as it did")
         let value = line.value as? String ?? ""
         XCTAssertTrue(value.hasPrefix("Context 390k of 1M; 5-hour 100%"), value)
-        XCTAssertTrue(value.contains("; Week 41%"), value)
-        XCTAssertTrue(value.hasSuffix("; Account you@example.com"), value)
+        XCTAssertTrue(value.contains("; Weekly 41%"), value)
+        XCTAssertTrue(value.hasSuffix("; Account you@example.com · Plus"), value)
     }
 }

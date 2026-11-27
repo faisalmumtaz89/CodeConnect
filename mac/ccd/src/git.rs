@@ -1467,6 +1467,58 @@ pub async fn remove_worktree(
     git_line(&git, main, &args, WORKTREE_REMOVE_TIMEOUT).await
 }
 
+/// The pid of the claude whose own lock `reason` is on the worktree `worktree`: Claude Code locks a
+/// `--worktree` it makes with "claude session <name> (pid N)", or "(pid N start <time>)" where `ps`
+/// gave its start, `<name>` the worktree's folder name with a `/` in it written `+`, and leaves the
+/// lock when its claude is stopped. `None` for any other lock.
+pub fn claude_lock_pid(reason: &str, worktree: &str) -> Option<i32> {
+    let folder = Path::new(worktree).file_name()?.to_str()?;
+    let (name, rest) = reason
+        .strip_prefix("claude session ")?
+        .split_once(" (pid ")?;
+    if name.replace('/', "+") != folder {
+        return None;
+    }
+    let inner = rest.strip_suffix(')')?;
+    let pid = match inner.split_once(' ') {
+        Some((pid, start))
+            if start
+                .strip_prefix("start ")
+                .is_some_and(|time| !time.is_empty()) =>
+        {
+            pid
+        }
+        Some(_) => return None,
+        None => inner,
+    };
+    if pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    pid.parse().ok().filter(|pid| *pid > 0)
+}
+
+/// Whether the process `pid` is alive: there, whether or not it is ours to signal.
+pub fn pid_alive(pid: i32) -> bool {
+    let signalled = unsafe { libc::kill(pid, 0) };
+    signalled == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// The linked worktree `worktree` unlocked, from the main checkout `main`. `Err` is git's line.
+pub async fn unlock_worktree(
+    main: &str,
+    configured_bin: Option<&str>,
+    worktree: &str,
+) -> std::result::Result<(), String> {
+    let git = git_bin(configured_bin).ok_or("git is not installed at a known location")?;
+    git_line(
+        &git,
+        main,
+        &["worktree", "unlock", worktree],
+        WORKTREE_REMOVE_TIMEOUT,
+    )
+    .await
+}
+
 /// The local `branch` deleted from `main`, only while its tip is `head_oid`. `Err` is the
 /// reason it was kept.
 pub async fn delete_branch(
@@ -3078,6 +3130,44 @@ mod tests {
         );
         assert_eq!(refused, Err("Permission denied (publickey).".into()));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **Claude Code's own worktree lock is read as Claude writes it**: "claude session <name>
+    /// (pid N)", with its start time after N where `ps` gave one, and a `/` in the name written `+` in
+    /// the folder; any other reason, or another worktree's name, is no Claude lock.
+    #[test]
+    fn claude_code_s_own_worktree_lock_is_read_as_claude_writes_it() {
+        let at = "/r/app/.claude/worktrees/x";
+        assert_eq!(
+            claude_lock_pid("claude session x (pid 12345)", at),
+            Some(12345)
+        );
+        assert_eq!(
+            claude_lock_pid(
+                "claude session x (pid 12345 start Fri Nov 27 10:11:12 2026)",
+                at
+            ),
+            Some(12345)
+        );
+        assert_eq!(
+            claude_lock_pid(
+                "claude session fix/login (pid 7)",
+                "/r/app/.claude/worktrees/fix+login"
+            ),
+            Some(7)
+        );
+        for other in [
+            "claude session y (pid 12345)",
+            "claude session x (pid )",
+            "claude session x (pid 0)",
+            "claude session x (pid 12a45)",
+            "claude session x (pid 12345) and a note",
+            "claude session x (pid 12345 started yesterday)",
+            "claude agent",
+            "",
+        ] {
+            assert_eq!(claude_lock_pid(other, at), None, "{other:?}");
+        }
     }
 
     /// A repository on `main` with one commit, its own identity, and nothing else.

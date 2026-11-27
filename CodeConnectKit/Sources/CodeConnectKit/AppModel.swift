@@ -2264,6 +2264,7 @@ public final class AppModel {
             if !self.launchSettled { self.settleLaunchIfCaughtUp() }
         }
         fresh.accountName = { [weak self] id in self?.accountEmail(run: key, id: id) }
+        fresh.keepsWorktree = { [weak self] in self?.summary(for: key)?.inWorktree == true }
         fresh.codexTurns = { [weak self] in
             guard let controls = self?.codexControlsByKey[key] else { return ([], []) }
             return (controls.observedTurns, controls.retiredTurns)

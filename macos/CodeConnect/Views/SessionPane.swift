@@ -92,27 +92,17 @@ struct SessionPane: View {
             .accessibilityHidden(boxTaken)
     }
 
-    /// The run's changes: beside the conversation, behind a hairline, or in its place, under the row that gives it back.
+    /// The run's changes: beside the conversation, behind a hairline, or in its place.
     private var changes: some View {
         HStack(spacing: 0) {
             if !inPlace { Rectangle().fill(Theme.hairline).frame(width: 1) }
-            VStack(spacing: 0) {
-                if inPlace {
-                    HStack {
-                        Spacer()
-                        ActionButton(title: "‹ Conversation", key: "Esc", prominent: false, small: true,
-                            id: "session.changes.back") { changesOpen = false }
-                    }
-                    .padding(.horizontal, 12)
-                    .frame(height: 38)
-                    .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
-                }
-                // The panel ends with the run's shell at its foot, sized by itself: its bar closed, its screen open.
-                ChangesPanel(row: row, model: model)
-            }
-            .frame(width: inPlace ? nil : Self.panelWidth)
+            // The panel ends with the run's shell at its foot, sized by itself: its bar closed, its screen open. In the
+            // conversation's place, its tabs row gives the conversation back.
+            ChangesPanel(row: row, model: model, back: inPlace ? { changesOpen = false } : nil)
+                .frame(width: inPlace ? nil : Self.panelWidth)
         }
-        .background(Theme.window)
+        // Not up into the window's toolbar band: the run's header stands there.
+        .background(Theme.window, ignoresSafeAreaEdges: [])
     }
 
     /// The changes panel's width, beside the conversation.
@@ -214,8 +204,7 @@ private struct PanelToggle: View {
         let changed = diff.flatMap { $0.added + $0.removed > 0 ? $0 : nil }
         Button { open.toggle() } label: {
             HStack(spacing: 6) {
-                // Not the run's own toggle's sidebar beside it: what this one shows is lines changed.
-                Image(systemName: "plus.forwardslash.minus").font(.system(size: 10))
+                Image(systemName: "sidebar.right").font(.system(size: 12))
                 if let changed { LineDelta(added: changed.added, removed: changed.removed) }
             }
             .foregroundStyle(Theme.text)

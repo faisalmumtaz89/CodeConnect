@@ -87,8 +87,9 @@ struct InputBoxSubmit: View {
                 .frame(width: 30, height: 30)
                 .background(enabled ? Self.lit : Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
         }
-        // The hover style takes a click on its whole frame, so the square's corners press.
-        .buttonStyle(.hover(radius: 9, over: true, id: id))
+        // The hover style takes a click on its whole frame, so the square's corners press; its faint face is its off look,
+        // with no fade on top.
+        .buttonStyle(.hover(radius: 9, over: true, fades: false, id: id))
         .disabled(!enabled)
         .help(help)
         .accessibilityLabel(label)
@@ -195,6 +196,8 @@ extension View {
 enum InputBoxLayout {
     static let barInset: CGFloat = 12
     static let lineSpacing: CGFloat = 5
+    /// From what stands above the box to the box itself: 30 pt to its lit rim, which is 4 pt outside it.
+    static let above: CGFloat = 30 + 4
 }
 
 /// The bar's chips' one size: their words 12.5 pt medium, 6 pt above and below; words cut keep `floor` while the bar

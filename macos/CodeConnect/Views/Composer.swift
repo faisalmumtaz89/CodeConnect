@@ -15,8 +15,11 @@ struct ComposerBar: View {
     var body: some View {
         if let model = machines.model(forSession: key) {
             if let summary = model.shownSummary(for: key), summary.takesNoReply {
-                if let command = summary.resumeCommand { ResumeCommand(command: command).onConversationColumn() }
-                EndedLine(model: model, key: key, summary: summary)
+                // One stack, so nothing but the command's own 12 pt stands between it and the foot's hairline.
+                VStack(spacing: 0) {
+                    if let command = summary.resumeCommand { ResumeCommand(command: command).onConversationColumn() }
+                    EndedLine()
+                }
             } else if let kept = model.drafts(for: key) {
                 Composer(model: model, key: key, kept: kept, showsChanges: showsChanges).onConversationColumn()
             }
@@ -24,14 +27,9 @@ struct ComposerBar: View {
     }
 }
 
-/// In an ended run's reply box's place: the pane's foot band, under its hairline; the mark and words on the
-/// conversation's notice columns, and under its words the agent the run was, with its model and the effort it ended
-/// with, as far as the run said them.
+/// In an ended run's reply box's place: the pane's foot band, under its hairline, the one 34 pt line that says the run
+/// has ended (artboard 13); the mark and words on the conversation's notice columns.
 private struct EndedLine: View {
-    let model: AppModel
-    let key: String
-    let summary: SessionSummary
-
     var body: some View {
         VStack(spacing: 0) {
             Rectangle().fill(Theme.hairline).frame(height: 1)
@@ -39,15 +37,8 @@ private struct EndedLine: View {
                 Image(systemName: "checkmark.circle").font(.system(size: 11)).foregroundStyle(Theme.text3)
                     .frame(width: 14)
                     .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(
-                        SessionWords.ended(
-                            byPerson: model.shown(for: key)?.endedByPerson == true, inWorktree: summary.inWorktree))
-                    agentLine
-                }
-                .font(Theme.ui(12))
-                .foregroundStyle(Theme.text3)
-                .padding(.vertical, 8)
+                Text(SessionWords.runEnded).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+                    .padding(.vertical, 8)
             }
             .padding(.horizontal, 28)
             .frame(minHeight: 34)
@@ -55,19 +46,6 @@ private struct EndedLine: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("session.endedLine")
-    }
-
-    /// The agent, and the model it said it ran when it said: by the label of the run's menu entry for that model when
-    /// there is one, so the line and the settings list spell it alike, else as the agent reported it, in code type
-    /// (Kit's `modelName`); then the effort it ended with (Kit's `headerEffort`), with or without a model said.
-    private var agentLine: Text {
-        var line = Text(summary.agent.productName)
-        if let confirmed = model.confirmedModel(for: key) {
-            let name = RunSettings.modelName(confirmed: confirmed.name, menus: summary.menus, label: summary.modelLabel)
-            line = Text("\(line) · \(name.reported ? Text(name.text).font(Theme.mono(11.5)) : Text(name.text))")
-        }
-        if let effort = RunSettings.headerEffort(summary: summary) { line = Text("\(line) · \(effort)") }
-        return line
     }
 }
 
@@ -78,7 +56,7 @@ private struct ResumeCommand: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(SessionWords.pickUpAtComputer).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+            Text(SessionWords.pickUpAtComputer).font(Theme.ui(12)).foregroundStyle(Theme.text3)
             // Whole, wrapping where it must: a cut would hide what runs.
             Text(command).font(Theme.mono(12)).foregroundStyle(Theme.text)
                 .fixedSize(horizontal: false, vertical: true)
@@ -185,13 +163,27 @@ private struct Composer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let line { note(line) }
-            box
+            if compacting {
+                // A card in the reply box's place, as a request is: the conversation column's hairline over it, its
+                // words 16 pt under that.
+                Rectangle().fill(Theme.hairline).frame(height: 1).padding(.horizontal, -28)
+                CompactCard(instructions: $instructions, agent: summary?.agent ?? .claude) {
+                    compacting = false
+                    run(.compact(instructions: instructions))
+                } cancel: {
+                    compacting = false
+                }
+                .padding(.top, 16 - 8)
+            } else {
+                if let line { note(line) }
+                box
+            }
         }
-        // Docked under the conversation, on its column's 28 pt sides and 20 pt above the pane's foot; 16 pt under the
-        // conversation's last line at its end (its row's 7 pt inset and the column's 1 pt end, then these 8).
+        // Docked under the conversation, on its column's 28 pt sides and 20 pt above the pane's foot; 30 pt from the
+        // conversation's last line at its end to the box's rim (its row's 7 pt inset and the column's 1 pt end, then
+        // the rest).
         .padding(.horizontal, 28)
-        .padding(.top, 8)
+        .padding(.top, compacting ? 0 : InputBoxLayout.above - 8)
         .padding(.bottom, 20)
         .onChange(of: kept.reply) { old, new in
             // If the draft has moved off the words it held — the same normalisation the send's mutation key uses, so a
@@ -266,14 +258,6 @@ private struct Composer: View {
                 }
             }
         #endif
-        .sheet(isPresented: $compacting) {
-            CompactDialog(instructions: $instructions, agent: summary?.agent ?? .claude) {
-                compacting = false
-                run(.compact(instructions: instructions))
-            } cancel: {
-                compacting = false
-            }
-        }
         .confirmation(
             Binding(get: { clearing ? true : nil }, set: { clearing = $0 ?? false }), returnsKeyboard: takeKeyboardBack
         ) { _ in
@@ -680,45 +664,56 @@ private struct Composer: View {
     }
 }
 
-/// Compact's own dialog: optional instructions, then Compact now or Cancel. Nothing is typed until Compact now.
-private struct CompactDialog: View {
+/// Compact in the reply box's place: what it does, then the box, its field the optional instructions and its bar Cancel
+/// (Esc) and Compact (⌘↩). Nothing is typed until Compact.
+private struct CompactCard: View {
     @Binding var instructions: String
     /// The run's agent, whom the compaction is asked of.
     let agent: AgentKind
     let run: () -> Void
     let cancel: () -> Void
+    @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(CompactPrompt.title).font(Theme.ui(15, .semibold)).foregroundStyle(Theme.text)
+        VStack(alignment: .leading, spacing: InputBoxLayout.above) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Image(systemName: PanelSymbol.compact).font(.system(size: 12)).foregroundStyle(Theme.text2)
+                        .accessibilityHidden(true)
+                    Text(CompactPrompt.title).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text)
+                }
                 Text(CompactPrompt.explanation(for: agent))
                     .font(Theme.ui(12.5))
                     .foregroundStyle(Theme.text2)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 4)
+            InputBox(barHeight: 46) {
                 TextField(
                     "", text: $instructions,
                     prompt: Text(CompactPrompt.placeholder(for: agent)).foregroundStyle(Theme.text3), axis: .vertical
                 )
                 .textFieldStyle(.plain)
-                .font(Theme.ui(12.5))
-                .lineLimit(2...5)
-                .padding(8)
-                .background(Theme.code, in: RoundedRectangle(cornerRadius: 7))
-                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.hairline))
+                .font(Theme.ui(15))
+                .lineSpacing(InputBoxLayout.lineSpacing)
+                .foregroundStyle(Theme.text)
+                .lineLimit(1...5)
+                .takesKeyboardWhenShown($focused)
+                // Esc cancels here, before it would close the run.
+                .onExitCommand(perform: cancel)
+                .focusedValue(\.composerHoldsEscape, focused ? true : nil)
                 .accessibilityLabel(CompactPrompt.fieldLabel)
                 .accessibilityIdentifier("session.composer.compact.instructions")
-            }
-            .padding(18)
-            SheetBar(
-                action: CompactPrompt.action, actionID: "session.composer.compact.run", blocked: false, perform: run,
-                cancel: cancel, cancelID: "session.composer.compact.cancel"
-            ) {
+            } leading: {
                 EmptyView()
+            } trailing: {
+                ActionButton(title: "Cancel", key: "Esc", prominent: false, id: "session.composer.compact.cancel", action: cancel)
+                ActionButton(title: CompactPrompt.action, key: "⌘↩", prominent: true, id: "session.composer.compact.run", action: run)
+                    .keyboardShortcut(.return, modifiers: .command)
             }
         }
-        .frame(width: 420)
-        .background(Theme.sheet)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("session.composer.compact")
     }
 }
 

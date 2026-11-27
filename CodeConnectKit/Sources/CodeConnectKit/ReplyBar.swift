@@ -10,7 +10,7 @@ public struct ReplyBar: Equatable, Sendable {
         public let window: String
     }
 
-    /// One usage window of an account: its share used, its caption ("5-hour", "Week") and how long until it resets
+    /// One usage window of an account: its share used, its caption ("5-hour", "Weekly") and how long until it resets
     /// (`AccountSwitchWords.resets`; nil once the time has come).
     public struct Limit: Equatable, Sendable {
         public let usedPercent: Int
@@ -26,8 +26,11 @@ public struct ReplyBar: Equatable, Sendable {
     public let limits: [Limit]
     /// In the limits' place, the Accounts page's words when the account's agent says no plan limits apply.
     public let limitsNote: String?
-    /// The account by the Kit's name rule: its email as the account book knows it, else its label; nil when the run
-    /// names no account.
+    /// The window the box's figures draw a ring for: at a usage limit (`SessionSummary.atLimit`), the window of that
+    /// limit's length; else the shortest the account reports (its 5-hour, else the next). Nil with no windows.
+    public let ring: Limit?
+    /// The account by the Kit's name rule (`ReplyBar.name`): "<email> · <Plan>" as the account book knows it, else its
+    /// label; nil when the run names no account.
     public let account: String?
 
     /// The bar's whole reading as one sentence, as both apps give it to VoiceOver: the context, each window with its
@@ -47,13 +50,23 @@ public struct ReplyBar: Equatable, Sendable {
             return Context(used: tokens(used), window: tokens(window))
         }.first
         guard let account = summary.account, let agent = StartAgent(rawValue: summary.agent.rawValue) else {
-            return ReplyBar(context: context, limits: [], limitsNote: nil, account: nil)
+            return ReplyBar(context: context, limits: [], limitsNote: nil, ring: nil, account: nil)
         }
         let facts = book?.facts(for: agent, accountID: account.id)
+        let limits = limits(facts, now: now)
+        let full = summary.atLimit ? summary.limit?.which.windowMinutes.map(AccountSwitchWords.caption(minutes:)) : nil
         return ReplyBar(
-            context: context, limits: limits(facts, now: now),
+            context: context, limits: limits,
             limitsNote: facts?.limitsAvailable == false ? AccountSwitchWords.noPlanLimits : nil,
-            account: facts?.email ?? account.label)
+            ring: limits.first { $0.caption == full } ?? limits.first,
+            account: name(facts, label: account.label))
+    }
+
+    /// An account as the bar, its card and the limit band name it: "<email> · <Plan>", its email alone with no plan
+    /// read, else its label.
+    static func name(_ facts: AccountFacts?, label: String?) -> String? {
+        let plan = facts?.plan.map { $0.prefix(1).uppercased() + $0.dropFirst() }
+        return (facts?.email ?? label).map { name in plan.map { "\(name) · \($0)" } ?? name }
     }
 
     /// An account's windows as drawn, shortest first, wherever its usage is shown (this bar, the Accounts page).
@@ -132,13 +145,11 @@ public struct LimitFoot: Equatable, Sendable {
                 ? "Resets \(clock(reset.date, sameDay: true, timeZone)) · \(reset.countdown)"
                 : "Resets \(clock(reset.date, sameDay: false, timeZone))"
         }
-        let plan = facts?.plan.map { $0.prefix(1).uppercased() + $0.dropFirst() }
-        let name = facts?.email ?? summary.account?.label
         return LimitFoot(
             title: "\(words(limit.which)) limit reached", resets: resets, resetsAt: reset?.date,
             limits: ReplyBar.limits(facts, now: now),
             full: window.map { AccountSwitchWords.caption(minutes: $0.windowMinutes) },
-            account: name.map { name in plan.map { "\(name) · \($0)" } ?? name },
+            account: ReplyBar.name(facts, label: summary.account?.label),
             prompt: summary.switching == nil ? replyPrompt : nil)
     }
 

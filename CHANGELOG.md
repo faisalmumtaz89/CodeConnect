@@ -3,6 +3,21 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.32
+
+- A turn that fails ends on a "Turn failed" row in its agent's own words, with its API error's reply, and the run
+  reads Failed until you send it something again.
+- A run you end says so at its end, and one in a worktree of its own says its worktree and branch are kept.
+- On the Mac, a card or Compact's question takes the reply box's place and is answered there, and a hunk's comment is
+  written in the reply box's own box.
+- The reply bar's usage draws one ring, for the window the run stopped at or else the account's shortest, and its
+  card says Weekly and names the account by its email and plan.
+- In the Changes panel, Create PR stands at the end of the state line, and a run's menu copies its branch name.
+- Settings shows each folder from ~ under its computer's home, and marks each device as a Mac or an iPhone and whether
+  it's connected.
+- Many small fixes to the Mac window from the screen check: the window's buttons, spacing above the reply box, the run
+  list's menus, the ended run's foot and Settings' titles.
+
 ## CodeConnect 0.19.31
 
 - On the Mac, the window has a new layout: the list of runs at the side, with a filter for each computer, a header over

@@ -107,8 +107,8 @@ struct MainWindow: View {
                 .background(Theme.window)
             }
         }
-        // The panes' toggles at the window's top edge: the list's beside the window's buttons, the run's at the right.
-        // The list and the run hide only while a run is open.
+        // The list's toggle at the window's top edge, beside the window's buttons; the list hides only while a run is open.
+        // The run hides from the View menu alone: its top right is the changes panel's toggle.
         .overlay(alignment: .topLeading) {
             if settings == nil {
                 PaneToggle(symbol: "sidebar.left", shown: !listHidden || !runIsOpen,
@@ -118,29 +118,19 @@ struct MainWindow: View {
                 }
                 .disabled(!runIsOpen)
                 .padding(.leading, 84)
-                .padding(.top, 13)
+                .padding(.top, 14)
             }
         }
-        // The update button is the window's, over Settings too; the run's toggle only over the panes.
+        // The update button is the window's, over Settings too.
         .overlay(alignment: .topTrailing) {
-            HStack(spacing: Self.updateGap) {
-                if let updates, let state = updates.state {
-                    UpdateButton(state: state) { updates.press() }
-                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { updateWidth = $0 }
-                }
-                if settings == nil {
-                    PaneToggle(symbol: "sidebar.right", shown: runIsOpen && !runHidden,
-                        title: runHidden ? "Show Run" : "Hide Run", id: "pane.toggle.run") {
-                        runHidden.toggle()
-                        if runHidden { listHidden = false }
-                    }
-                    .disabled(!runIsOpen)
-                }
+            if let updates, let state = updates.state {
+                UpdateButton(state: state) { updates.press() }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { updateWidth = $0 }
+                    // Centred 26 pt down, on the window buttons' line.
+                    .frame(height: 24)
+                    .padding(.trailing, 12)
+                    .padding(.top, 14)
             }
-            // The toggle's height: the button stands centred on it.
-            .frame(height: 24)
-            .padding(.trailing, 12)
-            .padding(.top, 13)
         }
         .focusedSceneValue(\.runIsOpen, runIsOpen)
         .focusedSceneValue(\.settingsShown, settings != nil)
@@ -316,12 +306,12 @@ extension MainWindow {
     /// shows, when it comes last. Only the header band moves; the pane's content keeps its own inset, under the hairline
     /// that closes the band.
     fileprivate func clearance(first: Bool, last: Bool) -> EdgeInsets {
-        let update = updates?.state == nil ? 0 : updateWidth + Self.updateGap
-        return EdgeInsets(top: 0, leading: first ? 128 : 0, bottom: 0, trailing: last ? 56 + update : 0)
+        let update = updates?.state == nil ? 0 : 12 + updateWidth + Self.updateGap
+        return EdgeInsets(top: 0, leading: first ? 128 : 0, bottom: 0, trailing: last ? update : 0)
     }
 
-    /// The update button's gap before the run's toggle.
-    fileprivate static let updateGap: CGFloat = 10
+    /// The update button's gap before the run header's controls.
+    fileprivate static let updateGap: CGFloat = 16
 }
 
 extension FocusedValues {

@@ -43,6 +43,20 @@ final class RunEndedTests: XCTestCase {
                 .endedByPerson, "a switch's end")
     }
 
+    /// The conversation's own end says who ended the run and what is kept (screen check 2); any other end stays
+    /// "Run ended".
+    func testTheConversationsEndSaysWhoEndedTheRun() throws {
+        func title(_ payload: String, keepsWorktree: Bool) throws -> String? {
+            TimelineBuilder.build([try end(payload)], keepsWorktree: keepsWorktree).compactMap {
+                if case .notice(let notice) = $0.content { notice.title } else { nil }
+            }.first
+        }
+        let person = #"{"exit_code":null,"reason":"Stopped","ended_by":"person"}"#
+        XCTAssertEqual(try title(person, keepsWorktree: true), "You ended this run · its worktree and branch are kept")
+        XCTAssertEqual(try title(person, keepsWorktree: false), "You ended this run")
+        XCTAssertEqual(try title(#"{"exit_code":null,"reason":"Stopped"}"#, keepsWorktree: true), "Run ended")
+    }
+
     func testASummarySaysWhetherItsRunIsInAWorktreeOfItsOwn() throws {
         XCTAssertTrue(try summary(#","in_worktree":true"#).inWorktree)
         XCTAssertFalse(try summary("").inWorktree, "absent: false, as an older daemon sends it")

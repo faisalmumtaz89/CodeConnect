@@ -61,11 +61,11 @@ struct FleetList: View {
         let picked = selectable.filter(chosen.contains)
         VStack(spacing: 0) {
             // The head's controls stand at the end of the list's 256 pt, whatever the list's width, so the computer menu
-            // opens from the same place, over whatever is beside the list; the ended runs are every computer's, so no
-            // computer is offered over them.
+            // opens from the same place, over whatever is beside the list; it narrows the ended runs as it does the
+            // active ones.
             HStack(spacing: 4) {
                 Spacer(minLength: 0)
-                if scope == .active { ComputerFilter(filter: $filter, addComputer: addComputer) }
+                ComputerFilter(filter: $filter, addComputer: addComputer)
                 Button(action: newRun) {
                     Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.text2)
                         .frame(width: 20, height: 24)
@@ -107,7 +107,7 @@ struct FleetList: View {
                         if scope == .active {
                             activeSections(list)
                         } else {
-                            endedSection(list.ended, selectable: selectable, picked: picked)
+                            endedSection(list.ended, selectable: selectable, picked: picked, narrowedTo: narrowedName)
                         }
                     }
                     // Room below the last row.
@@ -216,7 +216,7 @@ struct FleetList: View {
     /// Needs you, Working and Done. Unnarrowed, a section with no runs is left out; narrowed, it says so, and Needs
     /// you, which never narrows, says it holds every computer's. Done ends with the way to the ended runs, while any.
     @ViewBuilder private func activeSections(_ list: RunList) -> some View {
-        let narrowedTo = computer.flatMap { id in machines.models.first { $0.machineID == id }?.machineName }
+        let narrowedTo = narrowedName
         let sections: [(id: String, title: String, rows: [FleetRow])] = [
             ("needsYou", "Needs you", list.needsYou), ("working", "Working", list.working), ("done", "Done", list.done),
         ]
@@ -254,7 +254,15 @@ struct FleetList: View {
 
     /// The ended runs, on every computer, with the way back and, while any can be removed, Select; while choosing,
     /// how many are chosen and Done.
-    @ViewBuilder private func endedSection(_ ended: [FleetRow], selectable: [String], picked: [String]) -> some View {
+    /// The chosen computer's name, while the list is narrowed to one.
+    private var narrowedName: String? {
+        computer.flatMap { id in machines.models.first { $0.machineID == id }?.machineName }
+    }
+
+    /// The ended runs, of the chosen computer while one is chosen; with none, the list says so, naming that computer.
+    @ViewBuilder private func endedSection(
+        _ ended: [FleetRow], selectable: [String], picked: [String], narrowedTo: String?
+    ) -> some View {
         SectionLabel(title: selecting ? "\(picked.count) selected" : FleetScope.finished.title, id: "ended") {
             if selecting {
                 // No Done while a batch runs: the batch holds the choice until it has answered. While the card asks,
@@ -269,7 +277,8 @@ struct FleetList: View {
             }
         }
         if ended.isEmpty {
-            Text(FleetWords.noEndedRuns).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
+            Text(narrowedTo.map(RunListWords.noneOn) ?? FleetWords.noEndedRuns).font(Theme.ui(12.5))
+                .foregroundStyle(Theme.text3)
                 .padding(.horizontal, 18)
                 .frame(height: 30)
         }
@@ -323,12 +332,16 @@ struct FleetList: View {
         .accessibilityAction { activate() }
         .accessibilityIdentifier("fleet.row.\(row.id)")
         .accessibilityAddTraits(selected ? .isSelected : [])
-        // The run's "…" (decisions 185 and 217): on hover, its panel holding Copy Working Directory, then End Run…
-        // while the run is live, or Remove… once it has ended (an adopted run's at any time); for VoiceOver, which
-        // does not hover, those are the row's own actions.
+        // The run's "…" (decisions 185 and 217): on hover, its panel holding Copy Working Directory, Copy Branch Name
+        // while the run is on a branch, then End Run… while the run is live, or Remove… once it has ended (an adopted
+        // run's at any time); for VoiceOver, which does not hover, those are the row's own actions.
         .accessibilityActions {
             Button("Copy Working Directory") { copyToPasteboard(row.summary.cwd) }
                 .accessibilityIdentifier("fleet.row.\(row.id).copyWorkingDirectoryAction")
+            if let branch = row.summary.gitBranch {
+                Button("Copy Branch Name") { copyToPasteboard(branch) }
+                    .accessibilityIdentifier("fleet.row.\(row.id).copyBranchNameAction")
+            }
             if endable {
                 Button("End Run…") { ending = row }
                     .accessibilityIdentifier("fleet.row.\(row.id).endRunAction")
@@ -342,7 +355,7 @@ struct FleetList: View {
             if more && !selecting {
                 RunMore(
                     id: "fleet.row.\(row.id).more", action: endable ? .endRun : removable ? .remove : nil,
-                    copies: row.summary.cwd
+                    copies: row.summary.cwd, branch: row.summary.gitBranch
                 ) { if endable { ending = row } else { removing = row } }
                 .padding(.trailing, 14)
             }
@@ -352,7 +365,8 @@ struct FleetList: View {
             guard !selecting else { return }
             RunMore.show(
                 menu, at: CGRect(origin: point, size: .zero), id: "fleet.row.\(row.id).more",
-                action: endable ? .endRun : removable ? .remove : nil, copies: row.summary.cwd
+                action: endable ? .endRun : removable ? .remove : nil, copies: row.summary.cwd,
+                branch: row.summary.gitBranch
             ) { if endable { ending = row } else { removing = row } }
         }
         .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
@@ -458,13 +472,18 @@ private struct ComputerFilter: View {
         Button { open.toggle() } label: {
             HStack(spacing: 6) {
                 ComputerMark(os: chosen?.machineOS, size: 11)
-                Text(chosen?.machineName ?? "All").font(Theme.ui(12.5, .medium)).lineLimit(1).truncationMode(.middle)
+                Text(chosen?.machineName ?? "All").font(Theme.ui(11.5, .medium)).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(Theme.text2)
-            .inputBoxChip(open: open, bordered: true)
+            // The small button, as the run header's Changes is drawn.
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(Color.white.opacity(open ? 0.13 : 0.08), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.white.opacity(0.06)))
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.hover(radius: 8, id: "fleet.computers"))
+        .buttonStyle(.hover(radius: 6, id: "fleet.computers"))
         .focusable(false)
         .help(chosen?.machineName ?? RunListWords.allTitle)
         .accessibilityIdentifier("fleet.computers")
@@ -809,6 +828,8 @@ struct RunMore: View {
     let action: Action?
     /// A run's folder, which the menu's first item copies; none for a computer.
     var copies: String? = nil
+    /// The branch the run is on, which the menu's next item copies; none on a detached head, or before git was read.
+    var branch: String? = nil
     let perform: () -> Void
     #if DEBUG
         /// A render's `-CC_RUN_MENU <uid>` names this run's "…": once shown, it opens a moment later, as a click
@@ -821,7 +842,8 @@ struct RunMore: View {
     private var open: Bool { menu.shown?.owner == id }
 
     var body: some View {
-        Button { Self.show(menu, at: frame, id: id, action: action, copies: copies, perform: perform) } label: {
+        Button { Self.show(menu, at: frame, id: id, action: action, copies: copies, branch: branch, perform: perform)
+        } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.text2)
@@ -842,26 +864,31 @@ struct RunMore: View {
                 guard opensAtLaunch else { return }
                 // After the render has sized and placed its window, as a click comes on a window at rest.
                 try? await Task.sleep(for: .seconds(1))
-                Self.show(menu, at: frame, id: id, action: action, copies: copies, perform: perform)
+                Self.show(menu, at: frame, id: id, action: action, copies: copies, branch: branch, perform: perform)
             }
         #endif
     }
 
     /// The row's menu by `rect` (its "…", or a right-click's point as a zero-size rect): Copy Working Directory when
-    /// it `copies` a folder, then the act on the row's own subject through `perform`.
+    /// it `copies` a folder, Copy Branch Name when it knows a `branch`, then the act on the row's own subject through
+    /// `perform`.
     @MainActor static func show(
-        _ menu: RowMenu, at rect: CGRect, id: String, action: Action?, copies: String? = nil,
+        _ menu: RowMenu, at rect: CGRect, id: String, action: Action?, copies: String? = nil, branch: String? = nil,
         perform: @escaping () -> Void
     ) {
         let copy = copies.map { folder in
             RowMenu.Item(id: "\(id).copyWorkingDirectory", title: "Copy Working Directory", symbol: PanelSymbol.copy,
                          destructive: false) { copyToPasteboard(folder) }
         }
+        let copyBranch = branch.map { branch in
+            RowMenu.Item(id: "\(id).copyBranchName", title: "Copy Branch Name", symbol: PanelSymbol.copy,
+                         destructive: false) { copyToPasteboard(branch) }
+        }
         let act = action.map { action in
             RowMenu.Item(id: "\(id).\(action.id)", title: action.title, symbol: action.symbol, destructive: true,
                          perform: perform)
         }
-        menu.toggle(rect, owner: id, items: [copy, act].compactMap { $0 })
+        menu.toggle(rect, owner: id, items: [copy, copyBranch, act].compactMap { $0 })
     }
 
 }

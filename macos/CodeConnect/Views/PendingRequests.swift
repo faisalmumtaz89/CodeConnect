@@ -21,7 +21,8 @@ struct PendingRequests: View {
     var body: some View {
         let pending = model.shown(for: key)?.pendingApprovals ?? []
         if let first = pending.first {
-            Rectangle().fill(Theme.hairline).frame(height: 1)
+            // On the conversation's column, as the card under it.
+            Rectangle().fill(Theme.hairline).frame(height: 1).onConversationColumn()
             RequestBlock(approval: first, model: model)
                 // A request of its own: the next one starts with its own read gate and an empty reason.
                 .id(first.id)
@@ -53,25 +54,30 @@ struct HoldsReplyBox: PreferenceKey {
     static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
 }
 
-/// The reply box's own surface, edge and margins, holding a request's answers in its place, and at its trailing edge,
-/// apart from the answers, the Stop the reply box has while the run's turn runs (`StopTurnButton`).
-struct ReplyBoxFrame<Content: View>: View {
+/// The reply box itself (`InputBox`, lit as it is), holding a request's answers in its place: in its field, what the
+/// card writes or reads before answering (nothing: the bar alone); on its bar, the Stop the reply box has while the
+/// run's turn runs (`StopTurnButton`), then the card's note, and at the bar's trailing end its answers.
+struct ReplyBoxFrame<Field: View, Note: View, Answers: View>: View {
     let model: AppModel
     let key: String
-    @ViewBuilder let content: Content
+    @ViewBuilder let field: Field
+    @ViewBuilder let note: Note
+    @ViewBuilder let answers: Answers
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 12) {
-            VStack(alignment: .leading, spacing: 10) { content }
+        InputBox(barHeight: 46) {
+            field
+        } leading: {
             StopTurnButton(model: model, key: key)
+            note.yields(0)
+        } trailing: {
+            answers
         }
-            .padding(12)
-            .background(Theme.raised, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.09)))
-            // On the pane's one content column, as the reply box it stands in for: the card's text stands 28 pt in.
-            .padding(.horizontal, 28)
-            .padding(.top, 4)
-            .padding(.bottom, 16)
+        // Where the reply box it stands in for stands: on the pane's content column, 20 pt above the pane's foot, and
+        // 30 pt from the card's last line to its rim (what the card asks ends 14 pt above this).
+        .padding(.horizontal, 28)
+        .padding(.top, InputBoxLayout.above - 14)
+        .padding(.bottom, 20)
     }
 }
 
@@ -114,8 +120,8 @@ struct RequestBlock: View {
 
 /// Stops the turn the run is running, a Codex run's over Codex's own link and a Claude run's through the host it was
 /// started on: one white button with the stop square, where the send button would be. It shows whenever Kit says the
-/// turn can be stopped, in the reply box in Send's place and in the foot of a card that has taken the box's place,
-/// apart from the card's answers. Greyed while the stop is on its way, and for a moment after a turn changes, as Kit
+/// turn can be stopped, in the reply box in Send's place and at the leading end of a card that has taken the box's
+/// place, before the card's answers. Greyed while the stop is on its way, and for a moment after a turn changes, as Kit
 /// rules; the note above the box says what became of it.
 struct StopTurnButton: View {
     let model: AppModel
