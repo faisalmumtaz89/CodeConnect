@@ -3,8 +3,9 @@ import Foundation
 /// The Mac's session list by project (Release 2): every session under its project, the projects in the order the
 /// person should look at them, and the one count of what needs them. The iPhone keeps `FleetGroup`.
 ///
-/// A project is one folder on one computer: the session's folder, or for a session in a worktree of its own
-/// (`<folder>/.claude/worktrees/<name>`, as the daemon's `in_worktree` reads it) the folder the worktree belongs to.
+/// A project is one repository: the one GitHub remote, on every computer; without one, its main checkout on one
+/// computer. Without the daemon's repository fact (an older ccd, or before it was read) it is the session's folder, or
+/// for a session in a worktree of its own (`<folder>/.claude/worktrees/<name>`) the folder the worktree belongs to.
 /// Its name is that folder's.
 public struct ProjectList: Sendable, Equatable {
     /// Where the open session stood when it was opened: it stays there, and its project too, while it is open,
@@ -75,6 +76,7 @@ public struct ProjectList: Sendable, Equatable {
         self.onlyNeedsYou = onlyNeedsYou && needsYou > 0
         let only = self.onlyNeedsYou
         let open = held?.session
+        let project = Self.keys(listed)
         let shown = listed.filter { Self.needsYou($0) || computer == nil || $0.machineID == computer || $0.id == open }
         var place: [String: Int] = [:]
         for (index, key) in deck.enumerated() where place[key] == nil { place[key] = index }
@@ -82,14 +84,14 @@ public struct ProjectList: Sendable, Equatable {
         // What a project is, whatever the list narrows to: every listed session counts towards its size and activity.
         var whole: [String: (sessions: Int, latest: Date)] = [:]
         for row in listed {
-            let entry = whole[Self.key(row), default: (0, .distantPast)]
-            whole[Self.key(row)] = (entry.sessions + 1, max(entry.latest, row.lastActive))
+            let entry = whole[project[row.id]!, default: (0, .distantPast)]
+            whole[project[row.id]!] = (entry.sessions + 1, max(entry.latest, row.lastActive))
         }
 
         var order: [String] = []
         var groups: [String: [FleetRow]] = [:]
         for row in shown {
-            let key = Self.key(row)
+            let key = project[row.id]!
             if groups[key] == nil { order.append(key) }
             groups[key, default: []].append(row)
         }
@@ -167,7 +169,7 @@ public struct ProjectList: Sendable, Equatable {
             Project(
                 id: entry.key, name: names[entry.key]!, needsYou: entry.need, sessions: entry.sessions,
                 rows: entry.rows, earlier: entry.earlier, pinned: pins[entry.key] != nil, hidden: entry.hidden,
-                machineID: entry.first.machineID, folder: Self.folder(entry.first.summary.cwd))
+                machineID: entry.first.machineID, folder: Self.home(entry.first))
         }
         if let held, let at = projects.firstIndex(where: { $0.rows.contains { $0.id == held.session } }) {
             let project = projects.remove(at: at)
@@ -206,8 +208,31 @@ public struct ProjectList: Sendable, Equatable {
 
     // MARK: Projects
 
-    /// A session's project: its computer and the folder it belongs to.
-    static func key(_ row: FleetRow) -> String { "\(row.machineID ?? "")\u{1F}\(folder(row.summary.cwd))" }
+    /// A session's own project: its repository's GitHub remote, the same on every computer; else its computer and the
+    /// folder it belongs to.
+    static func key(_ row: FleetRow) -> String {
+        if let remote = row.summary.repo?.remote { return "\u{1F}\(remote)" }
+        return "\(row.machineID ?? "")\u{1F}\(home(row))"
+    }
+
+    /// Every session's project: its own, except that a session without the repository fact joins the project with a
+    /// remote whose main checkout is its folder on its computer, so an upgrade or a session not yet read splits none.
+    static func keys(_ rows: [FleetRow]) -> [String: String] {
+        var remotes: [String: String] = [:]
+        for row in rows {
+            guard let repo = row.summary.repo, repo.remote != nil else { continue }
+            remotes["\(row.machineID ?? "")\u{1F}\(repo.mainPath)"] = key(row)
+        }
+        var keys: [String: String] = [:]
+        for row in rows {
+            let own = key(row)
+            keys[row.id] = row.summary.repo == nil ? remotes[own] ?? own : own
+        }
+        return keys
+    }
+
+    /// The folder a session belongs to: its repository's main checkout, else its own folder (`folder`).
+    static func home(_ row: FleetRow) -> String { row.summary.repo?.mainPath ?? folder(row.summary.cwd) }
 
     /// The folder a session belongs to: its own, or for a worktree of its own (`<folder>/.claude/worktrees/<name>`,
     /// that last) the folder that holds the worktree.
@@ -240,7 +265,7 @@ public struct ProjectList: Sendable, Equatable {
     /// Each project's name. Two with one name say what tells each apart: its computer when no other of that name is
     /// on it, else the folder it is in.
     static func names(_ projects: [(key: String, row: FleetRow)]) -> [String: String] {
-        let named = projects.map { (key: $0.key, row: $0.row, name: name(folder($0.row.summary.cwd))) }
+        let named = projects.map { (key: $0.key, row: $0.row, name: name(home($0.row))) }
         var out: [String: String] = [:]
         for alike in Dictionary(grouping: named, by: \.name).values {
             guard alike.count > 1 else {
@@ -253,7 +278,7 @@ public struct ProjectList: Sendable, Equatable {
                 if perComputer[entry.row.machineID ?? ""] == 1, !computer.isEmpty {
                     out[entry.key] = "\(entry.name) · \(computer)"
                 } else {
-                    let parent = (folder(entry.row.summary.cwd) as NSString).deletingLastPathComponent
+                    let parent = (home(entry.row) as NSString).deletingLastPathComponent
                     out[entry.key] = "\(entry.name) · \(oneLine(FleetGroup.shellPath(parent)))"
                 }
             }

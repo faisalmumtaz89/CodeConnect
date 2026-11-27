@@ -11,10 +11,11 @@ final class ProjectListTests: XCTestCase {
     /// A session in `status`, in `cwd` on `machine` (named `name`), last active `minutes` after t0.
     private func row(
         _ id: String, _ status: FleetStatus, cwd: String = "/work/web", on machine: String = "m1", minutes: Double = 0,
-        lifecycle: String = "running", limited: Bool = false, archived: Bool = false, name: String? = nil
+        lifecycle: String = "running", limited: Bool = false, archived: Bool = false, name: String? = nil,
+        repo: String? = nil
     ) -> FleetRow {
         let extra = (limited ? #","limit":{"which":"five_hour","at":"2026-07-31T09:14:00.000Z"}"# : "")
-            + (archived ? #","archived":true"# : "")
+            + (archived ? #","archived":true"# : "") + (repo.map { #","repo":"# + $0 } ?? "")
         let json = """
             {"session_uid":"\(id)","session_id":"\(id)","cwd":"\(cwd)","lifecycle":"\(lifecycle)","link":"attached",\
             "last_seq":3,"created_at":"2026-07-31T09:14:00.000Z","updated_at":"2026-07-31T09:14:00.000Z"\(extra)}
@@ -49,6 +50,26 @@ final class ProjectListTests: XCTestCase {
         XCTAssertEqual(web.name, "web")
         XCTAssertEqual(ids(web.rows), ["wt", "main"])
         XCTAssertEqual(list.projects.first { $0.name == "src" }.map { ids($0.rows) }, ["deep"])
+    }
+
+    /// With the daemon's repository fact a project is its repository: one GitHub remote is one project on every
+    /// computer, whatever its folders; without a remote, its main checkout on its computer, an outside worktree too; a
+    /// session without the fact joins the project whose main checkout is its folder on its computer.
+    func testAProjectIsItsRepository() {
+        let web = #"{"name":"web","remote":"github.com/o/web","main_path":"/src/web"}"#
+        let copy = #"{"name":"web-copy","remote":"github.com/o/web","main_path":"/home/f/web-copy"}"#
+        let list = ProjectList([
+            row("m1", .running, cwd: "/src/web/.claude/worktrees/a", on: "m1", minutes: 3, repo: web),
+            row("m2", .done, cwd: "/home/f/web-copy", on: "m2", minutes: 2, repo: copy),
+            row("old", .done, cwd: "/src/web", on: "m1", minutes: 1),
+            row("other", .done, cwd: "/src/web", on: "m3"),
+            row("ext", .done, cwd: "/wt/feature", on: "m1", repo: #"{"name":"api","main_path":"/src/api"}"#),
+            row("api", .done, cwd: "/src/api", on: "m1", minutes: -1),
+        ])
+        XCTAssertEqual(list.projects.map { ids($0.rows) }, [["m1", "m2", "old"], ["ext", "api"], ["other"]])
+        XCTAssertEqual(list.projects.map(\.sessions), [3, 2, 1])
+        XCTAssertEqual(list.projects[1].name, "api")
+        XCTAssertEqual(list.projects[1].folder, "/src/api")
     }
 
     /// Two projects with one name say their computers when no other of that name is on it, else the folder each is
