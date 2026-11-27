@@ -165,6 +165,18 @@ final class FleetStatusTests: XCTestCase {
         XCTAssertEqual(result, .doneUnreviewed)
     }
 
+    /// Run state 04: a live run whose last turn failed reads Failed, seen or not, until its next prompt starts a turn.
+    func testALiveRunWhoseTurnFailedIsFailedUntilItsNextPrompt() async {
+        let failed = event(3, "turn_complete", #"{"status":"failed","failed":{"message":"Model unavailable"}}"#)
+        let unseen = await status(events: failedTool(1) + [failed], reviewedSeq: 0)
+        XCTAssertEqual(unseen, .failed)
+        let seen = await status(events: failedTool(1) + [failed], reviewedSeq: 99)
+        XCTAssertEqual(seen, .failed)
+        let next = event(4, "user_message", #"{"message":{"role":"user","content":"Try again"}}"#, source: "transcript")
+        let again = await status(events: failedTool(1) + [failed, next])
+        XCTAssertEqual(again, .running)
+    }
+
     /// Seen, a finished turn is still Done, its own case beside the unseen one, and never Idle.
     func testAReviewedTurnIsDoneNotIdle() async {
         let events = failedTool(1) + [event(3, "turn_complete", "{}")]

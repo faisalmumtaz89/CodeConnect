@@ -116,6 +116,23 @@ final class TimelineTurnTests: XCTestCase {
             shape(TimelineBuilder.drawn(items)), ["you", "tool:Bash", "notice:Turn complete"])
     }
 
+    /// Run state 04: a turn that failed ends on a "Turn failed" row in its agent's words, drawn even after a reply,
+    /// since that reply is the error's own text and no end of its own.
+    func testAFailedTurnEndsOnATurnFailedRowEvenAfterAReply() throws {
+        let failed = event(
+            3, "turn_complete",
+            #"{"subtype":"success","is_error":true,"num_turns":1,"failed":{"status":529,"message":"API Error: Repeated 529 Overloaded errors."}}"#,
+            source: "sdk")
+        let items = TimelineBuilder.build([user(1), reply(2, "API Error: Repeated 529 Overloaded errors."), failed])
+        XCTAssertEqual(
+            shape(TimelineBuilder.drawn(items)),
+            ["you", "reply:API Error: Repeated 529 Overloaded errors.", "notice:Turn failed"])
+        guard case .notice(let notice) = try XCTUnwrap(items.last).content else { return XCTFail("a notice") }
+        XCTAssertEqual(notice.kind, .turnComplete, "still the turn's boundary")
+        XCTAssertEqual(notice.severity, .failure)
+        XCTAssertEqual(notice.detail, "API Error: Repeated 529 Overloaded errors.")
+    }
+
     func testATurnWithNothingAfterThePromptKeepsItsTurnCompleteRow() {
         let items = TimelineBuilder.build([user(1), stop(2)])
         XCTAssertEqual(shape(TimelineBuilder.drawn(items)), ["you", "notice:Turn complete"])
