@@ -20,9 +20,10 @@ public struct RunList: Sendable, Equatable {
         ended = rows.filter { $0.status == .ended && !$0.summary.atLimit }
     }
 
-    /// How many runs `computer` has that have not ended: the ones the list shows of it, its count in the head's menu.
-    public static func activeCount(_ rows: [FleetRow], on computer: String) -> Int {
-        rows.count { $0.machineID == computer && ($0.status != .ended || $0.summary.atLimit) }
+    /// How many runs `computer` has, or every computer when nil, that have not ended: the ones the list shows of it,
+    /// its count in the head's menu.
+    public static func activeCount(_ rows: [FleetRow], on computer: String?) -> Int {
+        rows.count { (computer == nil || $0.machineID == computer) && ($0.status != .ended || $0.summary.atLimit) }
     }
 }
 

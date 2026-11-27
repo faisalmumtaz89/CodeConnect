@@ -102,6 +102,10 @@ public struct LimitFoot: Equatable, Sendable {
     /// "<email> · <Plan>", or the account's name alone; nil when the run names no account.
     public let account: String?
 
+    /// The reply box's prompt: `replyPrompt`, or nil when the next message moves the run to another account, since
+    /// that message goes through.
+    public let prompt: String?
+
     /// The reply box's prompt while the run is at its limit.
     public static let replyPrompt = "Send after the reset to carry on"
 
@@ -134,7 +138,8 @@ public struct LimitFoot: Equatable, Sendable {
             title: "\(words(limit.which)) limit reached", resets: resets, resetsAt: reset?.date,
             limits: ReplyBar.limits(facts, now: now),
             full: window.map { AccountSwitchWords.caption(minutes: $0.windowMinutes) },
-            account: name.map { name in plan.map { "\(name) · \($0)" } ?? name })
+            account: name.map { name in plan.map { "\(name) · \($0)" } ?? name },
+            prompt: summary.switching == nil ? replyPrompt : nil)
     }
 
     private static func words(_ which: LimitKind) -> String {

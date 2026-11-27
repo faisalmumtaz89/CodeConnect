@@ -300,7 +300,7 @@ private struct Composer: View {
 
     /// The reply field's prompt: at a usage limit, when a message goes through again.
     private func prompt(_ agent: String) -> String {
-        model.limitFoot(for: key, now: .now) == nil ? SessionWords.replyPrompt(agent) : LimitFoot.replyPrompt
+        model.limitFoot(for: key, now: .now)?.prompt ?? SessionWords.replyPrompt(agent)
     }
 
     private var box: some View {

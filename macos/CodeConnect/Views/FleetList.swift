@@ -487,7 +487,7 @@ private struct ComputerFilter: View {
     private var menu: some View {
         let computers = machines.models.filter(\.showsFleet)
         let fleet = machines.fleet
-        let all = fleet.count { $0.status != .ended }
+        let all = RunList.activeCount(fleet, on: nil)
         return VStack(alignment: .leading, spacing: 0) {
             choice(0, id: "fleet.computers.all", chosen: filter == nil, to: nil) {
                 MenuRow(chosen: filter == nil) {
