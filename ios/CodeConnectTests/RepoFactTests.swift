@@ -17,8 +17,8 @@ final class RepoFactTests: XCTestCase {
 
     func testASummaryNamesItsRepository() throws {
         XCTAssertEqual(
-            try summary(#","repo":{"name":"web","remote":"github.com/faisal/web","main_path":"/web"}"#).repo,
-            RepoFact(name: "web", remote: "github.com/faisal/web", mainPath: "/web"))
+            try summary(#","repo":{"name":"web","remote":"github.com/ada/web","main_path":"/web"}"#).repo,
+            RepoFact(name: "web", remote: "github.com/ada/web", mainPath: "/web"))
         XCTAssertEqual(
             try summary(#","repo":{"name":"web","main_path":"/web"}"#).repo,
             RepoFact(name: "web", remote: nil, mainPath: "/web"), "no remote on GitHub")
