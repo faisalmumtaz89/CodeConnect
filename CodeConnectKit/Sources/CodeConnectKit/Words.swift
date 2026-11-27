@@ -555,9 +555,94 @@ public enum ChangesWords {
         guard let first = numbers.min(), let last = numbers.max() else { return nil }
         return first == last ? "line \(first)" : "lines \(first)–\(last)"
     }
-    /// A comment on a hunk as it is sent to the agent: its anchor, then the words.
+    /// A comment on a hunk as it is sent to the agent: its anchor, the words, then the hunk itself, so the agent reads
+    /// the comment against the lines it is about. At most `Wire.maxComposeBytes`: only the hunk is cut.
     public static func comment(_ text: String, file: UnifiedDiff.FileDiff, hunk: UnifiedDiff.Hunk) -> String {
-        "\(commentAnchor(file: file, hunk: hunk)): \(text)"
+        fitted(
+            head: "\(commentAnchor(file: file, hunk: hunk)): \(text)\n\n",
+            excerpts: [Excerpt(label: "", text: hunk.text, language: "diff")], tail: "")
+    }
+
+    /// A failed check sent to the agent: its name, its first failure line and its log, then the person's words, if any.
+    public static func sendCheck(_ words: String?, check: RunGit.PullRequest.Check) -> String {
+        var head = "The check `\(check.name)` failed"
+        if let line = check.failureLine, !line.isEmpty { head += ": \(line)" }
+        if let url = check.url, !url.isEmpty { head += "\nIts log: \(url)" }
+        return fitted(head: head, excerpts: [], tail: following(words))
+    }
+
+    /// A file's conflict with the base sent to the agent: each conflicting stretch, this branch's lines then the
+    /// base's, then the person's words, if any. At most `Wire.maxComposeBytes`: only the stretches are cut.
+    public static func sendConflict(_ words: String?, path: String, base: String, hunks: [ConflictHunk]) -> String {
+        fitted(
+            head: "`\(path)` conflicts with \(base):\n\n",
+            excerpts: hunks.flatMap { hunk in
+                [
+                    Excerpt(label: "This branch:\n", text: hunk.ours, language: ""),
+                    Excerpt(label: "\(base):\n", text: hunk.theirs, language: ""),
+                ]
+            },
+            tail: following(words))
+    }
+
+    /// The person's words after an excerpt, a blank line apart; nothing when there are none.
+    private static func following(_ words: String?) -> String {
+        guard let words = words?.trimmingCharacters(in: .whitespacesAndNewlines), !words.isEmpty else { return "" }
+        return "\n\n\(words)"
+    }
+
+    /// Lines sent as code: a label over its fenced block, the block's language.
+    private struct Excerpt {
+        let label: String
+        let text: String
+        let language: String
+    }
+
+    /// `head`, each excerpt under its label in a fenced block, then `tail`, in at most `Wire.maxComposeBytes` of UTF-8:
+    /// `head` and `tail` whole, the excerpts cut at a character where the rest does not fit, ending "… (cut)". A fence is
+    /// longer than any run of backticks in its text.
+    private static func fitted(head: String, excerpts: [Excerpt], tail: String) -> String {
+        let cut = "… (cut)"
+        var body = ""
+        let room = { Wire.maxComposeBytes - (head + body + tail).utf8.count }
+        for (index, excerpt) in excerpts.enumerated() {
+            let fence = String(repeating: "`", count: max(3, longestBackticks(excerpt.text) + 1))
+            let open = (index == 0 ? "" : "\n") + excerpt.label + fence + excerpt.language + "\n"
+            let close = (excerpt.text.hasSuffix("\n") ? "" : "\n") + fence
+            if (open + excerpt.text + close).utf8.count <= room() {
+                body += open + excerpt.text + close
+                continue
+            }
+            // Cut here: what fits of this excerpt, its fence closed, and the mark.
+            let suffix = "\n" + fence + "\n" + cut
+            var kept = ""
+            var left = room() - (open + suffix).utf8.count
+            for character in excerpt.text {
+                let size = String(character).utf8.count
+                if size > left { break }
+                kept.append(character)
+                left -= size
+            }
+            if kept.isEmpty {
+                let mark = (body.isEmpty ? "" : "\n") + cut
+                if mark.utf8.count <= room() { body += mark }
+            } else {
+                body += open + kept + suffix
+            }
+            break
+        }
+        return head + body + tail
+    }
+
+    /// The longest run of backticks in `text`.
+    private static func longestBackticks(_ text: String) -> Int {
+        var longest = 0
+        var run = 0
+        for character in text {
+            run = character == "`" ? run + 1 : 0
+            longest = max(longest, run)
+        }
+        return longest
     }
 }
 
