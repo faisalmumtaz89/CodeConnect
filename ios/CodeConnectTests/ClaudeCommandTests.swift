@@ -100,7 +100,7 @@ final class PaletteContentTests: XCTestCase {
     func testBareSlashIsDiscoveryWithEveryRowAndTheCaption() {
         let content = SlashPalette.content(for: "/")
         XCTAssertEqual(content?.rows.map(\.command), ["model", "effort", "compact", "clear", "diff"])
-        XCTAssertEqual(content?.showsCaption, true)
+        XCTAssertEqual(content?.caption, "Any other command goes to Claude Code as typed")
         XCTAssertEqual(
             rows("  /"), rows("/"),
             "leading whitespace is forgiven")
@@ -116,8 +116,8 @@ final class PaletteContentTests: XCTestCase {
         XCTAssertNil(rows("/s"), "no row, no palette")
         for typed in ["/c", "/e"] {
             XCTAssertEqual(
-                SlashPalette.content(for: typed)?.showsCaption,
-                false, "the caption belongs to discovery, not filtering")
+                SlashPalette.content(for: typed)?.caption,
+                nil, "the caption belongs to discovery, not filtering")
         }
     }
 
