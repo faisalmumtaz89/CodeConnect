@@ -1259,9 +1259,15 @@ impl CodexAdapter {
             "completed_at": tfield("completedAt"),
             "duration_ms": tfield("durationMs"),
         });
-        // A failed turn says so in Codex's words (run state 04); a stopped one is `interrupted`.
+        // A failed turn says so in Codex's words (run state 04), an upstream HTTP error's own when Codex passed it
+        // through as its JSON; a stopped one is `interrupted`.
         if status == "failed" {
-            payload["failed"] = json!({ "message": tfield("error")["message"].as_str() });
+            let words = tfield("error")["message"].as_str().map(str::to_string);
+            let upstream = words
+                .as_deref()
+                .and_then(|words| serde_json::from_str::<Value>(words).ok())
+                .and_then(|upstream| upstream["error"]["message"].as_str().map(str::to_string));
+            payload["failed"] = json!({ "message": upstream.or(words) });
         }
         out.push(
             self.event(EventKind::TurnComplete, payload)
