@@ -617,7 +617,7 @@ struct FleetView: View {
         }
         let words = [
             newProjects > 0 ? "\(newProjects) new \(newProjects == 1 ? "project" : "projects")" : nil,
-            newRuns > 0 ? "\(newRuns) new \(newRuns == 1 ? "run" : "runs")" : nil,
+            newRuns > 0 ? "\(newRuns) new \(newRuns == 1 ? "session" : "sessions")" : nil,
             ended > 0 ? "\(ended) ended" : nil,
         ].compactMap { $0 }
         let total = newProjects + newRuns + ended
@@ -794,7 +794,7 @@ struct FleetView: View {
         }
         let live = screen.rows.filter { $0.status != .ended }
         let computers = Set(live.map(\.machineID)).count
-        let overview = "\(live.count) \(live.count == 1 ? "run" : "runs")"
+        let overview = "\(live.count) \(live.count == 1 ? "session" : "sessions")"
             + (narrowedTo ?? (computers > 1 ? " on \(computers) computers" : ""))
         let taken: FleetStatus? =
             screen.decisions > 0 ? .blocked : (live.contains { $0.status == .failed } ? .failed : nil)
@@ -1461,7 +1461,7 @@ struct FleetView: View {
         .frame(minHeight: CC.size.controlLg)
         .padding(.bottom, CC.space.xl)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(band.rows.count) ended runs, collapsed")
+        .accessibilityLabel("\(band.rows.count) ended sessions, collapsed")
     }
 
     // MARK: States

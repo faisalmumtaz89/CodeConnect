@@ -49,11 +49,11 @@ final class EndRunLiveUITests: XCTestCase {
         let app = try launchApp()
         openRun(app, uid: uid)
 
-        let end = app.buttons["End run"]
+        let end = app.buttons["End session"]
         XCTAssertTrue(end.waitForExistence(timeout: 10), "the menu offers End run on a live run CodeConnect started")
         let others = ["Changes", "Link health", "Terminal", "Timeline"].map { app.buttons[$0] }.filter(\.exists)
         XCTAssertFalse(others.isEmpty, "the menu's other items are there")
-        XCTAssertTrue(others.allSatisfy { $0.frame.minY < end.frame.minY }, "End run is the menu's last item")
+        XCTAssertTrue(others.allSatisfy { $0.frame.minY < end.frame.minY }, "End session is the menu's last item")
         keep(app, "1 the menu, End run last")
 
         end.tap()

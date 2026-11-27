@@ -93,7 +93,7 @@ final class FolderTrustLiveUITests: XCTestCase {
     /// the header is up.
     private func agentCount(_ app: XCUIApplication) -> Int {
         if app.staticTexts["Nothing running"].exists { return 0 }
-        let h = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ run.*")).firstMatch
+        let h = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ session.*")).firstMatch
         guard h.exists else { return -1 }
         return Int(h.label.prefix(while: { $0.isNumber })) ?? -1
     }

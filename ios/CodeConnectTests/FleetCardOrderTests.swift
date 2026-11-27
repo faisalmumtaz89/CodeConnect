@@ -369,8 +369,8 @@ final class FleetCardOrderTests: XCTestCase {
         let changes: [(String, Bool, Bool, Bool)] = [
             // (pill, a new project, a new agent, a run gone)
             ("nothing held", false, false, false), ("1 new project", true, false, false),
-            ("1 new run", false, true, false), ("1 ended", false, false, true),
-            ("1 new project · 1 new run · 1 ended", true, true, true),
+            ("1 new session", false, true, false), ("1 ended", false, false, true),
+            ("1 new project · 1 new session · 1 ended", true, true, true),
         ]
         for (type, size) in [(DynamicTypeSize.large, "L"), (.xxxLarge, "xxxL")] {
             var tops: [String: CGFloat] = [:]
@@ -420,7 +420,7 @@ final class FleetCardOrderTests: XCTestCase {
 
         model.adoptSummariesForTesting(base + [try run(alphaTwo, "alpha", updated: "10:04", created: "09:30")])
         let after = try await screen(window)
-        XCTAssertTrue(after.spoken.contains("1 new run"), after.spoken)
+        XCTAssertTrue(after.spoken.contains("1 new session"), after.spoken)
         XCTAssertEqual(after.cards, before.cards)
         assertNoRunMoved(before.rows, after.rows)
     }

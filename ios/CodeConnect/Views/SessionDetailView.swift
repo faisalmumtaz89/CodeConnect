@@ -1284,7 +1284,7 @@ struct SessionDetailView: View {
                 Button(role: .destructive) {
                     confirmingEndRun = true
                 } label: {
-                    Label("End run", image: "power")
+                    Label("End session", image: "power")
                 }
             }
         } label: {
@@ -1405,7 +1405,7 @@ struct SessionDetailView: View {
                 glyph: "folder-dashed",
                 title: "Not on your computer’s list",
                 message:
-                    "This run may have exited, or CodeConnect on your computer restarted since the link was made.",
+                    "This session may have exited, or CodeConnect on your computer restarted since the link was made.",
                 tone: .warning)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
