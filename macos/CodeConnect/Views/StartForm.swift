@@ -395,7 +395,7 @@ struct StartForm: View {
         // Above the chip, as every menu of the box's bar opens (screen 32).
         .overlay(alignment: .bottomLeading) {
             if folderOpen {
-                let placed = PanelPlace.place(widest: 520, leading: folderChip.minX, box: box)
+                let placed = PanelPlace.place(widest: browsing ? 440 : 360, leading: folderChip.minX, box: box)
                 folderPanel(context, width: placed.width).openPanel()
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { folderPanelHeight = $0 }
                     .offset(x: placed.x - folderChip.minX, y: -(InputBoxChip.height + Theme.panelGap))
@@ -414,7 +414,7 @@ struct StartForm: View {
         return min(260, max(room, 44))
     }
 
-    /// Up to 520 pt wide, inside the box (`PanelPlace.place`).
+    /// Up to 360 pt wide, 440 while browsing, inside the box (`PanelPlace.place`).
     private func folderPanel(_ context: StartContext, width: CGFloat) -> some View {
         folderRows(context)
             .frame(width: width - 2 * MenuMetrics.inset)
@@ -481,15 +481,16 @@ struct StartForm: View {
         }
     }
 
-    /// A folder on one line, as screen 32 draws it: its mark, its name, and its path after it, cut at its head. Row
-    /// `index` of the menu's light: ↓ ↑ move it, Return chooses.
+    /// A folder on one line, as screen 32 draws it: its mark, in line with Choose Folder…, its name, and its path after
+    /// it in grey, cut at its head; no check slot, the chip naming the folder chosen. Row `index` of the menu's light:
+    /// ↓ ↑ move it, Return chooses.
     private func folderRow(_ project: StartProject, index: Int) -> some View {
         let choose = { self.choose(project.path) }
         return Button(action: choose) {
-            MenuRow(chosen: folderPath == project.path) {
+            MenuRow {
                 Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.text2).accessibilityHidden(true)
                 Text(project.name).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1).fixedSize()
-                Text(project.shownPath).font(Theme.mono(11.5)).foregroundStyle(Theme.text2).lineLimit(1)
+                Text(project.shownPath).font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1)
                     .truncationMode(.head)
             }
         }

@@ -232,7 +232,7 @@ struct BranchMenu: View {
 
     @FocusState private var backKeys: Bool
 
-    static let width: CGFloat = 440
+    static let width: CGFloat = 360
     /// A line: a menu row and its gap (`MenuRow`).
     static let rowHeight: CGFloat = MenuMetrics.rowHeight + MenuMetrics.rowGap
     static let mostRows = 12

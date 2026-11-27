@@ -708,7 +708,7 @@ private struct AgentAccounts: View {
 }
 
 /// One account's row, the whole of it the choice: the email (else its name) and its plan, "Signed out" in amber, or
-/// its quiet note beneath; its figures under the group's columns, right-aligned, an empty cell where it names no such
+/// its quiet note beneath; the Default titled "Default", its email · plan beneath; its figures under the group's columns, right-aligned, an empty cell where it names no such
 /// window. In use: the Settings selection fill and a leading check; a sign-in waiting on the browser: a spinner there.
 /// Under the pointer: the lighter hover fill, the pointing hand, and, for a row with acts, a "…" at the trailing edge
 /// opening the window's row menu (`RowMenu`), as a run's does (`RunMore`); a right-click on the row opens the same menu
@@ -732,11 +732,12 @@ private struct AccountRow: View {
     let remove: () -> Void
     /// Sign Out… of an agent's own sign-in: asks first, by its group's card.
     var signOut: () -> Void = {}
-    /// The columns' headings on the group's title line: "<length> used" over each.
+    /// The columns' headings on the group's title line: "<length> used" over each, the week's as "Weekly used" (the
+    /// Kit's shared caption is "Week").
     static func headings(_ columns: [String]) -> some View {
         HStack(spacing: 0) {
             ForEach(columns, id: \.self) { caption in
-                Text("\(caption) used").lineLimit(1).frame(width: column, alignment: .trailing)
+                Text("\(caption == AccountSwitchWords.caption(minutes: 10080) ? "Weekly" : caption) used").lineLimit(1).frame(width: column, alignment: .trailing)
             }
         }
         .font(Theme.ui(10.5)).foregroundStyle(Theme.text3)
@@ -797,7 +798,7 @@ private struct AccountRow: View {
                         }
                         .hidden()
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(facts?.email ?? label).font(Theme.ui(13)).foregroundStyle(Theme.text)
+                            Text(id == nil ? label : facts?.email ?? label).font(Theme.ui(13)).foregroundStyle(Theme.text)
                                 .lineLimit(1).truncationMode(.middle)
                                 .accessibilityIdentifier("\(rowID).email")
                             if !secondLine.isEmpty {
@@ -846,9 +847,11 @@ private struct AccountRow: View {
     /// Its share used of each column's window, right-aligned, on the name's line, and beneath it, on the plan's, how long
     /// until that window resets (`AccountSwitchWords.resets`, kept current each minute while the page is shown); an
     /// empty cell where it names no such window. Or, in their place, "No plan limits" where its agent says none apply
-    /// (`limitsAvailable` false), else "Not reported yet".
+    /// (`limitsAvailable` false), else "Not reported yet"; nothing for a signed-out row.
     @ViewBuilder private var figures: some View {
-        if let facts, !ReplyBar.limits(facts, now: .now).isEmpty {
+        if signedOut {
+            EmptyView()
+        } else if let facts, !ReplyBar.limits(facts, now: .now).isEmpty {
             // Redrawn each minute while shown; each countdown is from the time of that drawing, since the schedule's own
             // date is the minute's start, up to 59 s earlier. The figures are the reply bar's (`ReplyBar.limits`).
             TimelineView(.everyMinute) { _ in
@@ -856,9 +859,11 @@ private struct AccountRow: View {
                 HStack(spacing: 0) {
                     ForEach(columns, id: \.self) { caption in
                         let window = limits.first { $0.caption == caption }
+                        let used = window?.usedPercent ?? 0
                         VStack(alignment: .trailing, spacing: 2) {
+                            // Red once the window is spent, amber from 90%.
                             Text(window.map { "\($0.usedPercent)%" } ?? " ").font(Theme.ui(13)).monospacedDigit()
-                                .foregroundStyle((window?.usedPercent ?? 0) >= 90 ? Theme.amber : Theme.text2)
+                                .foregroundStyle(used >= 100 ? Theme.red : used >= 90 ? Theme.amber : Theme.text2)
                             Text(window?.resets ?? " ")
                                 .font(Theme.ui(11.5)).monospacedDigit().foregroundStyle(Theme.text3).lineLimit(1)
                         }
@@ -874,14 +879,16 @@ private struct AccountRow: View {
         }
     }
 
-    /// The plan in the agent's own word, capitalized; "Signed out"; or the row's note; "As set up on this Mac" for a
-    /// Default whose agent hasn't said.
+    /// The plan in the agent's own word, capitalized, after the Default's email ("email · Plan"); "Signed out"; or the
+    /// row's note; "As set up on this Mac" for a Default whose agent hasn't said.
     private var secondLine: String {
         if signedOut { return "Signed out" }
         if let note { return note }
         if signingIn { return AccountSwitchWords.signingIn }
-        if let plan = facts?.plan { return plan.prefix(1).uppercased() + plan.dropFirst() }
-        return id == nil ? "As set up on this Mac" : ""
+        let plan = facts?.plan.map { $0.prefix(1).uppercased() + $0.dropFirst() }
+        guard id == nil else { return plan ?? "" }
+        let said = [facts?.email, plan].compactMap { $0 }.joined(separator: " · ")
+        return said.isEmpty ? "As set up on this Mac" : said
     }
 
     /// The row's "…", the app's row-menu button (`RunMore`'s size, hover and open state): it opens the menu below itself.

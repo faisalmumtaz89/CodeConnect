@@ -14,9 +14,9 @@ struct ModelButton: View {
     @Environment(\.startBox) private var startBox
     /// The button, in `StartForm.space`.
     @State private var chip: CGRect = .zero
-    /// The menu, 440 pt or the box's width, its trailing edge on the button's and inside the box.
+    /// The menu, 340 pt or the box's width, its trailing edge on the button's and inside the box.
     private var placed: (x: CGFloat, width: CGFloat) {
-        let width = startBox.width > 0 ? min(440, startBox.width) : 440
+        let width = startBox.width > 0 ? min(340, startBox.width) : 340
         return (max(startBox.minX, chip.maxX - width), width)
     }
 
