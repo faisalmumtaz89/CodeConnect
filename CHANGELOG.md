@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.32
+
 ## CodeConnect 0.19.31
 
 - On the Mac, the window has a new layout: the list of runs at the side, with a filter for each computer, a header over
