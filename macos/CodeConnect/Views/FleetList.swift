@@ -332,12 +332,16 @@ struct FleetList: View {
         .accessibilityAction { activate() }
         .accessibilityIdentifier("fleet.row.\(row.id)")
         .accessibilityAddTraits(selected ? .isSelected : [])
-        // The run's "…" (decisions 185 and 217): on hover, its panel holding Copy Working Directory, then End Run…
-        // while the run is live, or Remove… once it has ended (an adopted run's at any time); for VoiceOver, which
-        // does not hover, those are the row's own actions.
+        // The run's "…" (decisions 185 and 217): on hover, its panel holding Copy Working Directory, Copy Branch Name
+        // while the run is on a branch, then End Run… while the run is live, or Remove… once it has ended (an adopted
+        // run's at any time); for VoiceOver, which does not hover, those are the row's own actions.
         .accessibilityActions {
             Button("Copy Working Directory") { copyToPasteboard(row.summary.cwd) }
                 .accessibilityIdentifier("fleet.row.\(row.id).copyWorkingDirectoryAction")
+            if let branch = row.summary.gitBranch {
+                Button("Copy Branch Name") { copyToPasteboard(branch) }
+                    .accessibilityIdentifier("fleet.row.\(row.id).copyBranchNameAction")
+            }
             if endable {
                 Button("End Run…") { ending = row }
                     .accessibilityIdentifier("fleet.row.\(row.id).endRunAction")
@@ -351,7 +355,7 @@ struct FleetList: View {
             if more && !selecting {
                 RunMore(
                     id: "fleet.row.\(row.id).more", action: endable ? .endRun : removable ? .remove : nil,
-                    copies: row.summary.cwd
+                    copies: row.summary.cwd, branch: row.summary.gitBranch
                 ) { if endable { ending = row } else { removing = row } }
                 .padding(.trailing, 14)
             }
@@ -361,7 +365,8 @@ struct FleetList: View {
             guard !selecting else { return }
             RunMore.show(
                 menu, at: CGRect(origin: point, size: .zero), id: "fleet.row.\(row.id).more",
-                action: endable ? .endRun : removable ? .remove : nil, copies: row.summary.cwd
+                action: endable ? .endRun : removable ? .remove : nil, copies: row.summary.cwd,
+                branch: row.summary.gitBranch
             ) { if endable { ending = row } else { removing = row } }
         }
         .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
@@ -818,6 +823,8 @@ struct RunMore: View {
     let action: Action?
     /// A run's folder, which the menu's first item copies; none for a computer.
     var copies: String? = nil
+    /// The branch the run is on, which the menu's next item copies; none on a detached head, or before git was read.
+    var branch: String? = nil
     let perform: () -> Void
     #if DEBUG
         /// A render's `-CC_RUN_MENU <uid>` names this run's "…": once shown, it opens a moment later, as a click
@@ -830,7 +837,8 @@ struct RunMore: View {
     private var open: Bool { menu.shown?.owner == id }
 
     var body: some View {
-        Button { Self.show(menu, at: frame, id: id, action: action, copies: copies, perform: perform) } label: {
+        Button { Self.show(menu, at: frame, id: id, action: action, copies: copies, branch: branch, perform: perform)
+        } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.text2)
@@ -851,26 +859,31 @@ struct RunMore: View {
                 guard opensAtLaunch else { return }
                 // After the render has sized and placed its window, as a click comes on a window at rest.
                 try? await Task.sleep(for: .seconds(1))
-                Self.show(menu, at: frame, id: id, action: action, copies: copies, perform: perform)
+                Self.show(menu, at: frame, id: id, action: action, copies: copies, branch: branch, perform: perform)
             }
         #endif
     }
 
     /// The row's menu by `rect` (its "…", or a right-click's point as a zero-size rect): Copy Working Directory when
-    /// it `copies` a folder, then the act on the row's own subject through `perform`.
+    /// it `copies` a folder, Copy Branch Name when it knows a `branch`, then the act on the row's own subject through
+    /// `perform`.
     @MainActor static func show(
-        _ menu: RowMenu, at rect: CGRect, id: String, action: Action?, copies: String? = nil,
+        _ menu: RowMenu, at rect: CGRect, id: String, action: Action?, copies: String? = nil, branch: String? = nil,
         perform: @escaping () -> Void
     ) {
         let copy = copies.map { folder in
             RowMenu.Item(id: "\(id).copyWorkingDirectory", title: "Copy Working Directory", symbol: PanelSymbol.copy,
                          destructive: false) { copyToPasteboard(folder) }
         }
+        let copyBranch = branch.map { branch in
+            RowMenu.Item(id: "\(id).copyBranchName", title: "Copy Branch Name", symbol: PanelSymbol.copy,
+                         destructive: false) { copyToPasteboard(branch) }
+        }
         let act = action.map { action in
             RowMenu.Item(id: "\(id).\(action.id)", title: action.title, symbol: action.symbol, destructive: true,
                          perform: perform)
         }
-        menu.toggle(rect, owner: id, items: [copy, act].compactMap { $0 })
+        menu.toggle(rect, owner: id, items: [copy, copyBranch, act].compactMap { $0 })
     }
 
 }
