@@ -154,6 +154,7 @@ final class ProjectListTests: XCTestCase {
             row("late-card", .blocked, cwd: "/q/late", minutes: 10), row("early-card", .blocked, cwd: "/q/early"),
         ]
         XCTAssertEqual(names(ProjectList(unranked)), ["early", "late"])
+        XCTAssertEqual(names(ProjectList(unranked, deck: ["late-card"])), ["late", "early"], "a card in the Deck first")
         let failures = [
             row("new-fail", .failed, cwd: "/f/new", minutes: 5), row("old-idle", .idle, cwd: "/f/new", minutes: -600),
             row("old-fail", .failed, cwd: "/f/old"),
@@ -215,6 +216,24 @@ final class ProjectListTests: XCTestCase {
         let page = ProjectList(ends + older, revealed: [ProjectList.key(ends[1]): 1], held: held)
         XCTAssertEqual(page.projects[0].rows.count, 27)
         XCTAssertEqual(page.projects[0].earlier, 0)
+        // Held at the second row of the third project, where its own state would put it first in the second: both
+        // places kept, each on its own.
+        let three = [
+            row("first-card", .blocked, cwd: "/h/one"), row("lead", .running, cwd: "/h/two", minutes: 9),
+            row("opened", .blocked, cwd: "/h/two", minutes: 1), row("third", .blocked, cwd: "/h/three"),
+        ]
+        let deck = ["third", "opened", "first-card"]
+        let free = ProjectList(three, deck: deck)
+        XCTAssertEqual(names(free), ["three", "two", "one"])
+        XCTAssertEqual(ids(free.projects[1].rows), ["opened", "lead"])
+        let kept = ProjectList(three, deck: deck, held: ProjectList.Held(session: "opened", projectIndex: 2, rowIndex: 1))
+        XCTAssertEqual(names(kept), ["three", "one", "two"])
+        XCTAssertEqual(ids(kept.projects[2].rows), ["lead", "opened"])
+        // An ended session already shown, opened: nothing moves and nothing more is revealed.
+        let over = (0..<30).map { row("x\($0)", .ended, cwd: "/h/old", minutes: Double($0), lifecycle: "exited") }
+        let shownEnded = ProjectList(over, held: ProjectList.Held(session: "x29", projectIndex: 0, rowIndex: 0, ended: true))
+        XCTAssertEqual(shownEnded.projects[0].rows.count, 25)
+        XCTAssertEqual(shownEnded.projects[0].earlier, 5)
         // Its session gone, a project is held no longer.
         let gone = ProjectList([row("work", .running, cwd: "/p/a", on: "m2"), row("other", .blocked, cwd: "/p/b")], held: held)
         XCTAssertEqual(names(gone), ["b", "a"])

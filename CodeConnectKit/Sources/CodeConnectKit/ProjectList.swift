@@ -13,11 +13,14 @@ public struct ProjectList: Sendable, Equatable {
         public let session: String
         public let projectIndex: Int
         public let rowIndex: Int
+        /// It had ended when it was opened: it keeps its place among the ended sessions shown.
+        public let ended: Bool
 
-        public init(session: String, projectIndex: Int, rowIndex: Int) {
+        public init(session: String, projectIndex: Int, rowIndex: Int, ended: Bool = false) {
             self.session = session
             self.projectIndex = projectIndex
             self.rowIndex = rowIndex
+            self.ended = ended
         }
     }
 
@@ -120,13 +123,21 @@ public struct ProjectList: Sendable, Equatable {
             }
             let sorted = kept.sorted(by: Self.before)
             let live = sorted.filter { Self.rank($0) < Self.endedRank }
-            // The open session, ended, stays shown and takes no place in a reveal.
-            let openEnded = sorted.first { $0.id == open && Self.rank($0) == Self.endedRank }
-            let ended = sorted.filter { Self.rank($0) == Self.endedRank && $0.id != open }
+            let ended = sorted.filter { Self.rank($0) == Self.endedRank }
             let reveals = revealed[key] ?? 0
             let reveal = min(ended.count, (live.isEmpty ? 1 + reveals : reveals) * Self.page)
-            var rows = live + ended.prefix(reveal) + (openEnded.map { [$0] } ?? [])
-            let earlier = ended.count - reveal
+            var rows = live + ended.prefix(reveal)
+            var earlier = ended.count - reveal
+            // A session that ended while it was open stays shown, after what is revealed, and takes no place in a reveal;
+            // one opened ended keeps its place, and stays shown should a reveal fold back over it.
+            if let opened = ended.first(where: { $0.id == open }),
+                held?.ended == false || !rows.contains(where: { $0.id == open })
+            {
+                let others = ended.filter { $0.id != open }
+                let page = min(others.count, reveal)
+                rows = live + others.prefix(page) + [opened]
+                earlier = others.count - page
+            }
             if let held, let at = rows.firstIndex(where: { $0.id == held.session }) {
                 let row = rows.remove(at: at)
                 rows.insert(row, at: min(held.rowIndex, rows.count))
