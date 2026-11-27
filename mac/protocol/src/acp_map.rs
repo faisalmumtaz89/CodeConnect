@@ -139,13 +139,15 @@ pub fn read(
         let words = error["message"]
             .as_str()
             .unwrap_or("the agent refused the prompt");
+        let mut end = turn_end("error");
+        end.payload["failed"] = json!({ "message": error["message"].as_str() });
         return Read::Events(vec![
             event(
                 EventKind::Error,
                 format!("{run}/error/{seq}"),
                 json!({ "message": words }),
             ),
-            turn_end("error"),
+            end,
         ]);
     }
     Read::Events(Vec::new())

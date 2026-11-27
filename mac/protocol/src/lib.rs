@@ -1031,7 +1031,12 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     the run works in a `.claude/worktrees/<name>` folder of its own that it keeps, never on an archived run. An app
 ///     ends such a run's conversation "You ended this run", with "its worktree and branch are kept" when it keeps one.
 ///     A daemon below 69 sends neither: an app says "This run has ended".
-pub const PROTOCOL_MINOR: u32 = 69;
+///   * `70` — **A failed turn says so.**
+///
+///     A [`event::EventKind::TurnComplete`] of a turn that failed, and that the person did not stop, carries
+///     `failed`: `{"status": <its HTTP status, when the agent gave one>, "message": <the agent's words, or null>}`.
+///     A daemon below 70 sends none, and an app reads such a turn's end as an ordinary one.
+pub const PROTOCOL_MINOR: u32 = 70;
 
 #[cfg(test)]
 mod ledger_tests {

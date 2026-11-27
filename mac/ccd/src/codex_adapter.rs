@@ -1252,13 +1252,17 @@ impl CodexAdapter {
 
         // The turn terminal itself.
         let tfield = |k: &str| turn.get(k).cloned().unwrap_or(Value::Null);
-        let payload = json!({
+        let mut payload = json!({
             "status": status,
             "error": tfield("error"),
             "started_at": tfield("startedAt"),
             "completed_at": tfield("completedAt"),
             "duration_ms": tfield("durationMs"),
         });
+        // A failed turn says so in Codex's words (run state 04); a stopped one is `interrupted`.
+        if status == "failed" {
+            payload["failed"] = json!({ "message": tfield("error")["message"].as_str() });
+        }
         out.push(
             self.event(EventKind::TurnComplete, payload)
                 .with_source_event_id(turn_terminal_source_event_id(tid, turn_id))
@@ -2931,13 +2935,17 @@ mod tests {
             let end = of_kind(&live, &EventKind::TurnComplete);
             serde_json::from_str::<Value>(&end.last().expect("its end").2).expect("a payload")
         };
-        let failed = end(include_str!("../../../fixtures/codex/resume-failed-turn-0.164.0.json"));
+        let failed = end(include_str!(
+            "../../../fixtures/codex/resume-failed-turn-0.164.0.json"
+        ));
         assert_eq!(
             failed["failed"],
             json!({"message": failed["error"]["message"].clone()})
         );
         assert!(failed["failed"]["message"].is_string());
-        let stopped = end(include_str!("../../../fixtures/codex/resume-interrupted-turn-0.164.0.json"));
+        let stopped = end(include_str!(
+            "../../../fixtures/codex/resume-interrupted-turn-0.164.0.json"
+        ));
         assert_eq!(stopped["status"], "interrupted");
         assert_eq!(stopped.get("failed"), None);
     }

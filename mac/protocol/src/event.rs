@@ -167,6 +167,9 @@ pub enum EventKind {
     /// SDK's `result`, which the run's agent host relays as the turn ends (an
     /// earlier build filed it from the transcript or the Stop hook). The session
     /// is still alive and takes the next message.
+    ///
+    /// A turn that failed, and that the person did not stop, carries `failed` (minor 70):
+    /// `{"status": <its HTTP status, when the agent gave one>, "message": <the agent's words, or null>}`.
     TurnComplete,
     /// A tool is about to run (PreToolUse). Observability, never the gate.
     ToolCall,

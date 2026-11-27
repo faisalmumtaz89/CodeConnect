@@ -208,14 +208,14 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
         (Some("result"), _) => {
             // A command's own turn (/compact, /clear, /effort) names its command in
             // `local_command`; claude's other ends, an agent turn's among them, carry none.
-            mapped.events.push(event(
-                EventKind::TurnComplete,
-                0,
-                pick(
-                    message,
-                    &["subtype", "is_error", "num_turns", "local_command"],
-                ),
-            ));
+            let mut end = pick(
+                message,
+                &["subtype", "is_error", "num_turns", "local_command"],
+            );
+            if let Some(failed) = failed(message) {
+                end["failed"] = failed;
+            }
+            mapped.events.push(event(EventKind::TurnComplete, 0, end));
             mapped.events.push(event(
                 EventKind::Usage,
                 1,
@@ -246,6 +246,46 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
         _ => {}
     }
     mapped
+}
+
+/// How a `result` that failed says so ([`EventKind::TurnComplete`]'s `failed`): its HTTP status, when claude gave
+/// one, and its words, its `result` or else its `errors`. None for a result that did not fail, for a turn the person
+/// stopped (`aborted_streaming`, `aborted_tools`), and for an `error_during_execution` that names no reason, which may
+/// be a stop.
+fn failed(result: &Value) -> Option<Value> {
+    if result.get("is_error") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    match result.get("terminal_reason").and_then(Value::as_str) {
+        Some("aborted_streaming" | "aborted_tools") => return None,
+        None if result.get("subtype").and_then(Value::as_str) == Some("error_during_execution") => {
+            return None
+        }
+        _ => {}
+    }
+    let words = result
+        .get("result")
+        .and_then(Value::as_str)
+        .filter(|words| !words.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let errors: Vec<&str> = result
+                .get("errors")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            (!errors.is_empty()).then(|| errors.join("\n"))
+        });
+    let mut failed = Map::new();
+    if let Some(status) = result
+        .get("api_error_status")
+        .filter(|status| status.is_u64())
+    {
+        failed.insert("status".into(), status.clone());
+    }
+    failed.insert("message".into(), words.map_or(Value::Null, Value::String));
+    Some(Value::Object(failed))
 }
 
 /// The fields of `value` named in `keys` that it has, and no others.
@@ -442,15 +482,19 @@ mod tests {
                 .expect("its end")
                 .payload
         };
-        let overloaded = end(json!({"type": "result", "subtype": "success", "uuid": "r1", "is_error": true,
+        let overloaded = end(
+            json!({"type": "result", "subtype": "success", "uuid": "r1", "is_error": true,
             "api_error_status": 529, "num_turns": 1, "terminal_reason": "api_error",
-            "result": "API Error: Repeated 529 Overloaded errors."}));
+            "result": "API Error: Repeated 529 Overloaded errors."}),
+        );
         assert_eq!(
             overloaded["failed"],
             json!({"status": 529, "message": "API Error: Repeated 529 Overloaded errors."})
         );
-        let turns = end(json!({"type": "result", "subtype": "error_max_turns", "uuid": "r2", "is_error": true,
-            "num_turns": 9, "errors": ["Reached maximum number of turns (9)"]}));
+        let turns = end(
+            json!({"type": "result", "subtype": "error_max_turns", "uuid": "r2", "is_error": true,
+            "num_turns": 9, "errors": ["Reached maximum number of turns (9)"]}),
+        );
         assert_eq!(
             turns["failed"],
             json!({"message": "Reached maximum number of turns (9)"})
@@ -463,8 +507,10 @@ mod tests {
             }
             assert_eq!(end(stopped).get("failed"), None, "{reason:?}");
         }
-        let ordinary = end(json!({"type": "result", "subtype": "success", "uuid": "r4", "is_error": false,
-            "num_turns": 1, "result": "Done.", "terminal_reason": "completed"}));
+        let ordinary = end(
+            json!({"type": "result", "subtype": "success", "uuid": "r4", "is_error": false,
+            "num_turns": 1, "result": "Done.", "terminal_reason": "completed"}),
+        );
         assert_eq!(ordinary.get("failed"), None);
         assert!(mapped()
             .0
