@@ -571,7 +571,8 @@ struct FleetList: View {
         return HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Theme.text3)
             TextField(
-                "", text: Binding(get: { layout.search ?? "" }, set: { layout.search = $0 }),
+                // Its last words, written as it leaves the keyboard, never open search again once it is closed.
+                "", text: Binding(get: { layout.search ?? "" }, set: { if layout.search != nil { layout.search = $0 } }),
                 prompt: Text(RunListWords.search).foregroundStyle(Theme.text3)
             )
             .textFieldStyle(.plain)
