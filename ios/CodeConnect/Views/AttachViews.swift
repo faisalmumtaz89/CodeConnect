@@ -153,13 +153,22 @@ struct AttachmentTray: View {
             }
             if let reason {
                 Label {
-                    Text(reason)
+                    // One line: a file's own reason leads with its name, which gives way in its middle.
+                    if let name = files.first(where: { reason.hasPrefix($0.name) })?.name {
+                        HStack(spacing: 0) {
+                            Text(verbatim: name).lineLimit(1).truncationMode(.middle)
+                            Text(verbatim: String(reason.dropFirst(name.count))).lineLimit(1).layoutPriority(1)
+                        }
+                    } else {
+                        Text(reason).lineLimit(1).truncationMode(.tail)
+                    }
                 } icon: {
                     Image(systemName: "exclamationmark.circle").accessibilityHidden(true)
                 }
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.color.warning)
-                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(reason)
                 .accessibilityIdentifier("attach.problem")
             }
         }

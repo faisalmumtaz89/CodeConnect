@@ -1174,7 +1174,7 @@ struct SessionDetailView: View {
 
     /// **Who this is, as the bar's title**: the session's title (its first message, else its folder), and under it,
     /// on one line, where it runs: the folder › the branch · the computer, by the Mac's or Linux's mark. Each part stays
-    /// on one line; short of room the branch gives way first, in its middle, then the folder at its end, the computer
+    /// on one line; short of room the branch (in its middle) and the computer (at its end) give way together, the folder
     /// last. It stops growing where iOS's own bar titles do, since a bar has one height. A long press copies the whole
     /// path.
     private var barTitle: some View {
@@ -1187,17 +1187,17 @@ struct SessionDetailView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             HStack(spacing: 4) {
-                Text(verbatim: label.project).lineLimit(1).truncationMode(.tail).layoutPriority(1)
+                Text(verbatim: label.project).lineLimit(1).truncationMode(.tail).layoutPriority(2)
                 if let branch {
                     Text(verbatim: "›").foregroundStyle(CC.text.tertiary)
                     Text(verbatim: branch).font(.system(size: 11.5, design: .monospaced))
-                        .lineLimit(1).truncationMode(.middle)
+                        .lineLimit(1).truncationMode(.middle).layoutPriority(1)
                 }
                 if let computer {
                     Text(verbatim: "·").foregroundStyle(CC.text.tertiary)
                     Image(systemName: model.machineOS == "linux" ? "server.rack" : "desktopcomputer")
                         .font(.system(size: 10)).accessibilityHidden(true)
-                    Text(verbatim: computer).lineLimit(1).truncationMode(.tail).layoutPriority(2)
+                    Text(verbatim: computer).lineLimit(1).truncationMode(.tail).layoutPriority(1)
                 }
             }
             .ccType(CC.type.footnote)
