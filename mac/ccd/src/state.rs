@@ -5034,7 +5034,9 @@ impl Daemon {
                 // names. Lexical, so it costs nothing on a read this hot. See
                 // `project_label`.
                 project_label: crate::project_label::project_label(&row.cwd),
-                in_worktree: crate::project_label::in_worktree(&row.cwd),
+                // An archived run's worktree and branch are gone: only a run that keeps them is listed so.
+                in_worktree: !archived.contains(&row.session_uid)
+                    && crate::project_label::in_worktree(&row.cwd),
                 cwd: row.cwd,
                 lifecycle: row.lifecycle,
                 link,

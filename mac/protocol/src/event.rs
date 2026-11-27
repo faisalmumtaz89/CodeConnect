@@ -584,8 +584,8 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
     /// The run works in a worktree of its own (a `.claude/worktrees/<name>` folder, as a start in a new worktree and
-    /// claude's own `--worktree` make one), so its folder and branch stay when it ends. Omitted when false, and from
-    /// an older daemon.
+    /// claude's own `--worktree` make one), so its folder and branch stay when it ends; never on an [`Self::archived`]
+    /// run, whose worktree and branch are gone. Omitted when false, and from an older daemon.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_worktree: bool,
 }
