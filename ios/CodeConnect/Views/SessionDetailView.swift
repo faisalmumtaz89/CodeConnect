@@ -2072,12 +2072,6 @@ private struct SessionComposeBar: View {
             // highest-traffic control.
             standingNote
             byteCounter
-            if !files.isEmpty {
-                AttachmentTray(
-                    files: files, reason: model.filesBlockedReason(for: key),
-                    onRemove: { model.removeFile($0, from: key) },
-                    onRetry: { model.retryFile($0, in: key) })
-            }
             // At a usage limit, the Mac's band over the box: which limit, when it resets, the windows.
             LimitBand(model: model, key: key)
             composer
@@ -2102,6 +2096,15 @@ private struct SessionComposeBar: View {
     /// the keyboard say it has focus, and the rim stays as it rests.
     private var composer: some View {
         VStack(spacing: 0) {
+            // The files that go with the message, inside the box over its field.
+            if !files.isEmpty {
+                AttachmentTray(
+                    files: files, reason: model.filesBlockedReason(for: key),
+                    onRemove: { model.removeFile($0, from: key) },
+                    onRetry: { model.retryFile($0, in: key) })
+                .padding(.top, 4)
+                .padding(.horizontal, 14)
+            }
             Group {
                 if dictation.isRecording {
                     transcript
