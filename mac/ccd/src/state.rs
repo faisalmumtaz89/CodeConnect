@@ -8636,7 +8636,7 @@ mod tests {
         git(&app, &["init", "-q", "-b", "main"]);
         git(
             &app,
-            &["remote", "add", "origin", "git@github.com:Faisal/App.git"],
+            &["remote", "add", "origin", "git@github.com:Ada/App.git"],
         );
         git(&next, &["init", "-q", "-b", "main"]);
         std::fs::create_dir_all(&plain).unwrap();
@@ -8644,7 +8644,7 @@ mod tests {
             |dir: &std::path::Path| dir.canonicalize().unwrap().to_str().unwrap().to_string();
         let app_repo = protocol::event::RepoFact {
             name: "app".into(),
-            remote: Some("github.com/faisal/app".into()),
+            remote: Some("github.com/ada/app".into()),
             main_path: real(&app),
         };
 
@@ -8740,7 +8740,7 @@ mod tests {
         .await;
         git(
             &next,
-            &["remote", "add", "origin", "https://github.com/faisal/next"],
+            &["remote", "add", "origin", "https://github.com/ada/next"],
         );
         moved(2, &next).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
