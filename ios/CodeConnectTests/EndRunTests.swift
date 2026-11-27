@@ -17,7 +17,7 @@ final class EndRunTests: XCTestCase {
         XCTAssertEqual(end.title, "End “query-parser”?")
         XCTAssertEqual(end.items.map(\.words), ["Codex stops", "The session moves to Ended"])
         XCTAssertEqual(end.note, "Its folder stays as it is.")
-        XCTAssertEqual([end.cancel, end.confirm], ["Cancel", "End Run"])
+        XCTAssertEqual([end.cancel, end.confirm], ["Cancel", "End Session"])
         XCTAssertEqual(end.message, "Codex stops. The session moves to Ended. Its folder stays as it is.")
     }
 

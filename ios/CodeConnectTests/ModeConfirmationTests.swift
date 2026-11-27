@@ -33,7 +33,7 @@ final class ModeConfirmationTests: XCTestCase {
         for agent in [AgentKind.claude, .codex] {
             let w = ModeConfirmation.words(for: agent)
             XCTAssertFalse(w.message.lowercased().contains("safe"), w.message)
-            XCTAssertTrue(w.note.hasPrefix("In this run"), w.note)
+            XCTAssertTrue(w.note.hasPrefix("In this session"), w.note)
             XCTAssertTrue(w.note.contains("until you change the mode back"), w.note)
         }
     }
