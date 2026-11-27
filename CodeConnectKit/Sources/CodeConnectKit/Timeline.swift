@@ -246,10 +246,9 @@ public enum TimelineBuilder {
         /// minute the reader took to answer.
         var questionToolUseIDs: Set<String> = []
         var lastTurnEndSeq: UInt64 = 0
-        // Claude's reply naming an API error, by seq, when its turn's end says the turn failed: that end's row says
-        // it (run state 04). One whose end says nothing is drawn as any reply.
-        var apiErrorReply: UInt64?
-        var failedTurnReplies: Set<UInt64> = []
+        // The turns whose end says they failed (run state 04): that end's row says what failed, so the turn's own
+        // error words (Claude's API error reply, an agent's `error`) draw no row of their own.
+        var failedTurns: Set<String> = []
         // The sends a Stop cancelled, by request_id: their person-message rows read
         // "Not sent: stopped" and the `send_not_sent` notice itself draws no row.
         var stoppedSends: Set<String> = []
@@ -260,7 +259,6 @@ public enum TimelineBuilder {
                 if let id = event.toolUseID { hookToolCallIDs.insert(id) }
             case .agentMessage:
                 for use in event.agentToolUses { transcriptToolUseSeqs[use.id] = event.seq }
-                if event.payload["isApiErrorMessage"]?.boolValue == true { apiErrorReply = event.seq }
             case .toolResult:
                 absorbResult(event, into: &resultsByToolUse)
             case .approvalResolved:
@@ -289,8 +287,7 @@ public enum TimelineBuilder {
                 // Both close a turn, which is what an unresolved tool call is
                 // measured against. Only one of them also ends the session.
                 lastTurnEndSeq = max(lastTurnEndSeq, event.seq)
-                if event.turnFailure != nil, let reply = apiErrorReply { failedTurnReplies.insert(reply) }
-                apiErrorReply = nil
+                if event.turnFailure != nil, let turn = event.turnID { failedTurns.insert(turn) }
             default:
                 break
             }
@@ -434,7 +431,10 @@ public enum TimelineBuilder {
             case .agentMessage:
                 // Claude's resume placeholder is not a reply: no row, and so
                 // no activity on the fleet.
-                if event.isClaudePlaceholderReply || failedTurnReplies.contains(event.seq) { break }
+                if event.isClaudePlaceholderReply { break }
+                if event.payload["isApiErrorMessage"]?.boolValue == true, event.turnID.map(failedTurns.contains) == true {
+                    break
+                }
                 if let text = event.agentText {
                     items.append(
                         event.item(.agentMessage(text, isInterrupted: event.isInterruptedItem)))
@@ -623,6 +623,7 @@ public enum TimelineBuilder {
                                 severity: fact.link == "attached" ? .info : .warning))))
 
             case .error:
+                if event.turnID.map(failedTurns.contains) == true { break }
                 items.append(
                     event.item(
                         .notice(

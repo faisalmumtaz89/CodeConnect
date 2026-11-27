@@ -170,7 +170,8 @@ pub fn map(session: &SessionKey, turn: Option<&str>, message: &Value) -> Mapped 
                 if let Some(inner) = message.get("message") {
                     payload.insert("message".into(), pick(inner, &["model", "content"]));
                 }
-                if flag("isApiErrorMessage") {
+                // An API error's reply: the SDK names it by its `error`; a transcript-era claude flagged it.
+                if flag("isApiErrorMessage") || text("error").is_some() {
                     payload.insert("isApiErrorMessage".into(), Value::Bool(true));
                 }
                 mapped
