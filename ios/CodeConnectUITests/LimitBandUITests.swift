@@ -22,7 +22,8 @@ final class LimitBandUITests: XCTestCase {
         app.launchArguments = [
             "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1",
             "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", accounts,
-            "-CC_OPEN", "cx-1", "-CC_FIXTURE_LIMIT", "five_hour",
+            // cx-1 by its key, its session_uid.
+            "-CC_OPEN", "01CX000000000000000000DEF1", "-CC_FIXTURE_LIMIT", "five_hour",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ]
         app.launch()

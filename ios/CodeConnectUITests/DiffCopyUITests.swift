@@ -21,11 +21,8 @@ final class DiffCopyUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(session.waitForExistence(timeout: 30), "the fixture fleet has rows")
         session.tap()
-        let more = app.buttons["session-more"]
-        XCTAssertTrue(more.waitForExistence(timeout: 20), "the session bar's menu")
-        more.tap()
-        let diff = app.buttons.matching(NSPredicate(format: "label == 'Changes'")).firstMatch
-        XCTAssertTrue(diff.waitForExistence(timeout: 10), "the menu offers the changes")
+        let diff = app.buttons["session-changes"]
+        XCTAssertTrue(diff.waitForExistence(timeout: 20), "the changes, at the session bar's end")
         diff.tap()
 
         // The sample's Makefile hunk is last; scroll it into reach.

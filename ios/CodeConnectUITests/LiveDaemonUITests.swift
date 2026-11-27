@@ -66,11 +66,8 @@ final class LiveDaemonUITests: XCTestCase {
             guard row.waitForExistence(timeout: 15) else { continue }
             row.tap()
 
-            let more = app.buttons["session-more"]
-            XCTAssertTrue(more.waitForExistence(timeout: 20), "the session bar's menu")
-            more.tap()
-            let diff = app.buttons.matching(NSPredicate(format: "label == 'Changes'")).firstMatch
-            XCTAssertTrue(diff.waitForExistence(timeout: 10), "the menu offers the changes")
+            let diff = app.buttons["session-changes"]
+            XCTAssertTrue(diff.waitForExistence(timeout: 20), "the changes, at the session bar's end")
             diff.tap()
 
             // Either a rendered diff or an explicit reason. What must never

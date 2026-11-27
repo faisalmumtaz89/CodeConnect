@@ -396,12 +396,9 @@ struct RenderDriver {
         more.tap()
     }
 
-    /// The session's changes, from the bar's menu.
+    /// The session's changes, from the button at the bar's end.
     func openChanges(_ app: XCUIApplication) throws {
-        try openSessionMenu(app)
-        let changes = app.buttons.matching(NSPredicate(format: "label == 'Changes'")).firstMatch
-        try require(changes, "the changes in the session bar's menu")
-        changes.tap()
+        try require(app.buttons["session-changes"], "the changes at the session bar's end").tap()
     }
 
     /// Focuses the composer and types. A vertical-axis TextField is backed
@@ -1042,7 +1039,7 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
                 // One row holds the name and, under it, the description as the agent sends it, price included.
-                try driver.require(
+                try driver.requireExists(
                     driver.element(containing: "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok", in: app),
                     "the Sonnet row with its description")
             }),
@@ -1138,7 +1135,7 @@ enum RenderCatalog {
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 100),
-                "-CC_OPEN", "cx-1", "-CC_FIXTURE_LIMIT", "five_hour",
+                "-CC_OPEN", "01CX000000000000000000DEF1", "-CC_FIXTURE_LIMIT", "five_hour",
             ],
             reach: { app, driver in
                 try driver.requireExists(app.descendants(matching: .any)["session.limit"], "the band")
