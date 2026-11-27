@@ -1419,7 +1419,7 @@ struct SessionDetailView: View {
         // is just a message that happens to start with a slash, and it goes
         // through `compose` like any other.
         guard summary?.isCodex != true else { return nil }
-        return SlashPalette.content(for: composeText, agent: summary?.agent ?? .claude)
+        return SlashPalette.content(for: composeText, agent: summary?.agent ?? .claude, changes: summary?.diffStat)
     }
 
     /// One place to show a compose outcome that did not go through `send()` —

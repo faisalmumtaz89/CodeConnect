@@ -19,12 +19,14 @@ struct SlashPanel: View {
                             .foregroundStyle(Theme.text3)
                             .frame(width: 14)
                             .accessibilityHidden(true)
-                        Text(verbatim: row.title).font(Theme.mono(12)).foregroundStyle(Theme.text).fixedSize()
-                        ModelDetail(text: row.subtitle)
+                        Text(verbatim: row.title).font(Theme.mono(12))
+                            .foregroundStyle(row.unavailable == nil ? Theme.text : Theme.text3).fixedSize()
+                        ModelDetail(text: row.unavailable ?? row.subtitle)
                     }
                     .environment(\.menuRowLit, index == lit)
                 }
                 .buttonStyle(.panelRow)
+                .disabled(row.unavailable != nil)
                 .onHover { if $0 { light(index) } }
                 .accessibilityLabel(row.title)
                 .accessibilityIdentifier("session.slash.\(row.command)")

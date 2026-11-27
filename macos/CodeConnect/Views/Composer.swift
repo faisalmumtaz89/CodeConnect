@@ -166,7 +166,8 @@ private struct Composer: View {
     /// `SlashPalette`: the commands this app answers itself, as the iPhone offers them). A Codex run has no slash
     /// vocabulary.
     private var slash: SlashPalette.Content? {
-        slashLatch.content(for: kept.reply, agent: summary?.agent, focused: fieldFocused && panel == nil)
+        slashLatch.content(
+            for: kept.reply, agent: summary?.agent, changes: summary?.diffStat, focused: fieldFocused && panel == nil)
     }
 
     /// A palette row, as the typed command would go: the same `route`, then the palette stays closed.
@@ -338,7 +339,7 @@ private struct Composer: View {
                             case .downArrow: .down
                             default: .return(addsLine: press.modifiers.contains(.shift) || press.modifiers.contains(.option))
                             }
-                        switch SlashPalette.outcome(of: key, rows: slash.rows.count, highlighted: slashLit) {
+                        switch SlashPalette.outcome(of: key, rows: slash.rows, highlighted: slashLit) {
                         case .highlight(let row): slashLit = row
                         case .run(let row): runSlash(slash.rows[row])
                         case .close: slashLatch.close()

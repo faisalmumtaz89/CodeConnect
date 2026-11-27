@@ -233,6 +233,8 @@ public struct SlashRow: Equatable, Identifiable, Sendable {
     public let command: String
     public let subtitle: String
     public let action: CommandAction
+    /// Why it can't be chosen now, said in place of its subtitle; nil when it can.
+    public var unavailable: String? = nil
 
     public var id: String { command }
     public var title: String { "/\(command)" }
@@ -261,6 +263,9 @@ public enum SlashPalette {
         SlashRow(command: "diff", subtitle: "Review working-tree changes", action: .nativeDiff),
     ]
 
+    /// What a dimmed `/diff` says: the run's computer counted no changed lines.
+    public static let noChanges = "No changes yet"
+
     /// The rows `agent` takes: all five for Claude Code; Antigravity has no `/clear`, so not that one.
     public static func rows(for agent: AgentKind) -> [SlashRow] {
         agent == .antigravity ? allRows.filter { $0.command != "clear" } : allRows
@@ -268,12 +273,18 @@ public enum SlashPalette {
 
     /// The palette for one text on `agent`'s run, or nil for none. Bare `/` is the discovery moment: every row and the
     /// caption. A fragment filters case-insensitively. Whitespace after the fragment means arguments are coming, and
-    /// arguments are typing, not browsing.
-    public static func content(for typed: String, agent: AgentKind = .claude) -> Content? {
+    /// arguments are typing, not browsing. `/diff` is dimmed while the run's changed lines (`changes`) count none; a
+    /// run whose count is not known keeps it.
+    public static func content(for typed: String, agent: AgentKind = .claude, changes: DiffStat? = nil) -> Content? {
         let afterLeading = typed.drop(while: \.isWhitespace)
         guard afterLeading.hasPrefix("/") else { return nil }
         let fragment = afterLeading.dropFirst()
-        let offered = rows(for: agent)
+        let none = changes.map { $0.added + $0.removed == 0 } ?? false
+        let offered = rows(for: agent).map { row in
+            var row = row
+            if none && row.action == .nativeDiff { row.unavailable = noChanges }
+            return row
+        }
         if fragment.isEmpty {
             return Content(rows: offered, caption: caption(for: agent))
         }
@@ -298,9 +309,9 @@ public enum SlashPalette {
 
         /// The palette for `draft` on a Claude or Antigravity run (`agent`) whose reply box has the keyboard, unless it
         /// is closed; a Codex run has no slash vocabulary.
-        public func content(for draft: String, agent: AgentKind?, focused: Bool) -> Content? {
+        public func content(for draft: String, agent: AgentKind?, changes: DiffStat?, focused: Bool) -> Content? {
             guard let agent, agent == .claude || agent == .antigravity, focused, !closed else { return nil }
-            return SlashPalette.content(for: draft, agent: agent)
+            return SlashPalette.content(for: draft, agent: agent, changes: changes)
         }
     }
 
@@ -325,21 +336,22 @@ public enum SlashPalette {
         case toBox
     }
 
-    /// What `key` does with `rows` rows showing (0: no palette) and row `highlighted` lit. The first row is lit when the
-    /// palette shows; ↑ and ↓ move the light and stop at the ends; Return runs the lit row; ⇧Return and ⌥Return add a
-    /// line, palette or not; Esc closes the palette. With no palette every other key is the box's. The light is a menu
-    /// panel's (`MenuLight`), every row one that can be run.
-    public static func outcome(of key: Key, rows: Int, highlighted: Int) -> KeyOutcome {
+    /// What `key` does with `rows` showing (none: no palette) and row `highlighted` lit. The first row is lit when the
+    /// palette shows; ↑ and ↓ move the light, past a dimmed row, and stop at the ends; Return runs the lit row, and
+    /// on a dimmed one does nothing; ⇧Return and ⌥Return add a line, palette or not; Esc closes the palette. With no
+    /// palette every other key is the box's. The light is a menu panel's (`MenuLight`).
+    public static func outcome(of key: Key, rows: [SlashRow], highlighted: Int) -> KeyOutcome {
         if case .return(addsLine: true) = key { return .addLine }
-        guard rows > 0 else { return .toBox }
-        let lit = min(max(highlighted, 0), rows - 1)
+        guard !rows.isEmpty else { return .toBox }
+        let lit = min(max(highlighted, 0), rows.count - 1)
         var light = MenuLight(lit: lit)
-        let enabled = Array(repeating: true, count: rows)
+        let enabled = rows.map { $0.unavailable == nil }
         switch key {
         case .up: _ = light.press(.up, enabled: enabled)
         case .down: _ = light.press(.down, enabled: enabled)
         case .escape: return .close
-        case .return: return .run(lit)
+        // A dimmed row runs nothing, as a menu's dimmed item: the light stays, and the words stay in the box.
+        case .return: return enabled[lit] ? .run(lit) : .highlight(lit)
         }
         return .highlight(light.lit ?? lit)
     }

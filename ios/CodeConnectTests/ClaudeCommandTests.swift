@@ -132,18 +132,21 @@ final class PaletteContentTests: XCTestCase {
     /// edit (the latch kept the draft it closed on, and "/" typed again matched it), so Return sent a bare "/".
     func testThePaletteComesBackOnTheNextEdit() {
         var latch = SlashPalette.Latch()
-        XCTAssertNotNil(latch.content(for: "/", agent: .claude, focused: true))
+        func palette(_ draft: String, _ agent: AgentKind = .claude, focused: Bool = true) -> SlashPalette.Content? {
+            latch.content(for: draft, agent: agent, changes: nil, focused: focused)
+        }
+        XCTAssertNotNil(palette("/"))
         latch.close()  // /model ran from the palette
-        XCTAssertNil(latch.content(for: "/", agent: .claude, focused: true), "closed on the draft it ran from")
+        XCTAssertNil(palette("/"), "closed on the draft it ran from")
         latch.edited()  // ⌘A Delete
         latch.edited()  // "/"
-        XCTAssertNotNil(latch.content(for: "/", agent: .claude, focused: true), "the same words typed again show it")
+        XCTAssertNotNil(palette("/"), "the same words typed again show it")
         latch.close()  // Esc on "/c"
-        XCTAssertNil(latch.content(for: "/c", agent: .claude, focused: true), "Esc keeps it closed on the words")
+        XCTAssertNil(palette("/c"), "Esc keeps it closed on the words")
         latch.edited()  // "/cl"
-        XCTAssertEqual(latch.content(for: "/cl", agent: .claude, focused: true)?.rows.map(\.command), ["clear"])
-        XCTAssertNil(latch.content(for: "/", agent: .codex, focused: true), "a Codex run has no palette")
-        XCTAssertNil(latch.content(for: "/", agent: .claude, focused: false), "nor a box without the keyboard")
+        XCTAssertEqual(palette("/cl")?.rows.map(\.command), ["clear"])
+        XCTAssertNil(palette("/", .codex), "a Codex run has no palette")
+        XCTAssertNil(palette("/", focused: false), "nor a box without the keyboard")
     }
 
     /// The palette's keys: the first row lit, ↑ and ↓ move the light and stop at the ends, Return runs the lit row,
@@ -151,7 +154,7 @@ final class PaletteContentTests: XCTestCase {
     /// with a row lit falls through to the box and sends the fragment as typed.
     func testThePalettesKeys() {
         func outcome(_ key: SlashPalette.Key, rows: Int = 3, lit: Int = 0) -> SlashPalette.KeyOutcome {
-            SlashPalette.outcome(of: key, rows: rows, highlighted: lit)
+            SlashPalette.outcome(of: key, rows: Array(SlashPalette.allRows.prefix(rows)), highlighted: lit)
         }
         XCTAssertEqual(outcome(.return(addsLine: false)), .run(0), "Return runs the first row, lit when it shows")
         XCTAssertEqual(outcome(.return(addsLine: false), lit: 2), .run(2))
@@ -165,6 +168,28 @@ final class PaletteContentTests: XCTestCase {
             XCTAssertEqual(outcome(key, rows: 0), .toBox, "no palette: \(key)")
         }
         XCTAssertEqual(outcome(.return(addsLine: true), rows: 0), .addLine)
+    }
+
+    /// `/diff` is dimmed, saying "No changes yet", while the run's computer counts no changed lines, and only then: a
+    /// run whose count is not known yet, or one with changes, keeps it. ↓ passes a dimmed row, and Return on one does
+    /// nothing: no fragment is sent as a message.
+    func testDiffIsDimmedWhileTheRunHasNoChanges() {
+        func diff(_ changes: DiffStat?) -> SlashRow? {
+            SlashPalette.content(for: "/", changes: changes)?.rows.first { $0.command == "diff" }
+        }
+        XCTAssertEqual(diff(DiffStat(added: 0, removed: 0))?.unavailable, "No changes yet")
+        XCTAssertNil(diff(nil)?.unavailable, "a count not known yet dims nothing")
+        XCTAssertNil(diff(DiffStat(added: 3, removed: 0))?.unavailable)
+        XCTAssertNil(diff(DiffStat(added: 0, removed: 1))?.unavailable)
+        let rows = SlashPalette.content(for: "/", changes: DiffStat(added: 0, removed: 0))!.rows
+        XCTAssertEqual(rows.filter { $0.unavailable != nil }.map(\.command), ["diff"], "only /diff")
+        let last = rows.count - 1
+        XCTAssertEqual(
+            SlashPalette.outcome(of: .down, rows: rows, highlighted: last - 1), .highlight(last - 1), "↓ passes it")
+        XCTAssertEqual(
+            SlashPalette.outcome(of: .return(addsLine: false), rows: rows, highlighted: last), .highlight(last))
+        let alone = SlashPalette.content(for: "/di", changes: DiffStat(added: 0, removed: 0))!.rows
+        XCTAssertEqual(SlashPalette.outcome(of: .return(addsLine: false), rows: alone, highlighted: 0), .highlight(0))
     }
 
     /// A tapped row and the typed command resolve to the same action — the

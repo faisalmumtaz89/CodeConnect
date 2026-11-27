@@ -43,8 +43,10 @@ struct CommandPalette: View {
                         CCRow(
                             row.title,
                             titleIsMono: true,
-                            subtitle: row.subtitle,
+                            subtitle: row.unavailable ?? row.subtitle,
                             separator: row != content.rows.last || content.caption != nil,
+                            isDimmed: row.unavailable != nil,
+                            disabledReason: row.unavailable.map(CCDisabledReason.init),
                             action: { onAction(row.action) }
                         ) {
                             CCIcon(Self.icon(for: row.command), size: 16, weight: .regular, relativeTo: .body)
