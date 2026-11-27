@@ -21,10 +21,11 @@ public struct FleetGroup: Sendable, Hashable, Identifiable {
     public var computer: String { rows[0].machineName ?? "Unknown computer" }
 
     /// The home folder as `~`, the way a shell prints it: `/Users/<name>/…` on a
-    /// Mac and `/home/<name>/…` on Linux.
+    /// Mac and `/home/<name>/…` on Linux. A Mac's `/Users/Shared` is every user's
+    /// folder and no one's home, so it stays whole.
     public static func shellPath(_ cwd: String) -> String {
         let parts = cwd.split(separator: "/", omittingEmptySubsequences: false)
-        guard parts.count >= 3, parts[0].isEmpty, parts[1] == "Users" || parts[1] == "home"
+        guard parts.count >= 3, parts[0].isEmpty, parts[1] == "Users" && parts[2] != "Shared" || parts[1] == "home"
         else { return cwd }
         return (["~"] + parts.dropFirst(3)).joined(separator: "/")
     }
