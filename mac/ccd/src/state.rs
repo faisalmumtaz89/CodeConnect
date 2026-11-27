@@ -9700,6 +9700,8 @@ mod tests {
         let listed = daemon.sessions().await.unwrap();
         let run = listed.iter().find(|run| run.session_uid == uid).unwrap();
         assert!(run.archived && !run.relaunchable);
+        // Its worktree and branch are gone, so the listing does not say they stay.
+        assert!(!run.in_worktree, "{run:?}");
 
         assert_eq!(
             daemon
