@@ -19,6 +19,8 @@ final class EndRunTests: XCTestCase {
         XCTAssertEqual(end.note, "Its folder stays as it is.")
         XCTAssertEqual([end.cancel, end.confirm], ["Cancel", "End Session"])
         XCTAssertEqual(end.message, "Codex stops. The session moves to Ended. Its folder stays as it is.")
+        let mac = FleetWords.endAsk("query-parser", agent: "Codex", then: FleetWords.joinsEarlier)
+        XCTAssertEqual(mac.message, "Codex stops. It joins its project’s earlier sessions. Its folder stays as it is.")
     }
 
     /// The notice after an end or a removal that did not happen says why in a whole sentence of its own, one for

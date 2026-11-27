@@ -239,7 +239,8 @@ struct FleetList: View {
         // Ending a session cannot be undone: it asks once (the approved words), then says only what went wrong.
         .confirmation($ending) { row in
             Confirmation(
-                FleetWords.endAsk(row.title, agent: row.summary.agent.displayName), cancelID: "endRun.cancel",
+                FleetWords.endAsk(row.title, agent: row.summary.agent.displayName, then: FleetWords.joinsEarlier),
+                cancelID: "endRun.cancel",
                 confirmID: "endRun.confirm"
             ) { endRun(row) }
         }

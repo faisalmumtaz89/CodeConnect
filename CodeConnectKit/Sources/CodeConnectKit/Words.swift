@@ -59,16 +59,22 @@ public enum FleetWords {
     public static let noComputersYet = "No computers yet"
 
     /// Ending run `name` (its whole `RunLabel.inline`, which tells it from another run in the same project), whose agent
-    /// is `agent`: it stops and moves to Ended, and its folder is left as it is.
-    public static func endAsk(_ name: String, agent: String) -> AskWords {
+    /// is `agent`: it stops, goes where `then` says (the iPhone's Ended; on the Mac, `joinsEarlier`), and its folder is
+    /// left as it is.
+    public static func endAsk(
+        _ name: String, agent: String, then: String = "The session moves to \(FleetStatus.ended.label)"
+    ) -> AskWords {
         AskWords(
             title: "End “\(name)”?",
             items: [
                 .init(mark: "stop", words: "\(agent) stops"),
-                .init(mark: "arrow.right", words: "The session moves to \(FleetStatus.ended.label)"),
+                .init(mark: "arrow.right", words: then),
             ],
             note: "Its folder stays as it is.", cancel: "Cancel", confirm: "End Session")
     }
+
+    /// Where an ended session goes on the Mac, whose list has no Ended section: under its project's "N earlier ›".
+    public static let joinsEarlier = "It joins its project’s earlier sessions"
 
     /// Archiving run `name` (artboard n-11): it removes the worktree, deletes the local branch and ends `agent`’s
     /// session, and says first that files git ignores there go too, so a person keeping secrets in it is told before
