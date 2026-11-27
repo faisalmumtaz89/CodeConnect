@@ -3,7 +3,7 @@ import XCTest
 @testable import CodeConnectKit
 
 /// The Mac's run list (W1a, W1-1 and W1-6): Needs you, Working and Done, each in the fleet's order; Needs you whole on
-/// every computer whatever is chosen; the ended runs apart, on every computer; and the list's words.
+/// every computer whatever is chosen; the ended runs apart, on the chosen computer; and the list's words.
 final class RunListTests: XCTestCase {
     /// A run in `status`; `limited`: the usage limit its last turn stopped at, as the daemon sends it; `relaunchable`:
     /// the next message starts it again.
@@ -44,18 +44,19 @@ final class RunListTests: XCTestCase {
         XCTAssertEqual(ids(list.ended), ["over", "over-too"])
     }
 
-    /// W1-6: narrowed to one computer, Working and Done hold its runs alone; Needs you, and the ended runs, every
+    /// W1-6: narrowed to one computer, Working, Done and the ended runs hold its runs alone; Needs you every
     /// computer's.
     func testNeedsYouStaysWholeWhenOneComputerIsChosen() {
         let list = RunList(fleet, computer: "m1")
         XCTAssertEqual(ids(list.needsYou), ["approval", "failed", "idle", "question"])
         XCTAssertEqual(ids(list.working), ["working"])
         XCTAssertEqual(ids(list.done), ["seen"])
-        XCTAssertEqual(ids(list.ended), ["over", "over-too"])
+        XCTAssertEqual(ids(list.ended), ["over-too"])
         let other = RunList(fleet, computer: "m3")
         XCTAssertEqual(ids(other.needsYou), ["approval", "failed", "idle", "question"])
         XCTAssertEqual(other.working, [])
         XCTAssertEqual(other.done, [])
+        XCTAssertEqual(other.ended, [])
     }
 
     /// A run still starting, nothing drawn yet, is Working; one whose start failed before its agent existed is Failed,
@@ -93,7 +94,8 @@ final class RunListTests: XCTestCase {
         XCTAssertEqual(ids(list.needsYou), ["approval", "failed", "idle", "question", "capped", "capped-stopped"])
         XCTAssertEqual(ids(list.done), ["seen"])
         XCTAssertEqual(ids(RunList(fleet + [capped], computer: "m2").done), ["unseen"])
-        XCTAssertEqual(ids(list.ended), ["over", "over-too", "capped-over"])
+        XCTAssertEqual(
+            ids(RunList(fleet + [capped, over, stopped], computer: nil).ended), ["over", "over-too", "capped-over"])
         XCTAssertEqual(RunList.activeCount(fleet + [capped, over, stopped], on: "m2"), 6)
         XCTAssertEqual(RunList.activeCount(fleet + [capped, over, stopped], on: nil), 10, "every computer's")
     }
