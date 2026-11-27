@@ -591,6 +591,14 @@ where
                                 _ => None,
                             };
                             answered_on = AnsweredOn::from_client_name(client_name.as_deref());
+                            // A device is listed as the kind its app says it is; a hello naming no app keeps the mark.
+                            if let (Some(device), Some(_)) = (&device_id, &client_name) {
+                                if let Err(err) =
+                                    daemon.db.set_device_kind(device.clone(), answered_on).await
+                                {
+                                    crate::log_error!("could not mark device {device}'s kind: {err:#}");
+                                }
+                            }
                             crate::log_info!(
                                 "ws: client {:?} connected over {} as {}",
                                 client_name.as_deref().unwrap_or("unnamed"),
@@ -1865,6 +1873,9 @@ async fn hello_ack(
         machine_name: crate::machine::computer_name(),
         machine_os: Some(std::env::consts::OS.to_string()),
         machine_id: daemon.machine_id.get().cloned(),
+        machine_home: Some(protocol::home_dir())
+            .filter(|home| home.is_absolute() && home.parent().is_some())
+            .map(|home| home.display().to_string()),
     })
 }
 
@@ -3362,6 +3373,72 @@ mod tests {
         );
     }
 
+    /// **A device is listed as the kind of device its app says it is**, over the real listener: an iPhone's
+    /// hello marks it `iphone`, a Mac's `mac`, a later hello naming no app keeps the mark, and a device with no
+    /// hello since has none. Must-fail: drop the write after the hello, and every device has no `kind`.
+    #[tokio::test]
+    async fn a_device_is_listed_as_the_kind_its_app_says() {
+        let (server, paired) = live_server(protocol::config::Config::default()).await;
+        set_tailnet(&server, Some(tailnet_from_the_laptop(|_| {})));
+        let kind = |id: String| {
+            let daemon = std::sync::Arc::clone(&server.daemon);
+            async move {
+                let devices = daemon.list_devices().await.unwrap();
+                let device = devices
+                    .iter()
+                    .find(|d| d.device_id == id)
+                    .expect("the device is listed");
+                serde_json::to_value(device).unwrap()["kind"].clone()
+            }
+        };
+        let hello = |client: Option<&str>, extra: serde_json::Value| {
+            let mut hello = serde_json::json!({"type": "hello", "protocol_version": protocol::PROTOCOL_VERSION});
+            if let Some(client) = client {
+                hello["client_name"] = client.into();
+            }
+            hello
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            hello
+        };
+
+        let phone = hello_raw(
+            &server,
+            hello(Some("CodeConnect iPhone"), serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(phone["type"], "hello_ack", "{phone}");
+        let phone_id = phone["device_id"].as_str().unwrap().to_string();
+        assert_eq!(kind(phone_id.clone()).await, "iphone");
+
+        let token = phone["device_token"].as_str().unwrap();
+        let unnamed = hello_raw(&server, hello(None, serde_json::json!({"token": token}))).await;
+        assert_eq!(unnamed["type"], "hello_ack", "{unnamed}");
+        assert_eq!(
+            kind(phone_id).await,
+            "iphone",
+            "a hello naming no app keeps the mark"
+        );
+
+        let mac = hello_raw(
+            &server,
+            hello(Some("CodeConnect Mac"), serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(mac["type"], "hello_ack", "{mac}");
+        assert_eq!(
+            kind(mac["device_id"].as_str().unwrap().to_string()).await,
+            "mac"
+        );
+
+        assert_eq!(
+            kind(paired).await,
+            serde_json::Value::Null,
+            "no hello since, no mark"
+        );
+    }
+
     /// **A device linked by an address that is not its tailnet address is not told about itself**, over the real
     /// listener: its token carries the Tailscale device it was seen from, and that node is left out of its `peers`
     /// frame. Here the device comes from loopback and the tailnet puts the laptop elsewhere, as a Mac paired by its
@@ -4295,6 +4372,7 @@ mod tests {
                 revoked_at: None,
                 tailnet_node: None,
                 paired_before_nodes: false,
+                kind: None,
             }))
         };
         let result = hello_ack(&daemon, reconnect(), true, true).await;
@@ -4397,6 +4475,14 @@ mod tests {
         assert_eq!(reply["type"], "hello_ack");
         assert_eq!(reply["machine_name"], hostname.trim_end_matches('\n'));
         assert_eq!(reply["machine_os"], "linux");
+    }
+
+    #[tokio::test]
+    async fn the_ack_names_this_computers_home_folder() {
+        let home = std::env::var("HOME").unwrap();
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let (_socket, reply) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(reply["machine_home"], home.as_str(), "{reply}");
     }
 
     #[tokio::test]
@@ -6807,6 +6893,7 @@ mod tests {
                 revoked_at: None,
                 tailnet_node: None,
                 paired_before_nodes: false,
+                kind: None,
             }))
         };
         let private = |tls_active: bool, trust: PlaintextTrust, outcome: AuthOutcome| {

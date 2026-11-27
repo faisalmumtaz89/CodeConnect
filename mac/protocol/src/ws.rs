@@ -723,6 +723,10 @@ pub enum ServerMessage {
         /// machine. Minor 26.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine_id: Option<String>,
+        /// The computer's home folder, the one `list_folder` opens on, so an app shows a folder under it from "~".
+        /// Absent when the daemon has no absolute home other than "/". Minor 68.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine_home: Option<String>,
     },
     Sessions {
         sessions: Vec<SessionSummary>,
@@ -2717,10 +2721,16 @@ mod tests {
             machine_name: None,
             machine_os: None,
             machine_id: None,
+            machine_home: None,
         };
         let encoded = serde_json::to_string(&ack).unwrap();
         assert!(!encoded.contains("device_token"), "{encoded}");
-        for key in ["\"machine_name\"", "\"machine_os\"", "\"machine_id\""] {
+        for key in [
+            "\"machine_name\"",
+            "\"machine_os\"",
+            "\"machine_id\"",
+            "\"machine_home\"",
+        ] {
             assert!(
                 !encoded.contains(key),
                 "a name that could not be read is left out, never sent empty: {encoded}"
@@ -3049,9 +3059,13 @@ mod tests {
             crate::PROTOCOL_MINOR >= 67,
             "archiving a run (`archive`, `archived`) is minor 67"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 68,
+            "a computer's home folder on `hello_ack` (`machine_home`) and a device's `kind` are minor 68"
+        );
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 67);
+        assert_eq!(crate::PROTOCOL_MINOR, 68);
     }
 
     /// **The tags, pinned on this side too.**

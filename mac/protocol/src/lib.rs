@@ -1018,7 +1018,13 @@ pub const PROTOCOL_MISMATCH: &str =
 ///     branch and commit the panel showed, with nothing uncommitted or untracked there, and the branch merged or on the
 ///     base; it files [`event::notice::ARCHIVED`] and sets [`event::SessionSummary::archived`], and an archived run is
 ///     never relaunched. `git_actions` names `archive`; a daemon below 67 does not.
-pub const PROTOCOL_MINOR: u32 = 67;
+///   * `68` — **A computer names its home folder, and each device its kind.**
+///
+///     [`ws::ServerMessage::HelloAck`] carries `machine_home`, the folder `list_folder` opens on, so an app shows a
+///     folder under it from "~". [`pairing::DeviceSummary`] carries `kind` (`mac` or `iphone`), by the app the
+///     device's last hello named ([`ws::AnsweredOn::from_client_name`]); a device no hello has named since has none.
+///     A daemon below 68 sends neither: an app shows such a folder whole, and a device with no mark.
+pub const PROTOCOL_MINOR: u32 = 68;
 
 #[cfg(test)]
 mod ledger_tests {

@@ -757,6 +757,7 @@ mod tests {
                 revoked_at: Some("2026-07-31T10:05:00.000Z".into()),
                 tailnet_node: None,
                 paired_before_nodes: false,
+                kind: None,
             },
             token_revoked: true,
             ssh_key_removed: AlwaysFalse,
@@ -788,7 +789,8 @@ mod tests {
                       seen: Option<&str>,
                       revoked: Option<&str>,
                       node: Option<&str>,
-                      before_nodes: bool| DeviceSummary {
+                      before_nodes: bool,
+                      kind: Option<crate::ws::AnsweredOn>| DeviceSummary {
             device_id: id.into(),
             name: name.into(),
             created_at: created.into(),
@@ -796,6 +798,7 @@ mod tests {
             revoked_at: revoked.map(Into::into),
             tailnet_node: node.map(Into::into),
             paired_before_nodes: before_nodes,
+            kind,
         };
         let phone = |revoked: Option<&str>| {
             device(
@@ -806,6 +809,7 @@ mod tests {
                 revoked,
                 Some("nP7Kq2CNTRL"),
                 false,
+                Some(crate::ws::AnsweredOn::Iphone),
             )
         };
         let ipad = |revoked: Option<&str>| {
@@ -817,6 +821,7 @@ mod tests {
                 revoked,
                 Some("nD4Rw8CNTRL"),
                 false,
+                Some(crate::ws::AnsweredOn::Iphone),
             )
         };
         serde_json::json!({
@@ -839,6 +844,7 @@ mod tests {
                         None,
                         Some("nB2Lx5CNTRL"),
                         false,
+                        None,
                     ),
                     device(
                         "d5e6f7a8b9c0",
@@ -848,6 +854,7 @@ mod tests {
                         None,
                         Some("nM9Tz3CNTRL"),
                         false,
+                        Some(crate::ws::AnsweredOn::Mac),
                     ),
                     device(
                         "e7f8a9b0c1d2",
@@ -857,6 +864,7 @@ mod tests {
                         None,
                         Some("nM9Tz3CNTRL"),
                         false,
+                        Some(crate::ws::AnsweredOn::Mac),
                     ),
                     ipad(Some("2026-11-05T12:00:00.000Z")),
                     device(
@@ -867,6 +875,7 @@ mod tests {
                         Some("2026-10-01T09:30:00.000Z"),
                         None,
                         true,
+                        None,
                     ),
                 ],
             },

@@ -1067,6 +1067,15 @@ impl Db {
             .await
     }
 
+    pub async fn set_device_kind(
+        &self,
+        device_id: String,
+        kind: protocol::ws::AnsweredOn,
+    ) -> Result<()> {
+        self.run(move |store| store.set_device_kind(&device_id, kind))
+            .await
+    }
+
     /// Returns the device rows the token was taken from — see the store.
     ///
     /// The credential is owned rather than borrowed, like every other argument

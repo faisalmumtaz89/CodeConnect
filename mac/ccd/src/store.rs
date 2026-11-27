@@ -65,7 +65,7 @@ use protocol::host::Trust;
 use protocol::pairing::DeviceSummary;
 use protocol::proc_identity::{BootIdentity, ProcessIdentity};
 use protocol::secret::Redacted;
-use protocol::ws::{AnswerOutcome, FolderAnswer};
+use protocol::ws::{AnswerOutcome, AnsweredOn, FolderAnswer};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Schema generation. Bumped when a migration is added; stored in SQLite's own
@@ -268,6 +268,7 @@ pub struct DeviceRow {
     pub revoked_at: Option<String>,
     pub tailnet_node: Option<String>,
     pub paired_before_nodes: bool,
+    pub kind: Option<AnsweredOn>,
 }
 
 impl DeviceRow {
@@ -280,6 +281,7 @@ impl DeviceRow {
             revoked_at: self.revoked_at.clone(),
             tailnet_node: self.tailnet_node.clone(),
             paired_before_nodes: self.paired_before_nodes,
+            kind: self.kind,
         }
     }
 }
@@ -4233,6 +4235,19 @@ impl Store {
         Ok(name)
     }
 
+    /// Mark `device_id` as the kind of device its hello's app says it is.
+    pub fn set_device_kind(&self, device_id: &str, kind: AnsweredOn) -> Result<()> {
+        let kind = match kind {
+            AnsweredOn::Mac => "mac",
+            AnsweredOn::Iphone => "iphone",
+        };
+        self.write().execute(
+            "UPDATE devices SET kind = ?2 WHERE device_id = ?1 AND kind IS NOT ?2",
+            params![device_id, kind],
+        )?;
+        Ok(())
+    }
+
     /// The first of `requested`, `requested-2`, … that no device holds, `except` this one: names are how a human
     /// revokes a device, so they are unique, compared without case.
     fn free_device_name(
@@ -4389,7 +4404,7 @@ impl Store {
         let row = conn
             .query_row(
                 "SELECT device_id, name, created_at, last_seen_at, revoked_at,
-                        tailnet_node, paired_before_nodes
+                        tailnet_node, paired_before_nodes, kind
                    FROM devices
                   WHERE token_hash = ?1",
                 params![token_hash],
@@ -4628,7 +4643,7 @@ impl Store {
         let conn = self.read();
         let mut stmt = conn.prepare(
             "SELECT device_id, name, created_at, last_seen_at, revoked_at,
-                    tailnet_node, paired_before_nodes
+                    tailnet_node, paired_before_nodes, kind
                FROM devices ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], device_row_from)?;
@@ -6888,7 +6903,10 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             -- 1 on every row that existed when `tailnet_node` was added: paired
             -- before devices were recorded. Revoked with no node, such a row
             -- pauses every sign-in without a token or a code.
-            paired_before_nodes INTEGER NOT NULL DEFAULT 0
+            paired_before_nodes INTEGER NOT NULL DEFAULT 0,
+            -- `mac` or `iphone`, by the app its last hello named; null until a
+            -- hello names one.
+            kind              TEXT
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS devices_name ON devices(name);
@@ -7028,6 +7046,8 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     // The usage limit a run stopped at (minor 65): its wire word, and when.
     ("run_hosts", "limit_which", "TEXT"),
     ("run_hosts", "limit_at", "TEXT"),
+    // The kind of device, by the app its hello names (minor 68).
+    ("devices", "kind", "TEXT"),
 ];
 
 /// Repair push tuples a rollback or a pre-tuple build could have left incoherent.
@@ -7648,6 +7668,11 @@ fn device_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRow> {
         revoked_at: row.get(4)?,
         tailnet_node: row.get(5)?,
         paired_before_nodes: row.get(6)?,
+        kind: match row.get::<_, Option<String>>(7)?.as_deref() {
+            Some("mac") => Some(AnsweredOn::Mac),
+            Some("iphone") => Some(AnsweredOn::Iphone),
+            _ => None,
+        },
     })
 }
 

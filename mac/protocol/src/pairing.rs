@@ -182,6 +182,10 @@ pub struct DeviceSummary {
     /// a code, because the daemon cannot tell which device it was.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paired_before_nodes: bool,
+    /// `mac` or `iphone`, by the app its last hello named. Absent until a hello names one, and from a daemon
+    /// below minor 68.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::ws::AnsweredOn>,
 }
 
 impl DeviceSummary {
@@ -299,9 +303,10 @@ mod tests {
             revoked_at: None,
             tailnet_node: None,
             paired_before_nodes: false,
+            kind: None,
         };
         let encoded = serde_json::to_string(&device).unwrap();
-        for field in ["revoked_at", "tailnet_node", "paired_before_nodes"] {
+        for field in ["revoked_at", "tailnet_node", "paired_before_nodes", "kind"] {
             assert!(!encoded.contains(field), "{encoded}");
         }
         assert!(device.is_active());

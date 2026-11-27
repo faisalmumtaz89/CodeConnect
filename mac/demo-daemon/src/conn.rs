@@ -601,6 +601,7 @@ fn hello_ack() -> ServerMessage {
         machine_os: None,
         // No home of its own to be one machine across restarts.
         machine_id: None,
+        machine_home: None,
     }
 }
 
