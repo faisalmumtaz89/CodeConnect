@@ -1215,14 +1215,14 @@ struct SessionDetailView: View {
         .accessibilityIdentifier("session-title")
     }
 
-    /// **The session's changes, at the bar's end**: +N −M uncommitted, and its sheet a tap away. Never cut, on every
-    /// session; with no count read yet, the mark alone.
+    /// **The session's changes, at the bar's end**: the Mac's changes mark (a right sidebar) and +N −M uncommitted, its
+    /// sheet a tap away. Never cut, on every session; with no count read yet, the mark alone.
     private var changesButton: some View {
         Button {
             showDiff = true
         } label: {
             HStack(spacing: 4) {
-                CCIcon("plus-minus", size: 14, weight: .regular)
+                Image(systemName: "sidebar.right").font(.system(size: 13)).accessibilityHidden(true)
                 if let diff = summary?.diffStat {
                     Text(verbatim: "+\(diff.added)").foregroundStyle(CC.color.success)
                     Text(verbatim: "−\(diff.removed)").foregroundStyle(CC.color.danger)
