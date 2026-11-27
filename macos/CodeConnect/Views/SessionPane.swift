@@ -152,11 +152,11 @@ private struct Band: View {
     var body: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(row.label.inline)
+                Text(row.title)
                     .font(Theme.ui(13, .semibold))
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                    .truncationMode(.tail)
                     .accessibilityAddTraits(.isHeader)
                     .accessibilityIdentifier("session.title")
                 place
