@@ -12,7 +12,7 @@ final class HostedLinkSentenceTests: XCTestCase {
     func testAHostedRunWhoseLinkIsDownSaysItsLinkIsLost() throws {
         XCTAssertEqual(
             reason(try summary("session_hosted_detached")),
-            "\(HostDevice.current.computer("The computer")) has lost its link to this run. "
+            "\(HostDevice.current.computer("The computer")) has lost its link to this session. "
                 + "It can be answered again once the link is back.")
         XCTAssertEqual(
             FleetStatusRule.capability(summary: try summary("session_hosted_live"), capabilities: capabilities),
@@ -26,7 +26,7 @@ final class HostedLinkSentenceTests: XCTestCase {
         for link in ["attached", "detached"] {
             XCTAssertEqual(
                 reason(try summary("session_hosted_detached", setting: ["lifecycle": "failed", "link": link])),
-                "This run has ended.", "link \(link)")
+                "This session has ended.", "link \(link)")
         }
     }
 

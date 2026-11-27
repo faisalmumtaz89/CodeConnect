@@ -547,7 +547,7 @@ private struct ArchiveRow: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 line
-                ActionButton(title: "Archive Run", key: nil, prominent: false, id: "changes.archive") { asking = row }
+                ActionButton(title: "Archive Session", key: nil, prominent: false, id: "changes.archive") { asking = row }
                     .disabled(!quiet || state == .working || covered == true)
                     .padding(.trailing, 20)
             }

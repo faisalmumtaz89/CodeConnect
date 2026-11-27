@@ -58,7 +58,7 @@ final class ChangesStateWordsTests: XCTestCase {
             "Git did not commit. pre-commit hook: fmtcheck failed", "git's words, as it gave them")
         XCTAssertEqual(
             ChangesWords.actionRefused(code: "busy", detail: nil, step: .commit),
-            "A run in this folder is working or waiting for you, so nothing was committed.", "any run in the folder")
+            "A session in this folder is working or waiting for you, so nothing was committed.", "any run in the folder")
         XCTAssertEqual(ChangesWords.actionRefused(code: "indeterminate", detail: nil, step: .commit), ChangesWords.actionUnknown)
         XCTAssertEqual(ChangesWords.actionRefused(code: "a_newer_code", detail: "x", step: .commit), ChangesWords.actionUnknown)
     }
@@ -178,7 +178,7 @@ final class ChangesStateWordsTests: XCTestCase {
         XCTAssertEqual(
             said("merge_failed", "Required status check \"ci\" is expected."),
             "GitHub did not merge it. Required status check \"ci\" is expected.")
-        XCTAssertEqual(said("busy"), "A run in this folder is working or waiting for you, so nothing was merged.")
+        XCTAssertEqual(said("busy"), "A session in this folder is working or waiting for you, so nothing was merged.")
         XCTAssertEqual(said("timeout"), "GitHub took too long; the pull request may or may not have been merged.")
         XCTAssertEqual(said("gh_missing"), "This computer has no gh, so nothing was merged.")
         XCTAssertEqual(said("gh_signed_out"), "This computer’s gh isn’t signed in to GitHub, so nothing was merged.")

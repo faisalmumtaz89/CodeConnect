@@ -1753,7 +1753,7 @@ pub mod git_refusal {
     pub const BRANCH_HAS_COMMITS: &str = "branch_has_commits";
     /// Archive: git has the worktree locked; `detail` is the lock's reason, if it gave one.
     pub const LOCKED: &str = "locked";
-    /// Archive: the run did not end within 30 s, or End Run refused (`detail`, its reason).
+    /// Archive: the run did not end within 30 s, or End Session refused (`detail`, its reason).
     pub const STILL_RUNNING: &str = "still_running";
 }
 

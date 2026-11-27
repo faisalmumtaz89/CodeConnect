@@ -1484,8 +1484,8 @@ to probe credentials.
   checkout's worktree is refused so, and so is one whose file listing passes 64 MB or
   whose status warns, as for a folder git cannot open), and the branch may go: `head_oid` is on the base, or its pull request
   merged with `head_oid` as its head (`branch_has_commits`; GitHub unreadable is
-  `github_unavailable`). Then End Run, and `exited` within 30 s (`still_running`,
-  End Run's reason as detail when it refused); the run still ended (a message from
+  `github_unavailable`). Then End Session, and `exited` within 30 s (`still_running`,
+  End Session's reason as detail when it refused); the run still ended (a message from
   another device may have relaunched it: `still_running`) and the same checks again; `git -C <main>
   worktree remove <worktree>` (never forced; files git ignores go with it), and
   `branch -D <branch>` while its tip is still `head_oid`; the remote branch is left.

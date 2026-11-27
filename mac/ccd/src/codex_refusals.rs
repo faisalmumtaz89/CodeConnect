@@ -92,7 +92,7 @@ pub(crate) const INTERRUPT_ID_REUSED: &str =
 
 /// The interrupt twin of [`SESSION_LOOKUP_FAILED`], and a const for its reason.
 pub(crate) const INTERRUPT_LEDGER_UNREADABLE: &str =
-    "could not read this run's interrupt ledger; nothing was sent";
+    "could not read this session's interrupt ledger; nothing was sent";
 
 pub(crate) const INTERRUPT_ALREADY_SENT_UNKNOWN: &str =
     "this interrupt was already sent and what became of it \
@@ -104,7 +104,7 @@ pub(crate) const INTERRUPT_ALREADY_SENT_UNKNOWN: &str =
 /// that failed: an answer, a stop or a message is refused with the fact alone. Such a run has
 /// no screen at the computer to send the person to.
 pub(crate) const ENGINE_NO_CONNECTION: &str =
-    "CodeConnect has no connection to this run right now, so nothing was sent.";
+    "CodeConnect has no connection to this session right now, so nothing was sent.";
 
 pub(crate) fn compose_on_claude(uid: &str) -> String {
     format!(
@@ -168,16 +168,16 @@ pub(crate) const INTERRUPT_ALREADY_WAITING: &str =
 
 pub(crate) const INTERRUPT_ID_REUSED_ON_LINK: &str =
     "this request id has already been used for a different stop on this \
-    run, so nothing was sent; ask again under a new one";
+    session, so nothing was sent; ask again under a new one";
 
-pub(crate) const INTERRUPT_RUN_IS_GONE: &str = "this run is gone, so its turn cannot be stopped";
+pub(crate) const INTERRUPT_RUN_IS_GONE: &str = "this session is gone, so its turn cannot be stopped";
 
 /// [`COMPOSE_CLAIM_UNRECORDED`]'s twin, and a const for the same reason: the claim
 /// failed on this Mac's own disk, and the words the disk used are this Mac's to read.
 pub(crate) const INTERRUPT_CLAIM_UNRECORDED: &str =
     "could not record that this interrupt is being sent; nothing was sent";
 
-pub(crate) const COMPOSE_RUN_IS_GONE: &str = "this run is gone, so nothing can be said to it";
+pub(crate) const COMPOSE_RUN_IS_GONE: &str = "this session is gone, so nothing can be said to it";
 
 pub(crate) const COMPOSE_CLAIM_UNRECORDED: &str =
     "the computer could not record that the message is being sent; nothing \

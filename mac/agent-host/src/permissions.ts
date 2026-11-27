@@ -84,7 +84,7 @@ export function createPermissions(send: (body: Unsequenced) => void) {
   /** The run is over: an answer never written to claude's input never reached it. */
   function ended(): void {
     for (const uuid of writing.values()) {
-      send({ type: 'outcome', uuid, status: 'refused', detail: 'the run ended before the answer reached Claude' });
+      send({ type: 'outcome', uuid, status: 'refused', detail: 'the session ended before the answer reached Claude' });
     }
     writing.clear();
   }

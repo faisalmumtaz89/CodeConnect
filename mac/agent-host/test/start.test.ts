@@ -447,7 +447,7 @@ test('an allow and a stop read together: the answer never reaches claude, so it 
   const allow = JSON.stringify({ type: 'answer', uuid: 'c-race', tool_use_id: 'toolu_r1', decision: { behavior: 'allow' } });
   ccd.socket.write(`${allow}\n${JSON.stringify({ type: 'stop', uuid: 'c-stop' })}\n`);
   const outcome = await ccd.line('the raced answer', (line) => line.type === 'outcome' && line.uuid === 'c-race');
-  expect(outcome).toMatchObject({ status: 'refused', detail: 'the run ended before the answer reached Claude' });
+  expect(outcome).toMatchObject({ status: 'refused', detail: 'the session ended before the answer reached Claude' });
   await ccd.line("claude's end", (line) => line.type === 'exited');
   expect(answersRead(stub(), 'req-toolu_r1')).toStrictEqual([]);
 }, 10_000);

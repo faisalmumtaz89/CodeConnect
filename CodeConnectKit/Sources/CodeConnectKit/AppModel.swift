@@ -3517,7 +3517,7 @@ public final class AppModel {
 
     /// Why Stop is not offered on this session as drawn, or nil when it is.
     public func stopUnavailable(for key: String) -> String? {
-        guard let summary = shownSummary(for: key) else { return "This run is not in the fleet." }
+        guard let summary = shownSummary(for: key) else { return "This session is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
         return CodexProse.stopUnavailable(
             agent: summary.agent,
@@ -3530,7 +3530,7 @@ public final class AppModel {
 
     /// The same rule against the truth: what decides whether a stop may leave.
     private func stopBlocked(for key: String) -> String? {
-        guard let summary = summary(for: key) else { return "This run is not in the fleet." }
+        guard let summary = summary(for: key) else { return "This session is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
         return CodexProse.stopUnavailable(
             agent: summary.agent,
@@ -3543,7 +3543,7 @@ public final class AppModel {
 
     /// Why the Codex composer cannot send as drawn, or nil when it can.
     public func composeUnavailable(for key: String) -> String? {
-        guard let summary = shownSummary(for: key) else { return "This run is not in the fleet." }
+        guard let summary = shownSummary(for: key) else { return "This session is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
         return Self.composeUnavailable(summary, profile: daemonProfile, cardShown: cardShown(for: key))
     }
@@ -3551,7 +3551,7 @@ public final class AppModel {
     /// What decides whether a message may leave — the truth summary (`summary(for:)`) for the pending
     /// ref, and the shown card for `cardShown`, which the submit path's `rebuildNow` makes current first.
     public func composeBlocked(for key: String) -> String? {
-        guard let summary = summary(for: key) else { return "This run is not in the fleet." }
+        guard let summary = summary(for: key) else { return "This session is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
         return Self.composeUnavailable(summary, profile: daemonProfile, cardShown: cardShown(for: key))
     }
@@ -3605,7 +3605,7 @@ public final class AppModel {
     public func stopCodexTurn(sessionKey key: String) async -> InterruptResult? {
         let controls = codexControls(for: key)
         guard let summary = summary(for: key) else {
-            controls.stopNotSent("This run is not in the fleet.")
+            controls.stopNotSent("This session is not in the fleet.")
             return nil
         }
         // Agent, daemon capability, running turn and **link state**, in the one
@@ -3675,7 +3675,7 @@ public final class AppModel {
         let files = withFiles ? arrivedFileIDs(key) : []
         let controls = codexControls(for: key)
         guard let summary = summary(for: key) else {
-            controls.composeNotSent("This run is not in the fleet.")
+            controls.composeNotSent("This session is not in the fleet.")
             return nil
         }
         // A card may have arrived as an event and not yet been built into the shown
@@ -3747,7 +3747,7 @@ public final class AppModel {
     /// hash of the words, so a re-send of the same words is recognised by the daemon and replayed, never
     /// typed twice. A refusal comes back in the app's own words, never ccd's raw sentence.
     private func composeComment(text: String, to key: String) async -> ComposeAttempt {
-        guard let summary = summary(for: key) else { return .failed("This run is not in the fleet.") }
+        guard let summary = summary(for: key) else { return .failed("This session is not in the fleet.") }
         states[key]?.rebuildNow()
         if let blocked = composeBlocked(for: key) { return .refused(blocked) }
         if let blocked = ComposeDraft(text: text).blockedReason { return .refused(blocked) }
@@ -3921,7 +3921,7 @@ public final class AppModel {
     }
 
     private static let noUidSentence =
-        "\(HostDevice.current.computer("The computer")) has not given this run an id of its own, so nothing was sent."
+        "\(HostDevice.current.computer("The computer")) has not given this session an id of its own, so nothing was sent."
 
     /// A stop or a message whose outcome nobody knows, refused again. "Sent" for both, as the computer's own sentence
     /// for the same case says: a stop that was "stopped" would claim the turn ended, which nobody knows.
@@ -3943,7 +3943,7 @@ public final class AppModel {
             return
                 "\(HostDevice.current.computer("The computer"))’s CodeConnect never said it could \(verb), so nothing was sent. Update it."
         case .notACodexSession(let agent):
-            return "This is a \(agent) run, so nothing was sent."
+            return "This is a \(agent) session, so nothing was sent."
         case .nothingToSend(let reason):
             return reason
         }
@@ -3966,7 +3966,7 @@ public final class AppModel {
         // had left the fleet sent an `allow` for an agent nobody could name.
         guard let agent = summary(for: item.sessionKey)?.agent else {
             return .rejected(
-                "This run is no longer on the fleet, so nothing was sent. Answer it at \(HostDevice.current.computer("the computer", named: machineName)).")
+                "This session is no longer on the fleet, so nothing was sent. Answer it at \(HostDevice.current.computer("the computer", named: machineName)).")
         }
         if let mismatch = Self.decisionMismatch(
             decision: decision, agent: agent,
@@ -4072,7 +4072,7 @@ public final class AppModel {
             // Codex vocabulary the Mac refuses by name.
             return nil
         case (.claude, .optionId):
-            return "An option id is for a Codex run; this is a Claude run, "
+            return "An option id is for a Codex session; this is a Claude session, "
                 + "so nothing was sent."
         case (.antigravity, .allow), (.antigravity, .deny):
             // Answered through the agent host that holds agy's request, as a Claude card is.
@@ -4084,7 +4084,7 @@ public final class AppModel {
         case (.antigravity, _):
             return "An Antigravity card is answered Allow or Deny, so nothing was sent."
         case (.unsupported(let raw), _):
-            return "This app does not know how to answer a \(raw) run, so nothing was sent."
+            return "This app does not know how to answer a \(raw) session, so nothing was sent."
         default:
             return nil
         }
@@ -4138,11 +4138,11 @@ public final class AppModel {
         // itself is never typed through a side door.
         switch ClaudeCommandPolicy.action(for: text) {
         case .nativeModel:
-            return .refused("Use the run’s settings to change the model.")
+            return .refused("Use the session’s settings to change the model.")
         case .nativeDiff:
             return .refused("Open Changes to see the diff.")
         case .nativeEffort:
-            return .refused("Use the run’s settings to change the effort.")
+            return .refused("Use the session’s settings to change the effort.")
         case .nativeCompact:
             return .refused("Type /compact in the reply box to compact the context.")
         case .nativeClear:

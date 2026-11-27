@@ -109,9 +109,9 @@ final class RunListTests: XCTestCase {
 
     /// The words follow the count (D3), and the list's fixed words are exact.
     func testTheListsWords() {
-        XCTAssertEqual(RunListWords.runs(1), "1 run")
-        XCTAssertEqual(RunListWords.runs(2), "2 runs")
-        XCTAssertEqual(RunListWords.runs(0), "0 runs")
+        XCTAssertEqual(RunListWords.runs(1), "1 session")
+        XCTAssertEqual(RunListWords.runs(2), "2 sessions")
+        XCTAssertEqual(RunListWords.runs(0), "0 sessions")
         XCTAssertEqual(RunListWords.ended(9), "9 ended ›")
         XCTAssertEqual(RunListWords.noneOn("lumen5090"), "None on lumen5090")
         XCTAssertEqual(RunListWords.allComputers, "all computers")
@@ -133,7 +133,7 @@ final class RunListTests: XCTestCase {
         XCTAssertEqual(
             RunListWords.offlineLine(lastSeen: now.addingTimeInterval(-60), waiting: 3, now: now, calendar: calendar),
             "Last seen 2:25\u{202F}AM")
-        XCTAssertEqual(RunListWords.offlineLine(lastSeen: nil, waiting: 2, now: now, calendar: calendar), "2 runs")
+        XCTAssertEqual(RunListWords.offlineLine(lastSeen: nil, waiting: 2, now: now, calendar: calendar), "2 sessions")
         XCTAssertNil(RunListWords.offlineLine(lastSeen: nil, waiting: 0, now: now, calendar: calendar))
     }
 }
