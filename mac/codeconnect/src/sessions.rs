@@ -256,6 +256,7 @@ mod tests {
             title: None,
             limit: None,
             archived: false,
+            in_worktree: false,
         }
     }
 

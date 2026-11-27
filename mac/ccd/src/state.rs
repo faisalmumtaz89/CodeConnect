@@ -5034,6 +5034,7 @@ impl Daemon {
                 // names. Lexical, so it costs nothing on a read this hot. See
                 // `project_label`.
                 project_label: crate::project_label::project_label(&row.cwd),
+                in_worktree: crate::project_label::in_worktree(&row.cwd),
                 cwd: row.cwd,
                 lifecycle: row.lifecycle,
                 link,

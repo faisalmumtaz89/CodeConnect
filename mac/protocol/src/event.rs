@@ -583,6 +583,11 @@ pub struct SessionSummary {
     /// are gone, so it has no folder to pick up again. Omitted when false, and from an older daemon.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// The run works in a worktree of its own (a `.claude/worktrees/<name>` folder, as a start in a new worktree and
+    /// claude's own `--worktree` make one), so its folder and branch stay when it ends. Omitted when false, and from
+    /// an older daemon.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_worktree: bool,
 }
 
 /// The usage limit a run stopped at ([`SessionSummary::limit`]).
@@ -897,6 +902,7 @@ mod tests {
             title: None,
             limit: None,
             archived: false,
+            in_worktree: false,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);

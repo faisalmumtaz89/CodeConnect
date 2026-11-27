@@ -60,9 +60,31 @@ pub fn project_label(cwd: &str) -> String {
     cleaned.trim().to_string()
 }
 
+/// Whether `cwd` is a worktree of the run's own: a `.claude/worktrees/<name>` folder, where a start in a new worktree,
+/// and claude's own `--worktree`, make one. Lexical, as [`project_label`] is.
+pub fn in_worktree(cwd: &str) -> bool {
+    let parts: Vec<&str> = cwd.split('/').filter(|part| !part.is_empty()).collect();
+    matches!(parts.as_slice(), [.., ".claude", "worktrees", name] if *name != "." && *name != "..")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A run is in a worktree of its own only in a `.claude/worktrees/<name>` folder**: not the repository, not a
+    /// folder under a worktree, not one that only names worktrees elsewhere in its path.
+    #[test]
+    fn a_run_is_in_a_worktree_only_in_a_claude_worktrees_folder() {
+        assert!(in_worktree("/Users/dev/app/.claude/worktrees/fix+login"));
+        assert!(in_worktree("/Users/dev/app/.claude/worktrees/fix+login/"));
+        assert!(!in_worktree("/Users/dev/app"));
+        assert!(!in_worktree("/Users/dev/app/.claude/worktrees"));
+        assert!(!in_worktree(
+            "/Users/dev/app/.claude/worktrees/fix+login/src"
+        ));
+        assert!(!in_worktree("/Users/dev/worktrees/fix"));
+        assert!(!in_worktree(""));
+    }
 
     /// **A direction override cannot reorder a label.** U+202E in a directory
     /// name draws `abc\u{202E}gpj.exe` as `abcexe.jpg`, and the label becomes the
