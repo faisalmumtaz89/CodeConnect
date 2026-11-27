@@ -96,7 +96,7 @@ For encryption, use Tailscale.
 Every key is described in the [configuration reference](https://github.com/faisalmumtaz89/CodeConnect/blob/main/mac/README.md#configuration--codeconnectconfigjson).
 
 **Which coding agents are supported?**  
-Claude Code and Codex, in the Mac app as on the iPhone. For Claude Code: the fleet, approvals, questions and diffs. For Codex: the fleet, approvals, stopping a turn and saying something.
+Claude Code, Codex and Antigravity, in the Mac app as on the iPhone. For Claude Code: the fleet, approvals, questions and diffs. For Codex and Antigravity: the fleet, approvals, stopping a turn and saying something.
 
 **What exactly is installed on my Mac?**  
 CodeConnect’s binaries in `~/.codeconnect/bin`, `codeconnect` and `ccd` among them, with their licence notices, plus state under `~/.codeconnect`. With the Mac app, there is also the app itself, which carries these files and copies them into `~/.codeconnect/bin`, and its copy of what your agents did, in `~/Library/Application Support/CodeConnect`. Every binary is Developer ID–signed, and `codeconnect --version` reports its exact version and build commit.
