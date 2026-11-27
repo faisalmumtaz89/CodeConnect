@@ -1130,7 +1130,7 @@ uuid before the turn ended interrupted, which is the evidence Codex's own client
 message back on. A retry with the same request id is answered from the first, and a retry of
 a stopped message is told it was not sent and is not sent again. While a run's
 link is not attached, before its reconnect or after one that failed, an answer, a Stop and
-a message are refused with "CodeConnect has no connection to this run right now, so nothing
+a message are refused with "CodeConnect has no connection to this session right now, so nothing
 was sent." A retry of one already sent and not yet settled is answered from what was
 recorded instead: a Stop or a message is told it was sent and what became of it is not
 known, and an answer that it is already waiting to be confirmed. A run that a
@@ -1491,8 +1491,8 @@ to probe credentials.
   checkout's worktree is refused so, and so is one whose file listing passes 64 MB or
   whose status warns, as for a folder git cannot open), and the branch may go: `head_oid` is on the base, or its pull request
   merged with `head_oid` as its head (`branch_has_commits`; GitHub unreadable is
-  `github_unavailable`). Then End Run, and `exited` within 30 s (`still_running`,
-  End Run's reason as detail when it refused); the run still ended (a message from
+  `github_unavailable`). Then End Session, and `exited` within 30 s (`still_running`,
+  End Session's reason as detail when it refused); the run still ended (a message from
   another device may have relaunched it: `still_running`) and the same checks again; `git -C <main>
   worktree remove <worktree>` (never forced; files git ignores go with it), and
   `branch -D <branch>` while its tip is still `head_oid`; the remote branch is left.

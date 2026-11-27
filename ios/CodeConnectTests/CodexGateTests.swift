@@ -378,7 +378,7 @@ final class CodexGateTests: XCTestCase {
         let controls = CodexControls()
         let now = Date()
         controls.settleStop(
-            .rejected(reason: "CodeConnect has no connection to this run right now, so nothing was sent."),
+            .rejected(reason: "CodeConnect has no connection to this session right now, so nothing was sent."),
             material: "m", turnID: "t-1", now: now)
         XCTAssertTrue(controls.isStopGreyed(now: now.addingTimeInterval(1)))
         XCTAssertTrue(controls.isStopGreyed(now: now.addingTimeInterval(9)))
@@ -404,7 +404,7 @@ final class CodexGateTests: XCTestCase {
         XCTAssertFalse(controls.isStopGreyed(now: clock()))
         XCTAssertEqual(reads, 0, "nothing greyed, so nothing to time")
         controls.settleStop(
-            .rejected(reason: "CodeConnect has no connection to this run right now, so nothing was sent."),
+            .rejected(reason: "CodeConnect has no connection to this session right now, so nothing was sent."),
             material: "m", turnID: "t-1", now: now)
         XCTAssertTrue(controls.isStopGreyed(now: clock()))
         XCTAssertEqual(reads, 1, "a standing grey is timed")
@@ -417,7 +417,7 @@ final class CodexGateTests: XCTestCase {
         XCTAssertEqual(reads, 0, "a grey whose time is up is no longer timed")
 
         controls.settleStop(
-            .rejected(reason: "CodeConnect has no connection to this run right now, so nothing was sent."),
+            .rejected(reason: "CodeConnect has no connection to this session right now, so nothing was sent."),
             material: "m", turnID: "t-1", now: now)
         controls.beginCompose()
         XCTAssertFalse(controls.isStopGreyed(now: clock()))

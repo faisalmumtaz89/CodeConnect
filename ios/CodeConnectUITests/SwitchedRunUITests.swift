@@ -74,7 +74,7 @@ final class SwitchedRunUITests: XCTestCase {
             file: file, line: line)
         XCTAssertTrue(replyBox(app), "its reply box", file: file, line: line)
         XCTAssertEqual(rows(app, beginningWith: "Switched to"), 0, "no row for the move", file: file, line: line)
-        XCTAssertFalse(texts(app, beginningWith: "Run ended").firstMatch.exists, "no Run ended", file: file, line: line)
+        XCTAssertFalse(texts(app, beginningWith: "Session ended").firstMatch.exists, "no Session ended", file: file, line: line)
     }
 
     /// With the account book's listing (ccd's, recorded with the move), the conversation still draws no row for it:
@@ -103,7 +103,7 @@ final class SwitchedRunUITests: XCTestCase {
         XCTAssertEqual(rows(app, beginningWith: "Now on"), 1, "one row")
         XCTAssertTrue(row.firstMatch.label.contains("isn’t in"), row.firstMatch.label)
         XCTAssertEqual(rows(app, beginningWith: "Switched to"), 0, "no row for the move")
-        XCTAssertFalse(texts(app, beginningWith: "Run resumed").firstMatch.exists, "a move's relaunch draws nothing")
+        XCTAssertFalse(texts(app, beginningWith: "Session resumed").firstMatch.exists, "a move's relaunch draws nothing")
         XCTAssertTrue(replyBox(app), "its reply box")
     }
 
@@ -113,7 +113,7 @@ final class SwitchedRunUITests: XCTestCase {
             app.descendants(matching: .any).matching(identifier: "session-ended-line").firstMatch
                 .waitForExistence(timeout: 25), "the ended line")
         XCTAssertEqual(rows(app, beginningWith: "Switched to"), 0, "no move")
-        XCTAssertTrue(texts(app, beginningWith: "Run ended").firstMatch.exists, "Run ended")
+        XCTAssertTrue(texts(app, beginningWith: "Session ended").firstMatch.exists, "Session ended")
         XCTAssertFalse(replyBox(app), "no reply box")
     }
 }

@@ -30,7 +30,7 @@ public struct RunList: Sendable, Equatable {
 /// The run list's own words.
 public enum RunListWords {
     /// A count of runs, the word following the count.
-    public static func runs(_ count: Int) -> String { count == 1 ? "1 run" : "\(count) runs" }
+    public static func runs(_ count: Int) -> String { count == 1 ? "1 session" : "\(count) sessions" }
 
     /// Done's way to the ended runs.
     public static func ended(_ count: Int) -> String { "\(count) ended ›" }

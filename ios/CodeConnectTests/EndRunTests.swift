@@ -15,21 +15,21 @@ final class EndRunTests: XCTestCase {
     func testEndingAsksNamingTheRunAndSaysWhatEndingDoes() {
         let end = FleetWords.endAsk("query-parser", agent: "Codex")
         XCTAssertEqual(end.title, "End “query-parser”?")
-        XCTAssertEqual(end.items.map(\.words), ["Codex stops", "The run moves to Ended"])
+        XCTAssertEqual(end.items.map(\.words), ["Codex stops", "The session moves to Ended"])
         XCTAssertEqual(end.note, "Its folder stays as it is.")
-        XCTAssertEqual([end.cancel, end.confirm], ["Cancel", "End Run"])
-        XCTAssertEqual(end.message, "Codex stops. The run moves to Ended. Its folder stays as it is.")
+        XCTAssertEqual([end.cancel, end.confirm], ["Cancel", "End Session"])
+        XCTAssertEqual(end.message, "Codex stops. The session moves to Ended. Its folder stays as it is.")
     }
 
     /// The notice after an end or a removal that did not happen says why in a whole sentence of its own, one for
     /// each answer ccd can give, and quotes no wire word: an answer this build does not know is "refused", plainly.
     func testAFailedEndOrRemovalSaysWhyInASentenceAndQuotesNoWireWord() {
-        XCTAssertEqual(FleetWords.endFailedTitle, "Couldn’t end the run")
-        XCTAssertEqual(FleetWords.removeFailedTitle, "Couldn’t remove the run")
+        XCTAssertEqual(FleetWords.endFailedTitle, "Couldn’t end the session")
+        XCTAssertEqual(FleetWords.removeFailedTitle, "Couldn’t remove the session")
         XCTAssertEqual(FleetWords.removalRefused(.stillRunning), "It’s still running. End it first, then remove it.")
         XCTAssertEqual(
             FleetWords.removalRefused(.notExited(lifecycle: "unknown")),
-            "The computer doesn’t know whether it has stopped, so it keeps the run.")
+            "The computer doesn’t know whether it has stopped, so it keeps the session.")
         XCTAssertEqual(
             FleetWords.removalRefused(.failed(message: "the daemon could not remove that session")),
             "The computer couldn’t remove it.")

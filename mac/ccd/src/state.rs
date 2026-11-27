@@ -2157,7 +2157,7 @@ impl Daemon {
             0 => {}
             _ => {
                 return Err(
-                    "this request id is open in more than one run of that name; \
+                    "this request id is open in more than one session of that name; \
                      answer with the session_uid the card came from"
                         .into(),
                 )
@@ -2313,7 +2313,7 @@ impl Daemon {
                     logged_request_id(request_id)
                 );
                 return AnswerResult::Rejected {
-                    reason: "could not read this run's open cards; nothing was sent".into(),
+                    reason: "could not read this session's open cards; nothing was sent".into(),
                 };
             }
         };
@@ -3405,7 +3405,7 @@ impl Daemon {
                 .await
             }
             Ok(None) => AnswerResult::Rejected {
-                reason: "Only a run CodeConnect started takes answers; nothing was sent.".into(),
+                reason: "Only a session CodeConnect started takes answers; nothing was sent.".into(),
             },
             Err(err) => {
                 crate::log_error!(
@@ -3532,7 +3532,7 @@ impl Daemon {
                 .await
             }
             Ok(None) => SendTextResult::Refused {
-                reason: "Only a run CodeConnect started takes messages; nothing was sent.".into(),
+                reason: "Only a session CodeConnect started takes messages; nothing was sent.".into(),
             },
             Err(err) => {
                 crate::log_error!("send_text for {session_uid}: could not read its run: {err:#}");
@@ -10245,7 +10245,7 @@ mod tests {
         );
         kept(&main, &worktree);
 
-        // A live run that does not read exited within 30 s of End Run (its host here is a record
+        // A live run that does not read exited within 30 s of End Session (its host here is a record
         // with no process): nothing more goes.
         let live = "01K1B3XQ8ZC0DE5FGH7JKMNA74";
         let (live_main, live_tree) = archivable_run(&daemon, live, "worktree-x", Lifecycle::Live);

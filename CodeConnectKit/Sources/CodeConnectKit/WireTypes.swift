@@ -362,7 +362,7 @@ public enum CodexLinkState: Sendable, Hashable {
         case .boundNotStarted:
             switch ask {
             case .compose: return nil
-            case .stop: return "This Codex run has not started a turn yet."
+            case .stop: return "This Codex session has not started a turn yet."
             }
         case .none: return "There is no live link to this Codex session."
         case .unknown: return "\(HostDevice.current.computer("The computer")) reports a link state this app does not recognise."

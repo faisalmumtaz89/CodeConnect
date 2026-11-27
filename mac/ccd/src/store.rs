@@ -2172,7 +2172,7 @@ impl Store {
         )?;
         anyhow::ensure!(
             changed == 1,
-            "{session_uid} has no hosted run to record a host for"
+            "{session_uid} has no hosted session to record a host for"
         );
         Ok(())
     }
@@ -2571,7 +2571,7 @@ impl Store {
         models
             .map(|json| serde_json::from_str(&json))
             .transpose()
-            .context("a hosted run's models")
+            .context("a hosted session's models")
     }
 
     /// The modes of the hosted Antigravity run `session_uid`, as its start's outcome gave them (`{value, label}`);
@@ -2589,7 +2589,7 @@ impl Store {
         Ok(modes
             .map(|json| serde_json::from_str(&json))
             .transpose()
-            .context("a hosted run's modes")?
+            .context("a hosted session's modes")?
             .unwrap_or_default())
     }
 
@@ -2809,12 +2809,12 @@ impl Store {
             commands: commands
                 .map(|json| serde_json::from_str(&json))
                 .transpose()
-                .context("a hosted run's command list")?,
+                .context("a hosted session's command list")?,
             commands_at,
             screen_only: screen_only
                 .map(|json| serde_json::from_str(&json))
                 .transpose()
-                .context("a hosted run's screen-only commands")?,
+                .context("a hosted session's screen-only commands")?,
             claude_version,
         }))
     }

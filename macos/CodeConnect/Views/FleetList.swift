@@ -34,7 +34,7 @@ struct FleetList: View {
     @Environment(\.headerClearance) private var headerClearance
     /// The list has the keyboard: one stop, taken by a click on a row and kept across an arrow's move.
     @FocusState private var listFocused: Bool
-    /// The run End Run… is asking about, and what its computer said when it did not end.
+    /// The run End Session… is asking about, and what its computer said when it did not end.
     @State private var ending: FleetRow?
     @State private var endNote: String?
     /// The run Remove… is asking about, and what its computer said when it was not removed.
@@ -73,8 +73,8 @@ struct FleetList: View {
                 }
                 .buttonStyle(.hover(radius: 6, id: "fleet.newRun"))
                 .focusable(false)
-                .help("New Run")
-                .accessibilityLabel("New Run")
+                .help("New Session")
+                .accessibilityLabel("New Session")
                 .accessibilityIdentifier("fleet.newRun")
             }
             // Clear of the list's toggle beside the window's buttons when the list comes first.
@@ -333,7 +333,7 @@ struct FleetList: View {
         .accessibilityIdentifier("fleet.row.\(row.id)")
         .accessibilityAddTraits(selected ? .isSelected : [])
         // The run's "…" (decisions 185 and 217): on hover, its panel holding Copy Working Directory, Copy Branch Name
-        // while the run is on a branch, then End Run… while the run is live, or Remove… once it has ended (an adopted
+        // while the run is on a branch, then End Session… while the run is live, or Remove… once it has ended (an adopted
         // run's at any time); for VoiceOver, which does not hover, those are the row's own actions.
         .accessibilityActions {
             Button("Copy Working Directory") { copyToPasteboard(row.summary.cwd) }
@@ -343,7 +343,7 @@ struct FleetList: View {
                     .accessibilityIdentifier("fleet.row.\(row.id).copyBranchNameAction")
             }
             if endable {
-                Button("End Run…") { ending = row }
+                Button("End Session…") { ending = row }
                     .accessibilityIdentifier("fleet.row.\(row.id).endRunAction")
             }
             if removable {
@@ -808,7 +808,7 @@ private struct FleetLine: View {
 }
 
 /// A run's "…": it opens the window's row menu (`RowMenu`) below itself,
-/// holding End Run… or Remove… (`PanelItem`, destructive), each of which asks before anything is sent; a run's menu
+/// holding End Session… or Remove… (`PanelItem`, destructive), each of which asks before anything is sent; a run's menu
 /// first offers Copy Working Directory, its folder as the computer names it, as the iPhone's run offers it, and is
 /// there for every run, so a run that can be neither ended nor removed from here has that item alone. A right-click
 /// on the row opens the same menu at the pointer (`RunMore.show`).
@@ -816,7 +816,7 @@ struct RunMore: View {
     enum Action {
         case endRun, remove
 
-        var title: String { self == .endRun ? "End Run…" : "Remove…" }
+        var title: String { self == .endRun ? "End Session…" : "Remove…" }
         var id: String { self == .endRun ? "endRun" : "remove" }
         var symbol: String { self == .endRun ? PanelSymbol.endRun : PanelSymbol.remove }
     }

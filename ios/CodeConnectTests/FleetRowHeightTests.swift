@@ -55,7 +55,7 @@ final class FleetRowHeightTests: XCTestCase {
     }
 
     private let capabilities: [CapabilityBadge] = [
-        .control, .observe(reason: "This run has ended."), .unknown(reason: "Not connected."),
+        .control, .observe(reason: "This session has ended."), .unknown(reason: "Not connected."),
     ]
 
     private let activities: [(FleetActivity?, String)] = [
@@ -79,7 +79,7 @@ final class FleetRowHeightTests: XCTestCase {
     /// The daemon's own sentences, from its catalogue
     /// (`fixtures/codex/refusal-sentences.json`): its link-state refusal, which
     /// greys Stop for ten seconds, and its longest Codex stop sentence.
-    private let linkRefusal = "CodeConnect has no connection to this run right now, so nothing was sent."
+    private let linkRefusal = "CodeConnect has no connection to this session right now, so nothing was sent."
     private let longestStopSentence =
         "the link's connection to Codex ended while this request to stop the turn was in flight, so whether that "
         + "turn was stopped is not known; it will not be sent again. Check the computer."

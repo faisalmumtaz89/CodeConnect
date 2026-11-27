@@ -43,7 +43,7 @@ struct PaneToggle: View {
     }
 }
 
-/// View > Hide List (⌃⌘S) and Hide Run, each Show while its pane is hidden.
+/// View > Hide List (⌃⌘S) and Hide Session, each Show while its pane is hidden.
 struct PaneCommands: Commands {
     @AppStorage(Panes.listHidden) private var listHidden = false
     @AppStorage(Panes.runHidden) private var runHidden = false
@@ -59,7 +59,7 @@ struct PaneCommands: Commands {
                 }
                 .keyboardShortcut("s", modifiers: [.control, .command])
                 .disabled(runIsOpen != true)
-                Button(runHidden ? "Show Run" : "Hide Run") {
+                Button(runHidden ? "Show Session" : "Hide Session") {
                     runHidden.toggle()
                     if runHidden { listHidden = false }
                 }

@@ -279,7 +279,7 @@ enum Fixtures {
             // The fixture carries live Codex runs beside the Claude ones, so the ack advertises the
             // Codex capabilities a Codex-hosting daemon sends — otherwise the composer reads "too
             // old to carry a message to Codex" on the Codex runs. Its runs were started from the app, so it ends
-            // them too (`stop_run`): a render reaches a run row's "…" with End Run….
+            // them too (`stop_run`): a render reaches a run row's "…" with End Session….
             ackJSON = helloAckJSON.replacingOccurrences(
                 of: #""browse_folders":true}"#,
                 with: #""browse_folders":true,"codex_interrupt":true,"codex_compose":true,"stop_run":true,"supported_agents":["claude","codex"]}"#)
@@ -1887,7 +1887,7 @@ enum CodexFixtures {
         case .stopRefusedLate:
             return .rejected(
                 reason:
-                    "CodeConnect has no connection to this run right now, so nothing was sent.")
+                    "CodeConnect has no connection to this session right now, so nothing was sent.")
         case .stopIndeterminate:
             return .indeterminate(
                 reason:
@@ -1906,7 +1906,7 @@ enum CodexFixtures {
         // they landed, not the one that would be true now.
         case .composeDuplicate: return .duplicate(turnID: turnID, started: false)
         case .composeRejected:
-            return .rejected(reason: "CodeConnect has no connection to this run right now, so nothing was sent.")
+            return .rejected(reason: "CodeConnect has no connection to this session right now, so nothing was sent.")
         // **`compose_already_sent_unknown`, verbatim.** This was a hand-written
         // approximation — "that message was written and what became of it is
         // not known" — which is no row the daemon has ever had, so the render

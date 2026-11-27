@@ -77,7 +77,7 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 /// How long a run sent `stop` has to exit before its host's group is stopped (H5).
 const STOP_GRACE: Duration = Duration::from_secs(10);
 
-/// The end of a run the person ended (End Run), however it ended. It carries no exit code: the
+/// The end of a run the person ended (End Session), however it ended. It carries no exit code: the
 /// person asked for the stop, so claude's code (1 when it was mid-turn) says nothing; it says who
 /// ended it ([`protocol::event::ENDED_BY`]).
 pub(crate) fn stopped_end() -> serde_json::Value {
@@ -183,7 +183,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     let (uid, start_uuid) =
         match protocol::uid::new().and_then(|uid| Ok((uid, protocol::uid::uuid_v4()?))) {
             Ok(names) => names,
-            Err(err) => return failed(format!("could not name the run: {err}")),
+            Err(err) => return failed(format!("could not name the session: {err}")),
         };
     // The start's uploads become the run's before anything of it is recorded or sent: a start
     // that cannot take them records nothing, and leaves them where they were.
@@ -205,7 +205,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
     };
     let line = match serde_json::to_string(&start) {
         Ok(line) => line,
-        Err(err) => return failed(format!("could not write the run's start: {err}")),
+        Err(err) => return failed(format!("could not write the session's start: {err}")),
     };
     let now = protocol::time::now_rfc3339();
     let row = SessionRow {
@@ -233,7 +233,7 @@ async fn start_within(daemon: &Arc<Daemon>, run: Run<'_>, timeout: Duration) -> 
         Ok(Some(existing)) => return answer_for(existing),
         // Its branch and repository, read on a task of its own while it comes up.
         Ok(None) => daemon.refresh_tree(&uid),
-        Err(err) => return failed(format!("could not record the run: {err:#}")),
+        Err(err) => return failed(format!("could not record the session: {err:#}")),
     }
     let deadline = Instant::now() + timeout;
     let begun = match bring_up(daemon, &uid, &start_uuid, &start, &run, deadline, false).await {
@@ -293,17 +293,17 @@ async fn bring_up(
     let log = if relaunch {
         match std::fs::remove_file(dir.join("host.json")) {
             Err(err) if err.kind() != io::ErrorKind::NotFound => {
-                return Err(format!("could not remove the run's old host.json: {err}"))
+                return Err(format!("could not remove the session's old host.json: {err}"))
             }
             _ => {}
         }
         std::fs::OpenOptions::new()
             .append(true)
             .open(dir.join("host.log"))
-            .map_err(|err| format!("could not open the run's host.log: {err}"))?
+            .map_err(|err| format!("could not open the session's host.log: {err}"))?
     } else {
         crate::start_session::make_run_dir(run.root, &dir)
-            .map_err(|err| format!("could not make the run's folder {}: {err}", dir.display()))?
+            .map_err(|err| format!("could not make the session's folder {}: {err}", dir.display()))?
     };
     // What the log held before this launch, so a failure reads only this launch's words.
     let since = log.metadata().map(|meta| meta.len()).unwrap_or(0);
@@ -626,7 +626,7 @@ async fn commit_and_ack(
     match daemon.db.commit_cursor(uid.to_string(), host, seq).await {
         Ok(true) => send(write, &ToHost::Ack { seq }).await,
         Ok(false) => Err(format!(
-            "message {seq} is not past the run's cursor for this host"
+            "message {seq} is not past the session's cursor for this host"
         )),
         Err(err) => Err(format!("{err:#}")),
     }
@@ -831,7 +831,7 @@ async fn apply_sdk(
         Ok(Some(events)) => events,
         Ok(None) => {
             return Err(format!(
-                "message {seq} is not past the run's cursor for this host"
+                "message {seq} is not past the session's cursor for this host"
             ))
         }
         Err(err) => return Err(format!("{err:#}")),
@@ -1071,7 +1071,7 @@ async fn link(
                 match daemon.db.commit_cursor(uid.clone(), host, seq).await {
                     Ok(true) => {}
                     Ok(false) => {
-                        break format!("message {seq} is not past the run's cursor for this host")
+                        break format!("message {seq} is not past the session's cursor for this host")
                     }
                     Err(err) => break format!("{err:#}"),
                 }
@@ -1226,7 +1226,7 @@ async fn link(
                         }
                     }
                     Ok(false) => {
-                        break format!("message {seq} is not past the run's cursor for this host")
+                        break format!("message {seq} is not past the session's cursor for this host")
                     }
                     Err(err) => break format!("{err:#}"),
                 }
@@ -1363,7 +1363,7 @@ async fn link(
                         }
                     }
                     Ok(false) => {
-                        break format!("message {seq} is not past the run's cursor for this host")
+                        break format!("message {seq} is not past the session's cursor for this host")
                     }
                     Err(err) => break format!("{err:#}"),
                 }
@@ -1381,7 +1381,7 @@ async fn link(
                         }
                     }
                     Ok(false) => {
-                        break format!("message {seq} is not past the run's cursor for this host")
+                        break format!("message {seq} is not past the session's cursor for this host")
                     }
                     Err(err) => break format!("{err:#}"),
                 }
@@ -1397,7 +1397,7 @@ async fn link(
                         }
                     }
                     Ok(false) => {
-                        break format!("message {seq} is not past the run's cursor for this host")
+                        break format!("message {seq} is not past the session's cursor for this host")
                     }
                     Err(err) => break format!("{err:#}"),
                 }
@@ -1499,7 +1499,7 @@ async fn apply_acp(
         Ok(Some(filed)) => filed,
         Ok(None) => {
             return Err(format!(
-                "message {seq} is not past the run's cursor for this host"
+                "message {seq} is not past the session's cursor for this host"
             ))
         }
         Err(err) => return Err(format!("{err:#}")),
@@ -1692,10 +1692,10 @@ pub(crate) async fn stop_run(daemon: &Arc<Daemon>, uid: &str) -> StopRunResult {
     };
     let lifecycle = match daemon.db.hosted_link(uid.to_string()).await {
         Ok(Some(linked)) => linked.lifecycle,
-        Ok(None) => return refuse("CodeConnect did not start this run, so it cannot end it."),
+        Ok(None) => return refuse("CodeConnect did not start this session, so it cannot end it."),
         Err(err) => {
             crate::log_error!("{uid}: could not read its run to stop it: {err:#}");
-            return refuse("This computer could not read the run.");
+            return refuse("This computer could not read the session.");
         }
     };
     match lifecycle {
@@ -2159,7 +2159,7 @@ async fn apply_setting_outcome(
         Ok(Some(_)) => send(write, &ToHost::Ack { seq }).await?,
         Ok(None) => {
             return Err(format!(
-                "message {seq} is not past the run's cursor for this host"
+                "message {seq} is not past the session's cursor for this host"
             ))
         }
         Err(err) => return Err(format!("{err:#}")),
@@ -3149,7 +3149,7 @@ async fn apply_send_outcome(
                 Ok(true) => send(write, &ToHost::Ack { seq }).await?,
                 Ok(false) => {
                     return Err(format!(
-                        "message {seq} is not past the run's cursor for this host"
+                        "message {seq} is not past the session's cursor for this host"
                     ))
                 }
                 Err(err) => return Err(format!("{err:#}")),
@@ -3213,7 +3213,7 @@ async fn apply_interrupt_outcome(
         Ok(Some(_)) => {}
         Ok(None) => {
             return Err(format!(
-                "message {} is not past the run's cursor for this host",
+                "message {} is not past the session's cursor for this host",
                 told.seq
             ))
         }
@@ -3376,7 +3376,7 @@ async fn apply_answer_outcome(
         Ok(true) => {}
         Ok(false) => {
             return Err(format!(
-                "message {seq} is not past the run's cursor for this host"
+                "message {seq} is not past the session's cursor for this host"
             ))
         }
         Err(err) => return Err(format!("{err:#}")),
@@ -4551,7 +4551,7 @@ mod tests {
     #[tokio::test]
     async fn a_start_with_no_committed_outcome_leaves_its_run_starting() {
         for (case, why, after) in [
-            ("another host", "not past the run's cursor", "failed"),
+            ("another host", "not past the session's cursor", "failed"),
             ("another command", "does not apply", "starting"),
             ("closed", "closed the connection", "starting"),
         ] {

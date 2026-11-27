@@ -91,7 +91,7 @@ const link = createLink({
   setting: (command) =>
     setting
       ? setting(command)
-      : link.send({ type: 'outcome', uuid: command.uuid, status: 'refused', detail: 'the run has not started' }),
+      : link.send({ type: 'outcome', uuid: command.uuid, status: 'refused', detail: 'the session has not started' }),
   stop: () => stop?.(),
   facts: () => facts,
   pending: () => permissions?.pending() ?? [],
@@ -105,7 +105,7 @@ let permissions:
 
 // A message the run cannot take: before its start, or once its input has ended.
 function refuse(uuid: string): void {
-  link.send({ type: 'outcome', uuid, status: 'refused', detail: 'the run is not taking messages' });
+  link.send({ type: 'outcome', uuid, status: 'refused', detail: 'the session is not taking messages' });
 }
 
 // The run's later messages, the person's and ccd's mail wakes, while its input is open.
