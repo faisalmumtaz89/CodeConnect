@@ -153,5 +153,5 @@ public enum CompactPrompt {
     public static func placeholder(for agent: AgentKind = .claude) -> String {
         "What should \(agent.displayName) preserve?"
     }
-    public static let action = "Compact now"
+    public static let action = "Compact"
 }

@@ -115,6 +115,6 @@ final class NativeCommandTests: XCTestCase {
             [CompactPrompt.title, CompactPrompt.explanation(), CompactPrompt.fieldLabel, CompactPrompt.placeholder(),
              CompactPrompt.action],
             ["Compact context", "Ask Claude Code to compact its current context. Instructions are optional.",
-             "Instructions (optional)", "What should Claude preserve?", "Compact now"])
+             "Instructions (optional)", "What should Claude preserve?", "Compact"])
     }
 }
