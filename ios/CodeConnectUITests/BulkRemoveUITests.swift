@@ -75,7 +75,7 @@ final class BulkRemoveUITests: XCTestCase {
 
         app.buttons["Remove (2)"].tap()
         XCTAssertTrue(
-            app.staticTexts["Remove 2 runs?"].waitForExistence(timeout: 5), "one question for all")
+            app.staticTexts["Remove 2 sessions?"].waitForExistence(timeout: 5), "one question for all")
         app.buttons["remove.cancel"].tap()
         XCTAssertTrue(row(app, first).isSelected, "Cancel leaves the selection as it was")
         XCTAssertFalse(
