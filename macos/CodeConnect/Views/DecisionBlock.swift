@@ -98,8 +98,16 @@ struct DecisionBlock: View {
                                     .padding(.horizontal, 28).padding(.bottom, 14)
                             } else {
                                 ReplyBoxFrame(model: model, key: approval.sessionKey) {
-                                    outcomeLine
-                                    controls
+                                    if hasUpper {
+                                        VStack(alignment: .leading, spacing: 10) {
+                                            outcomeLine
+                                            upper
+                                        }
+                                    }
+                                } note: {
+                                    note
+                                } answers: {
+                                    answers
                                 }
                                 .preference(key: HoldsReplyBox.self, value: true)
                             }
@@ -368,34 +376,28 @@ struct DecisionBlock: View {
 
     // MARK: Answering
 
-    /// The answers. In the box (`boxed`): for Allow/Deny the reason a Deny carries, then Deny and Allow, whose keys
-    /// (`keyed`) follow the field (empty: ⌘↩ allows, ⌘D denies; a reason typed: Return denies with it, and Allow
-    /// keeps no key); where the card offers it, "Allow for this session" between them, waiting as Allow waits and with
-    /// no key, and above the row the rule it grants; for Codex its options, ⌘1 onwards. Held above the reply box: the same
-    /// answers, with no field and no keys.
+    /// The answers. In the box (`boxed`): for Allow/Deny the reason a Deny carries in the box's field, then Deny and
+    /// Allow on its bar, whose keys (`keyed`) follow the field (empty: ⌘↩ allows, ⌘D denies; a reason typed: Return
+    /// denies with it, and Allow keeps no key); where the card offers it, "Allow for this session" between them, waiting
+    /// as Allow waits and with no key, and above them the rule it grants; for Codex its options, ⌘1 onwards. Held above
+    /// the reply box: the same answers, with no field and no keys.
     @ViewBuilder private var controls: some View {
+        upper
+        if case .allowDeny = surface {
+            HStack(spacing: 8) {
+                note
+                Spacer(minLength: 8)
+                answers
+            }
+        }
+    }
+
+    /// What stands above the answers: the reason a Deny carries (in the box, where the run's agent receives one), what
+    /// a session grant covers, a Codex card's options.
+    @ViewBuilder private var upper: some View {
         switch surface {
         case .allowDeny(let allowForSession):
-            // The reason field only where the run's agent receives a Deny's reason (`AgentKind.takesDenyReason`).
-            if boxed, summary?.agent.takesDenyReason == true {
-                TextField(
-                    "", text: Binding { reason } set: { reason = $0 },
-                    prompt: Text(placeholder).foregroundStyle(Theme.text3), axis: .vertical
-                )
-                    .textFieldStyle(.plain)
-                    .font(Theme.ui(13))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1...4)
-                    .focused($reasonFocused)
-                    // Return sends a Deny only with a reason in it; on an empty field it does nothing.
-                    .sendsOnReturn { if reasonTyped { send(.text(trimmedReason), from: "reason") } }
-                    // Esc leaves the field before it closes the run, as in the reply box.
-                    .onExitCommand { reasonFocused = false }
-                    .focusedValue(\.composerHoldsEscape, reasonFocused ? true : nil)
-                    .disabled(refusalBlocked != nil)
-                    .accessibilityLabel(placeholder)
-                    .accessibilityIdentifier("\(id).reason.text")
-            }
+            if takesReason { reasonField }
             // What the session grant covers, as Claude writes the rule, read before the buttons as the iPhone has it:
             // the rule can be broader than the one command asked.
             if allowForSession, let rule = DecisionCard.sessionRuleCaption(card: approval.card) {
@@ -408,27 +410,6 @@ struct DecisionBlock: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityLabel("\(DecisionCard.sessionGrantLead) \(rule)")
                     .accessibilityIdentifier("\(id).sessionRule")
-            }
-            HStack(spacing: 8) {
-                blockedLine(assentBlocked)
-                Spacer(minLength: 8)
-                ActionButton(title: reasonTyped ? CardWords.denyAndSend : CardWords.deny, key: keyed ? (reasonTyped ? "↩" : "⌘D") : nil, prominent: false, id: "\(id).deny") {
-                    send(reasonTyped ? .text(trimmedReason) : .deny, from: reasonTyped ? "reason" : "deny")
-                }
-                .disabled(refusalBlocked != nil)
-                .answerKey(reasonTyped ? .return : "d", reasonTyped ? [] : .command, when: keyed)
-                if allowForSession {
-                    // A grant that outlives this card says yes as Allow does, so it waits as Allow waits; no key.
-                    ActionButton(title: CardWords.allowForSession, key: nil, prominent: false, id: "\(id).allowSession") {
-                        send(.optionId("acceptForSession"), from: "allowSession")
-                    }
-                    .disabled(assentBlocked != nil)
-                }
-                ActionButton(title: CardWords.allow, key: keyed && !reasonTyped ? "⌘↩" : nil, prominent: true, id: "\(id).allow") {
-                    send(.allow, from: "allow")
-                }
-                .disabled(assentBlocked != nil)
-                .answerKey(.return, .command, when: keyed && !reasonTyped)
             }
         case .codexOptions(let options):
             VStack(alignment: .leading, spacing: 4) {
@@ -459,6 +440,69 @@ struct DecisionBlock: View {
             }
         case .noneAnswerable:
             EmptyView()
+        }
+    }
+
+    /// In the box, the field holds anything to write or read before answering; with nothing, the bar stands alone.
+    private var hasUpper: Bool {
+        if model.outcomeNote(for: approval.sessionKey, lastSend: nil) != nil { return true }
+        switch surface {
+        case .allowDeny(let allowForSession):
+            return takesReason || allowForSession && DecisionCard.sessionRuleCaption(card: approval.card) != nil
+        case .codexOptions: return true
+        case .noneAnswerable: return false
+        }
+    }
+
+    /// The reason field only in the box, where the run's agent receives a Deny's reason (`AgentKind.takesDenyReason`).
+    private var takesReason: Bool { boxed && summary?.agent.takesDenyReason == true }
+
+    private var reasonField: some View {
+        TextField(
+            "", text: Binding { reason } set: { reason = $0 },
+            prompt: Text(placeholder).foregroundStyle(Theme.text3), axis: .vertical
+        )
+            .textFieldStyle(.plain)
+            .font(Theme.ui(15))
+            .lineSpacing(InputBoxLayout.lineSpacing)
+            .foregroundStyle(Theme.text)
+            .lineLimit(1...4)
+            .focused($reasonFocused)
+            // Return sends a Deny only with a reason in it; on an empty field it does nothing.
+            .sendsOnReturn { if reasonTyped { send(.text(trimmedReason), from: "reason") } }
+            // Esc leaves the field before it closes the run, as in the reply box.
+            .onExitCommand { reasonFocused = false }
+            .focusedValue(\.composerHoldsEscape, reasonFocused ? true : nil)
+            .disabled(refusalBlocked != nil)
+            .accessibilityLabel(placeholder)
+            .accessibilityIdentifier("\(id).reason.text")
+    }
+
+    /// Why Allow can't be pressed yet, beside the answers.
+    @ViewBuilder private var note: some View {
+        if case .allowDeny = surface { blockedLine(assentBlocked) }
+    }
+
+    /// Deny, Allow for this session where offered, Allow.
+    @ViewBuilder private var answers: some View {
+        if case .allowDeny(let allowForSession) = surface {
+            ActionButton(title: reasonTyped ? CardWords.denyAndSend : CardWords.deny, key: keyed ? (reasonTyped ? "↩" : "⌘D") : nil, prominent: false, id: "\(id).deny") {
+                send(reasonTyped ? .text(trimmedReason) : .deny, from: reasonTyped ? "reason" : "deny")
+            }
+            .disabled(refusalBlocked != nil)
+            .answerKey(reasonTyped ? .return : "d", reasonTyped ? [] : .command, when: keyed)
+            if allowForSession {
+                // A grant that outlives this card says yes as Allow does, so it waits as Allow waits; no key.
+                ActionButton(title: CardWords.allowForSession, key: nil, prominent: false, id: "\(id).allowSession") {
+                    send(.optionId("acceptForSession"), from: "allowSession")
+                }
+                .disabled(assentBlocked != nil)
+            }
+            ActionButton(title: CardWords.allow, key: keyed && !reasonTyped ? "⌘↩" : nil, prominent: true, id: "\(id).allow") {
+                send(.allow, from: "allow")
+            }
+            .disabled(assentBlocked != nil)
+            .answerKey(.return, .command, when: keyed && !reasonTyped)
         }
     }
 

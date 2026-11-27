@@ -64,8 +64,15 @@ struct QuestionBlock: View {
                                 controls(keys: false).padding(.horizontal, 28).padding(.bottom, 14)
                             } else {
                                 // Its keys answer while they are not elsewhere (`PendingSlot.keysElsewhere`).
-                                ReplyBoxFrame(model: model, key: approval.sessionKey) { controls(keys: !slot.keysElsewhere) }
-                                    .preference(key: HoldsReplyBox.self, value: true)
+                                let keys = !slot.keysElsewhere
+                                ReplyBoxFrame(model: model, key: approval.sessionKey) {
+                                    if notesInBox { notesField }
+                                } note: {
+                                    note
+                                } answers: {
+                                    answers(keys: keys)
+                                }
+                                .preference(key: HoldsReplyBox.self, value: true)
                             }
                         }
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { answersHeight = $0 }
@@ -156,7 +163,7 @@ struct QuestionBlock: View {
                         id: "\(id).q\(index).other.text")
                 }
             }
-            if question.takesNotes {
+            if question.takesNotes, !notesInBox {
                 field(
                     QuestionWords.notesPrompt(agent?.displayName ?? "the agent"),
                     text: Binding { draft.entries[index].notes } set: { draft.entries[index].notes = $0 },
@@ -177,25 +184,59 @@ struct QuestionBlock: View {
             .accessibilityIdentifier(id)
     }
 
-    /// Decline and Submit, with how many questions are answered (or why the card can't be) beside them; `keys`: in the box, where ⌘D declines and ⌘↩
-    /// submits.
+    /// Decline and Submit, with how many questions are answered (or why the card can't be) beside them, above the reply
+    /// box while its field holds the keyboard (no keys).
     private func controls(keys: Bool) -> some View {
-        let answers = draft.answers(in: questions)
-        return HStack(spacing: 8) {
-            Text(blocked ?? QuestionWords.answered(draft.answered(in: questions), of: questions.questions.count))
-                .font(Theme.ui(12)).foregroundStyle(Theme.text3).accessibilityIdentifier("\(id).blocked")
+        HStack(spacing: 8) {
+            note
             Spacer(minLength: 8)
-            ActionButton(title: QuestionWords.decline, key: keys ? "⌘D" : nil, prominent: false, id: "\(id).decline") {
-                send(.decline, from: "decline")
-            }
-            .disabled(blocked != nil)
-            .answerKey("d", .command, when: keys)
-            ActionButton(title: QuestionWords.submit, key: keys ? "⌘↩" : nil, prominent: true, id: "\(id).submit") {
-                if let answers { send(.answers(answers), from: "submit") }
-            }
-            .disabled(blocked != nil || answers == nil)
-            .answerKey(.return, .command, when: keys)
+            answers(keys: keys)
         }
+    }
+
+    /// How many questions are answered, or why the card can't be.
+    private var note: some View {
+        Text(blocked ?? QuestionWords.answered(draft.answered(in: questions), of: questions.questions.count))
+            .font(Theme.ui(12)).foregroundStyle(Theme.text3).lineLimit(1).accessibilityIdentifier("\(id).blocked")
+    }
+
+    /// Decline and Submit; `keys`: in the box, where ⌘D declines and ⌘↩ submits.
+    @ViewBuilder private func answers(keys: Bool) -> some View {
+        let answers = draft.answers(in: questions)
+        ActionButton(title: QuestionWords.decline, key: keys ? "⌘D" : nil, prominent: false, id: "\(id).decline") {
+            send(.decline, from: "decline")
+        }
+        .disabled(blocked != nil)
+        .answerKey("d", .command, when: keys)
+        ActionButton(title: QuestionWords.submit, key: keys ? "⌘↩" : nil, prominent: true, id: "\(id).submit") {
+            if let answers { send(.answers(answers), from: "submit") }
+        }
+        .disabled(blocked != nil || answers == nil)
+        .answerKey(.return, .command, when: keys)
+    }
+
+    /// A one-question card in the reply box's place writes its note in the box's field; with more questions, each
+    /// keeps its own under it.
+    private var notesInBox: Bool {
+        slot != nil && status.isAnswerable && !held && questions.questions.count == 1
+            && questions.questions[0].takesNotes
+    }
+
+    /// The box's field, for a one-question card's note, in the reply field's type.
+    private var notesField: some View {
+        let prompt = QuestionWords.notesPrompt(agent?.displayName ?? "the agent")
+        return TextField(
+            "", text: Binding { draft.entries[0].notes } set: { draft.entries[0].notes = $0 },
+            prompt: Text(prompt).foregroundStyle(Theme.text3), axis: .vertical
+        )
+            .textFieldStyle(.plain)
+            .font(Theme.ui(15))
+            .lineSpacing(InputBoxLayout.lineSpacing)
+            .foregroundStyle(Theme.text)
+            .lineLimit(1...5)
+            .disabled(!editable)
+            .accessibilityLabel(prompt)
+            .accessibilityIdentifier("\(id).q0.notes")
     }
 
     /// One answer, as the decision card sends one: never while the card cannot be answered or one is on its way.

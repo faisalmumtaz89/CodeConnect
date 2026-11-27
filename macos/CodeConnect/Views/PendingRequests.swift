@@ -53,25 +53,29 @@ struct HoldsReplyBox: PreferenceKey {
     static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
 }
 
-/// The reply box's own surface, edge and margins, holding a request's answers in its place, and at its leading edge,
-/// before the answers, the Stop the reply box has while the run's turn runs (`StopTurnButton`).
-struct ReplyBoxFrame<Content: View>: View {
+/// The reply box itself (`InputBox`, lit as it is), holding a request's answers in its place: in its field, what the
+/// card writes or reads before answering (nothing: the bar alone); on its bar, the Stop the reply box has while the
+/// run's turn runs (`StopTurnButton`), then the card's note, and at the bar's trailing end its answers.
+struct ReplyBoxFrame<Field: View, Note: View, Answers: View>: View {
     let model: AppModel
     let key: String
-    @ViewBuilder let content: Content
+    @ViewBuilder let field: Field
+    @ViewBuilder let note: Note
+    @ViewBuilder let answers: Answers
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 12) {
+        InputBox(barHeight: 46) {
+            field
+        } leading: {
             StopTurnButton(model: model, key: key)
-            VStack(alignment: .leading, spacing: 10) { content }
+            note.yields(0)
+        } trailing: {
+            answers
         }
-            .padding(12)
-            .background(Theme.raised, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.09)))
-            // On the pane's one content column, as the reply box it stands in for: the card's text stands 28 pt in.
-            .padding(.horizontal, 28)
-            .padding(.top, 4)
-            .padding(.bottom, 16)
+        // Where the reply box it stands in for stands: on the pane's content column, 20 pt above the pane's foot.
+        .padding(.horizontal, 28)
+        .padding(.top, 8)
+        .padding(.bottom, 20)
     }
 }
 
