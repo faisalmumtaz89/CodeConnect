@@ -19,6 +19,8 @@ struct StartPane: View {
     @State private var standing: CGRect = .zero
     /// The form's chosen computer takes files.
     @State private var takesFiles = false
+    /// Where the form's box stands in the panel: dropped files' plate stands above it.
+    @State private var box: CGRect = .zero
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,7 +28,9 @@ struct StartPane: View {
             Spacer(minLength: 16)
             Group {
                 if formShown || !machines.startContexts.isEmpty || machines.outstandingStart != nil {
-                    StartForm(started: started, addComputer: addComputer, whyNone: why, draft: draft, takesFiles: $takesFiles)
+                    StartForm(
+                        started: started, addComputer: addComputer, whyNone: why, draft: draft, takesFiles: $takesFiles,
+                        box: $box)
                         .onAppear { formShown = true }
                 } else {
                     noComputer
@@ -41,8 +45,9 @@ struct StartPane: View {
         .background(NumericGround(clear: standing).clipShape(RoundedRectangle(cornerRadius: 12)))
         .background(Theme.window, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.hairline))
-        // Files dropped anywhere on the panel go with the first message, staged until Start sends them.
-        .takesDroppedFiles(takesFiles, held: draft.files.count, plateBottom: 0, draft.attach)
+        // Files dropped anywhere on the panel go with the first message, staged until Start sends them; the plate
+        // stands above the box they land in, whose rim lights.
+        .takesDroppedFiles(takesFiles, held: draft.files.count, plateBottom: max(0, height - box.minY), draft.attach)
         .coordinateSpace(.named(StartForm.space))
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .padding(.horizontal, 10)
