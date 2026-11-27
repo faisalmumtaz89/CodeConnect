@@ -81,14 +81,17 @@ fn shim_has_git() -> bool {
     true
 }
 
-/// Collect `git diff HEAD` plus the untracked files, capped at `max_bytes`.
+/// Collect `git diff HEAD`, or with `from_base` the diff against the merge-base of `HEAD` and
+/// the run's base ([`protocol::ws::RunGit::from_base`]), plus the untracked files, capped at
+/// `max_bytes`.
 pub async fn collect(
     cwd: &str,
     configured_bin: Option<&str>,
+    from_base: bool,
     max_bytes: usize,
     timeout: Duration,
 ) -> Diff {
-    match collect_inner(cwd, configured_bin, max_bytes, timeout).await {
+    match collect_inner(cwd, configured_bin, from_base, max_bytes, timeout).await {
         Ok(diff) => diff,
         // A diff that cannot be produced is a note, not a protocol error: the
         // phone should say why and carry on, not show a failed request.
@@ -228,7 +231,7 @@ pub async fn diff_stat(
     .await
     .ok()?
     .ok;
-    let listed = files(&git, cwd, has_head, timeout).await?;
+    let listed = files(&git, cwd, has_head.then_some("HEAD"), timeout).await?;
     if listed.truncated {
         return None;
     }
@@ -297,7 +300,7 @@ async fn run_git_inner(
         ));
     }
     let head = parse_status(&status.stdout);
-    let listed = files(&git, cwd, head.oid.is_some(), timeout)
+    let listed = files(&git, cwd, head.oid.as_ref().map(|_| "HEAD"), timeout)
         .await
         .ok_or("git could not list the changed files")?;
     let Remotes { base, pushed } = remotes(
@@ -327,16 +330,29 @@ async fn run_git_inner(
         }
         _ => None,
     };
+    let from_base = match (&head.oid, &base) {
+        (Some(oid), Some(base)) => {
+            match merge_base(&git, cwd, oid, &base.reference, timeout).await {
+                Some(merge_base) => {
+                    files(&git, cwd, Some(&merge_base), timeout)
+                        .await
+                        .map(|listed| {
+                            Box::new(protocol::ws::FromBase {
+                                merge_base,
+                                changed: changed_files(&listed),
+                            })
+                        })
+                }
+                None => None,
+            }
+        }
+        _ => None,
+    };
     Ok(protocol::ws::RunGit {
         branch: head.branch,
         head_oid: head.oid,
         base,
-        changed: protocol::ws::ChangedFiles {
-            files: listed.files.len() as u64,
-            added: listed.files.iter().filter_map(|file| file.added).sum(),
-            removed: listed.files.iter().filter_map(|file| file.removed).sum(),
-            complete: !listed.truncated && !listed.uncounted,
-        },
+        changed: changed_files(&listed),
         ahead,
         pushed,
         unmerged: head.unmerged,
@@ -346,7 +362,33 @@ async fn run_git_inner(
         pr: None,
         gh_read_at: None,
         gh_repo: None,
+        from_base,
     })
+}
+
+/// [`Files`] as a [`protocol::ws::RunGit`] counts them.
+fn changed_files(listed: &Files) -> protocol::ws::ChangedFiles {
+    protocol::ws::ChangedFiles {
+        files: listed.files.len() as u64,
+        added: listed.files.iter().filter_map(|file| file.added).sum(),
+        removed: listed.files.iter().filter_map(|file| file.removed).sum(),
+        complete: !listed.truncated && !listed.uncounted,
+    }
+}
+
+/// The merge-base of `head` and `base`; `None` when they share no commit or git cannot say.
+async fn merge_base(
+    git: &Path,
+    cwd: &str,
+    head: &str,
+    base: &str,
+    timeout: Duration,
+) -> Option<String> {
+    let out = run(git, cwd, &["merge-base", head, base], timeout, PROBE_CAP)
+        .await
+        .ok()?;
+    let oid = out.stdout.trim();
+    (out.ok && !oid.is_empty()).then(|| oid.to_string())
 }
 
 /// The remote `branch` pushes to (`%(push:remotename)`: its `pushRemote`,
@@ -1173,16 +1215,15 @@ struct Files {
     uncounted: bool,
 }
 
-/// The changed files at `cwd`, from the repository's top: the tracked ones against `HEAD`
-/// (against the index before the first commit), compared as the diff compares them, then the
+/// The changed files at `cwd`, from the repository's top: the tracked ones against `against`,
+/// `HEAD` or a merge-base (against the index before the first commit: `None`), compared as the
+/// diff compares them, then the
 /// untracked ones. `None` when git cannot list them, or lists more tracked files than
 /// [`LISTING_CAP`] holds. Run with the diff's switches, so no configured program runs.
-async fn files(git: &Path, cwd: &str, has_head: bool, timeout: Duration) -> Option<Files> {
-    let mut args = diff_args(false);
+async fn files(git: &Path, cwd: &str, against: Option<&str>, timeout: Duration) -> Option<Files> {
+    let mut args = diff_args(None);
     args.extend(["--no-relative", "-z", "--raw", "--numstat"]);
-    if has_head {
-        args.push("HEAD");
-    }
+    args.extend(against);
     let tracked = run(git, cwd, &args, timeout, LISTING_CAP).await.ok()?;
     let untracked = run(git, cwd, UNTRACKED_ARGS, timeout, LISTING_CAP)
         .await
@@ -1679,6 +1720,7 @@ pub async fn dirty(cwd: &str, configured_bin: Option<&str>, timeout: Duration) -
 async fn collect_inner(
     cwd: &str,
     configured_bin: Option<&str>,
+    from_base: bool,
     max_bytes: usize,
     timeout: Duration,
 ) -> Result<Diff> {
@@ -1721,15 +1763,28 @@ async fn collect_inner(
     .await?
     .ok;
     let mut note = None;
+    let mut against = has_head.then(|| "HEAD".to_string());
+    if from_base && has_head {
+        let branch = branch(cwd, configured_bin, timeout).await;
+        let base = remotes(&git, cwd, branch.as_deref(), None, timeout)
+            .await
+            .base;
+        let merged = match &base {
+            Some(base) => merge_base(&git, cwd, "HEAD", &base.reference, timeout).await,
+            None => None,
+        };
+        match merged {
+            Some(merge_base) => against = Some(merge_base),
+            None => note = Some("no base is known; showing changes against HEAD".into()),
+        }
+    }
+    if !has_head {
+        note = Some("repository has no commits yet; showing unstaged changes".into());
+    }
     // Headroom for the untracked-file list and the truncation marker appended
     // below, so the assembled string still lands inside `max_bytes`.
     let diff_cap = max_bytes.saturating_add(1024);
-    let tracked = if has_head {
-        run(&git, cwd, &diff_args(true), timeout, diff_cap).await?
-    } else {
-        note = Some("repository has no commits yet; showing unstaged changes".into());
-        run(&git, cwd, &diff_args(false), timeout, diff_cap).await?
-    };
+    let tracked = run(&git, cwd, &diff_args(against.as_deref()), timeout, diff_cap).await?;
     if !tracked.ok {
         return Ok(note_only(format!(
             "git diff failed: {}",
@@ -1795,7 +1850,7 @@ async fn collect_inner(
         unified.push_str("\n… diff truncated by CodeConnect\n");
     }
 
-    let listed = files(&git, cwd, has_head, timeout).await;
+    let listed = files(&git, cwd, against.as_deref(), timeout).await;
     let files_truncated = listed.as_ref().is_some_and(|listed| {
         listed.truncated || listed.files.len() > protocol::ws::MAX_DIFF_FILES
     });
@@ -1827,7 +1882,7 @@ async fn collect_inner(
 /// `-c core.fsmonitor=false` for the same reason: fsmonitor is a configured
 /// hook program too. `--no-color` because a phone renders the text itself, and
 /// colour would arrive as escape sequences inside the payload.
-fn diff_args(against_head: bool) -> Vec<&'static str> {
+fn diff_args(against: Option<&str>) -> Vec<&str> {
     let mut args = vec![
         "-c",
         "core.fsmonitor=false",
@@ -1836,9 +1891,7 @@ fn diff_args(against_head: bool) -> Vec<&'static str> {
         "--no-textconv",
         "--no-color",
     ];
-    if against_head {
-        args.push("HEAD");
-    }
+    args.extend(against);
     args
 }
 
@@ -2186,7 +2239,14 @@ mod tests {
     }
 
     async fn diff_of(dir: &Path, max: usize) -> Diff {
-        collect(dir.to_str().unwrap(), None, max, Duration::from_secs(30)).await
+        collect(
+            dir.to_str().unwrap(),
+            None,
+            false,
+            max,
+            Duration::from_secs(30),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -2204,6 +2264,7 @@ mod tests {
         let diff = collect(
             "/nonexistent/codeconnect/test",
             None,
+            false,
             1024,
             Duration::from_secs(5),
         )
@@ -3294,7 +3355,7 @@ mod tests {
 
         // The run's diff names its untracked files, not the worktree.
         std::fs::write(dir.join("new.txt"), "n\n").unwrap();
-        let diff = collect(cwd, None, 512 * 1024, Duration::from_secs(10)).await;
+        let diff = collect(cwd, None, false, 512 * 1024, Duration::from_secs(10)).await;
         assert!(diff.unified.contains("new.txt"), "{}", diff.unified);
         assert!(
             !diff.unified.contains(".claude/worktrees"),
@@ -3909,7 +3970,7 @@ lint-only-in-bashrc
         let raw = run(
             &git_bin(None).unwrap(),
             dir.to_str().unwrap(),
-            &diff_args(true),
+            &diff_args(Some("HEAD")),
             Duration::from_secs(30),
             cap,
         )
@@ -3996,7 +4057,7 @@ lint-only-in-bashrc
         // flag fails here loudly rather than silently re-enabling execution in
         // a git version whose defaults happen to differ.
         for against_head in [true, false] {
-            let args = diff_args(against_head);
+            let args = diff_args(against_head.then_some("HEAD"));
             for required in ["--no-ext-diff", "--no-textconv", "core.fsmonitor=false"] {
                 assert!(args.contains(&required), "{required} missing from {args:?}");
             }
@@ -4192,5 +4253,118 @@ lint-only-in-bashrc
         git_sync(&empty, &["add", "."]);
         git_sync(&empty, &["commit", "-qm", "first"]);
         assert_eq!(repo_of(&empty).await, Some(before));
+    }
+
+    /// A branch `topic` off `origin/main` with `a.txt` edited and committed, and `main` then
+    /// moved ahead on the remote with an edit to `b.txt`, fetched: the merge-base is the first
+    /// commit.
+    fn branch_off_a_moved_base(tag: &str) -> PathBuf {
+        let (dir, _remote) = repo_with_origin(tag);
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        git_sync(&dir, &["add", "."]);
+        git_sync(&dir, &["commit", "-qm", "b"]);
+        git_sync(&dir, &["push", "-q", "origin", "main"]);
+        git_sync(&dir, &["checkout", "-q", "-b", "topic", "HEAD~1"]);
+        std::fs::write(dir.join("a.txt"), "1\n2\n3\n").unwrap();
+        git_sync(&dir, &["commit", "-qam", "topic"]);
+        git_sync(&dir, &["checkout", "-q", "main"]);
+        std::fs::write(dir.join("b.txt"), "b\nmoved\n").unwrap();
+        git_sync(&dir, &["commit", "-qam", "moved"]);
+        git_sync(&dir, &["push", "-q", "origin", "main"]);
+        git_sync(&dir, &["checkout", "-q", "topic"]);
+        dir
+    }
+
+    fn paths(files: &[protocol::ws::DiffFile]) -> Vec<&str> {
+        files.iter().map(|file| file.path.as_str()).collect()
+    }
+
+    /// **A branch's changes from its base** (C1): work all committed is nothing to commit
+    /// (`changed` 0) and still the branch's change (`from_base` lists it), only the branch's
+    /// own files when the base has moved on; an edit and an untracked file on top are in both;
+    /// the diff against the base shows the committed edit's hunk.
+    #[tokio::test]
+    async fn a_branchs_changes_from_its_base_include_its_commits() {
+        let dir = branch_off_a_moved_base("from-base");
+        let read = run_git_of(&dir).await.unwrap();
+        assert_eq!(read.changed.files, 0, "nothing to commit");
+        let from = read.from_base.expect("a base is known");
+        assert_eq!(
+            (from.changed.files, from.changed.added, from.changed.removed),
+            (1, 1, 0),
+            "only a.txt, the branch's own: not b.txt, which the base moved"
+        );
+        assert_eq!(
+            from.merge_base,
+            git_out(&dir, &["rev-parse", "topic~1"]).trim()
+        );
+        let diff = collect(
+            dir.to_str().unwrap(),
+            None,
+            true,
+            512 * 1024,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(paths(diff.files.as_deref().unwrap()), ["a.txt"]);
+        assert!(diff.unified.contains("+3"), "{}", diff.unified);
+        let head = diff_of(&dir, 512 * 1024).await;
+        assert_eq!(
+            head.files.as_deref().map(<[_]>::len),
+            Some(0),
+            "against HEAD: clean"
+        );
+
+        std::fs::write(dir.join("c.txt"), "new\n").unwrap();
+        std::fs::write(dir.join("a.txt"), "1\n2\n3\n4\n").unwrap();
+        let read = run_git_of(&dir).await.unwrap();
+        assert_eq!(read.changed.files, 2);
+        assert_eq!(
+            read.from_base.unwrap().changed.files,
+            2,
+            "a.txt once, and c.txt"
+        );
+        let diff = collect(
+            dir.to_str().unwrap(),
+            None,
+            true,
+            512 * 1024,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(paths(diff.files.as_deref().unwrap()), ["a.txt", "c.txt"]);
+        assert!(
+            diff.unified.contains("+3") && diff.unified.contains("+4"),
+            "{}",
+            diff.unified
+        );
+    }
+
+    /// **No base, no comparison with one**: a branch at its base has nothing from it, and a
+    /// repository with no remote has no `from_base`, its diff asked from the base the same as
+    /// against `HEAD`, with a note.
+    #[tokio::test]
+    async fn a_branch_at_its_base_or_with_none_has_nothing_from_it() {
+        let (level, _remote) = repo_with_origin("from-base-level");
+        let from = run_git_of(&level).await.unwrap().from_base.unwrap();
+        assert_eq!(from.changed.files, 0);
+
+        let alone = committable("from-base-none");
+        std::fs::write(alone.join("a.txt"), "2\n").unwrap();
+        let read = run_git_of(&alone).await.unwrap();
+        assert_eq!((read.changed.files, read.from_base), (1, None));
+        let diff = collect(
+            alone.to_str().unwrap(),
+            None,
+            true,
+            512 * 1024,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(paths(diff.files.as_deref().unwrap()), ["a.txt"]);
+        assert_eq!(
+            diff.note.as_deref(),
+            Some("no base is known; showing changes against HEAD")
+        );
     }
 }
