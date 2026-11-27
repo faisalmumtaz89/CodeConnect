@@ -35,8 +35,8 @@ struct StartForm: View {
     @Environment(\.sheetRoom) private var room
     /// The folder button's panel is open.
     @State private var folderOpen = false
-    /// Where the box stands in `StartForm.space`, which its panels stay inside.
-    @State private var box: CGRect = .zero
+    /// Where the box stands in `StartForm.space`, which its panels stay inside and the drop plate stands above.
+    @Binding var box: CGRect
     /// The folder chip in `StartForm.space`: its panel starts at its leading edge when it fits, and under it.
     @State private var folderChip: CGRect = .zero
     /// How tall the folder panel stands, and its list in it, as drawn.
