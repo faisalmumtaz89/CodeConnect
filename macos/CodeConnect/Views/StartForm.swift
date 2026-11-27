@@ -395,7 +395,7 @@ struct StartForm: View {
         // Above the chip, as every menu of the box's bar opens (screen 32).
         .overlay(alignment: .bottomLeading) {
             if folderOpen {
-                let placed = PanelPlace.place(widest: 520, leading: folderChip.minX, box: box)
+                let placed = PanelPlace.place(widest: browsing ? 440 : 360, leading: folderChip.minX, box: box)
                 folderPanel(context, width: placed.width).openPanel()
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { folderPanelHeight = $0 }
                     .offset(x: placed.x - folderChip.minX, y: -(InputBoxChip.height + Theme.panelGap))
@@ -414,7 +414,7 @@ struct StartForm: View {
         return min(260, max(room, 44))
     }
 
-    /// Up to 520 pt wide, inside the box (`PanelPlace.place`).
+    /// Up to 360 pt wide, 440 while browsing, inside the box (`PanelPlace.place`).
     private func folderPanel(_ context: StartContext, width: CGFloat) -> some View {
         folderRows(context)
             .frame(width: width - 2 * MenuMetrics.inset)
