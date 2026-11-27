@@ -649,7 +649,9 @@ enum Fixtures {
 
     /// `app-N` in `/Users/dev`, or, with `-CC_FIXTURE_REAL_NAMES`, the folders
     /// the start-a-session list holds, so a card and its project are one folder.
-    private static let realNames = ["storefront-api", "ios-app", "docs-site", "query-parser", "web-dashboard"]
+    private static let realNames = [
+        "storefront-api", "ios-app", "docs-site", "query-parser", "web-dashboard", "auth-service", "search-indexer",
+    ]
 
     /// `-CC_LONG_LABEL before|after`: the first run's folder, and Start's first folder, have a 60-character name,
     /// which ccd sends cut to 40 (`before`) or whole (`after`). Its folder name, then the label as sent.
@@ -1069,7 +1071,7 @@ enum Fixtures {
             event("fx-7", 5, 288, "agent_message", "transcript",
                   reply("One failure in `parser.test.ts`: the date parser drops the timezone offset. Fixing it now.")),
             event("fx-7", 6, 287, "tool_call", "hook",
-                  call("toolu_tl_2", "Edit", "{\"file_path\":\"/Users/dev/app-7/src/parser.ts\"}")),
+                  call("toolu_tl_2", "Edit", "{\"file_path\":\"\(cwd(7))/src/parser.ts\"}")),
             event("fx-7", 7, 286, "tool_result", "transcript", result("toolu_tl_2", "Updated src/parser.ts")),
             event("fx-7", 8, 285, "tool_call", "hook", call("toolu_tl_3", "Bash", "{\"command\":\"npm test\"}")),
             event("fx-7", 9, 278, "tool_result", "transcript", result("toolu_tl_3", "42 passed")),
