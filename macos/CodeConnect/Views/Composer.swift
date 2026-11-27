@@ -53,7 +53,7 @@ private struct ResumeCommand: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(SessionWords.pickUpAtComputer).font(Theme.ui(12)).foregroundStyle(Theme.text2)
+            Text(SessionWords.pickUpAtComputer).font(Theme.ui(12)).foregroundStyle(Theme.text3)
             // Whole, wrapping where it must: a cut would hide what runs.
             Text(command).font(Theme.mono(12)).foregroundStyle(Theme.text)
                 .fixedSize(horizontal: false, vertical: true)
