@@ -5,6 +5,16 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## CodeConnect 0.19.35
 
+- On the Mac, sessions are grouped by project, a project being its repository. Each project sits under a header that
+  folds and stays in view, with its ended sessions shown 25 at a time. The list's head says how many need you, and
+  Only these shows just those.
+- Each project's header has a menu: New Session Here, Pin to Top, Collapse Other Projects and Hide Project.
+- ⌘F searches the list by title; ⌘↑ and ⌘↓ move between projects, and ← and → fold and open one.
+- A project's ended sessions are archived together: only those whose work is already on the base go, and the card
+  names the rest.
+- A branch's conflicts are listed under its files, the Archive card's button says Archive, and the merge menu opens over
+  the file list.
+
 ## CodeConnect 0.19.34
 
 - The apps say "session" wherever they said "run": in buttons and menus (New Session, End Session…, Archive Session),
