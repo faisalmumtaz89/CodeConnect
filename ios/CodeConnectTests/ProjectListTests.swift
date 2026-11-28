@@ -14,9 +14,12 @@ final class ProjectListTests: XCTestCase {
         lifecycle: String = "running", limited: Bool = false, archived: Bool = false, name: String? = nil,
         repo: String? = nil, title: String? = nil
     ) -> FleetRow {
-        let extra = (limited ? #","limit":{"which":"five_hour","at":"2026-07-31T09:14:00.000Z"}"# : "")
-            + (archived ? #","archived":true"# : "") + (repo.map { #","repo":"# + $0 } ?? "")
-            + (title.map { #","title":""# + $0 + #"""# } ?? "")
+        // In typed parts: one expression of them all is more than CI's compiler type-checks in reasonable time.
+        let limit: String = limited ? #","limit":{"which":"five_hour","at":"2026-07-31T09:14:00.000Z"}"# : ""
+        let archive: String = archived ? #","archived":true"# : ""
+        let repoJSON: String = repo.map { #","repo":"# + $0 } ?? ""
+        let titleJSON: String = title.map { #","title":""# + $0 + #"""# } ?? ""
+        let extra = limit + archive + repoJSON + titleJSON
         let json = """
             {"session_uid":"\(id)","session_id":"\(id)","cwd":"\(cwd)","lifecycle":"\(lifecycle)","link":"attached",\
             "last_seq":3,"created_at":"2026-07-31T09:14:00.000Z","updated_at":"2026-07-31T09:14:00.000Z"\(extra)}

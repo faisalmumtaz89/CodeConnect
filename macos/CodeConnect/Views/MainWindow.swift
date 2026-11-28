@@ -206,7 +206,7 @@ struct MainWindow: View {
                     .opacity(0)
                     .allowsHitTesting(false)
             } else if let opened, changesInPlace, adding == nil, composerHoldsEscape != true, !Shells.shared.holdsKeys,
-                !asks.isAsking, layout.search == nil
+                !asks.isAsking
             {
                 Button("Conversation") { changesOpen.remove(opened) }
                     .keyboardShortcut(.cancelAction)
@@ -214,7 +214,7 @@ struct MainWindow: View {
                     .opacity(0)
                     .allowsHitTesting(false)
             } else if opened != nil, adding == nil, composerHoldsEscape != true, !Shells.shared.holdsKeys,
-                !asks.isAsking, layout.search == nil
+                !asks.isAsking
             {
                 Button("Close") { opened = nil }
                     .keyboardShortcut(.cancelAction)
@@ -264,6 +264,7 @@ struct MainWindow: View {
     private func started(_ run: String) {
         startDraft.didOpen()
         layout.onlyNeedsYou = false
+        layout.search = nil
         filter = nil
         opened = run
     }
@@ -293,7 +294,10 @@ struct MainWindow: View {
         .frame(width: besideAPane ? 256 : nil)
         .environment(\.headerClearance, clearance(first: true, last: !besideAPane))
         .onKeyPress(keys: [.return]) { press in
-            guard press.modifiers.isEmpty, opened != nil, !changesInPlace else { return .ignored }
+            // Not while a field in the list has the keyboard (search's): its Return is its own.
+            guard press.modifiers.isEmpty, opened != nil, !changesInPlace, composerHoldsEscape != true else {
+                return .ignored
+            }
             replyFocus += 1
             return .handled
         }
