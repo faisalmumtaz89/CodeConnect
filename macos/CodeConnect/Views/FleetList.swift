@@ -1,52 +1,84 @@
 import CodeConnectKit
 import SwiftUI
 
-/// Which runs the list shows: the ones still going, or the ones that have ended.
-enum FleetScope: String {
-    case active, finished
+/// How the person has laid the list out: only what needs them, the projects folded, how many times each project's
+/// ended sessions were revealed, and where the open session stood when it was opened, which it keeps while it is
+/// open, and what it is searching for (nil, no field). The app's, so a hidden list or a closed window comes back to it.
+/// The projects pinned (first first) and hidden
+/// (with the name each had when hidden), by project key, are kept across launches too (`kept`, `keep`).
+struct ListLayout: Equatable {
+    var onlyNeedsYou = false
+    var folded: Set<String> = []
+    var revealed: [String: Int] = [:]
+    var held: ProjectList.Held?
+    var search: String?
+    var pinned: [String] = []
+    var hidden: [String: String] = [:]
 
-    /// The scope by name: the ended runs carry their status's own word.
-    var title: String { self == .active ? "Active" : FleetStatus.ended.label }
+    private static let pinnedKey = "projects.pinned"
+    private static let hiddenKey = "projects.hidden"
 
-    func rows(_ fleet: [FleetRow]) -> [FleetRow] {
-        fleet.filter { ($0.status == .ended) == (self == .finished) }
+    /// A launch's list: Pin to Top and Hide Project as they were last kept.
+    static var kept: ListLayout {
+        let defaults = UserDefaults.standard
+        return ListLayout(
+            pinned: defaults.stringArray(forKey: pinnedKey) ?? [],
+            hidden: defaults.dictionary(forKey: hiddenKey) as? [String: String] ?? [:])
+    }
+
+    func keep() {
+        UserDefaults.standard.set(pinned, forKey: Self.pinnedKey)
+        UserDefaults.standard.set(hidden, forKey: Self.hiddenKey)
     }
 }
 
-/// The window's run list, 256 pt down its leading side: in its head the computer it is narrowed to ("All ▾") and New
-/// Run (+); under it every run on every paired computer in three sections by what it needs (`RunList`), Needs you,
-/// Working and Done, Done ending with the way to the ended runs ("N ended ›"), which the list shows in their place
-/// with the way back ("‹ Active"); in its foot this Mac's Tailscale and Settings.
+/// The window's session list, 256 pt down its leading side: in its head the computer it is narrowed to ("All ▾") and
+/// New Session (+); under it, while anything needs the person on any computer, "N need you" with Only these; then every
+/// session on every paired computer under its project (`ProjectList`), each project under a header that folds it and
+/// sticks while its sessions scroll under it, its ended sessions revealed in place ("N earlier ›"); in its foot this
+/// Mac's Tailscale and Settings.
 struct FleetList: View {
     @Environment(Machines.self) private var machines
-    @Binding var scope: FleetScope
+    @Binding var layout: ListLayout
     /// The computer the list is narrowed to, if any; the Mac narrows by computer alone.
     @Binding var filter: FleetFilter?
-    /// The run open beside the list, if any.
+    /// The session open beside the list, if any.
     @Binding var opened: String?
     let newRun: () -> Void
+    /// New Session Here: the start form, on the computer and in the folder given.
+    let newSessionIn: (_ machineID: String?, _ folder: String) -> Void
     let addComputer: () -> Void
     let openSettings: () -> Void
     /// The row under the pointer, and the row whose "…" panel is open.
     @State private var hovered: String?
-    /// The window's one row menu, which a run's "…" or a right-click on its row opens.
+    /// The window's one row menu, which a session's "…" or a right-click on its row opens.
     @Environment(RowMenu.self) private var menu
     @Environment(\.headerClearance) private var headerClearance
     /// The list has the keyboard: one stop, taken by a click on a row and kept across an arrow's move.
     @FocusState private var listFocused: Bool
-    /// The run End Session… is asking about, and what its computer said when it did not end.
+    /// Search's field has the keyboard.
+    @FocusState private var searchFocused: Bool
+    /// The project ⌘↑ and ⌘↓ moved the keys to, which ← and → fold and open; nil, the open session's.
+    @State private var keyed: String?
+    /// The session End Session… is asking about, and what its computer said when it did not end.
     @State private var ending: FleetRow?
     @State private var endNote: String?
-    /// The run Remove… is asking about, and what its computer said when it was not removed.
+    /// The session Remove… is asking about, and what its computer said when it was not removed.
     @State private var removing: FleetRow?
     @State private var removeNote: String?
-    /// Choosing ended runs to remove together (the iPhone's Select): what is chosen, the batch asked about, whether it
-    /// is on its way, and what the last batch did not remove, by run, with the computer's reason.
+    /// Choosing ended sessions to remove together (⌘-click on one): what is chosen, the batch asked about, whether it
+    /// is on its way, and what the last batch did not remove, by session, with the computer's reason.
     @State private var selecting = false
     @State private var chosen: Set<String> = []
     @State private var removingMany: [String]?
     @State private var batchRunning = false
     @State private var batchRefused: [String: String] = [:]
+    /// What the last batch did to the sessions it did: "removed" or "archived", for what it did not.
+    @State private var batchDid = "removed"
+    /// Archive N Ended Sessions… asking about a project's, once each one's repository has been read; and, when none
+    /// of them can go, why each stays.
+    @State private var archiving: ArchiveAsk?
+    @State private var archiveNone: String?
 
     /// The machine id the list is narrowed to.
     private var computer: String? {
@@ -54,18 +86,40 @@ struct FleetList: View {
         return nil
     }
 
+    /// The list as it stands, the open session held at `held`; searching for `search`, the sessions that match.
+    private func projects(held: ProjectList.Held?, search: String = "") -> ProjectList {
+        ProjectList(
+            machines.fleet, computer: computer, onlyNeedsYou: layout.onlyNeedsYou, pinned: layout.pinned,
+            hidden: Set(layout.hidden.keys), revealed: layout.revealed, deck: machines.deck.map(\.sessionKey), held: held,
+            search: search)
+    }
+
     var body: some View {
-        let list = RunList(machines.fleet, computer: computer)
-        let rows = scope == .active ? list.needsYou + list.working + list.done : list.ended
-        let selectable = scope == .finished ? list.ended.filter(removable).map(\.id) : []
+        let list = projects(held: layout.held)
+        // While words are searched for, what matches, in the list's place.
+        let found = layout.search.map { projects(held: nil, search: $0) }.flatMap { $0.found == nil ? nil : $0 }
+        let shown = found ?? list
+        // The sessions as the list shows them, for the arrows; a folded project's are not shown.
+        let rows = shown.projects.filter { !layout.folded.contains($0.id) }.flatMap(\.rows)
+        let selectable = rows.filter(removable).map(\.id)
         let picked = selectable.filter(chosen.contains)
         VStack(spacing: 0) {
             // The head's controls stand at the end of the list's 256 pt, whatever the list's width, so the computer menu
-            // opens from the same place, over whatever is beside the list; it narrows the ended runs as it does the
-            // active ones.
+            // opens from the same place, over whatever is beside the list.
             HStack(spacing: 4) {
                 Spacer(minLength: 0)
-                ComputerFilter(filter: $filter, addComputer: addComputer)
+                Button(action: openSearch) {
+                    Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(Theme.text2)
+                        .frame(width: 20, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.hover(radius: 6, id: "fleet.search"))
+                .focusable(false)
+                .keyboardShortcut("f", modifiers: .command)
+                .help("\(RunListWords.search) (⌘F)")
+                .accessibilityLabel(RunListWords.search)
+                .accessibilityIdentifier("fleet.search")
+                ComputerFilter(filter: $filter, hidden: $layout.hidden, addComputer: addComputer)
                 Button(action: newRun) {
                     Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.text2)
                         .frame(width: 20, height: 24)
@@ -85,7 +139,7 @@ struct FleetList: View {
             // Its dropdown opens over the rows below it.
             .zIndex(1)
             // What the last batch did not remove, and why, under the head.
-            if let note = batchNote(rows) {
+            if let note = batchNote(machines.fleet) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(note.title).font(Theme.ui(12, .medium)).foregroundStyle(Theme.amber)
                     Text(note.reasons).font(Theme.ui(12)).foregroundStyle(Theme.text2).lineLimit(2)
@@ -97,39 +151,120 @@ struct FleetList: View {
                 .accessibilityIdentifier("fleet.batchNote")
             }
 
-            if scope == .active, machines.fleet.isEmpty {
+            if layout.search != nil { searchRow(found) }
+
+            if machines.fleet.allSatisfy(\.summary.archived) {
                 NoAgentsYet(newAgent: newRun)
                     .padding(18)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
+                if list.needsYou > 0, layout.search == nil { needsYouRow(list) }
+                // The list stays beneath what search found, as it was left, scrolled where it was, for Esc to bring back.
+                ZStack {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        if scope == .active {
-                            activeSections(list)
-                        } else {
-                            endedSection(list.ended, selectable: selectable, picked: picked, narrowedTo: narrowedName)
+                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                        ForEach(list.projects) { project in
+                            let folded = layout.folded.contains(project.id)
+                            Section {
+                                if !folded {
+                                    ForEach(project.rows) { row in
+                                        // Narrowed, a session on another computer (one that needs you, or the open
+                                        // one) names that computer by its mark.
+                                        runRow(
+                                            row, elsewhere: computer != nil && row.machineID != computer,
+                                            choosable: selectable.contains(row.id))
+                                    }
+                                    earlier(project)
+                                }
+                                // 8 pt above the next header.
+                                Color.clear.frame(height: 8)
+                            } header: {
+                                ProjectHeader(
+                                    project: project, folded: folded, keyed: listFocused && keyed == project.id,
+                                    toggle: {
+                                        if folded { layout.folded.remove(project.id) } else { layout.folded.insert(project.id) }
+                                    },
+                                    newHere: { newSessionIn(project.machineID, project.folder) },
+                                    more: { rect in projectMenu(project, in: list, at: rect) })
+                            }
+                        }
+                        if list.onlyNeedsYou, !list.quiet.isEmpty {
+                            Text(RunListWords.quiet(list.quiet)).font(Theme.ui(11.5)).foregroundStyle(Theme.text3)
+                                .padding(.horizontal, 18)
+                                .padding(.top, 10)
+                                .accessibilityIdentifier("fleet.quiet")
+                        }
+                        if list.projects.isEmpty, let narrowedName {
+                            Text(RunListWords.noneOn(narrowedName)).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
+                                .padding(.horizontal, 18)
+                                .frame(height: 30)
+                                .accessibilityIdentifier("fleet.none")
                         }
                     }
-                    // Room below the last row.
+                    // 8 pt above the first header; room below the last row.
+                    .padding(.top, 8)
                     .padding(.bottom, 24)
                 }
                 #if DEBUG
                     .defaultScrollAnchor(RenderWindow.listAtEnd ? .bottom : nil)
                 #endif
-                // One stop for the keyboard: ↑ and ↓ move the open run through the runs as the list shows them, and
-                // the list keeps the keyboard as the run opens beside it.
+                .opacity(found == nil ? 1 : 0)
+                .allowsHitTesting(found == nil)
+                // Out of VoiceOver's reach, children and all, while search stands in its place.
+                .accessibilityElement(children: found == nil ? .contain : .ignore)
+                .accessibilityHidden(found != nil)
+                if let found { results(found, selectable: selectable) }
+                }
+                // Sessions scrolling past a stuck header stay under it, never over the list's head.
+                .clipped()
+                // One stop for the keyboard: ↑ and ↓ move the open session through the sessions as the list shows
+                // them, and the list keeps the keyboard as the session opens beside it; ⌘↑ and ⌘↓ move the keys to the
+                // project before or after, whose header shows it, and ← and → fold and open that project, or the open
+                // session's.
                 .focusable()
                 .focused($listFocused)
                 .focusEffectDisabled()
+                .onKeyPress(keys: [.upArrow, .downArrow]) { press in
+                    guard press.modifiers == .command else { return .ignored }
+                    let ids = shown.projects.map(\.id)
+                    let at = (keyed ?? project(of: opened, in: shown)).flatMap { ids.firstIndex(of: $0) }
+                    let down = press.key == .downArrow
+                    let next = at.map { $0 + (down ? 1 : -1) } ?? (down ? 0 : ids.count - 1)
+                    if ids.indices.contains(next) { keyed = ids[next] }
+                    return .handled
+                }
                 .onMoveCommand { direction in
-                    guard direction == .up || direction == .down else { return }
-                    opened = ListStep.step(from: opened, in: rows.map(\.id), down: direction == .down)
+                    switch direction {
+                    case .up, .down:
+                        keyed = nil
+                        opened = ListStep.step(from: opened, in: rows.map(\.id), down: direction == .down)
+                    case .left, .right:
+                        guard let id = keyed ?? project(of: opened, in: shown) else { return }
+                        if direction == .left { layout.folded.insert(id) } else { layout.folded.remove(id) }
+                    @unknown default:
+                        return
+                    }
                     keepListFocus()
                 }
             }
 
-            // While choosing: every removable run at once, and what is chosen removed together.
+            // While choosing: how many are chosen and Done; every removable session at once, and what is chosen
+            // removed together.
             if selecting {
+                HStack(spacing: 8) {
+                    Text("\(picked.count) selected").font(Theme.ui(12, .medium)).foregroundStyle(Theme.text3)
+                        .accessibilityIdentifier("fleet.selected")
+                    Spacer(minLength: 0)
+                    // No Done while a batch runs: the batch holds the choice until it has answered. While the card
+                    // asks, Esc is the card's.
+                    if !batchRunning {
+                        quietButton("Done", id: "fleet.selectDone") { endSelection() }
+                            .keyboardShortcut(removingMany == nil ? .cancelAction : nil)
+                    }
+                }
+                .padding(.leading, 18)
+                .padding(.trailing, 14)
+                .frame(height: 30)
                 HStack(spacing: 8) {
                     let all = !selectable.isEmpty && chosen.isSuperset(of: selectable)
                     ActionButton(title: all ? "Deselect All" : "Select All", key: nil, prominent: false, id: "fleet.selectAll") {
@@ -150,9 +285,13 @@ struct FleetList: View {
             ListFoot(openSettings: openSettings)
         }
         .background(Theme.sidebar)
-        // Leaving the ended runs leaves the choosing, and so does no removable run being left at all.
-        .onChange(of: scope) { endSelection() }
-        .onChange(of: list.ended.contains(where: removable)) { _, any in if !any { endSelection() } }
+        // The open session holds its place while it is open, its project unfolded, from when the list has it: a
+        // session just started is open before its row arrives.
+        .onChange(of: opened.flatMap { key in machines.fleet.contains { $0.id == key } ? key : nil }, initial: true) {
+            _, key in hold(key)
+        }
+        // No removable session shown, no choosing.
+        .onChange(of: selectable.isEmpty) { _, none in if none { endSelection() } }
         #if DEBUG
             .task(id: rows.first?.id) {
                 guard let row = rows.first else { return }
@@ -173,19 +312,42 @@ struct FleetList: View {
                     }
                 }
             }
+            // `-CC_FOLD` and `-CC_REVEAL`, once the projects they name are listed.
+            .task(id: list.projects.map(\.name)) {
+                for project in list.projects {
+                    if RenderWindow.folds.contains(project.name) { layout.folded.insert(project.id) }
+                    if let reveals = RenderWindow.reveals[project.name] { layout.revealed[project.id] = reveals }
+                    if RenderWindow.hides.contains(project.name) { layout.hidden[project.id] = project.name }
+                }
+            }
         #endif
-        // Ending a run cannot be undone: it asks once (the approved words), then says only what went wrong.
+        // Ending a session cannot be undone: it asks once (the approved words), then says only what went wrong.
         .confirmation($ending) { row in
             Confirmation(
-                FleetWords.endAsk(row.title, agent: row.summary.agent.displayName), cancelID: "endRun.cancel",
+                FleetWords.endAsk(row.title, agent: row.summary.agent.displayName, then: FleetWords.joinsEarlier),
+                cancelID: "endRun.cancel",
                 confirmID: "endRun.confirm"
             ) { endRun(row) }
+        }
+        // Archiving a project's ended sessions asks once, itemised (artboard 48), naming those that stay.
+        .confirmation($archiving) { ask in
+            Confirmation(
+                FleetWords.archiveEndedAsk(
+                    project: ask.project, count: ask.plan.going.count, computers: ask.computers,
+                    staying: ask.plan.staying),
+                cancelID: "archiveEnded.cancel", confirmID: "archiveEnded.confirm"
+            ) { archive(ask.plan) }
+        }
+        .confirmation($archiveNone) { note in
+            Confirmation(
+                title: FleetWords.archiveEndedNone, message: note,
+                answers: [.init(title: "OK", kind: .ok, id: "archiveEnded.ok")])
         }
         .confirmation($endNote) { note in
             Confirmation(
                 title: FleetWords.endFailedTitle, message: note, answers: [.init(title: "OK", kind: .ok, id: "endRun.ok")])
         }
-        // Removing forgets CodeConnect's own record of a run, never the agent's transcript: it asks once, in the
+        // Removing forgets CodeConnect's own record of a session, never the agent's transcript: it asks once, in the
         // iPhone's words, then says only what went wrong.
         .confirmation($removing) { row in
             Confirmation(
@@ -196,7 +358,7 @@ struct FleetList: View {
                     .init(title: "Remove", kind: .destructive, id: "remove.confirm") { remove(row) },
                 ])
         }
-        // One ask for the whole choice: for one run, its own words; for several, the iPhone's.
+        // One ask for the whole choice: for one session, its own words; for several, the iPhone's.
         .confirmation($removingMany) { keys in
             let one = keys.count == 1 ? rows.first { $0.id == keys[0] } : nil
             return Confirmation(
@@ -213,89 +375,91 @@ struct FleetList: View {
         }
     }
 
-    /// Needs you, Working and Done. Unnarrowed, a section with no runs is left out; narrowed, it says so, and Needs
-    /// you, which never narrows, says it holds every computer's. Done ends with the way to the ended runs, while any.
-    @ViewBuilder private func activeSections(_ list: RunList) -> some View {
-        let narrowedTo = narrowedName
-        let sections: [(id: String, title: String, rows: [FleetRow])] = [
-            ("needsYou", "Needs you", list.needsYou), ("working", "Working", list.working), ("done", "Done", list.done),
-        ]
-        ForEach(sections, id: \.id) { section in
-            let ended = section.id == "done" && !list.ended.isEmpty
-            if !section.rows.isEmpty || (computer != nil && section.id != "needsYou") || ended {
-                SectionLabel(title: section.title, id: section.id) {
-                    if section.id == "needsYou", computer != nil {
-                        Text(RunListWords.allComputers).font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                    } else if ended {
-                        Button { scope = .finished } label: {
-                            Text(RunListWords.ended(list.ended.count)).font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                        }
-                        .buttonStyle(.hover(radius: 5, id: "fleet.showFinished"))
-                        .focusable(false)
-                        .accessibilityIdentifier("fleet.showFinished")
+    /// "N need you", over the projects while anything needs the person on any computer: a click keeps only those
+    /// (Only these), the row lit amber and saying Show All; narrowed to a computer, it says it counts all of them.
+    private func needsYouRow(_ list: ProjectList) -> some View {
+        Button { layout.onlyNeedsYou.toggle() } label: {
+            HStack(spacing: 9) {
+                StateIcon(status: .blocked)
+                Text(RunListWords.needYou(list.needsYou)).font(Theme.ui(12.5, .medium)).foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(
+                    list.onlyNeedsYou
+                        ? RunListWords.showAll : computer != nil ? RunListWords.allComputers : RunListWords.onlyThese
+                )
+                .font(Theme.ui(11.5)).foregroundStyle(Theme.text3).fixedSize()
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(list.onlyNeedsYou ? Theme.amber.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.hover(radius: 6, id: "fleet.needsYou"))
+        .focusable(false)
+        .padding(.horizontal, 8)
+        .padding(.bottom, 2)
+        .accessibilityIdentifier("fleet.needsYou")
+        .accessibilityAddTraits(list.onlyNeedsYou ? .isSelected : [])
+    }
+
+    /// Under a project's sessions: its ended ones not yet shown ("N earlier ›", 25 more a click), and once any were
+    /// revealed, Show fewer, which folds them back.
+    @ViewBuilder private func earlier(_ project: ProjectList.Project) -> some View {
+        let revealed = layout.revealed[project.id] ?? 0
+        // Show fewer while it has something to fold: an ended session revealed in the list.
+        let fewer = revealed > 0 && project.rows.contains { $0.status == .ended && !$0.summary.atLimit }
+        if project.earlier > 0 || fewer {
+            HStack(spacing: 12) {
+                if project.earlier > 0 {
+                    quietButton(RunListWords.earlier(project.earlier), id: "fleet.project.\(project.name).earlier") {
+                        layout.revealed[project.id] = revealed + 1
                     }
                 }
-                if section.rows.isEmpty, let narrowedTo {
-                    Text(RunListWords.noneOn(narrowedTo)).font(Theme.ui(12.5)).foregroundStyle(Theme.text3)
-                        .padding(.horizontal, 18)
-                        .frame(height: 30)
-                        .accessibilityIdentifier("fleet.section.\(section.id).none")
-                }
-                ForEach(section.rows) { row in
-                    // In Needs you, narrowed, a run on another computer names that computer by its mark.
-                    let elsewhere = section.id == "needsYou" && computer != nil && row.machineID != computer
-                    // Known by its section too: a run that moves to another section (Idle while the launch catches
-                    // up, Done once it has) is drawn anew there, never a lazy row kept with its old mark.
-                    runRow(row, elsewhere: elsewhere, choosable: false).id(section.id + "/" + row.id)
+                if fewer {
+                    quietButton(RunListWords.showFewer, id: "fleet.project.\(project.name).fewer") {
+                        layout.revealed[project.id] = nil
+                    }
                 }
             }
+            .padding(.leading, 33)
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .padding(.bottom, 2)
         }
     }
 
-    /// The ended runs, on every computer, with the way back and, while any can be removed, Select; while choosing,
-    /// how many are chosen and Done.
-    /// The chosen computer's name, while the list is narrowed to one.
-    private var narrowedName: String? {
-        computer.flatMap { id in machines.models.first { $0.machineID == id }?.machineName }
-    }
-
-    /// The ended runs, of the chosen computer while one is chosen; with none, the list says so, naming that computer.
-    @ViewBuilder private func endedSection(
-        _ ended: [FleetRow], selectable: [String], picked: [String], narrowedTo: String?
-    ) -> some View {
-        SectionLabel(title: selecting ? "\(picked.count) selected" : FleetScope.finished.title, id: "ended") {
-            if selecting {
-                // No Done while a batch runs: the batch holds the choice until it has answered. While the card asks,
-                // Esc is the card's.
-                if !batchRunning {
-                    labelButton("Done", id: "fleet.selectDone") { endSelection() }
-                        .keyboardShortcut(removingMany == nil ? .cancelAction : nil)
-                }
-            } else {
-                if !selectable.isEmpty { labelButton("Select", id: "fleet.select") { startSelection() } }
-                labelButton("‹ Active", id: "fleet.showActive") { scope = .active }
-            }
-        }
-        if ended.isEmpty {
-            Text(narrowedTo.map(RunListWords.noneOn) ?? FleetWords.noEndedRuns).font(Theme.ui(12.5))
-                .foregroundStyle(Theme.text3)
-                .padding(.horizontal, 18)
-                .frame(height: 30)
-        }
-        ForEach(ended) { row in runRow(row, elsewhere: false, choosable: selectable.contains(row.id)) }
-    }
-
-    /// A section label's word that acts: quiet, as the label's own words.
-    private func labelButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Text(title).font(Theme.ui(12)).foregroundStyle(Theme.text3) }
+    /// A word that acts, quiet as the list's notes.
+    private func quietButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Text(title).font(Theme.ui(11.5)).foregroundStyle(Theme.text3) }
             .buttonStyle(.hover(radius: 5, id: id))
             .focusable(false)
             .accessibilityIdentifier(id)
     }
 
+    /// The chosen computer's name, while the list is narrowed to one.
+    private var narrowedName: String? {
+        computer.flatMap { id in machines.models.first { $0.machineID == id }?.machineName }
+    }
+
+    /// Holds the session just opened where the list draws it now, and unfolds its project; none open, none held. The
+    /// session already held stays where it is held.
+    private func hold(_ key: String?) {
+        guard layout.held?.session != key else { return }
+        let drawn = projects(held: layout.held)
+        layout.held = nil
+        guard let key else { return }
+        for (index, project) in drawn.projects.enumerated() {
+            guard let at = project.rows.firstIndex(where: { $0.id == key }) else { continue }
+            layout.held = .init(session: key, projectIndex: index, rowIndex: at, ended: project.rows[at].status == .ended)
+            layout.folded.remove(project.id)
+            return
+        }
+    }
+
     /// One run's row: a click opens it (or, while choosing, chooses it), its "…" on hover or a right-click holds what
     /// can be done to it.
-    private func runRow(_ row: FleetRow, elsewhere: Bool, choosable: Bool) -> some View {
+    private func runRow(_ row: FleetRow, elsewhere: Bool, choosable: Bool, highlight: String? = nil) -> some View {
         let selected = opened == row.id
         let model = machines.model(for: row.machineID)
         let endable = model?.canEndRun(row.summary) == true
@@ -322,7 +486,8 @@ struct FleetList: View {
                 row: row, selected: selected, roomForMore: more && !selecting,
                 elsewhere: elsewhere ? model?.machineOS ?? "" : nil, offline: offline,
                 chosen: selecting && choosable ? chosen.contains(row.id) : nil,
-                refusal: batchRefused[row.id], resets: model?.limitFoot(for: row.id, now: .now)?.resetsAt)
+                refusal: batchRefused[row.id], resets: model?.limitFoot(for: row.id, now: .now)?.resetsAt,
+                highlight: highlight)
         }
         .buttonStyle(.hover(radius: 6, id: "fleet.row.\(row.id)"))
         .focusable(false)
@@ -372,6 +537,172 @@ struct FleetList: View {
         .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
     }
 
+    /// What search found, in the list's place: each project with its matches, the matched words lit.
+    private func results(_ found: ProjectList, selectable: [String]) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                ForEach(found.projects) { project in
+                    let folded = layout.folded.contains(project.id)
+                    Section {
+                        if !folded {
+                            ForEach(project.rows) { row in
+                                runRow(
+                                    row, elsewhere: computer != nil && row.machineID != computer,
+                                    choosable: selectable.contains(row.id), highlight: layout.search)
+                            }
+                        }
+                        Color.clear.frame(height: 8)
+                    } header: {
+                        ProjectHeader(
+                            project: project, folded: folded, keyed: listFocused && keyed == project.id, counts: true,
+                            toggle: {
+                                if folded { layout.folded.remove(project.id) } else { layout.folded.insert(project.id) }
+                            },
+                            newHere: { newSessionIn(project.machineID, project.folder) },
+                            more: { rect in projectMenu(project, in: found, at: rect) })
+                    }
+                }
+            }
+            .padding(.top, 8)
+            .padding(.bottom, 24)
+        }
+    }
+
+    /// Search's field above the projects: the words, how many sessions match, and Esc, which clears it and brings the
+    /// list back as it was. ↑ and ↓ move the open session through what it found; Return opens the first.
+    private func searchRow(_ found: ProjectList?) -> some View {
+        let results = (found?.projects ?? []).filter { !layout.folded.contains($0.id) }.flatMap(\.rows).map(\.id)
+        return HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Theme.text3)
+            TextField(
+                // Its last words, written as it leaves the keyboard, never open search again once it is closed.
+                "", text: Binding(get: { layout.search ?? "" }, set: { if layout.search != nil { layout.search = $0 } }),
+                prompt: Text(RunListWords.search).foregroundStyle(Theme.text3)
+            )
+            .textFieldStyle(.plain)
+            .font(Theme.ui(12.5))
+            .foregroundStyle(Theme.text)
+            .focused($searchFocused)
+            .accessibilityLabel(RunListWords.search)
+            .accessibilityIdentifier("fleet.search.field")
+            .onSubmit { if let first = results.first { opened = first } }
+            .onKeyPress(keys: [.upArrow, .downArrow]) { press in
+                opened = ListStep.step(from: opened, in: results, down: press.key == .downArrow)
+                return .handled
+            }
+            if let count = found?.found {
+                Text(RunListWords.found(count)).font(Theme.ui(11.5)).foregroundStyle(Theme.text3).fixedSize()
+                    .accessibilityIdentifier("fleet.search.found")
+            }
+            Button("Esc", action: closeSearch)
+                .buttonStyle(.plain)
+                .font(Theme.ui(10.5, .medium))
+                .foregroundStyle(Theme.text3)
+                .padding(.horizontal, 5)
+                .frame(height: 16)
+                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+                .keyboardShortcut(.cancelAction)
+                .focusable(false)
+                .help("Clear Search")
+                .accessibilityLabel("Clear Search")
+                .accessibilityIdentifier("fleet.search.clear")
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+        .padding(.horizontal, 8)
+        .padding(.bottom, 4)
+    }
+
+    private func openSearch() {
+        if layout.search == nil { layout.search = "" }
+        searchFocused = true
+    }
+
+    private func closeSearch() {
+        layout.search = nil
+        keepListFocus()
+    }
+
+    /// The project the session `key` is listed in.
+    private func project(of key: String?, in list: ProjectList) -> String? {
+        list.projects.first { $0.rows.contains { $0.id == key } }?.id
+    }
+
+    /// A project's menu by `rect` (its "…", or a right-click's point): New Session Here, Pin to Top or Unpin, Collapse
+    /// Other Projects, then Archive N Ended Sessions… while it has ended sessions in worktrees of their own on computers
+    /// that archive, and Hide Project, or Unhide Project on a hidden one shown because something in it needs you.
+    private func projectMenu(_ project: ProjectList.Project, in list: ProjectList, at rect: CGRect) {
+        let id = "fleet.project.\(project.name).more"
+        let archivable = project.archivable.filter { machines.model(for: $0.machineID)?.archivesRuns == true }
+        let archive = archivable.isEmpty ? nil : RowMenu.Item(
+            id: "\(id).archiveEnded", title: FleetWords.archiveEnded(archivable.count), symbol: "archivebox",
+            destructive: false, apart: true
+        ) { prepareArchive(project.name, archivable) }
+        menu.toggle(rect, owner: id, items: [
+            RowMenu.Item(id: "\(id).newSessionHere", title: RunListWords.newSessionHere, symbol: "plus", destructive: false) {
+                newSessionIn(project.machineID, project.folder)
+            },
+            RowMenu.Item(
+                id: "\(id).pin", title: RunListWords.pin(project.pinned), symbol: project.pinned ? "pin.slash" : "pin",
+                destructive: false
+            ) {
+                layout.pinned.removeAll { $0 == project.id }
+                if !project.pinned { layout.pinned.insert(project.id, at: 0) }
+            },
+            RowMenu.Item(
+                id: "\(id).collapseOthers", title: RunListWords.collapseOthers, symbol: "chevron.up.chevron.down",
+                destructive: false
+            ) {
+                layout.folded = Set(list.projects.map(\.id)).subtracting([project.id])
+            },
+            archive,
+            RowMenu.Item(
+                id: "\(id).hide", title: RunListWords.hide(project.hidden), symbol: project.hidden ? "eye" : "eye.slash",
+                destructive: false, apart: archive == nil
+            ) {
+                layout.hidden[project.id] = project.hidden ? nil : project.name
+            },
+        ].compactMap { $0 })
+    }
+
+    /// Reads each of `rows`' repositories afresh on its computer, then asks about those that can go, naming those that
+    /// stay; when none can, says why each stays.
+    private func prepareArchive(_ project: String, _ rows: [FleetRow]) {
+        Task {
+            var gits: [String: RunGit] = [:]
+            for row in rows {
+                if let git = await machines.model(for: row.machineID)?.readRunGit(key: row.id) { gits[row.id] = git }
+            }
+            let plan = ArchiveEnded(rows, gits: gits)
+            let computers = Set(plan.going.compactMap { going in rows.first { $0.id == going.key }?.machineName })
+            if plan.going.isEmpty {
+                archiveNone = plan.staying.joined(separator: " ")
+            } else {
+                archiving = ArchiveAsk(project: project, computers: computers.sorted(), plan: plan)
+            }
+        }
+    }
+
+    /// Archives each that can go in turn, as Archive Session does; what was not archived is named under the list's head,
+    /// with the computer's reason.
+    private func archive(_ plan: ArchiveEnded) {
+        batchDid = "archived"
+        batchRunning = true
+        batchRefused = [:]
+        Task {
+            var refused: [String: String] = [:]
+            for going in plan.going {
+                guard let model = machines.model(for: going.machineID) else { continue }
+                if let why = await model.archive(key: going.key, branch: going.branch, headOID: going.headOID) {
+                    refused[going.key] = why
+                }
+            }
+            batchRunning = false
+            batchRefused = refused
+        }
+    }
+
     /// Gives the list the keyboard, and gives it again once the window has laid out the run that opened: the new pane
     /// beside the list otherwise hands the keyboard to the first control left in the window.
     private func keepListFocus() {
@@ -391,7 +722,7 @@ struct FleetList: View {
 
     /// Ended, on a computer that removes runs.
     private func removable(_ row: FleetRow) -> Bool {
-        row.status == .ended && row.summary.isRemovable
+        row.status == .ended && !row.summary.atLimit && row.summary.isRemovable
             && machines.model(for: row.machineID)?.daemonProfile.removesSessions == true
     }
 
@@ -409,6 +740,7 @@ struct FleetList: View {
 
     /// Removes each chosen run in turn; whatever was not removed stays chosen, with its reason on its row.
     private func removeChosen(_ keys: [String]) {
+        batchDid = "removed"
         batchRunning = true
         batchRefused = [:]
         Task {
@@ -416,7 +748,7 @@ struct FleetList: View {
             batchRunning = false
             batchRefused = refused
             if selecting { chosen = Set(refused.keys) }
-            if let note = batchNote(scope.rows(machines.fleet)) {
+            if let note = batchNote(machines.fleet) {
                 NSAccessibility.post(
                     element: NSApp.mainWindow as Any, notification: .announcementRequested,
                     userInfo: [.announcement: "\(note.title). \(note.reasons)", .priority: NSAccessibilityPriorityLevel.high])
@@ -428,27 +760,131 @@ struct FleetList: View {
     private func batchNote(_ rows: [FleetRow]) -> (title: String, reasons: String)? {
         let kept = rows.compactMap { batchRefused[$0.id] }
         guard !kept.isEmpty else { return nil }
-        return ("\(kept.count) not removed", Set(kept).sorted().joined(separator: " · "))
+        return ("\(kept.count) not \(batchDid)", Set(kept).sorted().joined(separator: " · "))
     }
 }
 
-/// A section's label, 34 pt: its name, and at its end what the section adds (a note, or a way elsewhere).
-private struct SectionLabel<Trailing: View>: View {
-    let title: String
-    let id: String
-    @ViewBuilder let trailing: () -> Trailing
+/// Archive N Ended Sessions…'s question: the project, the computers whose worktrees go, and which go and stay.
+private struct ArchiveAsk {
+    let project: String
+    let computers: [String]
+    let plan: ArchiveEnded
+}
+
+/// A project's header, 30 pt: its disclosure, which folds and opens the project, its name,
+/// and at its end how many of its sessions need the person, in amber, or else how many sessions it has; under the
+/// pointer, its "…" (the project's menu, as a right-click on it opens it) and + (New Session Here) in the count's place.
+/// It sticks to the list's top while its sessions scroll under it, opaque, with a hairline under it.
+private struct ProjectHeader: View {
+    let project: ProjectList.Project
+    let folded: Bool
+    /// The keys are on it (⌘↑ ⌘↓): the selected fill.
+    var keyed = false
+    /// Search's results: its count is its matches.
+    var counts = false
+    let toggle: () -> Void
+    let newHere: () -> Void
+    /// Opens the project's menu by a rect, in the window's coordinates.
+    let more: (CGRect) -> Void
+    @Environment(RowMenu.self) private var menu
+    @State private var hovered = false
+    @State private var moreFrame: CGRect = .zero
+
+    private var moreID: String { "fleet.project.\(project.name).more" }
+    /// Its "…" and + show: under the pointer, or while its menu is open.
+    private var showsActs: Bool { hovered || menu.shown?.owner == moreID }
+
+    /// What VoiceOver reads after its name: folded or open, then its count as drawn.
+    private var spoken: String {
+        let count = project.needsYou > 0 ? RunListWords.needYou(project.needsYou) : RunListWords.runs(project.sessions)
+        return "\(folded ? "folded" : "open"), \(count)"
+    }
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text(title).font(Theme.ui(12, .medium)).foregroundStyle(Theme.text3).lineLimit(1)
-                .accessibilityIdentifier("fleet.section.\(id)")
-            Spacer(minLength: 0)
-            trailing()
+        Button(action: toggle) {
+            HStack(spacing: 6) {
+                Image(systemName: folded ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 8, weight: .semibold)).foregroundStyle(Theme.text3)
+                    .frame(width: 9)
+                Text(project.name).font(Theme.ui(12, .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                let amber = project.needsYou > 0 && !counts
+                Text(amber ? RunListWords.needYou(project.needsYou) : "\(project.sessions)")
+                    .font(Theme.ui(11, amber ? .medium : .regular))
+                    .foregroundStyle(amber ? Theme.amber : Theme.text3)
+                    .monospacedDigit()
+                    .fixedSize()
+                    .opacity(showsActs ? 0 : 1)
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 6)
+            .frame(height: 30)
+            .background(keyed ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
+            // Its fill and hairline once it is stuck at the list's top, read from where it is drawn, frame by frame.
+            .background {
+                ZStack(alignment: .bottom) {
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.sheet)
+                    Rectangle().fill(Theme.hairline).frame(height: 1)
+                }
+                .visualEffect { content, proxy in content.opacity(proxy.frame(in: .scrollView).minY <= 0 ? 1 : 0) }
+            }
+            .contentShape(Rectangle())
         }
-        .padding(.leading, 18)
-        .padding(.trailing, 14)
-        .frame(height: 34)
-        .padding(.top, 6)
+        .buttonStyle(.hover(radius: 6, id: "fleet.project.\(project.name)"))
+        .focusable(false)
+        .help(project.folder)
+        .accessibilityLabel(project.name)
+        .accessibilityValue(spoken)
+        .accessibilityIdentifier("fleet.project.\(project.name)")
+        // VoiceOver, which does not hover, has the "…"'s acts as the header's own.
+        .accessibilityActions {
+            Button(RunListWords.newSessionHere, action: newHere)
+                .accessibilityIdentifier("fleet.project.\(project.name).newSessionAction")
+            Button("More") { more(moreFrame) }
+                .accessibilityIdentifier("\(moreID)Action")
+        }
+        .overlay(alignment: .trailing) {
+            if showsActs {
+                HStack(spacing: 0) {
+                    act("ellipsis", size: 12, id: moreID, help: "More") { more(moreFrame) }
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { moreFrame = $0 }
+                    act("plus", size: 11, id: "fleet.project.\(project.name).newSession", help: RunListWords.newSessionHere,
+                        action: newHere)
+                }
+                .padding(.trailing, 6)
+            }
+        }
+        .onHover { hovered = $0 }
+        .onRightClick { point in more(CGRect(origin: point, size: .zero)) }
+        #if DEBUG
+            .task {
+                guard RenderWindow.projectMenu == project.name else { return }
+                hovered = true
+                // After the render has sized and placed its window, as a click comes on a window at rest.
+                try? await Task.sleep(for: .seconds(1))
+                more(moreFrame)
+            }
+        #endif
+        .padding(.horizontal, 8)
+        .padding(.bottom, 2)
+        // Opaque, so the sessions it is stuck over do not show through it.
+        .background(Theme.sidebar)
+    }
+
+    /// One of its acts under the pointer: a 22 pt square, as a row's "…" is drawn.
+    private func act(_ symbol: String, size: CGFloat, id: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: size, weight: .semibold)).foregroundStyle(Theme.text2)
+                .frame(width: 22, height: 22)
+                .background(menu.shown?.owner == id ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.hover(radius: 5, id: id))
+        .focusable(false)
+        .help(help)
+        .accessibilityLabel(help)
+        .accessibilityIdentifier(id)
     }
 }
 
@@ -459,6 +895,8 @@ private struct SectionLabel<Trailing: View>: View {
 private struct ComputerFilter: View {
     @Environment(Machines.self) private var machines
     @Binding var filter: FleetFilter?
+    /// The hidden projects, by key, with their names: the menu's way back to each.
+    @Binding var hidden: [String: String]
     let addComputer: () -> Void
     @State private var open = false
     @State private var height: CGFloat = 0
@@ -535,6 +973,28 @@ private struct ComputerFilter: View {
             .buttonStyle(.panelRow)
             .panelRow(computers.count + 1, id: "fleet.computers.addComputer", choose: chooseAdd)
             .accessibilityIdentifier("fleet.computers.addComputer")
+            if !hidden.isEmpty {
+                MenuDivider().padding(.vertical, 4)
+                MenuHeader(text: RunListWords.hiddenProjects)
+                ForEach(Array(hidden.sorted { ($0.value, $0.key) < ($1.value, $1.key) }.enumerated()), id: \.element.key) {
+                    index, project in
+                    let unhide = {
+                        hidden[project.key] = nil
+                        open = false
+                    }
+                    Button(action: unhide) {
+                        MenuRow(chosen: false) {
+                            Image(systemName: "eye.slash").font(.system(size: 11)).foregroundStyle(Theme.text2)
+                            Text(project.value).font(Theme.ui(12.5)).foregroundStyle(Theme.text).lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    .buttonStyle(.panelRow)
+                    .panelRow(computers.count + 2 + index, id: "fleet.computers.hidden.\(project.value)", choose: unhide)
+                    .help(RunListWords.hide(true))
+                    .accessibilityIdentifier("fleet.computers.hidden.\(project.value)")
+                }
+            }
         }
         .frame(minWidth: 280)
         .fixedSize()
@@ -758,9 +1218,21 @@ private struct FleetLine: View {
     var refusal: String? = nil
     /// When the usage limit the run is at resets, in place of its age; nil when that is not known.
     var resets: Date? = nil
+    /// Search's words, lit where the title has them.
+    var highlight: String? = nil
     @State private var lastTick = Date()
 
     private var since: Date { row.lastActive }
+
+    /// Its title, search's words lit in amber where they first come in it.
+    private var lit: AttributedString {
+        var title = AttributedString(row.title)
+        let words = highlight?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !words.isEmpty, let range = title.range(of: words, options: [.caseInsensitive, .diacriticInsensitive]) {
+            title[range].backgroundColor = Theme.amber.opacity(0.22)
+        }
+        return title
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -771,7 +1243,7 @@ private struct FleetLine: View {
                     .accessibilityIdentifier("fleet.row.\(row.id).status")
             }
             // The name fills the row up to its time: no spacer of its own, which would cost the row's gap twice.
-            Text(row.title)
+            Text(lit)
                 .font(Theme.ui(13, row.status == .blocked ? .medium : .regular))
                 .foregroundStyle(row.status == .ended ? Theme.text2 : Theme.text)
                 .lineLimit(1)

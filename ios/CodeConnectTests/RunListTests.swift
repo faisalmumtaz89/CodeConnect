@@ -2,8 +2,7 @@ import XCTest
 
 @testable import CodeConnectKit
 
-/// The Mac's run list (W1a, W1-1 and W1-6): Needs you, Working and Done, each in the fleet's order; Needs you whole on
-/// every computer whatever is chosen; the ended runs apart, on the chosen computer; and the list's words.
+/// The Mac's list (W1a): what needs the person, a computer's count in the head's menu, and the list's words.
 final class RunListTests: XCTestCase {
     /// A run in `status`; `limited`: the usage limit its last turn stopped at, as the daemon sends it; `relaunchable`:
     /// the next message starts it again.
@@ -35,32 +34,8 @@ final class RunListTests: XCTestCase {
 
     private func ids(_ rows: [FleetRow]) -> [String] { rows.map(\.summary.sessionKey) }
 
-    /// W1-1: each run in its section, in the fleet's order; the ended runs apart.
-    func testEachRunIsInItsSectionInTheFleetsOrder() {
-        let list = RunList(fleet, computer: nil)
-        XCTAssertEqual(ids(list.needsYou), ["approval", "failed", "idle", "question"])
-        XCTAssertEqual(ids(list.working), ["working", "ending"])
-        XCTAssertEqual(ids(list.done), ["unseen", "seen"])
-        XCTAssertEqual(ids(list.ended), ["over", "over-too"])
-    }
-
-    /// W1-6: narrowed to one computer, Working, Done and the ended runs hold its runs alone; Needs you every
-    /// computer's.
-    func testNeedsYouStaysWholeWhenOneComputerIsChosen() {
-        let list = RunList(fleet, computer: "m1")
-        XCTAssertEqual(ids(list.needsYou), ["approval", "failed", "idle", "question"])
-        XCTAssertEqual(ids(list.working), ["working"])
-        XCTAssertEqual(ids(list.done), ["seen"])
-        XCTAssertEqual(ids(list.ended), ["over-too"])
-        let other = RunList(fleet, computer: "m3")
-        XCTAssertEqual(ids(other.needsYou), ["approval", "failed", "idle", "question"])
-        XCTAssertEqual(other.working, [])
-        XCTAssertEqual(other.done, [])
-        XCTAssertEqual(other.ended, [])
-    }
-
-    /// A run still starting, nothing drawn yet, is Working; one whose start failed before its agent existed is Failed,
-    /// in Needs you: from the daemon's lifecycle, never hidden behind "N ended ›".
+    /// A session still starting, nothing drawn yet, is working; one whose start failed before its agent existed is
+    /// Failed, and needs the person: from the daemon's lifecycle, never with the ended ones.
     @MainActor func testAStartingRunWorksAndOneThatFailedToStartNeedsYou() throws {
         func summary(_ id: String, _ lifecycle: String) throws -> SessionSummary {
             let json = """
@@ -77,25 +52,18 @@ final class RunListTests: XCTestCase {
             row("starting", FleetStatusRule.status(summary: starting, shown: nil, reviewedSeq: 0), on: "m1"),
             row("failed", FleetStatusRule.status(summary: failed, shown: nil, reviewedSeq: 0), on: "m1"),
         ]
-        let list = RunList(rows, computer: nil)
-        XCTAssertEqual(ids(list.working), ["starting"])
-        XCTAssertEqual(ids(list.needsYou), ["failed"])
-        XCTAssertEqual(list.ended, [])
+        XCTAssertEqual(ids(rows.filter(ProjectList.needsYou)), ["failed"])
     }
 
-    /// W1-2: a run at its usage limit waits on the person, whatever its last turn's status and whichever computer is
-    /// chosen, in that list alone, and counted among its computer's runs; one that has ended for good is with the
-    /// ended runs.
+    /// W1-2: a session at its usage limit waits on the person, whatever its last turn's status, and is counted among its
+    /// computer's sessions; one that has ended for good does not.
     func testARunAtItsLimitNeedsYou() {
         let capped = row("capped", .doneUnreviewed, on: "m2", limited: true)
         let over = row("capped-over", .ended, on: "m2", limited: true, lifecycle: "exited")
         let stopped = row("capped-stopped", .ended, on: "m2", limited: true, lifecycle: "exited", relaunchable: true)
-        let list = RunList(fleet + [capped, over, stopped], computer: "m1")
-        XCTAssertEqual(ids(list.needsYou), ["approval", "failed", "idle", "question", "capped", "capped-stopped"])
-        XCTAssertEqual(ids(list.done), ["seen"])
-        XCTAssertEqual(ids(RunList(fleet + [capped], computer: "m2").done), ["unseen"])
         XCTAssertEqual(
-            ids(RunList(fleet + [capped, over, stopped], computer: nil).ended), ["over", "over-too", "capped-over"])
+            ids((fleet + [capped, over, stopped]).filter(ProjectList.needsYou)),
+            ["approval", "failed", "idle", "question", "capped", "capped-stopped"])
         XCTAssertEqual(RunList.activeCount(fleet + [capped, over, stopped], on: "m2"), 6)
         XCTAssertEqual(RunList.activeCount(fleet + [capped, over, stopped], on: nil), 10, "every computer's")
     }
@@ -112,7 +80,11 @@ final class RunListTests: XCTestCase {
         XCTAssertEqual(RunListWords.runs(1), "1 session")
         XCTAssertEqual(RunListWords.runs(2), "2 sessions")
         XCTAssertEqual(RunListWords.runs(0), "0 sessions")
-        XCTAssertEqual(RunListWords.ended(9), "9 ended ›")
+        XCTAssertEqual(RunListWords.needYou(1), "1 needs you")
+        XCTAssertEqual(RunListWords.needYou(4), "4 need you")
+        XCTAssertEqual(RunListWords.earlier(7), "7 earlier ›")
+        XCTAssertEqual(RunListWords.quiet(["local-ai"]), "local-ai is hidden: nothing there needs you.")
+        XCTAssertEqual(RunListWords.quiet(["a", "b"]), "2 projects are hidden: nothing there needs you.")
         XCTAssertEqual(RunListWords.noneOn("lumen5090"), "None on lumen5090")
         XCTAssertEqual(RunListWords.allComputers, "all computers")
         XCTAssertEqual(RunListWords.allTitle, "All computers")
