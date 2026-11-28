@@ -40,6 +40,7 @@ final class FixtureSiteTests: XCTestCase {
         XCTAssertFalse(
             String(describing: Fixtures.frames(variant: .timeline)).contains("/Users/jordan/code/query-parser/src"),
             "no home folder in the conversation's tool lines")
+        XCTAssertFalse(String(describing: stacked).contains("/Users/dev"), "nor in the decisions' tool lines")
     }
 
     func testWithoutTheFlagTheFixturesAreUnchanged() {

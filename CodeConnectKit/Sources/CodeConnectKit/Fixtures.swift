@@ -281,9 +281,26 @@ enum Fixtures {
         "storefront-api", "data-pipeline", "docs-site", "web-dashboard", "query-parser", "docs-site", "query-parser",
     ]
 
+    /// The website's sample: a card's paths are in its project's folder as the fleet shows it, never `/Users/dev`.
+    private static func sited(_ card: Card) -> Card {
+        guard site, let index = Int(card.sessionID.dropFirst(3)) else { return card }
+        func rehome(_ value: JSONValue) -> JSONValue {
+            switch value {
+            case .string(let text):
+                return .string(text.replacingOccurrences(of: "/Users/dev/app", with: "~/code/\(projectLabel(index))"))
+            case .object(let fields): return .object(fields.mapValues(rehome))
+            case .array(let items): return .array(items.map(rehome))
+            default: return value
+            }
+        }
+        var sited = card
+        sited.input = rehome(card.input)
+        return sited
+    }
+
     static func frames(now: Date = Fixtures.now, variant: Variant = .deck) -> [ServerMessage] {
         if variant == .antigravity { return antigravityFrames(now: now) }
-        let cards = variant.cards + (site && variant == .stacked ? [mcpCard] : [])
+        let cards = (variant.cards + (site && variant == .stacked ? [mcpCard] : [])).map(sited)
         let held = variant.heldCard.map { [$0] } ?? []
         var messages: [ServerMessage] = []
         var ackJSON: String
