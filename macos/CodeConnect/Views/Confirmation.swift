@@ -161,6 +161,8 @@ private struct ConfirmationCard: View {
                             Text(item.words).font(Theme.ui(13)).foregroundStyle(Theme.text2)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+                        // One line, 30 pt; wrapped, apart from the next by the same air.
+                        .padding(.vertical, 6)
                         .frame(minHeight: 30)
                     }
                 }

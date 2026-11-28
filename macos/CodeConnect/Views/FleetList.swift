@@ -113,8 +113,12 @@ struct FleetList: View {
             HStack(spacing: 4) {
                 Spacer(minLength: 0)
                 Button(action: openSearch) {
-                    Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(Theme.text2)
+                    // Lit while search is open, as the board draws a control that is on.
+                    Image(systemName: "magnifyingglass").font(.system(size: 12))
+                        .foregroundStyle(layout.search != nil ? Theme.text : Theme.text2)
                         .frame(width: 20, height: 24)
+                        .background(
+                            Color.white.opacity(layout.search != nil ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 6))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.hover(radius: 6, id: "fleet.search"))
@@ -123,7 +127,8 @@ struct FleetList: View {
                 .help("\(RunListWords.search) (⌘F)")
                 .accessibilityLabel(RunListWords.search)
                 .accessibilityIdentifier("fleet.search")
-                ComputerFilter(filter: $filter, hidden: $layout.hidden, addComputer: addComputer)
+                // The computer's name has the head's room before the spacer does.
+                ComputerFilter(filter: $filter, hidden: $layout.hidden, addComputer: addComputer).layoutPriority(1)
                 Button(action: newRun) {
                     Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.text2)
                         .frame(width: 20, height: 24)
@@ -971,7 +976,8 @@ private struct ComputerFilter: View {
         Button { open.toggle() } label: {
             HStack(spacing: 6) {
                 ComputerMark(os: chosen?.machineOS, size: 11)
-                Text(chosen?.machineName ?? "All").font(Theme.ui(11.5, .medium)).lineLimit(1).truncationMode(.middle)
+                // The name cut at its end.
+                Text(chosen?.machineName ?? "All").font(Theme.ui(11.5, .medium)).lineLimit(1).truncationMode(.tail)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .semibold))
             }
             .foregroundStyle(Theme.text2)
