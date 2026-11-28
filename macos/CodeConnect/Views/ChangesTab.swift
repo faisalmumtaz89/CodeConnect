@@ -93,6 +93,8 @@ struct ChangesPanel: View {
                     }
                 }
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+                // Above the tabs and the list under it, so a row's menu opens over them.
+                .zIndex(1)
             } else if reply == nil, let branch = row.summary.gitBranch?.displaySafe {
                 BranchLine(branch: branch, base: nil, pullRequest: nil, host: "")
             }
@@ -682,7 +684,6 @@ private struct MergeRow: View {
                     .accessibilityIdentifier("changes.merge.refused")
             }
         }
-        .zIndex(1)
     }
 
     /// The methods the repository allows, the one the button uses checked, then a rule and the ones it turns off,
