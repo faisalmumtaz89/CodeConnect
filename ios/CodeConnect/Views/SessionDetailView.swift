@@ -2077,8 +2077,11 @@ private struct SessionComposeBar: View {
             // highest-traffic control.
             standingNote
             byteCounter
-            // At a usage limit, the Mac's band over the box: which limit, when it resets, the windows.
-            LimitBand(model: model, key: key)
+            // At a usage limit, the Mac's band over the box: which limit, when it resets, the windows. Only then: drawn
+            // empty it would still take this stack's spacing above the box.
+            if model.limitFoot(for: key, now: .now) != nil {
+                LimitBand(model: model, key: key)
+            }
             composer
         }
         // 12 pt in from the screen's edges; 30 pt from the conversation's last line to the box's rim, which stands 4 pt
