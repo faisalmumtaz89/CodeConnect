@@ -366,8 +366,9 @@ enum Fixtures {
         #endif
         if variant.hasRunningTool || variant == .longOutput {
             // In order, so `fx-5` reads as Running: the turn's last item has
-            // to be the tool call.
+            // to be the tool call. On the website's sample its paths are in its project's folder, as its card's are.
             for json in turnJSON(now: now) {
+                let json = site ? json.replacingOccurrences(of: "/Users/dev/app", with: "~/code/\(projectLabel(5))") : json
                 if let event = decode(json) { messages.append(event) }
             }
         }
