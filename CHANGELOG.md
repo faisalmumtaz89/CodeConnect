@@ -3,6 +3,8 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.35
+
 ## CodeConnect 0.19.34
 
 - The apps say "session" wherever they said "run": in buttons and menus (New Session, End Session…, Archive Session),
