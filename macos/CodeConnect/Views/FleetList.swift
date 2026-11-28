@@ -606,6 +606,8 @@ struct FleetList: View {
     /// list back as it was. ↑ and ↓ move the open session through what it found; Return opens the first.
     private func searchRow(_ found: ProjectList?) -> some View {
         let results = (found?.projects ?? []).filter { !searchFolded.contains($0.id) }.flatMap(\.rows).map(\.id)
+        // Esc is search's while its field has the keyboard, or while nothing else in the window would take it.
+        let escapes = covered != true && (searchFocused || opened == nil && !selecting)
         return HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Theme.text3)
             TextField(
@@ -640,8 +642,7 @@ struct FleetList: View {
                 .padding(.horizontal, 5)
                 .frame(height: 16)
                 .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
-                // Esc is search's while its field has the keyboard, or while nothing else in the window would take it.
-                .keyboardShortcut(covered != true && (searchFocused || opened == nil) ? .cancelAction : nil)
+                .keyboardShortcut(escapes ? .cancelAction : nil)
                 .focusable(false)
                 .help("Clear Search")
                 .accessibilityLabel("Clear Search")
@@ -873,6 +874,8 @@ private struct ProjectHeader: View {
                     .foregroundStyle(amber ? Theme.amber : Theme.text3)
                     .monospacedDigit()
                     .fixedSize()
+                    // Under the pointer, room for its "…" and +, so its name ends before them.
+                    .frame(minWidth: showsActs ? 44 : 0, alignment: .trailing)
                     .opacity(showsActs ? 0 : 1)
             }
             .padding(.leading, 8)

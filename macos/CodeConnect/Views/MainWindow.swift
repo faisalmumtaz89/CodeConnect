@@ -264,6 +264,7 @@ struct MainWindow: View {
     private func started(_ run: String) {
         startDraft.didOpen()
         layout.onlyNeedsYou = false
+        layout.search = nil
         filter = nil
         opened = run
     }
@@ -293,7 +294,10 @@ struct MainWindow: View {
         .frame(width: besideAPane ? 256 : nil)
         .environment(\.headerClearance, clearance(first: true, last: !besideAPane))
         .onKeyPress(keys: [.return]) { press in
-            guard press.modifiers.isEmpty, opened != nil, !changesInPlace else { return .ignored }
+            // Not while a field in the list has the keyboard (search's): its Return is its own.
+            guard press.modifiers.isEmpty, opened != nil, !changesInPlace, composerHoldsEscape != true else {
+                return .ignored
+            }
             replyFocus += 1
             return .handled
         }
