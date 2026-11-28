@@ -360,7 +360,7 @@ struct FleetView: View {
             } label: {
                 HStack(spacing: CC.space.xxs) {
                     CCIcon("plus", size: 16)
-                    Text(FleetWords.newAgent)
+                    Text(FleetWords.newSession)
                         .ccType(CC.type.body)
                 }
                 .foregroundStyle(CC.text.primary)
@@ -373,7 +373,7 @@ struct FleetView: View {
             // it gave a slot an icon's width, so a title longer than "New"
             // spilled past the screen's left edge.
             .fixedSize()
-            .accessibilityLabel(FleetWords.newAgent)
+            .accessibilityLabel(FleetWords.newSession)
             .accessibilityIdentifier("start-entry")
         }
         .ccPlainToolbarItem()

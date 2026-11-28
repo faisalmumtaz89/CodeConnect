@@ -101,10 +101,10 @@ final class DraftsKeptUITests: XCTestCase {
         XCTAssertEqual(value(again), "kept answer")
     }
 
-    /// New agent, through to the Ready step in a recent folder.
+    /// New session, through to the Ready step in a recent folder.
     private func toReady(_ app: XCUIApplication) {
         let entry = app.buttons["start-entry"]
-        XCTAssertTrue(entry.waitForExistence(timeout: 20), "New agent")
+        XCTAssertTrue(entry.waitForExistence(timeout: 20), "New session")
         entry.tap()
         let computer = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'start-computer-'")).firstMatch
         XCTAssertTrue(computer.waitForExistence(timeout: 10), "a computer")

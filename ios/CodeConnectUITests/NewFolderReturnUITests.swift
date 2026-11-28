@@ -14,7 +14,8 @@ final class NewFolderReturnUITests: XCTestCase {
         app.launch()
 
         let entry = app.buttons["start-entry"]
-        XCTAssertTrue(entry.waitForExistence(timeout: 20), "New agent")
+        XCTAssertTrue(entry.waitForExistence(timeout: 20), "New session")
+        XCTAssertEqual(entry.label, "New session", "the start action is named as on the Mac")
         entry.tap()
         let computer = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'start-computer-'")).firstMatch
         XCTAssertTrue(computer.waitForExistence(timeout: 10), "a computer")
