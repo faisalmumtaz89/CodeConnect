@@ -210,9 +210,13 @@ struct FleetList: View {
                 #endif
                 .opacity(found == nil ? 1 : 0)
                 .allowsHitTesting(found == nil)
+                // Out of VoiceOver's reach, children and all, while search stands in its place.
+                .accessibilityElement(children: found == nil ? .contain : .ignore)
                 .accessibilityHidden(found != nil)
                 if let found { results(found, selectable: selectable) }
                 }
+                // Sessions scrolling past a stuck header stay under it, never over the list's head.
+                .clipped()
                 // One stop for the keyboard: ↑ and ↓ move the open session through the sessions as the list shows
                 // them, and the list keeps the keyboard as the session opens beside it; ⌘↑ and ⌘↓ move the keys to the
                 // project before or after, whose header shows it, and ← and → fold and open that project, or the open
