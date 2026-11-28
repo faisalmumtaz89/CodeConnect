@@ -2348,6 +2348,8 @@ private struct SessionComposeBar: View {
                 .foregroundStyle(draft.isOverCeiling ? CC.color.danger : CC.text.tertiary)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .trailing)
+                // As a note's line: 16 pt to the box, whose rim stands 4 pt outside it.
+                .padding(.bottom, CC.space.xs)
                 .accessibilityLabel(
                     draft.isOverCeiling
                         ? "Too long. \(counter)." : "\(counter).")
@@ -2405,6 +2407,8 @@ private struct ComposeNote: View {
             CCAdaptiveSpacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // The box's rim stands 4 pt outside it, inside the stack's 8 pt: a line above the box keeps 16 pt to the box.
+        .padding(.bottom, CC.space.xs)
         .accessibilityElement(children: .combine)
     }
 }
