@@ -5248,18 +5248,20 @@ impl Daemon {
 
     // ------------------------------------------------------------ diff
 
-    /// `git diff HEAD` for a session's working directory.
+    /// `git diff HEAD` for a session's working directory, or against its base's merge-base
+    /// ([`crate::git::collect`]).
     ///
     /// The client names a *session*, never a path: the directory comes from our
     /// own registry, so no request can aim this at an arbitrary place on the
     /// filesystem.
-    pub async fn diff(&self, session_ref: &str) -> Result<crate::git::Diff> {
+    pub async fn diff(&self, session_ref: &str, from_base: bool) -> Result<crate::git::Diff> {
         let row = self.resolve(session_ref).await?;
         let gate = self.git_gate(&row.cwd).await;
         let _one_at_a_time = gate.lock().await;
         Ok(crate::git::collect(
             &row.cwd,
             self.config.git_bin.as_deref(),
+            from_base,
             self.config.diff_max_bytes,
             Duration::from_millis(self.config.diff_timeout_ms),
         )

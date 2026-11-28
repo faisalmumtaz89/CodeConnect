@@ -3,100 +3,82 @@
 
 **Control your agents from anywhere.**
 
-[codeconnect.sh](https://codeconnect.sh) · [App Store](https://apps.apple.com/app/codeconnect-remote/id6797021894)
+[Website](https://codeconnect.sh) · [Download for Mac](https://codeconnect.sh/mac) · [iPhone app](https://apps.apple.com/app/codeconnect-remote/id6797021894) · [Support](https://codeconnect.sh/support)
 
 [![CI](https://github.com/faisalmumtaz89/CodeConnect/actions/workflows/ci.yml/badge.svg)](https://github.com/faisalmumtaz89/CodeConnect/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
 
-CodeConnect brings the Claude Code and Codex sessions on your Mac or Linux computer to your iPhone. Approve a command, answer a question or review a diff from your phone while the agent keeps working.
+<p align="center">
+  <a href="https://codeconnect.sh">
+    <img src=".github/assets/hero.jpg" width="100%" alt="The CodeConnect Mac app, with sessions grouped by project and Claude asking to run git push, next to the iPhone app's Projects screen showing 5 sessions waiting">
+  </a>
+</p>
 
-## Features
+CodeConnect puts the coding agents on all your Mac and Linux computers in one list, on your Mac and your iPhone. Approve a command, answer a question or review a diff from wherever you are.
 
-- **Every session in one place.** One iPhone pairs with several computers and lists every session started through CodeConnect, and what it is waiting for.
-- **Approvals with the whole command.** Each request is marked by risk and shows its whole command before you answer it.
-- **Claude's questions.** When Claude asks you to choose, the question appears on your phone, and your answer reaches Claude as if you had chosen at the computer.
-- **Diffs you can read on a phone.** Word-level highlighting, and a comment on any hunk goes to the agent.
-- **Talk to the agent.** Type or dictate a message; dictation uses Apple's speech recognition, and nothing is sent until you send it.
-- **Claude Code and Codex.** Everything above works with Claude Code; on a Codex session the phone answers approvals with Codex's own options, stops a turn, and sends a message ([details](docs/codex.md)).
-- **Sessions message each other: CodeConnect Messages.** A Claude Code or Codex session can message any other session on your computers through the tools CodeConnect gives it (`msg_sessions`, `msg_send`, `msg_read`); the message waits until that session reads it, and the session is woken to read it ([details](docs/codex.md#codeconnect-messages)).
-- **Honest about what it knows.** A session shows the age of its last event, and a stale connection disables actions and says why.
+It works with Claude Code, Codex and Antigravity.
 
-## Requirements
+## What you get
 
-- An iPhone with iOS 17 or later.
-- A Mac with macOS 13 or later (Apple silicon or Intel), or a Linux computer (x86_64 or arm64) with OpenSSL 3. Claude Code started from the app needs glibc on Linux, which Alpine and other musl systems do not ship.
-- [Claude Code](https://code.claude.com/docs/en/setup) 2.1.268 or later, signed in, or [Codex](https://github.com/openai/codex), already working in your terminal. CodeConnect runs the `claude` and `codex` your shell runs.
-- [Tailscale](https://tailscale.com/download) on both, signed in to the same Tailscale account; a computer on another account pairs with a code. Tailscale is the default; your local network also works, without encryption ([how](https://codeconnect.sh/support)).
+- **Every session in one place.** Every session you start with CodeConnect, on all your computers, grouped by project, each showing what it is waiting for.
+- **Approvals you can read.** Each request shows its full command before you answer, and on the iPhone a medium or high risk is tagged.
+- **Questions and messages.** Answer an agent's questions and send it messages from your Mac or your iPhone.
+- **Review and ship.** Read diffs (with word-level highlights on the iPhone) and comment on any hunk. On the Mac, commit, open a pull request and merge it from the Changes panel.
+- **Sessions that talk to each other.** A session can message any other session on your computers, and acts on what it reads unless you run `codeconnect msg-act off`. [SECURITY.md](SECURITY.md) says who can send one.
+- **Direct and private.** Sessions go straight from your computers to your devices over Tailscale, and no CodeConnect server sees them. Notifications pass through Apple and, unless your daemon has its own push key, CodeConnect's push relay, which gets no session content.
 
 ## Install
 
-1. On your iPhone, install [CodeConnect Remote](https://apps.apple.com/app/codeconnect-remote/id6797021894) from the App Store, and Tailscale, signed in to the same Tailscale account as your computer.
-2. On your computer:
-   - **Mac:** on macOS 26 or later, download `CodeConnect-<version>.dmg` from the [latest release](https://github.com/faisalmumtaz89/CodeConnect/releases/latest) or [codeconnect.sh/mac](https://codeconnect.sh/mac), drag CodeConnect to Applications and open it. It installs CodeConnect, starts its daemon and keeps both up to date. Its window shows the agents on all your computers: open one to read its conversation, answer its approvals and questions, reply to it and see what it has changed. To pair your iPhone, choose File › Add iPhone… and scan the QR code with your iPhone's camera, or type the address and code shown under it into the iPhone app. On an older Mac, run the Linux command instead.
-   - **Linux:** as your own user, run
+### Mac
 
-     ```sh
-     curl -fsSL https://codeconnect.sh | sh
-     ```
+On macOS 26 or later, [download the Mac app](https://codeconnect.sh/mac), drag it to Applications and open it. It installs CodeConnect and keeps it up to date. To pair your iPhone, choose File › Add iPhone… and scan the QR code. To uninstall, quit the app and move it to the Trash, then follow Uninstalling on the [Support](https://codeconnect.sh/support) page.
 
-The installer checks the release's signature before installing anything, installs to `~/.codeconnect/bin` with the agent host that runs Claude for the app, and asks before adding that folder to your `PATH`. Then it asks "Set up CodeConnect now?" and does whatever is still missing, in order:
+### Linux, or a Mac before macOS 26
 
-1. Connects Tailscale, saying how to install it if it is missing.
-2. Starts the CodeConnect daemon.
-3. Shows a QR code: scan it with the app.
-4. Signs in Claude Code and Codex, if they are installed and signed out.
+On macOS 13 or later, or on Linux:
 
-Run again, it picks up where it stopped. It uses sudo only on Linux, for `tailscale up --qr` and, where systemd needs it, `loginctl enable-linger`. To read it first: `curl -fsSL https://codeconnect.sh -o codeconnect-install.sh`, `less codeconnect-install.sh`, then `sh codeconnect-install.sh`. On a Linux computer where you have only root, or in a container, read [On Linux](site/support.md#on-linux) first.
+```sh
+curl -fsSL https://codeconnect.sh | sh
+```
 
-Once your iPhone uses one of your computers, every other computer running CodeConnect and signed in to Tailscale with the same account as your iPhone appears on it by itself, with no code, unless it runs Tailscale in userspace mode, as most containers do. One whose CodeConnect refuses it is listed with why and Try again. One you removed stays out of the list and is offered again, with no code, under "On your Tailscale account": in Settings on the iPhone, in Add a Computer on the Mac. A computer on another Tailscale account, or with a Tailscale tag, needs its code: in the app, go to Settings → Computers → Add a computer and scan the code that computer's Mac app shows under File › Add iPhone…, or the one `codeconnect pair` prints there.
+The installer checks the release's signature, installs to `~/.codeconnect/bin`, and then walks you through Tailscale, the daemon and pairing. Run it again to pick up where it stopped. For root-only machines and containers, see [Support](https://codeconnect.sh/support).
+
+### iPhone
+
+Install [CodeConnect Remote](https://apps.apple.com/app/codeconnect-remote/id6797021894) (iOS 17 or later) and scan the pairing code. Your other computers on the same Tailscale account then appear by themselves, unless one is tagged or runs Tailscale in userspace mode, as most containers do.
+
+### Requirements
+
+- At least one agent installed and signed in: [Claude Code](https://code.claude.com/docs/en/setup) 2.1.268 or later, [Codex](https://github.com/openai/codex) or Antigravity.
+- [Tailscale](https://tailscale.com/download) on your computers and your iPhone. A computer that doesn't appear by itself pairs with a code. Your local network also works, without encryption.
+- On Linux: x86_64 or arm64 with OpenSSL 3. Claude Code and Antigravity started from the app need glibc.
 
 ## Use
 
-Start an agent from the CodeConnect app: choose this computer, the project and the agent. The session appears on your phone. At the computer:
+Start a session from the Mac app or the iPhone app. On a computer:
 
 ```sh
-codeconnect pair              # a pairing code, for an iPhone that doesn't add this computer by itself (single use, 5 minutes)
-codeconnect devices           # paired phones
-codeconnect revoke <device>   # cut a phone off, open connections included
+codeconnect pair              # a one-time pairing code, valid for 5 minutes
+codeconnect devices           # list paired devices
+codeconnect revoke <device>   # cut off a device, and others on its Tailscale device
 codeconnect daemon status     # is the daemon running?
-codeconnect msg-act off       # sessions show each other's CodeConnect messages to you instead of acting on them (on: the default)
+codeconnect update            # install the latest release (the Mac app updates itself)
 ```
-
-## Update and uninstall
-
-`codeconnect update` installs the latest signed release, unless the Mac app installed CodeConnect, which updates it itself; your sessions keep running. The iPhone app updates from the App Store. Coming from an older release, read [Upgrading](mac/README.md#upgrading).
-
-To uninstall, follow [Uninstalling](site/support.md#uninstalling): on a Mac with the app, quit it and move it to the Trash first; then end your sessions, remove the daemon, delete `~/.codeconnect`, and remove what CodeConnect added to your shell's startup files.
-
-## How it works
-
-```
-iPhone ──── WebSocket over your tailnet ────▶ ccd, the daemon on your computer
-```
-
-The daemon, `ccd`, logs every session's events. Claude Code reports to it through the agent host CodeConnect runs it in, and Codex through Codex's own app server; approval requests come only through those channels, never from the screen. Your answer goes back the same way rather than being typed into the prompt. More in [ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-## Security and privacy
-
-- Sessions go directly between your computer and your phone, over Tailscale by default; no CodeConnect server sees them.
-- A notification passes through Apple and, unless your daemon has its own Apple push key, CodeConnect's push relay, which receives no session content.
-- Your sessions' messages to each other travel only between your own computers, over Tailscale, and only between computers of the same Tailscale user (sessions on one computer message each other without Tailscale too, unless it is a tagged device); any program on one of those computers can send one, with no further credential. A session acts on one unless you set that computer to only show them with `codeconnect msg-act off`; it is guidance to the session, and its own permission mode still governs what it may do.
-- A paired phone can send your sessions messages and answer their approvals. [SECURITY.md](SECURITY.md) covers the trust boundaries and reporting a vulnerability privately; the [privacy policy](https://codeconnect.sh/privacy) lists every connection.
 
 ## Documentation
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the pieces fit together
-- [docs/claude-code.md](docs/claude-code.md): Claude Code sessions and their accounts
-- [docs/codex.md](docs/codex.md): Codex sessions in detail
-- [mac/README.md](mac/README.md): the daemon, pairing, TLS and configuration
-- [ios/README.md](ios/README.md): the app, its honesty rules and design system
-- [docs/push-gateway.md](docs/push-gateway.md): the push relay
+- [Support](https://codeconnect.sh/support): setup, pairing, Linux and uninstalling
+- [Architecture](docs/ARCHITECTURE.md): how the pieces fit together
+- [Claude Code](docs/claude-code.md) and [Codex](docs/codex.md) sessions
+- [The daemon](mac/README.md): pairing, TLS and configuration
+- [The iPhone app](ios/README.md)
+- [Changelog](CHANGELOG.md)
 
-## Build from source
+## Contributing
 
-The Rust workspace is in `mac/`, the iPhone app's Xcode project in `ios/` and the Mac app's in `macos/`, both built on the shared `CodeConnectKit/` package; [CONTRIBUTING.md](CONTRIBUTING.md) has the build and test commands.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the build and test commands. Report security issues privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 

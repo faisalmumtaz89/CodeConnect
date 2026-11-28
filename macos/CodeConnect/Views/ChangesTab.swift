@@ -235,13 +235,23 @@ struct ChangesPanel: View {
     private func loaded(
         _ raw: SessionDiff, _ parsed: UnifiedDiff, _ fetchedAt: Date, counted: Bool, banded: Bool
     ) -> some View {
-        if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil, let conflicted {
+        let git = model.runGit(for: key)?.git
+        let fromBase = model.diffIsFromBase(key: key)
+        // A diff against the base lists committed work too, so nothing uncommitted is the repository's own count.
+        let committedOnly = fromBase && git?.changed.files == 0 && git?.changed.complete == true
+        if (parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil || committedOnly), let conflicted {
             // Nothing uncommitted, and the commit conflicts with its base: its conflicts stand where the diff would.
             backBand
             ConflictsList(key: key, model: model, compared: conflicted)
         } else if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil {
             backBand
-            Message(id: "changes.clean", title: ChangesWords.noUncommitted, sentence: ChangesWords.clean)
+            Message(
+                id: "changes.clean",
+                title: fromBase
+                    ? git?.base.flatMap { $0.name == git?.branch ? nil : ChangesWords.noChanges(from: $0.name) }
+                        ?? ChangesWords.noUncommitted
+                    : ChangesWords.noUncommitted,
+                sentence: ChangesWords.clean)
         } else if parsed.isEmpty && raw.files?.isEmpty != false {
             backBand
             Message(

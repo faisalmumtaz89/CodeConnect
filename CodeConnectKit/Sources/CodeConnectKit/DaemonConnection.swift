@@ -1197,11 +1197,11 @@ public final class DaemonConnection {
 
     /// On-demand `git diff` for one run. Correlated by the reference like the
     /// other single-keyed replies, so the same one-in-flight-per-key rule holds.
-    public func diff(session: String) async throws -> SessionDiff {
+    public func diff(session: String, fromBase: Bool = false) async throws -> SessionDiff {
         try await request(
             key: session,
             store: \.diffWaiters,
-            send: .getDiff(session: session),
+            send: .getDiff(session: session, fromBase: fromBase),
             timeout: repositoryReadTimeout)
     }
 
