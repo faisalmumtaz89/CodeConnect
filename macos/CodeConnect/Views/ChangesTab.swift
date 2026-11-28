@@ -237,10 +237,8 @@ struct ChangesPanel: View {
     ) -> some View {
         let git = model.runGit(for: key)?.git
         let fromBase = model.diffIsFromBase(key: key)
-        // A diff against the base lists committed work too, so nothing uncommitted is the repository's own count.
-        let committedOnly = fromBase && git?.changed.files == 0 && git?.changed.complete == true
-        if (parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil || committedOnly), let conflicted {
-            // Nothing uncommitted, and the commit conflicts with its base: its conflicts stand where the diff would.
+        if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil, let conflicted {
+            // Nothing to list, and the commit conflicts with its base: its conflicts stand where the diff would.
             backBand
             ConflictsList(key: key, model: model, compared: conflicted)
         } else if parsed.isEmpty && raw.files?.isEmpty != false && raw.note == nil {
@@ -267,7 +265,11 @@ struct ChangesPanel: View {
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
             }
             if banded { Band(count: files.count, cut: raw.truncated || raw.filesTruncated, back: back) }
-            Document(raw: raw, diff: parsed, files: files).environment(hunks)
+            Document(
+                raw: raw, diff: parsed, files: files,
+                conflicts: conflicted.map { ConflictBlocks(key: key, model: model, compared: $0) }
+            )
+            .environment(hunks)
         }
     }
 }
@@ -460,17 +462,28 @@ private struct ConflictsList: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
-                if compared.files.isEmpty {
-                    Text(ChangesWords.conflictsUnnamed).font(Theme.ui(12)).foregroundStyle(Theme.text3)
-                }
-                ForEach(compared.files, id: \.self) { path in
-                    ConflictBlock(key: key, model: model, path: path, base: compared.base.name.displaySafe)
-                }
+                ConflictBlocks(key: key, model: model, compared: compared)
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityIdentifier("changes.conflicts")
+    }
+}
+
+/// Each conflicting file's block, or the line that says the computer named none.
+private struct ConflictBlocks: View {
+    let key: String
+    let model: AppModel
+    let compared: RunConflicts
+
+    var body: some View {
+        if compared.files.isEmpty {
+            Text(ChangesWords.conflictsUnnamed).font(Theme.ui(12)).foregroundStyle(Theme.text3)
+        }
+        ForEach(compared.files, id: \.self) { path in
+            ConflictBlock(key: key, model: model, path: path, base: compared.base.name.displaySafe)
+        }
     }
 }
 
@@ -925,20 +938,23 @@ private struct Message: View {
     }
 }
 
-/// The files the run changed, each a click from its diff, then each file's diff folded to its header or open: the
-/// computer's note when it qualified a diff it did send, each file the capture holds, and from an older computer the
-/// lines that belong to no file (the untracked names). Lazy in its files.
+/// The files the run changed, each a click from its diff, then the commit's conflicts with its base when it has
+/// some, then each file's diff folded to its header or open: the computer's note when it qualified a diff it did
+/// send, each file the capture holds, and from an older computer the lines that belong to no file (the untracked
+/// names). Lazy in its files.
 private struct Document: View {
     let raw: SessionDiff
     let diff: UnifiedDiff
     let files: [ChangedFile]
+    let conflicts: ConflictBlocks?
     /// The files whose diffs are folded to their headers.
     @State private var folded: Set<String> = []
 
     var body: some View {
         ScrollViewReader { reader in
             ScrollView {
-                // One column: the list, its rule, then the diffs. A scroll view's views are not stacked by it.
+                // One column: the list, its rule, then the conflicts and the diffs. A scroll view's views are not
+                // stacked by it.
                 VStack(alignment: .leading, spacing: 0) {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(files) { file in
@@ -952,6 +968,7 @@ private struct Document: View {
                     .padding(.vertical, 8)
                     Rectangle().fill(Theme.hairline).frame(height: 1)
                     LazyVStack(alignment: .leading, spacing: 12) {
+                        if let conflicts { conflicts }
                         if let note = raw.note {
                             Text(verbatim: note)
                                 .font(Theme.mono(11.5))

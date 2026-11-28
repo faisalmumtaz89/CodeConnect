@@ -3,6 +3,13 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect 0.19.34
+
+- The apps say "session" wherever they said "run": in buttons and menus (New Session, End Session…, Archive Session),
+  the ended and empty lines, notices and refusals.
+- Once a branch's work is committed, the Changes panel lists it against the branch's base, and says "No changes from
+  main" (or its base's name) when the branch has none.
+
 ## CodeConnect 0.19.33
 
 - On the Mac, the Changes panel shows an open pull request's checks: they lead its state line, and a Checks tab lists

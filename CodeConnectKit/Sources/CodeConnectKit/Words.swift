@@ -87,7 +87,7 @@ public enum FleetWords {
                 .init(mark: "arrow.triangle.branch", words: "Deletes the local branch"),
                 .init(mark: "terminal", words: "Ends the \(agent) session"),
             ],
-            note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive Session")
+            note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive")
     }
     /// A project's menu's way to archive its ended sessions in worktrees of their own, `count` of them (artboard 48).
     public static func archiveEnded(_ count: Int) -> String {

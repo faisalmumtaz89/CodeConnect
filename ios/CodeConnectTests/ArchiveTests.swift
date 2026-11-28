@@ -72,6 +72,6 @@ final class ArchiveTests: XCTestCase {
             ask.items.map(\.words), ["Removes the worktree", "Deletes the local branch", "Ends the Codex session"])
         XCTAssertEqual(ask.items.map(\.mark), ["folder", "arrow.triangle.branch", "terminal"])
         XCTAssertEqual(ask.note, "Files git ignores in it, like .env, are deleted too.")
-        XCTAssertEqual(ask.confirm, "Archive Session")
+        XCTAssertEqual(ask.confirm, "Archive")
     }
 }
