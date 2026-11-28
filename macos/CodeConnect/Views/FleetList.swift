@@ -60,6 +60,8 @@ struct FleetList: View {
     @FocusState private var searchFocused: Bool
     /// The project ⌘↑ and ⌘↓ moved the keys to, which ← and → fold and open; nil, the open session's.
     @State private var keyed: String?
+    /// The projects folded among search's results, which leave the list's own folds as they were.
+    @State private var searchFolded: Set<String> = []
     /// The session End Session… is asking about, and what its computer said when it did not end.
     @State private var ending: FleetRow?
     @State private var endNote: String?
@@ -100,7 +102,7 @@ struct FleetList: View {
         let found = layout.search.map { projects(held: nil, search: $0) }.flatMap { $0.found == nil ? nil : $0 }
         let shown = found ?? list
         // The sessions as the list shows them, for the arrows; a folded project's are not shown.
-        let rows = shown.projects.filter { !layout.folded.contains($0.id) }.flatMap(\.rows)
+        let rows = shown.projects.filter { !(found == nil ? layout.folded : searchFolded).contains($0.id) }.flatMap(\.rows)
         let selectable = rows.filter(removable).map(\.id)
         let picked = selectable.filter(chosen.contains)
         VStack(spacing: 0) {
@@ -213,7 +215,7 @@ struct FleetList: View {
                 // Out of VoiceOver's reach, children and all, while search stands in its place.
                 .accessibilityElement(children: found == nil ? .contain : .ignore)
                 .accessibilityHidden(found != nil)
-                if let found { results(found, selectable: selectable) }
+                if let found { results(found, list: list, selectable: selectable) }
                 }
                 // Sessions scrolling past a stuck header stay under it, never over the list's head.
                 .clipped()
@@ -455,6 +457,15 @@ struct FleetList: View {
             layout.folded.remove(project.id)
             return
         }
+        // Opened where the list does not show it (from search: an earlier session, a hidden project, outside Only these):
+        // held where the list puts an open session, after what is revealed, its project in its own place.
+        let shown = projects(held: .init(session: key, projectIndex: .max, rowIndex: .max))
+        guard let project = shown.projects.first(where: { $0.rows.contains { $0.id == key } }),
+            let at = project.rows.firstIndex(where: { $0.id == key })
+        else { return }
+        let index = drawn.projects.firstIndex { $0.id == project.id } ?? drawn.projects.count
+        layout.held = .init(session: key, projectIndex: index, rowIndex: at, ended: project.rows[at].status == .ended)
+        layout.folded.remove(project.id)
     }
 
     /// One run's row: a click opens it (or, while choosing, chooses it), its "…" on hover or a right-click holds what
@@ -479,6 +490,7 @@ struct FleetList: View {
                 return
             }
             opened = selected ? nil : row.id
+            keyed = nil
             keepListFocus()
         }
         return Button(action: activate) {
@@ -537,12 +549,14 @@ struct FleetList: View {
         .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
     }
 
-    /// What search found, in the list's place: each project with its matches, the matched words lit.
-    private func results(_ found: ProjectList, selectable: [String]) -> some View {
+    /// What search found, in the list's place: each project with its matches, the matched words lit. A header's + and
+    /// "…" act on the whole project as the list has it, not on its matches.
+    private func results(_ found: ProjectList, list: ProjectList, selectable: [String]) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                 ForEach(found.projects) { project in
-                    let folded = layout.folded.contains(project.id)
+                    let folded = searchFolded.contains(project.id)
+                    let whole = list.projects.first { $0.id == project.id } ?? project
                     Section {
                         if !folded {
                             ForEach(project.rows) { row in
@@ -556,10 +570,10 @@ struct FleetList: View {
                         ProjectHeader(
                             project: project, folded: folded, keyed: listFocused && keyed == project.id, counts: true,
                             toggle: {
-                                if folded { layout.folded.remove(project.id) } else { layout.folded.insert(project.id) }
+                                if folded { searchFolded.remove(project.id) } else { searchFolded.insert(project.id) }
                             },
-                            newHere: { newSessionIn(project.machineID, project.folder) },
-                            more: { rect in projectMenu(project, in: found, at: rect) })
+                            newHere: { newSessionIn(whole.machineID, whole.folder) },
+                            more: { rect in projectMenu(whole, in: list, at: rect) })
                     }
                 }
             }
@@ -571,7 +585,7 @@ struct FleetList: View {
     /// Search's field above the projects: the words, how many sessions match, and Esc, which clears it and brings the
     /// list back as it was. ↑ and ↓ move the open session through what it found; Return opens the first.
     private func searchRow(_ found: ProjectList?) -> some View {
-        let results = (found?.projects ?? []).filter { !layout.folded.contains($0.id) }.flatMap(\.rows).map(\.id)
+        let results = (found?.projects ?? []).filter { !searchFolded.contains($0.id) }.flatMap(\.rows).map(\.id)
         return HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Theme.text3)
             TextField(
@@ -583,9 +597,12 @@ struct FleetList: View {
             .font(Theme.ui(12.5))
             .foregroundStyle(Theme.text)
             .focused($searchFocused)
+            // While it has the keyboard, Esc is its own: the window's Esc (close the session) waits.
+            .focusedValue(\.composerHoldsEscape, searchFocused ? true : nil)
             .accessibilityLabel(RunListWords.search)
             .accessibilityIdentifier("fleet.search.field")
-            .onSubmit { if let first = results.first { opened = first } }
+            // Return opens the first match, unless ↑ or ↓ already opened one.
+            .onSubmit { if let first = results.first, !results.contains(opened ?? "") { opened = first } }
             .onKeyPress(keys: [.upArrow, .downArrow]) { press in
                 opened = ListStep.step(from: opened, in: results, down: press.key == .downArrow)
                 return .handled
@@ -601,7 +618,7 @@ struct FleetList: View {
                 .padding(.horizontal, 5)
                 .frame(height: 16)
                 .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
-                .keyboardShortcut(.cancelAction)
+                .keyboardShortcut(searchFocused ? .cancelAction : nil)
                 .focusable(false)
                 .help("Clear Search")
                 .accessibilityLabel("Clear Search")
@@ -621,6 +638,8 @@ struct FleetList: View {
 
     private func closeSearch() {
         layout.search = nil
+        searchFolded = []
+        keyed = nil
         keepListFocus()
     }
 
@@ -634,6 +653,7 @@ struct FleetList: View {
     /// that archive, and Hide Project, or Unhide Project on a hidden one shown because something in it needs you.
     private func projectMenu(_ project: ProjectList.Project, in list: ProjectList, at rect: CGRect) {
         let id = "fleet.project.\(project.name).more"
+        let hidden = layout.hidden[project.id] != nil
         let archivable = project.archivable.filter { machines.model(for: $0.machineID)?.archivesRuns == true }
         let archive = archivable.isEmpty ? nil : RowMenu.Item(
             id: "\(id).archiveEnded", title: FleetWords.archiveEnded(archivable.count), symbol: "archivebox",
@@ -658,10 +678,10 @@ struct FleetList: View {
             },
             archive,
             RowMenu.Item(
-                id: "\(id).hide", title: RunListWords.hide(project.hidden), symbol: project.hidden ? "eye" : "eye.slash",
+                id: "\(id).hide", title: RunListWords.hide(hidden), symbol: hidden ? "eye" : "eye.slash",
                 destructive: false, apart: archive == nil
             ) {
-                layout.hidden[project.id] = project.hidden ? nil : project.name
+                layout.hidden[project.id] = hidden ? nil : project.name
             },
         ].compactMap { $0 })
     }
@@ -684,15 +704,20 @@ struct FleetList: View {
         }
     }
 
-    /// Archives each that can go in turn, as Archive Session does; what was not archived is named under the list's head,
-    /// with the computer's reason.
+    /// Archives each that can go in turn, as Archive Session does, and only while it is still ended and needs nothing
+    /// (one resumed since the card was read stays); what was not archived is named under the list's head, with the
+    /// computer's reason.
     private func archive(_ plan: ArchiveEnded) {
         batchDid = "archived"
         batchRunning = true
         batchRefused = [:]
+        let still = plan.going.filter { going in
+            machines.fleet.first { $0.id == going.key }
+                .map { $0.status == .ended && !ProjectList.needsYou($0) && !$0.summary.archived } == true
+        }
         Task {
             var refused: [String: String] = [:]
-            for going in plan.going {
+            for going in still {
                 guard let model = machines.model(for: going.machineID) else { continue }
                 if let why = await model.archive(key: going.key, branch: going.branch, headOID: going.headOID) {
                     refused[going.key] = why
@@ -758,7 +783,7 @@ struct FleetList: View {
 
     /// What the last batch did not remove, among these rows, as the iPhone says it.
     private func batchNote(_ rows: [FleetRow]) -> (title: String, reasons: String)? {
-        let kept = rows.compactMap { batchRefused[$0.id] }
+        let kept = rows.filter { !$0.summary.archived }.compactMap { batchRefused[$0.id] }
         guard !kept.isEmpty else { return nil }
         return ("\(kept.count) not \(batchDid)", Set(kept).sorted().joined(separator: " · "))
     }
@@ -796,7 +821,8 @@ private struct ProjectHeader: View {
 
     /// What VoiceOver reads after its name: folded or open, then its count as drawn.
     private var spoken: String {
-        let count = project.needsYou > 0 ? RunListWords.needYou(project.needsYou) : RunListWords.runs(project.sessions)
+        let count = project.needsYou > 0 && !counts
+            ? RunListWords.needYou(project.needsYou) : RunListWords.runs(project.sessions)
         return "\(folded ? "folded" : "open"), \(count)"
     }
 

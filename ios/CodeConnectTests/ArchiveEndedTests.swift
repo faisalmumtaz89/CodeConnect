@@ -17,9 +17,10 @@ final class ArchiveEndedTests: XCTestCase {
             capability: .control, blockedCount: 0, lastActivityAt: nil, cachedAt: nil, machineID: "m1", machineName: "Studio")
     }
 
-    private func git(files: Int = 0, ahead: Int = 0) throws -> RunGit {
+    private func git(files: Int = 0, ahead: Int = 0, base: Bool = true) throws -> RunGit {
+        let baseJSON = base ? #""base":{"name":"main","remote":"origin","ref":"refs/remotes/origin/main"},"# : ""
         let json = #"""
-            {"branch":"fix/x","head_oid":"1234567","base":{"name":"main","remote":"origin","ref":"refs/remotes/origin/main"},
+            {"branch":"fix/x","head_oid":"1234567",\#(baseJSON)
              "changed":{"files":\#(files),"added":0,"removed":0,"complete":true},"ahead":\#(ahead),
              "pushed":false,"unmerged":false,"read_at":"2026-11-26T12:00:00Z"}
             """#
@@ -31,9 +32,10 @@ final class ArchiveEndedTests: XCTestCase {
     func testOnlyWhatArchiveSessionWouldArchiveGoes() throws {
         let rows = try [
             row("a", title: "Merged fix"), row("b", title: "Half done"), row("c", title: "Unmerged work"),
-            row("d", title: "Far away"),
+            row("d", title: "Far away"), row("e", title: "Local only"),
         ]
-        let plan = ArchiveEnded(rows, gits: ["a": try git(), "b": try git(files: 2), "c": try git(ahead: 3)])
+        let plan = ArchiveEnded(
+            rows, gits: ["a": try git(), "b": try git(files: 2), "c": try git(ahead: 3), "e": try git(base: false)])
         XCTAssertEqual(plan.going.map(\.key), ["a"])
         XCTAssertEqual(plan.going.first?.branch, "fix/x")
         XCTAssertEqual(plan.going.first?.headOID, "1234567")
@@ -41,6 +43,7 @@ final class ArchiveEndedTests: XCTestCase {
             "“Half done” has uncommitted changes, so it stays.",
             "“Unmerged work” has commits not on its base, so it stays.",
             "“Far away”’s repository couldn’t be read, so it stays.",
+            "“Local only” has no base branch known, so it stays.",
         ])
     }
 

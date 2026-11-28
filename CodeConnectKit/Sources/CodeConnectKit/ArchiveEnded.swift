@@ -28,6 +28,8 @@ public struct ArchiveEnded: Sendable, Equatable {
             }
             if git.changed.files > 0 || !git.changed.complete {
                 staying.append(FleetWords.staysUncommitted(row.title))
+            } else if git.base == nil {
+                staying.append(FleetWords.staysNoBase(row.title))
             } else if ChangesWords.archivable(git, inWorktree: row.summary.inWorktree), let branch = git.branch,
                 let head = git.headOID
             {
