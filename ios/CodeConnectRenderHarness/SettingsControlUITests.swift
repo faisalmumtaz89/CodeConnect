@@ -19,14 +19,14 @@ final class SettingsControlUITests: XCTestCase {
         app.buttons["session.composer.settings"]
     }
 
-    /// Hittable, then one tap opens the unified settings sheet (its "Permission mode" section is the mark).
+    /// Hittable, then one tap opens the session's settings sheet (its "Permission" section is the mark).
     private func assertTapOpensSheet(_ app: XCUIApplication, _ who: String) {
         let button = control(app)
         XCTAssertTrue(button.waitForExistence(timeout: 10), "\(who): the control is drawn")
         XCTAssertTrue(button.isEnabled, "\(who): the control is hittable")
         button.tap()
         XCTAssertTrue(
-            app.staticTexts["Permission mode"].waitForExistence(timeout: 10),
+            app.staticTexts["Permission"].waitForExistence(timeout: 10),
             "\(who): tapping the control opens the settings sheet")
         app.terminate()
     }
@@ -53,7 +53,7 @@ final class SettingsControlUITests: XCTestCase {
         XCTAssertTrue(button.waitForExistence(timeout: 10), "the control is drawn")
         button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)).tap()
         XCTAssertTrue(
-            app.staticTexts["Permission mode"].waitForExistence(timeout: 10),
+            app.staticTexts["Permission"].waitForExistence(timeout: 10),
             "a tap low in the 44pt frame opens the sheet")
         app.terminate()
     }

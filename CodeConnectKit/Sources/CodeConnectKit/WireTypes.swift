@@ -237,6 +237,23 @@ public enum AgentKind: Sendable, Hashable {
         }
     }
 
+    /// An agent's mark, as both apps draw it in an 18 pt circle: an SF Symbol, bold, at its own point size.
+    public struct Mark: Equatable, Sendable {
+        public let symbol: String
+        public let size: Double
+    }
+
+    /// Claude's asterisk, Codex's code chevron, Antigravity's sparkle; a question mark for an agent this build does not
+    /// know.
+    public var mark: Mark {
+        switch self {
+        case .claude: return Mark(symbol: "asterisk", size: 9)
+        case .codex: return Mark(symbol: "chevron.left.forwardslash.chevron.right", size: 7.5)
+        case .antigravity: return Mark(symbol: "sparkle", size: 8.5)
+        case .unsupported: return Mark(symbol: "questionmark", size: 8)
+        }
+    }
+
     /// Whether a Deny on this agent's card can carry the person's reason to it: Claude's does. A Codex card is answered
     /// with its own options, and Antigravity's agent takes a rejection with no words (ACP's `reject_once`), so a reason
     /// typed for either would reach no one.

@@ -57,6 +57,8 @@ final class DecisionTextSourceTests: XCTestCase {
             // Copied, never drawn: the daemon's bytes go to the pasteboard.
             ("FleetView.swift", ["CCPasteboard.copy(row.summary.cwd)"]),
             ("SessionDetailView.swift", ["if let summary { CCPasteboard.copy(summary.cwd) }"]),
+            // Handed to a new session as its folder, never drawn.
+            ("HostedSettingsSheet.swift", ["private var folder: String? { model.shownSummary(for: sessionKey)?.cwd }"]),
             ("DecisionCard.swift", ["let cwd = CodexCard.cwd(in: approval.card.toolInput)"]),
         ]),
         // The raw tool input of a timeline row: its presence, and its pretty

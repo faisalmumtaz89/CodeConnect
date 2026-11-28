@@ -265,9 +265,42 @@ enum Fixtures {
         return Date()
     }
 
+    /// `-CC_FIXTURE_SITE YES`: the website's sample, as the design team's Mac pictures hold it: the computer is "Mac
+    /// Studio", the runs are in docs-site, web-dashboard, data-pipeline, storefront-api and query-parser, `fx-7` is
+    /// query-parser's "Parse ISO dates with offsets", and `stacked` holds five decisions (its four and `mcpCard`).
+    static var site: Bool {
+        #if DEBUG
+            UserDefaults.standard.bool(forKey: "CC_FIXTURE_SITE")
+        #else
+            false
+        #endif
+    }
+
+    /// The site's folders, by run: query-parser is `fx-7`, the website's conversation.
+    private static let siteNames = [
+        "storefront-api", "data-pipeline", "docs-site", "web-dashboard", "query-parser", "docs-site", "query-parser",
+    ]
+
+    /// The website's sample: a card's paths are in its project's folder as the fleet shows it, never `/Users/dev`.
+    private static func sited(_ card: Card) -> Card {
+        guard site, let index = Int(card.sessionID.dropFirst(3)) else { return card }
+        func rehome(_ value: JSONValue) -> JSONValue {
+            switch value {
+            case .string(let text):
+                return .string(text.replacingOccurrences(of: "/Users/dev/app", with: "~/code/\(projectLabel(index))"))
+            case .object(let fields): return .object(fields.mapValues(rehome))
+            case .array(let items): return .array(items.map(rehome))
+            default: return value
+            }
+        }
+        var sited = card
+        sited.input = rehome(card.input)
+        return sited
+    }
+
     static func frames(now: Date = Fixtures.now, variant: Variant = .deck) -> [ServerMessage] {
         if variant == .antigravity { return antigravityFrames(now: now) }
-        let cards = variant.cards
+        let cards = (variant.cards + (site && variant == .stacked ? [mcpCard] : [])).map(sited)
         let held = variant.heldCard.map { [$0] } ?? []
         var messages: [ServerMessage] = []
         var ackJSON: String
@@ -289,6 +322,7 @@ enum Fixtures {
         default:
             ackJSON = helloAckJSON
         }
+        if site { ackJSON = ackJSON.replacingOccurrences(of: "Jordan’s Mac Studio", with: "Mac Studio") }
         // `-CC_FIXTURE_UPLOADS YES` (or `-CC_FIXTURE_FILES YES`, which also fills a run's tray): the computer takes
         // files, so the box draws its file control.
         if UserDefaults.standard.bool(forKey: "CC_FIXTURE_UPLOADS") || UserDefaults.standard.bool(forKey: "CC_FIXTURE_FILES") {
@@ -332,8 +366,9 @@ enum Fixtures {
         #endif
         if variant.hasRunningTool || variant == .longOutput {
             // In order, so `fx-5` reads as Running: the turn's last item has
-            // to be the tool call.
+            // to be the tool call. On the website's sample its paths are in its project's folder, as its card's are.
             for json in turnJSON(now: now) {
+                let json = site ? json.replacingOccurrences(of: "/Users/dev/app", with: "~/code/\(projectLabel(5))") : json
                 if let event = decode(json) { messages.append(event) }
             }
         }
@@ -671,6 +706,7 @@ enum Fixtures {
     private static func projectLabel(_ index: Int) -> String {
         if index == 1, let long = longLabel { return long.sent }
         #if DEBUG
+            if site, index <= siteNames.count { return siteNames[index - 1] }
             if UserDefaults.standard.bool(forKey: "CC_FIXTURE_REAL_NAMES"), index <= realNames.count {
                 return realNames[index - 1]
             }
@@ -705,7 +741,9 @@ enum Fixtures {
             #if DEBUG
                 // `-CC_FIXTURE_TITLES YES`: each run carries a title (minor 63), the first line of its first message,
                 // as ccd sends one, so the list and the run's header draw it.
-                if UserDefaults.standard.bool(forKey: "CC_FIXTURE_TITLES") {
+                if site, index == 7 {
+                    hosted += "\"title\":\"Parse ISO dates with offsets\","
+                } else if UserDefaults.standard.bool(forKey: "CC_FIXTURE_TITLES") {
                     let titles = [
                         "Retry the router on 5xx", "Batch remove ended runs", "Default checkpoint for the importer",
                         "Support page for 0.19.23", "Usage reset countdown", "Audit setup against installed",
@@ -1070,8 +1108,9 @@ enum Fixtures {
                   result("toolu_tl_1", "41 passed, 1 failed: parser.test.ts")),
             event("fx-7", 5, 288, "agent_message", "transcript",
                   reply("One failure in `parser.test.ts`: the date parser drops the timezone offset. Fixing it now.")),
+            // The website's sample names the file without a home folder, which a store picture should not show.
             event("fx-7", 6, 287, "tool_call", "hook",
-                  call("toolu_tl_2", "Edit", "{\"file_path\":\"\(cwd(7))/src/parser.ts\"}")),
+                  call("toolu_tl_2", "Edit", "{\"file_path\":\"\(site ? "src" : "\(cwd(7))/src")/parser.ts\"}")),
             event("fx-7", 7, 286, "tool_result", "transcript", result("toolu_tl_2", "Updated src/parser.ts")),
             event("fx-7", 8, 285, "tool_call", "hook", call("toolu_tl_3", "Bash", "{\"command\":\"npm test\"}")),
             event("fx-7", 9, 278, "tool_result", "transcript", result("toolu_tl_3", "42 passed")),

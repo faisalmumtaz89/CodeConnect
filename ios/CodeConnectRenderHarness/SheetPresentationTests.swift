@@ -38,7 +38,7 @@ final class SheetPresentationTests: XCTestCase {
         // is not the frame of the detent it is heading for.
         Thread.sleep(forTimeInterval: 1.0)
 
-        let title = try driver.require(app.staticTexts["Settings"].firstMatch, "the sheet title")
+        let title = try driver.require(app.staticTexts["This session"].firstMatch, "the sheet title")
         let row = try driver.require(app.staticTexts["Sonnet"].firstMatch, "a model row")
         let titleBefore = title.frame
         let rowBefore = row.frame

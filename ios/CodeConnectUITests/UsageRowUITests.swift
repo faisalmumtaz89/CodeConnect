@@ -1,8 +1,8 @@
 import XCTest
 
-/// The run's usage on its settings line is the button's value, never its label: VoiceOver reads the line's words as
-/// they were, then the Kit's sentence for the usage the app holds (`ReplyBar.spoken`), as the Mac speaks it. On `cx-1`,
-/// a live Codex run whose short line leaves room for all the figures, so the row asserted is one that draws them.
+/// The run's usage is its own control in the reply box's bar, beside the model chip: its value is the Kit's sentence
+/// for the usage the app holds (`ReplyBar.spoken`), as the Mac speaks it, and the chip's label reads as it did without
+/// it. On `cx-1`, a live Codex run whose short name leaves room for all the figures.
 final class UsageRowUITests: XCTestCase {
 
     /// Codex's Default as you@example.com: its 5-hour window full, its week at 41%.
@@ -25,21 +25,36 @@ final class UsageRowUITests: XCTestCase {
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ] + (usage ? ["-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", accounts] : [])
         app.launch()
-        XCTAssertTrue(app.buttons["session.composer.settings"].waitForExistence(timeout: 25), "the settings line")
+        XCTAssertTrue(app.buttons["session.composer.settings"].waitForExistence(timeout: 25), "the model chip")
         return app
     }
 
-    func testTheUsageIsTheLinesValueAndItsLabelIsUnchanged() {
-        let plain = launch(usage: false).buttons["session.composer.settings"].label
-        XCUIApplication().terminate()
+    func testTheUsageIsItsOwnControlAndTheChipsLabelIsUnchanged() {
+        let plain = launch(usage: false)
+        let chip = plain.buttons["session.composer.settings"].label
+        XCTAssertFalse(plain.buttons["session.composer.usage"].exists, "no usage held, no figures")
+        plain.terminate()
         let app = launch(usage: true)
-        let lines = app.buttons.matching(identifier: "session.composer.settings")
-        XCTAssertEqual(lines.count, 1, "one settings control, the figures inside it")
-        let line = lines.firstMatch
-        XCTAssertEqual(line.label, plain, "the label reads as it did")
-        let value = line.value as? String ?? ""
+        XCTAssertEqual(app.buttons["session.composer.settings"].label, chip, "the chip reads as it did")
+        let usage = app.buttons["session.composer.usage"]
+        XCTAssertTrue(usage.waitForExistence(timeout: 5), "the figures, a control of their own")
+        let value = usage.value as? String ?? ""
         XCTAssertTrue(value.hasPrefix("Context 390k of 1M; 5-hour 100%"), value)
         XCTAssertTrue(value.contains("; Weekly 41%"), value)
         XCTAssertTrue(value.hasSuffix("; Account you@example.com · Plus"), value)
+    }
+
+    /// The figures open the session's usage: its limits, and the account by its whole email and plan.
+    func testTheFiguresOpenTheUsageSheet() {
+        let app = launch(usage: true)
+        let usage = app.buttons["session.composer.usage"]
+        XCTAssertTrue(usage.waitForExistence(timeout: 5), "the figures")
+        usage.tap()
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label ==[c] %@", "Limits")).firstMatch
+                .waitForExistence(timeout: 5), "the Usage sheet")
+        XCTAssertTrue(
+            app.staticTexts.matching(identifier: "usage.account").firstMatch.label.hasPrefix("you@example.com"),
+            "the account, by its email")
     }
 }

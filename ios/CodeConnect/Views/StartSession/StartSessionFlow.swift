@@ -16,8 +16,9 @@ struct StartSeed {
     let agent: StartAgent
     /// The model the start named, nil for the agent's Default.
     let model: String?
-    /// The folder the question is about.
-    let trustPath: String
+    /// The folder the question is about; nil opens the sheet on Ready, with nothing to ask (a session's settings
+    /// starting another agent there).
+    let trustPath: String?
 }
 
 /// New session, one question a screen: which computer, which folder (a recent
@@ -94,7 +95,8 @@ struct StartStepsSheet: View {
         _place = State(initialValue: seed.place)
         _trustPath = State(initialValue: seed.trustPath)
         let isRepo = seed.context.git(seed.project.path).map { $0 != nil } ?? seed.context.branchAhead(seed.project)
-        let steps: [Screen] = [.computer, .folder, .agent] + (isRepo ? [.branch] : []) + [.start, .trust]
+        let steps: [Screen] = [.computer, .folder, .agent] + (isRepo ? [.branch] : []) + [.start]
+            + (seed.trustPath == nil ? [] : [.trust])
         _trail = State(initialValue: steps)
     }
 

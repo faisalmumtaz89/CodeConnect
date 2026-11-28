@@ -79,7 +79,7 @@ final class UploadHoldsTests: XCTestCase {
         try await XCTUnwrap(model.statesForTesting["u-1"]).settleForTesting()
         model.attach(data: Data("abc".utf8), name: "a.txt", to: "u-1")
         XCTAssertNotNil(model.filesBlockedReason(for: "u-1"), "the file holds the message")
-        XCTAssertFalse(HostedSettingsBar.isHeld(model, "u-1"), "but not the run's model and effort")
+        XCTAssertFalse(model.settingsHeld("u-1"), "but not the run's model and effort")
     }
 
     func testFilesForAComputerThatTakesNoneHoldStart() {

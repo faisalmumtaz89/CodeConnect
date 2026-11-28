@@ -46,7 +46,7 @@ public struct AskWords: Sendable, Hashable {
 /// questions asked before a run ends or goes.
 public enum FleetWords {
     public static let projects = "Projects"
-    public static let newAgent = "New agent"
+    public static let newSession = "New session"
     public static let startAnAgent = "Start an agent"
     /// Under the launch's mark once it has waited a second for its computers (`LaunchMark`).
     public static func connecting(to computers: [String]) -> String {

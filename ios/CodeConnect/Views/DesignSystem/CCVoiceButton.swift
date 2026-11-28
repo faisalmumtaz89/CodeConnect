@@ -42,6 +42,11 @@ struct CCVoiceButton: View {
     /// daemon that refuses typed text, a stop on its way). Never blocks `stop`:
     /// a recording can always be ended.
     var blockedReason: String?
+    /// The disc's drawn size: 36 in the start's pill, 34 in a session's reply box; the hit area is 44 either way.
+    var disc: CGFloat = CC.size.controlSm
+    /// A session's reply box draws the idle mic quiet (white .08, the glyph in primary text), keeping the accent face
+    /// for Send and Stop.
+    var quietMic = false
     let action: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -50,6 +55,8 @@ struct CCVoiceButton: View {
     private var isBlocked: Bool {
         blockedReason != nil && (phase == .dictate || phase == .send || phase == .stopTurn)
     }
+
+    private var isQuiet: Bool { quietMic && phase == .dictate && !isBlocked }
 
     var body: some View {
         Button {
@@ -67,16 +74,16 @@ struct CCVoiceButton: View {
 
     private var face: some View {
         ZStack {
-            Circle().fill(isBlocked ? CC.color.surfaceRaised : CC.color.accent)
+            Circle().fill(isBlocked ? CC.color.surfaceRaised : isQuiet ? Color.white.opacity(0.08) : CC.color.accent)
             if isBlocked {
                 Circle().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline)
             }
             glyph
-                .foregroundStyle(isBlocked ? CC.text.disabled : CC.text.onAccent)
+                .foregroundStyle(isBlocked ? CC.text.disabled : isQuiet ? CC.text.primary : CC.text.onAccent)
         }
         // Fixed like every control height in the kit: the circle grows only
         // if its content demands it, which a glyph never does.
-        .frame(width: CC.size.controlSm, height: CC.size.controlSm)
+        .frame(width: disc, height: disc)
         .overlay {
             if phase == .stop {
                 recordingRing

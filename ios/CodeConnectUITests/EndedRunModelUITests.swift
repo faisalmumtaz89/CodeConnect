@@ -1,8 +1,8 @@
 import XCTest
 
-/// An ended run names the model it ran on, which the Mac names in its pane heading: one that takes no reply shows its
-/// settings line, read only, over the line that says it has ended, as one the next message relaunches shows it over its
-/// reply box.
+/// An ended session names the model it ran on, which the Mac names in its pane heading: one that takes no reply names
+/// it, with its effort, on the line that says it has ended; one the next message relaunches names it in its reply box's
+/// chip, read only.
 final class EndedRunModelUITests: XCTestCase {
 
     override func setUpWithError() throws {
@@ -29,22 +29,20 @@ final class EndedRunModelUITests: XCTestCase {
         add(shot)
     }
 
-    func testARunThatTakesNoReplyNamesItsModelOverTheEndedLine() {
+    func testARunThatTakesNoReplyNamesItsModelOnTheEndedLine() {
         let app = open("01K1B3XQ8ZC0DE5FGH7JKMNP00")
 
         let ended = app.descendants(matching: .any).matching(identifier: "session-ended-line").firstMatch
         XCTAssertTrue(ended.waitForExistence(timeout: 25), "a run that takes no reply: the ended line")
         attach(app, "ended-not-relaunchable")
-        // The line's words; its glyph carries the same identifier.
         let line = app.staticTexts.matching(identifier: "session.composer.model").firstMatch
         XCTAssertTrue(line.waitForExistence(timeout: 5), "its model, read only")
-        XCTAssertTrue(line.label.hasPrefix("Sonnet 5.5"), line.label)
+        XCTAssertEqual(line.label, "Sonnet 5.5 · High")
         XCTAssertFalse(app.buttons["session.composer.settings"].exists, "nothing to change on a run that has ended")
-        XCTAssertLessThan(line.frame.maxY, ended.frame.minY + 1, "over the ended line")
+        XCTAssertTrue(ended.frame.contains(CGPoint(x: line.frame.midX, y: line.frame.midY)), "on the ended line")
     }
 
-    /// The same line over a reply box, on an ended run the next message relaunches: the room it keeps there is the
-    /// room it keeps over the ended line.
+    /// An ended session the next message relaunches keeps its reply box, its model in the box's chip.
     func testARelaunchableRunNamesItsModelOverItsReplyBox() {
         let app = open("01K1B3XQ8ZC0DE5FGH7JKMNP07")
         let line = app.staticTexts.matching(identifier: "session.composer.model").firstMatch

@@ -91,20 +91,18 @@ final class ConversationLayoutUITests: XCTestCase {
             "the turn that ended on `npm run lint` must keep its line")
     }
 
-    /// The bar's "…" holds the session's changes and the link's health under
-    /// the name of the computer, which is a heading, not a button.
-    func testTheMenuNamesTheComputer() {
+    /// The bar's title names the computer the session runs on, its changes are a button at the bar's end, and its
+    /// "…" holds the link's health, under no heading: the computer is named once, in the title.
+    func testTheTitleNamesTheComputerAndTheBarItsChanges() {
         let app = open("fx-6")
+        let title = app.descendants(matching: .any)["session-title"].firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 10), "the bar's title")
+        XCTAssertTrue(title.label.hasSuffix("on Jordan’s Mac Studio"), title.label)
+        XCTAssertTrue(app.buttons["session-changes"].exists, "the changes, at the bar's end")
         app.buttons["session-more"].tap()
         let link = app.buttons["Link health"].firstMatch
         XCTAssertTrue(link.waitForExistence(timeout: 10), "the menu offers the link's health")
-        XCTAssertTrue(
-            app.staticTexts["On Jordan’s Mac Studio"].exists, "under the computer's name")
-        XCTAssertFalse(
-            app.buttons["On Jordan’s Mac Studio"].exists, "which is not an action")
-        XCTAssertTrue(
-            app.buttons.matching(NSPredicate(format: "label == 'Changes'")).firstMatch.exists,
-            "and the changes")
+        XCTAssertFalse(app.staticTexts["On Jordan’s Mac Studio"].exists, "the computer is named in the title")
         link.tap()
         XCTAssertTrue(
             app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'your computer last answered'")).firstMatch

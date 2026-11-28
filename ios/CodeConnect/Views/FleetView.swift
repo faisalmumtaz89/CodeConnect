@@ -345,7 +345,7 @@ struct FleetView: View {
             .environment(
                 machines.models.first { $0.starter.starts[requestID] != nil } ?? model)
         } else {
-            SessionDetailView(route: route)
+            SessionDetailView(route: route, onStartNew: startNew)
                 .environment(owner(route.key))
                 .id(route.key)
         }
@@ -360,7 +360,7 @@ struct FleetView: View {
             } label: {
                 HStack(spacing: CC.space.xxs) {
                     CCIcon("plus", size: 16)
-                    Text(FleetWords.newAgent)
+                    Text(FleetWords.newSession)
                         .ccType(CC.type.body)
                 }
                 .foregroundStyle(CC.text.primary)
@@ -373,7 +373,7 @@ struct FleetView: View {
             // it gave a slot an icon's width, so a title longer than "New"
             // spilled past the screen's left edge.
             .fixedSize()
-            .accessibilityLabel(FleetWords.newAgent)
+            .accessibilityLabel(FleetWords.newSession)
             .accessibilityIdentifier("start-entry")
         }
         .ccPlainToolbarItem()
@@ -617,7 +617,7 @@ struct FleetView: View {
         }
         let words = [
             newProjects > 0 ? "\(newProjects) new \(newProjects == 1 ? "project" : "projects")" : nil,
-            newRuns > 0 ? "\(newRuns) new \(newRuns == 1 ? "run" : "runs")" : nil,
+            newRuns > 0 ? "\(newRuns) new \(newRuns == 1 ? "session" : "sessions")" : nil,
             ended > 0 ? "\(ended) ended" : nil,
         ].compactMap { $0 }
         let total = newProjects + newRuns + ended
@@ -794,7 +794,7 @@ struct FleetView: View {
         }
         let live = screen.rows.filter { $0.status != .ended }
         let computers = Set(live.map(\.machineID)).count
-        let overview = "\(live.count) \(live.count == 1 ? "run" : "runs")"
+        let overview = "\(live.count) \(live.count == 1 ? "session" : "sessions")"
             + (narrowedTo ?? (computers > 1 ? " on \(computers) computers" : ""))
         let taken: FleetStatus? =
             screen.decisions > 0 ? .blocked : (live.contains { $0.status == .failed } ? .failed : nil)
@@ -1033,6 +1033,17 @@ struct FleetView: View {
 
     /// Ask every computer for its projects. The computer is chosen in the
     /// flow, by a tap, and held there.
+    /// A session's settings choosing another agent's model: the Start sheet, seeded with this computer, its folder,
+    /// that agent and model, opened from the fleet once the settings sheet has gone, as the folder question reopens it.
+    private func startNew(_ seed: StartSeed) {
+        startSeed = seed
+        path = []
+        Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            startOpen = true
+        }
+    }
+
     private func loadStart() {
         for context in startContexts { context.load() }
     }
@@ -1451,7 +1462,7 @@ struct FleetView: View {
         .frame(minHeight: CC.size.controlLg)
         .padding(.bottom, CC.space.xl)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(band.rows.count) ended runs, collapsed")
+        .accessibilityLabel("\(band.rows.count) ended sessions, collapsed")
     }
 
     // MARK: States

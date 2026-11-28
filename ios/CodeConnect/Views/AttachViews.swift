@@ -127,9 +127,10 @@ private struct CameraCapture: UIViewControllerRepresentable {
     }
 }
 
-/// **What goes with the next reply**, 56-pt tiles over the pill, in order. Each says where it is — on its way (a
-/// ring), arrived (plain), refused before sending, or failed on the way (send it again) — and each has its ×.
-/// Why they hold the message back is said once, in Kit's words, under the tiles.
+/// **What goes with the next reply**, 56-pt tiles inside the reply box over its field, in order. Each says where it is
+/// — on its way (its share and size, and a bar), arrived (plain), refused before sending (!), or failed on the way (a
+/// tap sends it again) — and each has its ×, a 44-pt target. Why they hold the message back is said once, in Kit's
+/// words, in amber, under the tiles.
 struct AttachmentTray: View {
     let files: [Attachment]
     /// Kit's `filesBlockedReason`.
@@ -138,23 +139,39 @@ struct AttachmentTray: View {
     let onRetry: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: CC.space.xxs) {
+        VStack(alignment: .leading, spacing: CC.space.xs) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: CC.space.sm) {
+                HStack(spacing: 16) {
                     ForEach(files) { file in
                         AttachmentTile(file: file, onRetry: { onRetry(file.id) })
                             .overlay(alignment: .topTrailing) { removeButton(file) }
                     }
                 }
-                .padding(.top, 6)
-                .padding(.trailing, 6)
+                // Room for the ×, which stands over each tile's corner.
+                .padding(.top, 12)
+                .padding(.trailing, 12)
             }
             if let reason {
-                Text(reason)
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.color.danger)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("attach.problem")
+                Label {
+                    // One line: a file's own reason leads with its name, which gives way in its middle, never past
+                    // a few letters either side of the "…".
+                    if let name = files.first(where: { reason.hasPrefix($0.name) })?.name {
+                        HStack(spacing: 0) {
+                            Text(verbatim: name).lineLimit(1).truncationMode(.middle)
+                                .frame(minWidth: name.count > 8 ? 56 : nil, alignment: .leading)
+                            Text(verbatim: String(reason.dropFirst(name.count))).lineLimit(1).layoutPriority(1)
+                        }
+                    } else {
+                        Text(reason).lineLimit(1).truncationMode(.tail)
+                    }
+                } icon: {
+                    Image(systemName: "exclamationmark.circle").accessibilityHidden(true)
+                }
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.color.warning)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(reason)
+                .accessibilityIdentifier("attach.problem")
             }
         }
     }
@@ -165,11 +182,12 @@ struct AttachmentTray: View {
                 .foregroundStyle(CC.text.primary)
                 .frame(width: 20, height: 20)
                 .background(CC.color.surfaceOverlay, in: Circle())
-                .overlay { Circle().strokeBorder(CC.color.bg, lineWidth: 2) }
-                .ccHitTarget(minWidth: 32, minHeight: 32)
+                .overlay { Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1) }
+                .frame(width: CC.size.hitTarget, height: CC.size.hitTarget)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .offset(x: 8, y: -8)
+        .offset(x: 12, y: -12)
         .accessibilityLabel("Remove \(file.name)")
         .accessibilityIdentifier("attach.remove")
     }
@@ -188,6 +206,7 @@ private struct AttachmentTile: View {
         face
             .frame(width: Self.side, height: Self.side)
             .clipShape(shape)
+            // A failed file's Retry fills the tile, so a tap anywhere on it sends it again.
             .overlay { state }
             .overlay { shape.strokeBorder(edge, lineWidth: troubled ? 1.5 : CC.stroke.hairline) }
             .task(id: file.id) {
@@ -202,7 +221,22 @@ private struct AttachmentTile: View {
 
     @ViewBuilder
     private var face: some View {
-        if let thumbnail {
+        if case .uploading(let sent) = file.state, thumbnail == nil {
+            // On its way: how much has gone, of how much.
+            VStack(spacing: 3) {
+                Text(verbatim: "\(file.size > 0 ? sent * 100 / file.size : 0)%").font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(CC.text.secondary)
+                Text(verbatim: "of \(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file))")
+                    .font(.system(size: 9)).foregroundStyle(CC.text.tertiary)
+            }
+            .dynamicTypeSize(...DynamicTypeSize.large)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(CC.color.surfaceRaised)
+        } else if case .refused = file.state, thumbnail == nil {
+            Text(verbatim: "!").font(.system(size: 16, weight: .semibold)).foregroundStyle(CC.color.danger)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(CC.color.surfaceRaised)
+        } else if let thumbnail {
             Image(uiImage: thumbnail).resizable().scaledToFill()
         } else {
             VStack(spacing: 4) {
@@ -239,17 +273,19 @@ private struct AttachmentTile: View {
     private var state: some View {
         switch file.state {
         case .uploading(let sent):
-            ZStack {
-                Color.black.opacity(0.45)
-                    .opacity(thumbnail == nil ? 0 : 1)
-                Circle().stroke(.white.opacity(0.25), lineWidth: 2.5).frame(width: 22, height: 22)
-                Circle()
-                    .trim(from: 0, to: file.size > 0 ? CGFloat(sent) / CGFloat(file.size) : 0)
-                    .stroke(.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .frame(width: 22, height: 22)
+            // A thin bar along the tile's foot, over a picture dimmed while it goes.
+            ZStack(alignment: .bottom) {
+                Color.black.opacity(thumbnail == nil ? 0 : 0.45)
+                GeometryReader { geometry in
+                    let share = file.size > 0 ? CGFloat(sent) / CGFloat(file.size) : 0
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.1))
+                        Capsule().fill(CC.text.primary).frame(width: geometry.size.width * share)
+                    }
+                }
+                .frame(height: 2)
+                .padding(6)
             }
-            .padding(.bottom, thumbnail == nil ? 16 : 0)
             .clipShape(shape)
         case .failed:
             Button(action: onRetry) {

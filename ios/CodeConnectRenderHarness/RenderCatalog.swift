@@ -396,12 +396,9 @@ struct RenderDriver {
         more.tap()
     }
 
-    /// The session's changes, from the bar's menu.
+    /// The session's changes, from the button at the bar's end.
     func openChanges(_ app: XCUIApplication) throws {
-        try openSessionMenu(app)
-        let changes = app.buttons.matching(NSPredicate(format: "label == 'Changes'")).firstMatch
-        try require(changes, "the changes in the session bar's menu")
-        changes.tap()
+        try require(app.buttons["session-changes"], "the changes at the session bar's end").tap()
     }
 
     /// Focuses the composer and types. A vertical-axis TextField is backed
@@ -717,44 +714,44 @@ enum RenderCatalog {
                     driver.text(containing: "Not sent: stopped", in: app),
                     "the cancelled send's marker on the person's own row")
             }),
-        // **The run's branch and its +N −M**, under the bar, in ccd's `git_branch`
-        // and `diff_stat`: a long branch, a short one, a Codex run, and none.
+        // **The session's branch in its title, and its +N −M at the bar's end**, in ccd's `git_branch` and `diff_stat`:
+        // a long branch, a short one, a Codex session, and none.
         RenderScenario(
             name: "session-facts-long",
-            purpose: "a branch longer than the line gives way in its middle; +N −M keeps its edge",
+            purpose: "a branch longer than the title's line gives way in its middle; Changes keeps its +N −M",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
             reach: { app, driver in
-                let facts = app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch
-                try driver.requireExists(facts, "the run's branch line")
-                guard facts.label.contains("feature/") else { throw RenderFailure.unreachable("feature/ on the run's branch line") }
+                let title = app.descendants(matching: .any).matching(identifier: "session-title").firstMatch
+                try driver.requireExists(title, "the bar's title")
+                guard title.label.contains("branch feature/") else { throw RenderFailure.unreachable("feature/ in the title") }
+                try driver.requireExists(app.buttons["session-changes"], "the changes at the bar's end")
             }),
         RenderScenario(
             name: "session-facts-short",
-            purpose: "a short branch and its +N −M",
+            purpose: "a short branch in the title, and its +N −M",
             arguments: ["-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
             reach: { app, driver in
-                let facts = app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch
-                try driver.requireExists(facts, "the run's branch line")
-                guard facts.label.contains("main") else { throw RenderFailure.unreachable("main on the run's branch line") }
+                let title = app.descendants(matching: .any).matching(identifier: "session-title").firstMatch
+                try driver.requireExists(title, "the bar's title")
+                guard title.label.contains("branch main") else { throw RenderFailure.unreachable("main in the title") }
             }),
         RenderScenario(
             name: "session-facts-codex",
-            purpose: "a Codex run's branch and +N −M",
+            purpose: "a Codex session's branch in the title, and its +N −M",
             arguments: ["-CC_FIXTURE", "stacked", "-CC_DEEPLINK", "codeconnect://session/fx-4"],
             reach: { app, driver in
-                let facts = app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch
-                try driver.requireExists(facts, "the run's branch line")
-                guard facts.label.contains("main") else { throw RenderFailure.unreachable("main on the run's branch line") }
+                let title = app.descendants(matching: .any).matching(identifier: "session-title").firstMatch
+                try driver.requireExists(title, "the bar's title")
+                guard title.label.contains("branch main") else { throw RenderFailure.unreachable("main in the title") }
             }),
         RenderScenario(
             name: "session-facts-none",
-            purpose: "a folder ccd reports no branch for: no line under the bar",
+            purpose: "a folder ccd reports no branch for: the title names the folder and the computer alone",
             arguments: ["-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-3"],
             reach: { app, driver in
-                try driver.require(app.buttons["session-more"], "the session detail")
-                if app.descendants(matching: .any).matching(identifier: "session-facts").firstMatch.exists {
-                    throw RenderFailure.unreachable("no branch line for a run without one")
-                }
+                let title = app.descendants(matching: .any).matching(identifier: "session-title").firstMatch
+                try driver.requireExists(title, "the bar's title")
+                if title.label.contains("branch ") { throw RenderFailure.unreachable("no branch for a session without one") }
             }),
         // **The run's ⋯ on a Claude run started from the app**: Changes, then
         // Claude Code's Compact and Clear, as the Mac's reply box offers them.
@@ -930,15 +927,16 @@ enum RenderCatalog {
         // The header's one line, when the computer's name is longer than it.
         RenderScenario(
             name: "session-header-long-name",
-            purpose: "a computer name longer than its line in the session bar's menu",
+            purpose: "a computer name longer than the title's line: the branch and the folder give way before it",
             arguments: [
                 "-CC_FIXTURE", "timelineLongName", "-CC_DEEPLINK", "codeconnect://session/fx-6",
             ],
             reach: { app, driver in
-                try driver.openSessionMenu(app)
-                try driver.requireExists(
-                    app.staticTexts["On Jordan’s MacBook Pro (16-inch, Nov 2024)"].firstMatch,
-                    "the computer's name, heading the menu's link item")
+                let title = app.descendants(matching: .any).matching(identifier: "session-title").firstMatch
+                try driver.requireExists(title, "the bar's title")
+                guard title.label.hasSuffix("on Jordan’s MacBook Pro (16-inch, Nov 2024)") else {
+                    throw RenderFailure.unreachable("the computer's whole name in the title")
+                }
             }),
 
         // **The decision, as a sheet.** The Deck renders this card full
@@ -1019,14 +1017,14 @@ enum RenderCatalog {
         RenderScenario(
             name: "session-hosted-settings-sheet",
             purpose:
-                "the hosted run's unified model/effort/mode sheet, minor-39 menus in their worst shapes",
+                "the This session sheet, minor-39 menus in their worst shapes",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
                 try driver.require(
-                    driver.text(containing: "Permission mode", in: app), "the mode section")
+                    driver.text(containing: "Permission", in: app), "the mode section")
                 try driver.require(
                     driver.element(containing: "Extra high", in: app),
                     "the labelled efforts the hosted sheet draws")
@@ -1034,27 +1032,24 @@ enum RenderCatalog {
         RenderScenario(
             name: "session-hosted-settings-model",
             purpose:
-                "the hosted settings sheet at its top — the Model section, each model by its name with the agent's own "
-                + "description beside it, on one line",
+                "the This session sheet's Model section: each model by its name, the agent's own description under it",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
             ],
             reach: { app, driver in
                 try driver.openPaletteRow(app, fragment: "/m", row: "/model")
-                // One row holds the name and, beside it, the description as the agent sends it, price included.
+                // One row holds the name and, under it, the description as the agent sends it, price included.
+                // At AX5 the Model section is below the fold, and a lazy list draws no row until it is scrolled to,
+                // so the sheet is dragged until the row exists before it is required.
+                let sheet = driver.list(holding: "Permission", in: app)
                 let sonnet = driver.element(
-                    containing: "Sonnet, Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok", in: app)
-                try driver.require(sonnet, "the Sonnet row with its description beside its name")
-                // On one line: the row is no taller than a row with no description, as an effort's.
-                let effort = driver.element(containing: "Extra high", in: app)
-                try driver.require(effort, "an effort row to measure the Sonnet row against")
-                if sonnet.frame.height > effort.frame.height + 1 {
-                    throw RenderFailure.unreachable("the Sonnet row on one line")
-                }
+                    containing: "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok", in: app)
+                for _ in 0..<16 where !sonnet.exists { driver.dragUp(within: sheet) }
+                try driver.require(sonnet, "the Sonnet row with its description", scrollingWithin: sheet)
             }),
         RenderScenario(
             name: "session-hosted-settings-modes",
-            purpose: "the hosted settings sheet scrolled to Permission mode — Plan is the selected row",
+            purpose: "the This session sheet's Permission section — Plan is the selected row",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
             ],
@@ -1064,7 +1059,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-settings-claude-plan",
-            purpose: "the composer settings control — a hosted Claude run in Plan, the mode named beside the model",
+            purpose: "the reply box's model chip — a hosted Claude run in Plan: its mark and model",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1"],
             reach: { app, driver in
                 try driver.require(
@@ -1072,7 +1067,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-settings-claude-bypass",
-            purpose: "the composer settings control — Claude in Bypass permissions, a confirm mode named in red",
+            purpose: "the reply box's model chip — Claude in Bypass permissions: the chip in red",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-2"],
             reach: { app, driver in
                 try driver.require(
@@ -1082,7 +1077,7 @@ enum RenderCatalog {
         // its account, the fullest full.
         RenderScenario(
             name: "session-usage-bypass-100",
-            purpose: "the settings line with the run's usage: context, two windows, the fullest at 100%",
+            purpose: "the reply box's figures: context and the ring of the window at its limit, at 100%",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-2",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 100),
@@ -1093,7 +1088,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-codex-figures",
-            purpose: "the settings line with the run's usage on a Codex run at its default: all the figures",
+            purpose: "the reply box's figures on a Codex run at its default: all the figures",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
@@ -1106,7 +1101,7 @@ enum RenderCatalog {
         // at three shares, so the percent's slot is seen holding its width.
         RenderScenario(
             name: "session-usage-ring-9",
-            purpose: "the settings line with the fullest window's ring alone, at 9%",
+            purpose: "the reply box\'s figures, the ring at 9%",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 9),
@@ -1117,7 +1112,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-ring-23",
-            purpose: "the settings line with the fullest window's ring alone, at 23%",
+            purpose: "the reply box\'s figures, the ring at 23%",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
@@ -1128,7 +1123,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-ring-100",
-            purpose: "the settings line with the fullest window's ring alone, at 100%",
+            purpose: "the reply box\'s figures, the ring at 100%",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 100),
@@ -1137,9 +1132,21 @@ enum RenderCatalog {
                 try driver.require(
                     app.buttons["session.composer.settings"], "the composer settings control")
             }),
+        // **A session stopped at its limit**: the band over the box, its prompt, the ring red.
+        RenderScenario(
+            name: "session-limit-band",
+            purpose: "a Codex session stopped at its 5-hour limit: the band over the reply box, its prompt, the ring red",
+            arguments: [
+                "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1",
+                "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 100),
+                "-CC_OPEN", "01CX000000000000000000DEF1", "-CC_FIXTURE_LIMIT", "five_hour",
+            ],
+            reach: { app, driver in
+                try driver.requireExists(app.descendants(matching: .any)["session.limit"], "the band")
+            }),
         RenderScenario(
             name: "session-usage-context-only",
-            purpose: "the settings line with the run's context and no account limits read",
+            purpose: "the reply box's figures with the context and no account limits read",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES",
@@ -1150,7 +1157,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-limits-only",
-            purpose: "the settings line with its account's limits and no context reported",
+            purpose: "the reply box's figures with the account's limits and no context reported",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "limits", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
@@ -1172,46 +1179,36 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-usage-sheet-claude",
-            purpose: "the settings sheet's Usage section for a Claude run: first as a tap opens it, last at AX5",
+            purpose: "the Usage sheet for a Claude run, as the figures open it",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
             ],
             reach: { app, driver in
-                try driver.require(
-                    app.buttons["session.composer.settings"], "the composer settings control").tap()
-                // As it opens where Usage stands first (scrolled not at all); at accessibility sizes, where it stands
-                // last, scrolled down to it.
-                try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
-                try driver.require(driver.text(containing: "Usage", in: app), "the sheet's Usage section")
+                try driver.require(app.buttons["session.composer.usage"], "the reply box's figures").tap()
+                try driver.require(driver.text(containing: "Limits", in: app), "the Usage sheet")
             }),
         RenderScenario(
             name: "session-usage-sheet-no-plan-limits",
-            purpose: "the settings sheet's Usage section for an account its agent says has no plan limits",
+            purpose: "the Usage sheet for an account its agent says has no plan limits",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/fx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", noPlanLimitsAccounts,
             ],
             reach: { app, driver in
-                try driver.require(
-                    app.buttons["session.composer.settings"], "the composer settings control").tap()
-                try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
+                try driver.require(app.buttons["session.composer.usage"], "the reply box's figures").tap()
                 try driver.require(driver.text(containing: "No plan limits", in: app), "the no-limits row")
             }),
         RenderScenario(
             name: "session-usage-sheet-codex",
-            purpose: "the settings sheet's Usage section for a Codex run: first as a tap opens it, last at AX5",
+            purpose: "the Usage sheet for a Codex run, as the figures open it",
             arguments: [
                 "-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1",
                 "-CC_FIXTURE_USAGE", "YES", "-CC_ACCOUNTS_WIRE", usageAccounts(fullest: 23),
             ],
             reach: { app, driver in
-                try driver.require(
-                    app.buttons["session.composer.settings"], "the composer settings control").tap()
-                // As it opens where Usage stands first (scrolled not at all); at accessibility sizes, where it stands
-                // last, scrolled down to it.
-                try driver.requireExists(driver.text(containing: "Permission mode", in: app), "the settings sheet")
-                try driver.require(driver.text(containing: "Usage", in: app), "the sheet's Usage section")
+                try driver.require(app.buttons["session.composer.usage"], "the reply box's figures").tap()
+                try driver.require(driver.text(containing: "Limits", in: app), "the Usage sheet")
             }),
         RenderScenario(
             name: "session-settings-over-a-long-reply",
@@ -1235,7 +1232,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-settings-codex-default",
-            purpose: "the composer settings control — a live Codex run at its default, the model named alone",
+            purpose: "the reply box's model chip — a live Codex run at its default: its mark and model",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1"],
             reach: { app, driver in
                 try driver.require(
@@ -1243,7 +1240,7 @@ enum RenderCatalog {
             }),
         RenderScenario(
             name: "session-settings-codex-full",
-            purpose: "the composer settings control — Codex in Full Access, a confirm mode named in red",
+            purpose: "the reply box's model chip — Codex in Full Access: the chip in red",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-2"],
             reach: { app, driver in
                 try driver.require(
@@ -1257,7 +1254,7 @@ enum RenderCatalog {
                 try driver.require(
                     app.buttons["session.composer.settings"], "the composer settings control").tap()
                 try driver.require(
-                    driver.text(containing: "Permission mode", in: app),
+                    driver.text(containing: "Permission", in: app),
                     "the settings sheet, opened by the control")
             }),
         RenderScenario(
@@ -1268,20 +1265,20 @@ enum RenderCatalog {
                 try driver.require(
                     app.buttons["session.composer.settings"], "the composer settings control").tap()
                 try driver.require(
-                    driver.text(containing: "Permission mode", in: app),
+                    driver.text(containing: "Permission", in: app),
                     "the settings sheet, opened by the control")
             }),
         RenderScenario(
             name: "session-hosted-settings-codex-default-effort",
             purpose:
-                "a live Codex run that chose no effort: its model's own default, Low, marked with a Default note",
+                "a live Codex run that chose no effort: its model's own default, Low, the selected segment",
             arguments: ["-CC_FIXTURE", "hostedSettings", "-CC_DEEPLINK", "codeconnect://session/cx-1"],
             reach: { app, driver in
                 try driver.require(
                     app.buttons["session.composer.settings"], "the composer settings control").tap()
                 try driver.require(
                     driver.element(containing: "Medium", in: app), "the Effort rows under the marked default",
-                    scrollingWithin: driver.list(holding: "Permission mode", in: app))
+                    scrollingWithin: driver.list(holding: "Permission", in: app))
                 // The list stops at its end, with the marked row under the sheet's bar: back a row's height.
                 app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.40))
                     .press(

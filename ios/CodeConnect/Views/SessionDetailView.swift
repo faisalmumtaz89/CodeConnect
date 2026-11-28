@@ -927,6 +927,8 @@ private struct HistoryHead: View {
 /// goes to that machine.
 struct SessionDetailView: View {
     let route: SessionRoute
+    /// A new session with another agent's model, from this one's settings sheet (`HostedSettingsSheet.onStartNew`).
+    var onStartNew: (StartSeed) -> Void = { _ in }
 
     @Environment(AppModel.self) private var model
     @Environment(Machines.self) private var machines
@@ -957,6 +959,7 @@ struct SessionDetailView: View {
     }
     @State private var askingAgain = false
     @State private var showHostedSettingsSheet = false
+    @State private var showUsageSheet = false
     @State private var showCompactSheet = false
     @State private var compactSheetPrefill = ""
     @State private var showClearConfirm = false
@@ -982,7 +985,6 @@ struct SessionDetailView: View {
     /// timeline gives the keyboard back on a tap of its own.
     @FocusState private var composerFocused: Bool
     /// Landscape: the bar's title is one line, the path beside the project.
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     /// The run this screen is about. Everything on it — the timeline, the
     /// compose bar, the diff — is scoped to this one key, so a
@@ -997,12 +999,10 @@ struct SessionDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // **The header is the bar.** The project and its path are the bar's
-            // title, and the rest is one tap away at its end, so
-            // the conversation starts where the bar stops. What the header carried
-            // only sometimes — a Codex turn's Stop, the permission note, an ended
-            // run's resume command — still shows, under the bar, while it applies.
-            RunFacts(summary: summary)
+            // **The header is the bar.** The session's title and where it runs are the bar's title, its changes and
+            // the rest one tap away at its end, so the conversation starts where the bar stops. What the header
+            // carried only sometimes — a Codex turn's Stop, the permission note, an ended run's resume command —
+            // still shows, under the bar, while it applies.
             sessionNotices
 
             if shown != nil {
@@ -1027,23 +1027,21 @@ struct SessionDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) { barTitle }
+            ToolbarItem(placement: .topBarTrailing) { changesButton }
+                .ccPlainToolbarItem()
             ToolbarItem(placement: .topBarTrailing) { moreMenu }
                 .ccPlainToolbarItem()
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
-                // A run that takes no reply has no reply box, as on the Mac:
-                // one quiet line in its place says it has ended. Over it, the
-                // settings line, read only (an ended run has no menus), names
-                // the model it ran on, which the Mac names in its pane heading.
+                // A session that takes no reply has no reply box, as on the Mac: one quiet line in its place says it
+                // has ended, and on what model, which the Mac names in its pane heading.
                 if summary?.takesNoReply == true {
-                    HostedSettingsBar(model: model, key: key, onOpen: { showHostedSettingsSheet = true })
-                    EndedLine()
+                    EndedLine(model: model, key: key)
                 } else {
                     if let palette = paletteContent {
                         CommandPalette(content: palette, onAction: route)
                     }
-                    HostedSettingsBar(model: model, key: key, onOpen: { showHostedSettingsSheet = true })
                     // The box writes into the run's drafts, so it is drawn while the screen lists the run, as on
                     // the Mac.
                     if let drafts = model.drafts(for: key) {
@@ -1056,12 +1054,13 @@ struct SessionDetailView: View {
                             summary: summary,
                             onWhy: { showLinkDetail = true },
                             onSend: send,
+                            onSettings: { showHostedSettingsSheet = true },
+                            onUsage: { showUsageSheet = true },
                             focused: $composerFocused)
                     }
                 }
             }
-            // One ground under the whole block — the settings line and the reply box together — so the
-            // conversation ends at its top edge and never shows through either.
+            // One ground under the whole block, so the conversation ends at its top edge and never shows through.
             .background { BottomBlockGround() }
             .onChange(of: composeText) { old, new in
                 // If the draft has moved off the words it held — the same
@@ -1088,9 +1087,14 @@ struct SessionDetailView: View {
         // A new handshake is the link back: the unanswered send is asked again.
         .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
         .sheet(isPresented: $showHostedSettingsSheet) {
-            HostedSettingsSheet(sessionKey: key, onLanded: consumeDraft)
+            HostedSettingsSheet(sessionKey: key, onLanded: consumeDraft, onStartNew: onStartNew)
                 .environment(model)
                 .ccConfirmationHost()
+                .ccTallSheet()
+        }
+        .sheet(isPresented: $showUsageSheet) {
+            UsageSheet(sessionKey: key)
+                .environment(model)
                 .ccResizableSheet()
         }
         .sheet(isPresented: $showCompactSheet) {
@@ -1168,48 +1172,74 @@ struct SessionDetailView: View {
 
     // MARK: Bar
 
-    /// **Who this is, as the bar's title**: the status dot, the project, and the
-    /// path under it (beside it in landscape). It stops growing where iOS's own
-    /// bar titles do, since a bar has one height. A long press copies the whole
-    /// path, as it did on the header's path line.
+    /// **Who this is, as the bar's title**: the session's title (its first message, else its folder), and under it,
+    /// on one line, where it runs: the folder › the branch · the computer, by the Mac's or Linux's mark. Each part stays
+    /// on one line; short of room the branch (in its middle) and the computer (at its end) give way together, the folder
+    /// last. It stops growing where iOS's own bar titles do, since a bar has one height. A long press copies the whole
+    /// path.
     private var barTitle: some View {
-        // A long name gives way in its middle and keeps its end, as on the Mac.
-        let name = Text(verbatim: label.project)
-            .ccType(CC.type.headline)
-            .foregroundStyle(CC.text.primary)
-            .lineLimit(1)
-            .truncationMode(.middle)
-        // The path is the Mac's, as it is: the phone does not know whose home
-        // folder it is under, so it does not shorten one. Head truncation keeps
-        // the tail, the part that identifies the run.
-        let path = Text(verbatim: summary?.shownCwd ?? "")
-            .ccType(CC.type.monoSmall)
-            .foregroundStyle(CC.text.tertiary)
-            .lineLimit(1)
-            .truncationMode(.head)
-        return HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
-            CCStatusDot(
-                color: dotColour,
-                size: CCStatusDot.Size.row.rawValue,
-                isHollow: shown?.loadedFromCacheAt != nil && shown?.hasLiveData != true,
-                pulses: (shown?.pendingApprovals.isEmpty == false))
-            .ccMark(beside: CC.type.headline)
-            if verticalSizeClass == .compact {
-                HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) { name; path }
-            } else {
-                VStack(alignment: .leading, spacing: 0) { name; path }
+        let branch = summary?.gitBranch?.displaySafe
+        let computer = model.machineName
+        return VStack(alignment: .leading, spacing: 1) {
+            Text(verbatim: summary?.title ?? label.project)
+                .ccType(CC.type.rowTitle)
+                .foregroundStyle(CC.text.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            HStack(spacing: 4) {
+                Text(verbatim: label.project).lineLimit(1).truncationMode(.tail).layoutPriority(2)
+                if let branch {
+                    Text(verbatim: "›").foregroundStyle(CC.text.tertiary)
+                    Text(verbatim: branch).font(.system(size: 11.5, design: .monospaced))
+                        .lineLimit(1).truncationMode(.middle).layoutPriority(1)
+                }
+                if let computer {
+                    Text(verbatim: "·").foregroundStyle(CC.text.tertiary)
+                    Image(systemName: model.machineOS == "linux" ? "server.rack" : "desktopcomputer")
+                        .font(.system(size: 10)).accessibilityHidden(true)
+                    Text(verbatim: computer).lineLimit(1).truncationMode(.tail).layoutPriority(1)
+                }
             }
+            .ccType(CC.type.footnote)
+            .foregroundStyle(CC.text.secondary)
         }
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        // From the back button, however short: the bar centres its title item.
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .onLongPressGesture {
             if let summary { CCPasteboard.copy(summary.cwd) }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            [label.project, summary.map { "Working directory, \($0.shownCwd)" }]
-                .compactMap { $0 }.joined(separator: ". "))
+            [summary?.title ?? label.project, label.project, branch.map { "branch \($0)" }, computer.map { "on \($0)" }]
+                .compactMap { $0 }.joined(separator: ", "))
         .accessibilityIdentifier("session-title")
+    }
+
+    /// **The session's changes, at the bar's end**: the Mac's changes mark (a right sidebar) and +N −M uncommitted, its
+    /// sheet a tap away. Never cut, on every session; with no count read yet, the mark alone.
+    private var changesButton: some View {
+        Button {
+            showDiff = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "sidebar.right").font(.system(size: 13)).accessibilityHidden(true)
+                if let diff = summary?.diffStat {
+                    Text(verbatim: "+\(diff.added)").foregroundStyle(CC.color.success)
+                    Text(verbatim: "−\(diff.removed)").foregroundStyle(CC.color.danger)
+                }
+            }
+            .ccType(CC.type.monoSmall)
+            .foregroundStyle(CC.text.secondary)
+            .fixedSize()
+            .ccHitTarget()
+        }
+        .buttonStyle(.plain)
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .accessibilityLabel("Changes")
+        .accessibilityValue(summary?.diffStat.map { "\($0.added) lines added, \($0.removed) removed" } ?? "")
+        .accessibilityIdentifier("session-changes")
     }
 
     /// The run as it was when End run was confirmed; the row reads Stopping once ccd takes it.
@@ -1218,17 +1248,10 @@ struct SessionDetailView: View {
         Task { endRunNote = await model.endRun(summary) }
     }
 
-    /// **Everything the bar does not show, one tap away.** First the session's
-    /// changes, whose sheet counts them, and the link's health under the name
-    /// of the computer the session is on, which is a heading, not an action.
-    /// Last, on a live run CodeConnect started, End run.
+    /// **Everything the bar does not show, one tap away**: Compact and Clear where the agent has them, the link's
+    /// health (the computer is named in the title), and last, on a live run CodeConnect started, End run.
     private var moreMenu: some View {
         return Menu {
-            Button {
-                showDiff = true
-            } label: {
-                Label("Changes", image: "plus-minus")
-            }
             // A Claude or Antigravity run started from the app takes its agent's
             // own Compact, and Claude's its Clear, as the Mac's reply box offers
             // them: agy has no clear.
@@ -1250,12 +1273,10 @@ struct SessionDetailView: View {
                 }
             }
             if !model.sampleFleetActive {
-                Section(model.machineName.map { "On \($0)" } ?? "") {
-                    Button {
-                        showLinkDetail = true
-                    } label: {
-                        Label("Link health", image: "desktop")
-                    }
+                Button {
+                    showLinkDetail = true
+                } label: {
+                    Label("Link health", image: "desktop")
                 }
             }
             // Ending a run cannot be undone, so it is last, and asks first.
@@ -1265,7 +1286,7 @@ struct SessionDetailView: View {
                 Button(role: .destructive) {
                     confirmingEndRun = true
                 } label: {
-                    Label("End run", image: "power")
+                    Label("End session", image: "power")
                 }
             }
         } label: {
@@ -1336,13 +1357,6 @@ struct SessionDetailView: View {
         }
     }
 
-    private var dotColour: Color {
-        guard let summary else { return CC.text.tertiary }
-        let status = FleetStatusRule.status(
-            summary: summary, shown: shown, reviewedSeq: shown?.reviewedSeq ?? 0)
-        return status.ccDotColor
-    }
-
     /// A deep link aimed at *this* session opens what it asked for.
     private func consumeDeepLink() {
         switch machines.pendingDeepLink {
@@ -1393,7 +1407,7 @@ struct SessionDetailView: View {
                 glyph: "folder-dashed",
                 title: "Not on your computer’s list",
                 message:
-                    "This run may have exited, or CodeConnect on your computer restarted since the link was made.",
+                    "This session may have exited, or CodeConnect on your computer restarted since the link was made.",
                 tone: .warning)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -1723,9 +1737,9 @@ private struct SessionTimeline: View {
 
                     // The scroll target for "go to the latest" — nothing but
                     // an identity; the at-the-tail verdict lives in
-                    // `TailObserver`, off the real scroll offset. The list's
-                    // bottom breathing room rides inside this child so the
-                    // target includes it.
+                    // `TailObserver`, off the real scroll offset. No breathing
+                    // room under it: the reply box's own top padding is the
+                    // space between the last line and its rim.
                     //
                     // The probe rides this row because it must sit inside the
                     // collection view to walk up to it. A row exists only near
@@ -1737,7 +1751,6 @@ private struct SessionTimeline: View {
                     // which is the moment `TailObserver` re-pins it.
                     Color.clear
                         .frame(height: 1)
-                        .padding(.bottom, CC.space.lg)
                         .background(TailObserver(watch: tailWatch, anchor: pageAnchor))
                         .id(Self.tailAnchor)
                 }
@@ -1999,7 +2012,7 @@ private struct SessionBanner: View {
     }
 }
 
-/// The ground under the screen's bottom block (the settings line over the reply box): the page's own ground,
+/// The ground under the screen's bottom block (the reply box and the notes over it): the page's own ground,
 /// faded in over the block's top padding, so a row scrolled under it ends softly instead of at a slab's edge and
 /// every line of the block reads on solid ground.
 private struct BottomBlockGround: View {
@@ -2037,6 +2050,9 @@ private struct SessionComposeBar: View {
     let summary: SessionSummary?
     let onWhy: () -> Void
     let onSend: () -> Void
+    /// Open the run's settings sheet (the bar's chip) and its usage (the bar's figures).
+    let onSettings: () -> Void
+    let onUsage: () -> Void
 
     @Environment(AppModel.self) private var model
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -2061,19 +2077,18 @@ private struct SessionComposeBar: View {
             // highest-traffic control.
             standingNote
             byteCounter
-            if !files.isEmpty {
-                AttachmentTray(
-                    files: files, reason: model.filesBlockedReason(for: key),
-                    onRemove: { model.removeFile($0, from: key) },
-                    onRetry: { model.retryFile($0, in: key) })
+            // At a usage limit, the Mac's band over the box: which limit, when it resets, the windows. Only then: drawn
+            // empty it would still take this stack's spacing above the box.
+            if model.limitFoot(for: key, now: .now) != nil {
+                LimitBand(model: model, key: key)
             }
             composer
         }
-        .padding(.horizontal, CC.space.md)
-        .padding(.top, CC.space.xs)
-        // At rest the pill sits on the safe-area line, just above the home
-        // indicator; over the keyboard it keeps 8pt of air.
-        .padding(.bottom, focused.wrappedValue ? CC.space.xs : 0)
+        // 12 pt in from the screen's edges; 30 pt from the conversation's last line to the box's rim, which stands 4 pt
+        // outside the box; 8 pt above the home indicator, and above the keyboard.
+        .padding(.horizontal, 12)
+        .padding(.top, 34)
+        .padding(.bottom, 8)
         // Typing is the user's next act as much as retrying the mic is; a
         // stale mic-failure note must not stand over a hand-typed message.
         .onChange(of: text) { _, _ in dictation.clearFailure() }
@@ -2081,91 +2096,101 @@ private struct SessionComposeBar: View {
         .onDisappear { dictation.cancel() }
     }
 
-    // MARK: The pill
+    // MARK: The box
 
-    /// One pill: the field, and the circle inside its trailing end, where the
-    /// thumb finishing a line finds it. The pill wears no focus ring: the caret
-    /// and the keyboard say it has focus, and the rim stays as it rests.
-    ///
-    /// One circle does the whole job — mic when the field is empty, send once a
-    /// single character exists — so the pill never grows a second button for a
-    /// thumb to arbitrate at 2am. In the bottom corner, so the circle stays at
-    /// the end of the last line as the field grows.
-    ///
-    /// **An overlay over room the field leaves, not an `HStack` beside it.**
-    /// Measured: as a row sibling of the circle, the field lost its own scroll
-    /// position after a paste past the line limit — the last line, and the
-    /// caret on it, sat below the field's bottom edge, at L and at AX5 — while
-    /// the same field with the circle overlaid kept the caret in view. The
-    /// overlay also means nothing the field holds (at AX5 the placeholder alone
-    /// is wider than the pill) can push the circle out.
+    /// **The box**: the field over one 48 pt bar (`ReplyBoxBar`): `+` where the computer takes files, the model chip,
+    /// the figures, and one circle — mic when there is neither text nor a file, Send otherwise, Stop while a turn runs —
+    /// so the box never grows a second button for a thumb to arbitrate at 2am. The box wears no focus ring: the caret and
+    /// the keyboard say it has focus, and the rim stays as it rests.
     private var composer: some View {
-        Group {
-            if dictation.isRecording {
-                transcript
-            } else {
-                field
+        VStack(spacing: 0) {
+            // The files that go with the message, inside the box over its field.
+            if !files.isEmpty {
+                AttachmentTray(
+                    files: files, reason: model.filesBlockedReason(for: key),
+                    onRemove: { model.removeFile($0, from: key) },
+                    onRetry: { model.retryFile($0, in: key) })
+                .padding(.top, 4)
+                .padding(.horizontal, 14)
             }
-        }
-        // 12pt, not 16: the disc's 8pt inset took 4pt from the trailing side,
-        // and the text keeps the width it wraps at.
-        .padding(.leading, model.canUpload(key) ? CC.size.hitTarget + CC.space.xxs : CC.space.sm)
-        .padding(
-            .trailing,
-            dictation.isRecording
-                ? 2 * CC.size.hitTarget + 2 * CC.space.xxs : CC.size.hitTarget + CC.space.xxs)
-        .padding(.vertical, CC.space.xs)
-        .frame(minHeight: CCPillSurface.height)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // Read first: VoiceOver orders by position, and on one line the
-        // circle's 44pt frame starts above the field's.
-        .accessibilitySortPriority(1)
-        .overlay(alignment: .bottomTrailing) {
-            HStack(spacing: CC.space.xxs) {
-                // While the mic is hot the pill carries no meters or clocks:
-                // the live transcript is proof the mic hears you, and the
-                // button's stop face is the recording state. Chrome that
-                // restates both was removed at the owner's call.
+            Group {
                 if dictation.isRecording {
+                    transcript
+                } else {
+                    field
+                }
+            }
+            .padding(.top, 12)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if dictation.isRecording {
+                // While the mic is hot the bar is × and Stop, nothing else: no meters or clocks, as the live
+                // transcript is proof the mic hears you, and the button's stop face is the recording state.
+                HStack(spacing: 0) {
                     cancelButton
+                    Spacer(minLength: 0)
+                    circle
                 }
-                CCVoiceButton(phase: phase, blockedReason: blockedReason) { act() }
-                    .accessibilityIdentifier(phase == .stopTurn ? "stop-\(key)" : "session.composer.send")
-            }
-            // 4pt round the 44pt frame puts the 36pt disc 8pt inside the
-            // pill's bottom and trailing edges.
-            .padding(CC.space.xxs)
-        }
-        // `+` at the leading edge, where the computer takes files: the circle's 4pt inset, mirrored.
-        .overlay(alignment: .bottomLeading) {
-            if model.canUpload(key) {
-                AttachMenu(room: Attachment.maxCount - files.count) { name, size, read in
-                    model.attach(name: name, size: size, to: key, read: read)
+                .frame(height: 48)
+                .padding(.horizontal, 2)
+            } else {
+                ReplyBoxBar(
+                    model: model, key: key, agent: summary?.agent, onSettings: onSettings, onUsage: onUsage
+                ) {
+                    if model.canUpload(key) {
+                        AttachMenu(room: Attachment.maxCount - files.count) { name, size, read in
+                            model.attach(name: name, size: size, to: key, read: read)
+                        }
+                    }
+                } trailing: {
+                    circle
                 }
-                .padding(CC.space.xxs)
             }
         }
-        .background { CCPillSurface() }
-        // The sort priority above ranks within the pill alone.
+        .background { CCBoxSurface() }
         .accessibilityElement(children: .contain)
         .ccAnimation(CC.motion.small, value: dictation.isRecording)
     }
 
+    /// The one circle: mic, Send, Stop, drawn 34 in a 44-pt target.
+    private var circle: some View {
+        CCVoiceButton(phase: phase, blockedReason: blockedReason, disc: 34, quietMic: true) { act() }
+            .accessibilityIdentifier(phase == .stopTurn ? "stop-\(key)" : "session.composer.send")
+    }
+
     private var field: some View {
-        TextField(
-            "", text: $text,
-            prompt: Text(SessionWords.replyPrompt(summary?.agent.displayName ?? "the agent"))
-                .foregroundStyle(CC.text.placeholder),
-            // `.vertical` keeps the system keyboard's dictation key available
-            // too — the mic in the circle is the first-class door, not the
-            // only one.
-            axis: .vertical
-        )
-        .lineLimit(typeSize.isAccessibilitySize ? 1...3 : 1...5)
-        .ccType(CC.type.body)
-        .foregroundStyle(CC.text.primary)
-        .focused(focused)
-        .accessibilityLabel("Message for \(runLabel)")
+        // At a usage limit the box says when a message goes through.
+        // While its computer is offline the box says so, and when a reply can go.
+        let prompt = model.limitFoot(for: key, now: .now)?.prompt
+            ?? model.offlineReply(for: key, draft: "")
+            ?? SessionWords.replyPrompt(summary?.agent.displayName ?? "the agent")
+        let lines = typeSize.isAccessibilitySize ? 3 : 5
+        return ZStack(alignment: .topLeading) {
+            // iOS draws a field's prompt on one line, cut; drawn here it wraps to the field's lines while the field is
+            // empty. The field's own prompt, clear, is still what VoiceOver reads.
+            if text.isEmpty {
+                Text(prompt)
+                    .ccType(CC.type.callout)
+                    .foregroundStyle(CC.text.placeholder)
+                    .lineLimit(lines)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            TextField(
+                "", text: $text,
+                prompt: Text(prompt).foregroundStyle(.clear),
+                // `.vertical` keeps the system keyboard's dictation key available
+                // too — the mic in the circle is the first-class door, not the
+                // only one.
+                axis: .vertical
+            )
+            .lineLimit(1...lines)
+            .ccType(CC.type.callout)
+            .foregroundStyle(CC.text.primary)
+            .focused(focused)
+            .accessibilityLabel("Message for \(runLabel)")
+        }
     }
 
     /// What the recognizer heard, streaming. Committed words at full strength;
@@ -2175,7 +2200,7 @@ private struct SessionComposeBar: View {
     private var transcript: some View {
         if dictation.transcript.isEmpty {
             Text("Listening…")
-                .ccType(CC.type.body)
+                .ccType(CC.type.callout)
                 .foregroundStyle(CC.text.tertiary)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .accessibilityLabel("Listening")
@@ -2185,7 +2210,7 @@ private struct SessionComposeBar: View {
                     dictation.finalizedText.isEmpty || dictation.volatileText.isEmpty
                         ? "" : " ")
                 + Text(dictation.volatileText).foregroundStyle(CC.text.tertiary))
-                .ccType(CC.type.body)
+                .ccType(CC.type.callout)
                 .foregroundStyle(CC.text.primary)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .accessibilityLabel("Transcript: \(dictation.transcript)")
@@ -2249,8 +2274,8 @@ private struct SessionComposeBar: View {
         }
     }
 
-    /// Discards the recording *and* the transcript. Ghost weight — the circle
-    /// beside it keeps the decision.
+    /// Discards the recording *and* the transcript. A bare ×, at the bar's leading edge — the circle at its other end
+    /// keeps the decision.
     private var cancelButton: some View {
         Button {
             // Silent, like every dismissal: buzzing on a discard trains the
@@ -2264,12 +2289,10 @@ private struct SessionComposeBar: View {
                 maxSize: CC.size.controlSm / 2
             )
             .foregroundStyle(CC.text.secondary)
-                .frame(width: CC.size.controlSm, height: CC.size.controlSm)
-                .background {
-                    Circle().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline)
-                }
+            .frame(width: CC.size.hitTarget, height: CC.size.hitTarget)
+            .contentShape(Rectangle())
         }
-        .ccHitTarget()
+        .buttonStyle(.plain)
         .accessibilityLabel("Cancel dictation")
         .accessibilityHint("Discards the transcript")
     }
@@ -2294,7 +2317,10 @@ private struct SessionComposeBar: View {
             composeNote(note)
         } else if case .failed(let reason, let needsSettings) = dictation.phase {
             micFailureNote(reason: reason, needsSettings: needsSettings)
-        } else if let note = model.standingNote(for: key, draft: text), note.text != filesReason {
+        } else if let note = model.standingNote(for: key, draft: text), note.text != filesReason,
+            !(text.isEmpty && note.text == model.offlineReply(for: key, draft: text))
+        {
+            // An offline computer is said once: in the empty box's placeholder, else here over the draft.
             composeNote(note)
         }
     }
@@ -2322,6 +2348,8 @@ private struct SessionComposeBar: View {
                 .foregroundStyle(draft.isOverCeiling ? CC.color.danger : CC.text.tertiary)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .trailing)
+                // As a note's line: 16 pt to the box, whose rim stands 4 pt outside it.
+                .padding(.bottom, CC.space.xs)
                 .accessibilityLabel(
                     draft.isOverCeiling
                         ? "Too long. \(counter)." : "\(counter).")
@@ -2379,6 +2407,8 @@ private struct ComposeNote: View {
             CCAdaptiveSpacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // The box's rim stands 4 pt outside it, inside the stack's 8 pt: a line above the box keeps 16 pt to the box.
+        .padding(.bottom, CC.space.xs)
         .accessibilityElement(children: .combine)
     }
 }
@@ -2395,60 +2425,43 @@ extension ComposeProse.Tone {
     }
 }
 
-/// **What the screen does not already say about the run**, one line under the
-/// bar: the folder's branch in code type, and its uncommitted +N −M at the
-/// right edge. The agent is in the reply box's placeholder and the model
-/// above it, so neither repeats here. Short of room the branch gives way in
-/// its middle; with neither fact known the line is absent.
-private struct RunFacts: View {
-    let summary: SessionSummary?
-
-    @Environment(\.dynamicTypeSize) private var typeSize
-
-    var body: some View {
-        let branch = summary?.gitBranch?.displaySafe
-        let diff = summary?.diffStat
-        if branch != nil || diff != nil {
-            HStack(spacing: CC.space.sm) {
-                if let branch {
-                    Text(verbatim: branch)
-                        .foregroundStyle(CC.text.secondary)
-                        .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
-                        .truncationMode(.middle)
-                }
-                Spacer(minLength: 0)
-                if let diff {
-                    (Text(verbatim: "+\(diff.added)").foregroundStyle(CC.color.success)
-                        + Text(verbatim: " −\(diff.removed)").foregroundStyle(CC.color.danger))
-                        .fixedSize()
-                }
-            }
-            .ccType(CC.type.monoSmall)
-            .padding(.horizontal, CC.space.md)
-            .padding(.vertical, CC.space.xs)
-            .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("session-facts")
-        }
-    }
-}
-
-/// In an ended run's reply box's place: a hairline, then the run's end said
-/// quietly, a check mark on the text's first line (`SessionWords.runEnded`).
-/// It keeps the room the box keeps above itself (`SessionComposeBar`), so the
-/// settings line over it stands as clear of it as of the box.
+/// In an ended session's reply box's place: a hairline, then one line: the agent's mark, the session's end said
+/// quietly (`SessionWords.runEnded`), and the model it ran on with its effort.
 private struct EndedLine: View {
+    let model: AppModel
+    let key: String
+
+    /// The model it ran on and its effort, as the chip named them: "Sonnet 5.5 · High".
+    private var ranOn: String? {
+        let name: String? = switch model.runSettings(for: key) {
+        case .hostedReadOnly(let fact): fact.flatMap { $0.text.isEmpty ? nil : $0.text }
+        case .hostedLive(let settings): settings.modelDisplay.isEmpty ? nil : settings.modelDisplay
+        case .deferToOtherPath: nil
+        }
+        let effort = model.shownSummary(for: key).flatMap(RunSettings.effortName)
+        return name.map { name in effort.map { "\(name) · \($0)" } ?? name }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             CCHairline()
             HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
-                CCIcon("check-circle", size: 14)
-                    .foregroundStyle(CC.text.tertiary)
-                    .ccMark(beside: CC.type.footnote)
-                    .accessibilityHidden(true)
+                if let agent = model.shownSummary(for: key)?.agent {
+                    CCAgentMark(agent: agent).alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+                }
                 Text(SessionWords.runEnded)
                     .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(CC.text.secondary)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                if let ranOn {
+                    Text(verbatim: "· \(ranOn)")
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.tertiary)
+                        .lineLimit(1).truncationMode(.tail)
+                        .accessibilityLabel(ranOn)
+                        .accessibilityIdentifier("session.composer.model")
+                }
             }
             .padding(.horizontal, CC.space.md)
             .padding(.vertical, CC.space.sm)
@@ -2456,7 +2469,7 @@ private struct EndedLine: View {
         }
         .padding(.top, CC.space.xs)
         .background(CC.color.bg)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session-ended-line")
     }
 }

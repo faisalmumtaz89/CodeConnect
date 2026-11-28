@@ -1,9 +1,14 @@
 import CodeConnectKit
 import SwiftUI
 
-/// **The model, effort and permission-mode controls for a hosted Claude run** (B8, minor 39).
+/// **This session: its effort, permission and model** (B8, minor 39), opened by the reply box's model chip.
 ///
-/// One sheet, three menus and the run's usage, one outcome line — reached from `/model` and `/effort`, because a run
+/// One full-dark sheet, as the Decision sheet: the title with the current choice under it, then Effort (for the
+/// model in use, one segmented row), Permission (the agent's own names, a mode that lets the agent work without
+/// asking in red, confirmed first), and Model: this session's agent's models, then every other agent's on this
+/// computer, each group under its agent's mark, its heading pinned while the list scrolls. Choosing another agent's
+/// model starts a new session: the Start sheet opens on this computer and folder with that agent and model, ready to
+/// send (`onStartNew`). One outcome line — reached from `/model` and `/effort` too, because a run
 /// CodeConnect started offers all three as structured menus the daemon validates, not as typed
 /// commands. `SessionDetailView` sends every run's `/model` and `/effort` here.
 ///
@@ -16,6 +21,8 @@ struct HostedSettingsSheet: View {
     let sessionKey: String
     /// The `/model` or `/effort` draft that opened this sheet is consumed when a change is applied.
     var onLanded: () -> Void = {}
+    /// Start a new session with another agent's model, from the Start sheet seeded with it.
+    var onStartNew: (StartSeed) -> Void = { _ in }
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -30,11 +37,18 @@ struct HostedSettingsSheet: View {
     /// this sheet is reached for.
     private var agent: AgentKind { model.shownSummary(for: sessionKey)?.agent ?? .claude }
 
+    /// The current choice, under the title: the model, its effort, the mode.
+    private var current: String? {
+        guard case .hostedLive(let live) = settings else { return nil }
+        return [live.modelDisplay.isEmpty ? nil : live.modelDisplay, live.selectedEffort?.label, live.selectedMode?.label]
+            .compactMap { $0 }.joined(separator: " · ")
+    }
+
     var body: some View {
-        CCSheetChrome("Settings", onClose: { dismiss() }) {
+        CCSheetChrome("This session", subtitle: current, onClose: { dismiss() }) {
             VStack(spacing: 0) {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: CC.space.md) {
+                    LazyVStack(alignment: .leading, spacing: CC.space.md, pinnedViews: [.sectionHeaders]) {
                         switch settings {
                         case .hostedLive(let live):
                             liveSections(live)
@@ -69,38 +83,32 @@ struct HostedSettingsSheet: View {
 
     @ViewBuilder
     private func liveSections(_ live: HostedSettings) -> some View {
-        if !typeSize.isAccessibilitySize { usage }
-        CCSectionHeader("Model")
-        card {
-            ForEach(Array(live.models.enumerated()), id: \.element.value) { index, entry in
-                choiceRow(
-                    title: entry.label, detail: entry.detail,
-                    isSelected: live.selectedModel?.value == entry.value,
-                    isLast: index == live.models.count - 1, disabled: live.inFlight
-                ) { await model.setModel(for: sessionKey, modelValue: entry.value) }
-            }
-        }
         // The effort menu is the selected model's; with nothing selected there is none to draw.
         if !live.efforts.isEmpty {
-            CCSectionHeader("Effort")
-            card {
-                ForEach(Array(live.efforts.enumerated()), id: \.element.value) { index, entry in
-                    let isSelected = live.selectedEffort?.value == entry.value
-                    choiceRow(
-                        title: entry.label,
-                        // The model's own default, marked while no effort is chosen (decision 318).
-                        detail: isSelected && live.effortIsDefault ? "Default" : nil,
-                        isSelected: isSelected, offered: live.offers(entry),
-                        isLast: index == live.efforts.count - 1, disabled: live.inFlight
-                    ) { await model.setEffort(for: sessionKey, effortValue: entry.value) }
+            CCSectionHeader("Effort · for \(live.modelDisplay.isEmpty ? "this model" : live.modelDisplay)")
+            if typeSize.isAccessibilitySize {
+                // Segments this wide cut every label at accessibility sizes, so the efforts are rows, as Permission's.
+                card {
+                    ForEach(Array(live.efforts.enumerated()), id: \.element.value) { index, entry in
+                        let isSelected = live.selectedEffort?.value == entry.value
+                        choiceRow(
+                            title: entry.label, detail: isSelected && live.effortIsDefault ? "Default" : nil,
+                            isSelected: isSelected, offered: live.offers(entry) || !isSelected,
+                            isLast: index == live.efforts.count - 1, disabled: live.inFlight
+                        ) {
+                            await model.setEffort(for: sessionKey, effortValue: entry.value)
+                        }
+                    }
                 }
+            } else {
+                effortRow(live)
             }
         }
-        CCSectionHeader("Permission mode")
+        CCSectionHeader("Permission")
         card {
             ForEach(Array(live.modes.enumerated()), id: \.element.value) { index, entry in
                 choiceRow(
-                    title: entry.confirm ? "\(entry.label)…" : entry.label,
+                    title: entry.confirm ? "\(entry.label)…" : entry.label, warn: entry.confirm,
                     isSelected: live.selectedMode?.value == entry.value,
                     isLast: index == live.modes.count - 1, disabled: live.inFlight
                 ) {
@@ -114,82 +122,172 @@ struct HostedSettingsSheet: View {
                 }
             }
         }
-        if typeSize.isAccessibilitySize { usage }
+        CCSectionHeader("Model")
+        Section {
+            card {
+                ForEach(Array(live.models.enumerated()), id: \.element.value) { index, entry in
+                    choiceRow(
+                        title: entry.label, detail: entry.detail,
+                        isSelected: live.selectedModel?.value == entry.value,
+                        isLast: index == live.models.count - 1, disabled: live.inFlight
+                    ) { await model.setModel(for: sessionKey, modelValue: entry.value) }
+                }
+            }
+        } header: {
+            agentHeading(agent, note: "This session")
+        }
+        ForEach(otherAgents) { other in
+            Section {
+                otherModels(other)
+            } header: {
+                agentHeading(Self.kind(other), note: "Starts a new session")
+            }
+        }
     }
 
-    // MARK: Usage
+    /// The effort as one segmented row, 44 pt tall; the model's own default, while no effort is chosen, is the
+    /// selected segment and says so to VoiceOver (decision 318).
+    private func effortRow(_ live: HostedSettings) -> some View {
+        HStack(spacing: 0) {
+            ForEach(live.efforts, id: \.value) { entry in
+                let isSelected = live.selectedEffort?.value == entry.value
+                Button {
+                    guard live.offers(entry) || !isSelected else { return }
+                    run { await model.setEffort(for: sessionKey, effortValue: entry.value) }
+                } label: {
+                    Text(entry.label)
+                        .ccType(CC.type.footnote).fontWeight(.medium)
+                        .lineLimit(1).minimumScaleFactor(0.8)
+                        .foregroundStyle(isSelected ? CC.text.primary : CC.text.tertiary)
+                        .frame(maxWidth: .infinity, minHeight: CC.size.hitTarget)
+                        .background(
+                            isSelected ? Color.white.opacity(0.1) : .clear,
+                            in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(live.inFlight)
+                .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+                .accessibilityValue(isSelected && live.effortIsDefault ? "Default" : "")
+            }
+        }
+        .padding(2)
+        .background(CC.color.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.08)))
+    }
 
-    /// **What the run's usage is, in full** (`ReplyBar`, the Mac's card): the conversation's size against its
-    /// model's window, each window of its account with its share and when it resets, the words for an account with
-    /// no plan limits, and the account; each row only where the app holds it, the section only where it holds any.
-    /// It asks the computer nothing: drawn from what the app holds, again once a minute while the sheet is open, so
-    /// a reset's "resets in" stays current. It stands first where the settings line can draw the figures, so a tap on
-    /// them opens on their details, and last at accessibility sizes, where the line never draws them and the sheet
-    /// opens on its settings as before.
+    /// An agent's group heading, pinned while its models scroll under it: its mark, its name, and what choosing does.
+    private func agentHeading(_ agent: AgentKind, note: String) -> some View {
+        HStack(spacing: 7) {
+            CCAgentMark(agent: agent)
+            Text(agent.productName.uppercased()).ccType(CC.type.micro).foregroundStyle(CC.text.secondary)
+            Spacer(minLength: CC.space.sm)
+            Text(note).ccType(CC.type.footnote).foregroundStyle(CC.text.tertiary)
+        }
+        .padding(.top, CC.space.sm)
+        .padding(.bottom, CC.space.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(CC.color.bg)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    // MARK: Other agents
+
+    /// This computer, as a start sees it.
+    private var startHere: StartContext { StartContext(model: model) }
+
+    /// Every agent a start here offers but this session's.
+    private var otherAgents: [StartAgent] { startHere.startAgents.filter { Self.kind($0) != agent } }
+
+    /// Another agent's models on this computer; choosing one opens the Start sheet with it, on this session's folder.
     @ViewBuilder
-    private var usage: some View {
-        if let bar = model.replyBar(for: sessionKey, now: Date()), !Self.usageRows(bar).isEmpty {
-            TimelineView(.everyMinute) { context in
-                let rows = model.replyBar(for: sessionKey, now: context.date).map(Self.usageRows) ?? []
-                VStack(alignment: .leading, spacing: CC.space.md) {
-                    CCSectionHeader("Usage")
-                    card {
-                        ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
-                            if let value = row.value {
-                                CCFactRow(
-                                    row.label, value: value, age: row.resets,
-                                    separator: index < rows.count - 1)
-                            } else {
-                                CCFactRow(
-                                    row.label, separator: index < rows.count - 1,
-                                    value: { EmptyView() }, detail: { EmptyView() })
-                            }
-                        }
+    private func otherModels(_ other: StartAgent) -> some View {
+        switch startHere.models(other) {
+        case .checking:
+            card { note("Checking \(other.displayName) on \(startHere.machineName)…") }
+        case .missing(let reason), .signedOut(let reason):
+            card { note(reason) }
+        case .choices(let choices):
+            card {
+                ForEach(Array(choices.enumerated()), id: \.offset) { index, choice in
+                    choiceRow(
+                        title: choice.label, detail: choice.detail, isSelected: false,
+                        isLast: index == choices.count - 1, disabled: folder == nil
+                    ) {
+                        guard let folder else { return nil }
+                        dismiss()
+                        onStartNew(StartSeed(
+                            context: startHere, project: startHere.project(at: folder), place: .folder,
+                            agent: other, model: choice.model, trustPath: nil))
+                        return nil
                     }
                 }
             }
         }
     }
 
-    /// The card's rows, in the Mac card's order: Context, each window, the no-limits words (a row with no value),
-    /// Account.
-    private static func usageRows(_ bar: ReplyBar) -> [(label: String, value: String?, resets: String?)] {
-        var rows: [(label: String, value: String?, resets: String?)] = []
-        if let context = bar.context { rows.append(("Context", "\(context.used) of \(context.window)", nil)) }
-        rows += bar.limits.map { ($0.caption, "\($0.usedPercent)%", $0.resets) }
-        if let note = bar.limitsNote { rows.append((note, nil, nil)) }
-        if let account = bar.account { rows.append(("Account", account, nil)) }
-        return rows
+    /// The folder this session runs in, which a new session starts in too.
+    private var folder: String? { model.shownSummary(for: sessionKey)?.cwd }
+
+    private static func kind(_ agent: StartAgent) -> AgentKind {
+        switch agent {
+        case .claude: return .claude
+        case .codex: return .codex
+        case .antigravity: return .antigravity
+        }
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text).ccType(CC.type.footnote).foregroundStyle(CC.text.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .padding(.horizontal, 14)
     }
 
     private func card<Content: View>(@ViewBuilder _ content: @escaping () -> Content) -> some View {
         CCCard(padding: 0) { VStack(spacing: 0) { content() } }
     }
 
-    /// One selectable row: its label, a check when it is the current value, and
-    /// its tap — disabled while any call is in flight (the menus are one unit) and on the row already in
-    /// force (there is nothing to apply), unless the row says it is still on offer (`offered`: an effort marked as
-    /// the model's default, which choosing makes the person's own).
+    /// One selectable row: its label (in the alert's red for a mode that lets the agent work without asking), the
+    /// agent's description beneath, a check at its end when it is the current value, and its tap — disabled while any
+    /// call is in flight (the menus are one unit), and doing nothing on the row already in force (there is nothing to
+    /// apply) unless the row says it is still on offer (`offered`). That row stays enabled: iOS fades a disabled one.
     private func choiceRow(
-        title: String, detail: String? = nil, isSelected: Bool, offered: Bool? = nil, isLast: Bool, disabled: Bool,
-        apply: @escaping () async -> SettingResult?
+        title: String, detail: String? = nil, warn: Bool = false, isSelected: Bool, offered: Bool? = nil, isLast: Bool,
+        disabled: Bool, apply: @escaping () async -> SettingResult?
     ) -> some View {
-        CCRow(
-            title,
-            titleDetail: detail,
-            showsChevron: false,
-            separator: !isLast,
-            action: (disabled || !(offered ?? !isSelected)) ? nil : { run(apply) }
-        ) {
-            CCIcon(isSelected ? "check-circle-fill" : "circle", size: 18, relativeTo: .body)
-                .foregroundStyle(isSelected ? CC.text.primary : CC.text.tertiary)
-        } trailing: {
-            EmptyView()
-        } meta: {
-            EmptyView()
+        Button {
+            guard offered ?? !isSelected else { return }
+            run(apply)
+        } label: {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).ccType(CC.type.callout)
+                        .foregroundStyle(warn ? CC.color.danger : CC.text.primary)
+                        .lineLimit(1)
+                    if let detail {
+                        Text(detail).ccType(CC.type.footnote).foregroundStyle(CC.text.tertiary).lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+                if isSelected {
+                    Image(systemName: "checkmark").font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(CC.text.primary)
+                        .accessibilityHidden(true)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .frame(minHeight: 48)
+            .contentShape(Rectangle())
         }
-        // The checkmark is drawn with an icon, which VoiceOver hides, so the selection is announced
-        // as a trait on the row instead.
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .overlay(alignment: .bottom) {
+            if !isLast { Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1).padding(.leading, 14) }
+        }
+        // The check is drawn with an icon, which VoiceOver hides, so the selection is announced as a trait instead.
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
@@ -205,7 +303,6 @@ struct HostedSettingsSheet: View {
 
     @ViewBuilder
     private func readOnly(_ modelFact: RunModelName?) -> some View {
-        if !typeSize.isAccessibilitySize { usage }
         CCSectionHeader("Model")
         card {
             if let modelFact, !modelFact.text.isEmpty {
@@ -216,7 +313,7 @@ struct HostedSettingsSheet: View {
                 } trailing: { EmptyView() } meta: { EmptyView() }
             } else {
                 CCRow(
-                    "Not reported", meta: "This run has not reported a model.",
+                    "Not reported", meta: "This session has not reported a model.",
                     showsChevron: false, separator: false
                 ) {
                     CCIcon("circle-dashed", size: 16, weight: .regular, relativeTo: .body)
@@ -224,17 +321,16 @@ struct HostedSettingsSheet: View {
                 } trailing: { EmptyView() }
             }
         }
-        Text("This run isn’t offering model controls right now. Its model is shown as last reported.")
+        Text("This session isn’t offering model controls right now. Its model is shown as last reported.")
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
             .fixedSize(horizontal: false, vertical: true)
-        if typeSize.isAccessibilitySize { usage }
     }
 
     @ViewBuilder
     private var unavailable: some View {
         CCCard {
-            Text("This run’s settings aren’t available here.")
+            Text("This session’s settings aren’t available here.")
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
         }
