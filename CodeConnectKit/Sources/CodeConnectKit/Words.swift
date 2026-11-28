@@ -82,7 +82,7 @@ public enum FleetWords {
                 .init(mark: "arrow.triangle.branch", words: "Deletes the local branch"),
                 .init(mark: "terminal", words: "Ends the \(agent) session"),
             ],
-            note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive Session")
+            note: "Files git ignores in it, like .env, are deleted too.", cancel: "Cancel", confirm: "Archive")
     }
     /// An archived run's conversation ends with this (its `archived` notice).
     public static let archived = "Archived · worktree and branch removed"
