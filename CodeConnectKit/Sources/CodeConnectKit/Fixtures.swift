@@ -1090,8 +1090,9 @@ enum Fixtures {
                   result("toolu_tl_1", "41 passed, 1 failed: parser.test.ts")),
             event("fx-7", 5, 288, "agent_message", "transcript",
                   reply("One failure in `parser.test.ts`: the date parser drops the timezone offset. Fixing it now.")),
+            // The website's sample names the file without a home folder, which a store picture should not show.
             event("fx-7", 6, 287, "tool_call", "hook",
-                  call("toolu_tl_2", "Edit", "{\"file_path\":\"\(cwd(7))/src/parser.ts\"}")),
+                  call("toolu_tl_2", "Edit", "{\"file_path\":\"\(site ? "src" : "\(cwd(7))/src")/parser.ts\"}")),
             event("fx-7", 7, 286, "tool_result", "transcript", result("toolu_tl_2", "Updated src/parser.ts")),
             event("fx-7", 8, 285, "tool_call", "hook", call("toolu_tl_3", "Bash", "{\"command\":\"npm test\"}")),
             event("fx-7", 9, 278, "tool_result", "transcript", result("toolu_tl_3", "42 passed")),

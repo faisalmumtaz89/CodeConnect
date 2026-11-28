@@ -37,6 +37,9 @@ final class FixtureSiteTests: XCTestCase {
         let parser = runs(Fixtures.frames(variant: .timeline)).first { $0.sessionID == "fx-7" }
         XCTAssertEqual(parser?.projectLabel, "query-parser")
         XCTAssertEqual(parser?.title, "Parse ISO dates with offsets")
+        XCTAssertFalse(
+            String(describing: Fixtures.frames(variant: .timeline)).contains("/Users/jordan/code/query-parser/src"),
+            "no home folder in the conversation's tool lines")
     }
 
     func testWithoutTheFlagTheFixturesAreUnchanged() {
