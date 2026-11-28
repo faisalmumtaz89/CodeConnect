@@ -115,6 +115,8 @@ public enum FleetWords {
     /// Why one of them stays.
     public static func staysUncommitted(_ title: String) -> String { "“\(title)” has uncommitted changes, so it stays." }
     public static func staysOffBase(_ title: String) -> String { "“\(title)” has commits not on its base, so it stays." }
+    /// One going that was resumed between the card and its turn: not archived.
+    public static let archiveSkippedResumed = "It was resumed, so it stays."
     public static func staysNoBase(_ title: String) -> String { "“\(title)” has no base branch known, so it stays." }
     public static func staysUnread(_ title: String) -> String { "“\(title)”’s repository couldn’t be read, so it stays." }
 
